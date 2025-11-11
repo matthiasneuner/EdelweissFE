@@ -44,6 +44,7 @@ class AdaptiveTimeStepper:
         maxNumberIncrements: int,
         journal: Journal,
         increaseFactor=1.1,
+        makeZeroIncrementFirst=True,
     ):
         """
         An increment generator for incremental-iterative simulations.
@@ -68,6 +69,8 @@ class AdaptiveTimeStepper:
             The journal instance for logging purposes.
         increaseFactor
             The ratio to increase the increments in case of good convergence.
+        makeZeroIncrementFirst
+            If True, the first increment will be zero.
         """
 
         self.nPassedGoodIncrements = int(0)
@@ -86,6 +89,7 @@ class AdaptiveTimeStepper:
         self.dT = 0.0
         self.journal = journal
         self.increaseFactor = increaseFactor
+        self.makeZeroIncrementFirst = makeZeroIncrementFirst
 
     def generateTimeStep(self) -> TimeStep:
         """
@@ -104,7 +108,10 @@ class AdaptiveTimeStepper:
                 self.increment = remainder
 
             # # zero increment; return value for first function call
-            theIncrement = self.increment if self.incrementCounter > 0 else 0.0
+            if self.makeZeroIncrementFirst and (self.incrementCounter == 0):
+                theIncrement = 0.0
+            else:
+                theIncrement = self.increment
 
             dT = self.stepLength * theIncrement
             self.finishedStepProgress += theIncrement
