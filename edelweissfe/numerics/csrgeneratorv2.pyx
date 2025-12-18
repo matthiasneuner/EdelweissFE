@@ -1,27 +1,27 @@
 #  ---------------------------------------------------------------------
 #
-#  _____    _      _              _         _____ _____
-# | ____|__| | ___| |_      _____(_)___ ___|  ___| ____|
-# |  _| / _` |/ _ \ \ \ /\ / / _ \ / __/ __| |_  |  _|
-# | |__| (_| |  __/ |\ V  V /  __/ \__ \__ \  _| | |___
-# |_____\__,_|\___|_| \_/\_/ \___|_|___/___/_|   |_____|
+#   _____     _       _             _         _____ _____
+#  | ____|__| | ___| |_       _____(_)___ ___|   ___| ____|
+#  |  _| / _` |/ _ \ \ \ /\ / / _ \ / __/ __| |_  |  _|
+#  | |__| (_| |  __/ |\ V  V /  __/ \__ \__ \  _| | |___
+#  |_____\__,_|\___|_| \_/\_/ \___|_|___/___/_|   |_____|
 #
 #
-#  Unit of Strength of Materials and Structural Analysis
-#  University of Innsbruck,
-#  2017 - today
+#   Unit of Strength of Materials and Structural Analysis
+#   University of Innsbruck,
+#   2017 - today
 #
-#  Matthias Neuner matthias.neuner@uibk.ac.at
+#   Matthias Neuner matthias.neuner@uibk.ac.at
 #
-#  This file is part of EdelweissFE.
+#   This file is part of EdelweissFE.
 #
-#  This library is free software; you can redistribute it and/or
-#  modify it under the terms of the GNU Lesser General Public
-#  License as published by the Free Software Foundation; either
-#  version 2.1 of the License, or (at your option) any later version.
+#   This library is free software; you can redistribute it and/or
+#   modify it under the terms of the GNU Lesser General Public
+#   License as published by the Free Software Foundation; either
+#   version 2.1 of the License, or (at your option) any later version.
 #
-#  The full text of the license can be found in the file LICENSE.md at
-#  the top level directory of EdelweissFE.
+#   The full text of the license can be found in the file LICENSE.md at
+#   the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 
 import numpy as np
@@ -31,15 +31,21 @@ cimport numpy as np
 from libcpp.vector cimport vector
 
 
+# Updated Extern Block to match new C++ Signature
 cdef extern from "_csrcore.h":
     cdef cppclass CSRCore nogil:
-        CSRCore(long* I, long* J, long n_pairs, long n_dof) except +
+        # I, J -> int* (32-bit)
+        # n_pairs -> long (64-bit)
+        # n_dof -> int (32-bit)
+        CSRCore(const int* I, const int* J, long n_pairs, int n_dof) except +
+
+        # Members are now standard ints
         vector[int] indptr
         vector[int] indices
-        long nnz
-        long nDof
+        int nnz
+        int nDof
 
-        void update( const double* V_data, double* csr_data ) nogil
+        void update(const double* V_data, double* csr_data) nogil
 
 cdef class CSRGenerator:
     """
@@ -54,30 +60,33 @@ cdef class CSRGenerator:
     cdef CSRCore* core
     cdef public object csrMatrix
     cdef double[:] data_view
-    cdef int nCooPairs
+    cdef long nCooPairs  # Kept as long (int64)
 
     def __dealloc__(self):
         if self.core != NULL:
             del self.core
 
     def __init__(self, systemMatrix):
-        cdef long[::1] I = np.ascontiguousarray(systemMatrix.I.astype(np.int64))
-        cdef long[::1] J = np.ascontiguousarray(systemMatrix.J.astype(np.int64))
-        self.nCooPairs = len(I)
-        cdef long nDof = systemMatrix.nDof
+        # CHANGED: Cast to np.int32 (C int) to match C++ signature
+        cdef int[::1] I = systemMatrix.I
+        cdef int[::1] J = systemMatrix.J
+
+        self.nCooPairs = len(I) # Length is still 64-bit capable
+
+        # CHANGED: Cast to int (C int)
+        cdef int nDof = int(systemMatrix.nDof)
 
         # 1. Run C++ Core
         with nogil:
             self.core = new CSRCore(&I[0], &J[0], self.nCooPairs, nDof)
 
         # 2. Direct Zero-Copy Access
-        # Cython allows us to call .data() on the vector attribute directly
         cdef int* ptr_indptr = self.core.indptr.data()
         cdef int* ptr_indices = self.core.indices.data()
-        # cdef int* ptr_map = self.core.map_to_csr.data()
 
         # 3. Cast to Memoryviews
-        cdef long nnz = self.core.nnz
+        # CHANGED: nnz is now int
+        cdef int nnz = self.core.nnz
 
         # We tell Cython: "This pointer is an array of size X"
         cdef int[::1] view_indptr = <int[:nDof+1]> ptr_indptr
@@ -116,8 +125,7 @@ cdef class CSRGenerator:
         cdef double* v_ptr = &V[0]
 
         # Release GIL:
-        # C++ std::execution will spawn its own thread pool (e.g. TBB).
         with nogil:
-            self.core.update(v_ptr, d_ptr )
+            self.core.update(v_ptr, d_ptr)
 
         return self.csrMatrix
