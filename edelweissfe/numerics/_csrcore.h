@@ -2,182 +2,245 @@
 
 #include <vector>
 #include <algorithm>
-#include <iostream>
-#include <cstdint>
 #include <numeric>
-#include <stdexcept>
+#include <cstdint>
 #include <limits>
-
-// Include OpenMP
-#ifdef _OPENMP
+#include <stdexcept>
+#include <cstring>
 #include <omp.h>
-#endif
+#include <cstring>
 
-// Entry struct (16 Bytes)
-struct Entry {
-    int row;
-    int col;
-    int64_t origIdx;
+struct PackedEdge {
+    uint64_t key;   // High 32: Row, Low 32: Col
+    int32_t orig;   // Original index
 
-    bool operator<(const Entry& other) const {
-        if (row != other.row) return row < other.row;
-        return col < other.col;
+    // Default comparison for std::sort is now extremely fast
+    bool operator<(const PackedEdge& other) const {
+        return key < other.key;
     }
 };
 
 class CSRCore {
 public:
+    // CSR Topology
     std::vector<int> indptr;
     std::vector<int> indices;
     int nnz = 0;
     int nDof = 0;
 
-    std::vector<int64_t> gather_sources;
-    std::vector<int64_t> assembly_ptr;
+    // Assembly Mapping
+    std::vector<int32_t> gather_sources;
+    std::vector<int32_t> assembly_ptr;
 
     CSRCore(const int* I, const int* J, int64_t n_pairs, int n_dof) : nDof(n_dof) {
-
         if (n_pairs == 0) {
             indptr.assign(nDof + 1, 0);
             return;
         }
 
-        // --- CONFIGURATION: Cache-Aware Partitioning ---
-        // We want each partition to fit in CPU L2 Cache (approx 256KB - 512KB).
-        // Entry is 16 bytes. ~32k entries = 512KB.
-        // Formula: partitions = n_pairs / 32000
+        // --- SAFETY & CONFIG ---
+        if (n_pairs > std::numeric_limits<int32_t>::max()) {
+            throw std::overflow_error("CSRCore: n_pairs exceeds 32-bit limit.");
+        }
 
-        int64_t target_partitions = n_pairs / 32000;
-        if (target_partitions < 2048) target_partitions = 2048;
-        if (target_partitions > 262144) target_partitions = 262144; // Cap at 256k partitions
+        // Determine Partitions based on threads
+        int num_threads = 1;
+        #pragma omp parallel
+        {
+            #pragma omp single
+            num_threads = omp_get_num_threads();
+        }
 
-        const int NUM_PARTITIONS = (int)target_partitions;
-        double chunk_size = (nDof > NUM_PARTITIONS) ? (double)nDof / NUM_PARTITIONS : 1.0;
+        // We partition by ROWS.
+        // 4x partitions per thread is a good heuristic for load balancing.
+        const int num_partitions = (num_threads * 4 > nDof) ? 1 : num_threads * 4;
+        const double rows_per_partition = (double)nDof / num_partitions;
 
-        // --- STEP 1: HISTOGRAM (Serial) ---
-        // Fast linear scan. Parallelizing adds atomic overhead, usually not worth it.
-        std::vector<int64_t> p_counts(NUM_PARTITIONS, 0);
+        // --- STEP 1: PARALLEL HISTOGRAM ---
+        // Count how many edges fall into each partition.
+        // We use thread-local counters to avoid atomic contention.
 
-        for (int64_t k = 0; k < n_pairs; ++k) {
-            if (I[k] < 0 || I[k] >= nDof || J[k] < 0 || J[k] >= nDof) {
-                throw std::out_of_range("CSRCore Error: Index out of bounds.");
+        std::vector<int64_t> partition_counts(num_partitions, 0);
+        std::vector<std::vector<int64_t>> thread_local_counts(num_threads, std::vector<int64_t>(num_partitions, 0));
+
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            auto& local_counts = thread_local_counts[tid];
+
+            #pragma omp for schedule(static)
+            for (int64_t k = 0; k < n_pairs; ++k) {
+                int r = I[k];
+                int p_id = (int)(r / rows_per_partition);
+                if (p_id >= num_partitions) p_id = num_partitions - 1;
+                local_counts[p_id]++;
             }
-            int p_id = (int)(I[k] / chunk_size);
-            if (p_id >= NUM_PARTITIONS) p_id = NUM_PARTITIONS - 1;
-            else if (p_id < 0) p_id = 0;
-            p_counts[p_id]++;
         }
 
-        // --- STEP 2: OFFSETS ---
-        std::vector<int64_t> heads(NUM_PARTITIONS, 0);
-        int64_t current_offset = 0;
-        for (int i = 0; i < NUM_PARTITIONS; ++i) {
-            heads[i] = current_offset;
-            current_offset += p_counts[i];
+        // Reduce thread counts to global partition counts & calculate offsets
+        // This matrix transposition (thread x part -> part x thread) allows us
+        // to calculate exactly where each thread should write its data.
+        std::vector<std::vector<int64_t>> write_offsets(num_partitions, std::vector<int64_t>(num_threads));
+        std::vector<int64_t> partition_starts(num_partitions + 1, 0);
+
+        int64_t current_global_offset = 0;
+        for (int p = 0; p < num_partitions; ++p) {
+            partition_starts[p] = current_global_offset;
+            for (int t = 0; t < num_threads; ++t) {
+                write_offsets[p][t] = current_global_offset;
+                current_global_offset += thread_local_counts[t][p];
+            }
         }
-        std::vector<int64_t> p_offsets = heads;
-        p_offsets.push_back(current_offset);
+        partition_starts[num_partitions] = current_global_offset; // Should equal n_pairs
 
-        // --- STEP 3: SCATTER (Serial) ---
-        std::vector<Entry> flat_buffer(n_pairs);
-        for (int64_t k = 0; k < n_pairs; ++k) {
-            int r = I[k];
-            int p_id = (int)(r / chunk_size);
-            if (p_id >= NUM_PARTITIONS) p_id = NUM_PARTITIONS - 1;
-            else if (p_id < 0) p_id = 0;
+        // --- STEP 2: PARALLEL SCATTER (BUCKETING) ---
+        // Pack data into a structure that is fast to sort.
+        std::vector<PackedEdge> edges(n_pairs);
 
-            int64_t pos = heads[p_id]++;
-            flat_buffer[pos] = {r, J[k], k};
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+
+            #pragma omp for schedule(static)
+            for (int64_t k = 0; k < n_pairs; ++k) {
+                int r = I[k];
+                int c = J[k];
+
+                // Pack (Row, Col) into 64-bit key
+                uint64_t key = ((uint64_t)r << 32) | (uint32_t)c;
+
+                int p_id = (int)(r / rows_per_partition);
+                if (p_id >= num_partitions) p_id = num_partitions - 1;
+
+                // Determine write position (no atomics needed now)
+                int64_t pos = write_offsets[p_id][tid]++;
+
+                edges[pos] = {key, (int32_t)k};
+            }
         }
 
-        // --- STEP 4: PARALLEL SORT ---
-        // [PERFORMANCE CRITICAL]
-        // Independent partitions allow perfect scaling with OpenMP.
+        // --- STEP 3: PARALLEL SORT & SYMBOLIC COMPRESSION ---
+        // Each thread takes ownership of specific partitions, sorts them,
+        // and calculates how many non-zeros (nnz) they will produce.
+
+        std::vector<int32_t> partition_nnz(num_partitions, 0);
+
+        // Temporary indptr logic: Since indptr is cumulative globally,
+        // we first fill it relative to the partition start, then fix it later.
+        indptr.assign(nDof + 1, 0);
+
         #pragma omp parallel for schedule(dynamic, 1)
-        for (int p = 0; p < NUM_PARTITIONS; ++p) {
-            int64_t start = p_offsets[p];
-            int64_t end = p_offsets[p+1];
-            if (start < end) {
-                std::sort(flat_buffer.begin() + start, flat_buffer.begin() + end);
-            }
-        }
+        for (int p = 0; p < num_partitions; ++p) {
+            int64_t start = partition_starts[p];
+            int64_t end = partition_starts[p + 1];
 
-        // --- STEP 5: COMPRESS (Direct Indptr Build) ---
-        size_t est_nnz = n_pairs / 2;
-        if (est_nnz > 2000000000) est_nnz = 2000000000;
+            if (start == end) continue;
 
-        indices.reserve(est_nnz);
-        indptr.resize(nDof + 1); // Use resize to set size immediately
+            // 3a. Sort the partition
+            std::sort(edges.begin() + start, edges.begin() + end);
 
-        gather_sources.resize(n_pairs);
-        assembly_ptr.reserve(est_nnz + 1);
-        assembly_ptr.push_back(0);
+            // 3b. Symbolic Counting (Local CSR generation)
+            // We iterate the sorted edges to count unique (r,c) pairs
+            // and fill the indptr counts for rows in this partition.
 
-        // Process First Entry
-        const auto& first = flat_buffer[0];
-        indices.push_back(first.col);
-        gather_sources[0] = first.origIdx;
+            int32_t local_nnz = 0;
+            if (end > start) {
+                local_nnz = 1; // First entry is always new
 
-        // Initialize Indptr up to the first row found
-        // (Handles case where first row is not row 0)
-        for (int r = 0; r <= first.row; ++r) indptr[r] = 0;
+                // Determine Row range for this partition
+                // We must be careful: indptr is size nDof+1.
+                // We extract row from the key.
+                int prev_row = (int)(edges[start].key >> 32);
 
-        int32_t current_nnz = 1; // We just pushed one
-        int32_t current_row = first.row;
+                // Mark first row count
+                indptr[prev_row + 1]++;
 
-        for (int64_t k = 1; k < n_pairs; ++k) {
-            const auto& curr = flat_buffer[k];
-            const auto& prev = flat_buffer[k-1];
+                for (int64_t k = start + 1; k < end; ++k) {
+                    uint64_t curr_key = edges[k].key;
+                    uint64_t prev_key = edges[k-1].key;
 
-            gather_sources[k] = curr.origIdx;
+                    int curr_row = (int)(curr_key >> 32);
 
-            bool is_new_entry = (curr.row != prev.row) || (curr.col != prev.col);
-
-            if (is_new_entry) {
-                assembly_ptr.push_back(k);
-                indices.push_back(curr.col);
-
-                // If Row Changed, update indptr
-                if (curr.row != current_row) {
-                    // Fill indptr for all rows we skipped (usually just current_row + 1)
-                    // with the value of current_nnz BEFORE this new entry was added.
-                    for (int r = current_row + 1; r <= curr.row; ++r) {
-                        indptr[r] = current_nnz;
+                    // If key is different, it's a new matrix entry
+                    if (curr_key != prev_key) {
+                        local_nnz++;
+                        indptr[curr_row + 1]++;
                     }
-                    current_row = curr.row;
                 }
-                current_nnz++;
             }
-        }
-        assembly_ptr.push_back(n_pairs);
-
-        // Fill remaining indptr to the end
-        for (int r = current_row + 1; r <= nDof; ++r) {
-            indptr[r] = current_nnz;
+            partition_nnz[p] = local_nnz;
         }
 
+        // --- STEP 4: GLOBAL SCAN (OFFSET CALCULATION) ---
+        // 4a. Indptr Prefix Sum (This is tricky)
+        // Currently indptr[r+1] holds the COUNT of non-zeros in row r.
+        // We need to do a standard cumulative sum over the whole array.
+        // std::partial_sum is efficient enough here (serial, but cache-linear and fast for <10M rows).
+        // For massive arrays, this can be parallelized, but usually not needed.
+        std::partial_sum(indptr.begin(), indptr.end(), indptr.begin());
+
+        // 4b. NNZ Offsets for the other arrays
+        std::vector<int32_t> global_nnz_offsets(num_partitions, 0);
+        int32_t current_nnz = 0;
+        for (int p = 0; p < num_partitions; ++p) {
+            global_nnz_offsets[p] = current_nnz;
+            current_nnz += partition_nnz[p];
+        }
         this->nnz = current_nnz;
 
-        // Safety: Overflow Check
-        if (indices.size() > std::numeric_limits<int>::max()) {
-             throw std::overflow_error("CSRCore Error: Result Matrix > 2.14B entries.");
+        // --- STEP 5: FINAL FILL ---
+        indices.resize(nnz);
+        gather_sources.resize(n_pairs);
+        assembly_ptr.resize(nnz + 1);
+        assembly_ptr[nnz] = n_pairs; // Sentinel
+
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int p = 0; p < num_partitions; ++p) {
+            int64_t start = partition_starts[p];
+            int64_t end = partition_starts[p + 1];
+            if (start == end) continue;
+
+            int32_t write_idx = global_nnz_offsets[p];
+
+            // Fill first entry of the partition
+            indices[write_idx] = (int)(edges[start].key & 0xFFFFFFFF);
+            assembly_ptr[write_idx] = start;
+            gather_sources[start] = edges[start].orig;
+
+            int32_t internal_count = 0;
+
+            for (int64_t k = start + 1; k < end; ++k) {
+                uint64_t curr_key = edges[k].key;
+                uint64_t prev_key = edges[k-1].key;
+
+                gather_sources[k] = edges[k].orig;
+
+                if (curr_key != prev_key) {
+                    internal_count++;
+                    // Close previous assembly pointer
+                    // (assembly_ptr[i+1] is start of next, which is current k)
+                    assembly_ptr[write_idx + internal_count] = k;
+
+                    // Write new column index
+                    indices[write_idx + internal_count] = (int)(curr_key & 0xFFFFFFFF);
+                }
+            }
         }
     }
 
     void update(const double* V_data, double* csr_data) const {
         if (nnz == 0) return;
 
-        // --- STEP 6: PARALLEL UPDATE ---
-        // [PERFORMANCE CRITICAL]
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < nnz; ++i) {
-            int64_t start = assembly_ptr[i];
-            int64_t end   = assembly_ptr[i+1];
+            int32_t start = assembly_ptr[i];
+            int32_t end   = assembly_ptr[i+1];
 
             double sum = 0.0;
-            // SIMD Vectorization
+            // The compiler will autovectorize this reduction effectively
+            // because gather_sources is contiguous in memory now.
             #pragma omp simd reduction(+:sum)
-            for (int64_t k = start; k < end; ++k) {
+            for (int32_t k = start; k < end; ++k) {
                 sum += V_data[gather_sources[k]];
             }
             csr_data[i] = sum;

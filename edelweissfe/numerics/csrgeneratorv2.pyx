@@ -31,15 +31,10 @@ cimport numpy as np
 from libcpp.vector cimport vector
 
 
-# Updated Extern Block to match new C++ Signature
 cdef extern from "_csrcore.h":
     cdef cppclass CSRCore nogil:
-        # I, J -> int* (32-bit)
-        # n_pairs -> long (64-bit)
-        # n_dof -> int (32-bit)
         CSRCore(const int* I, const int* J, long n_pairs, int n_dof) except +
 
-        # Members are now standard ints
         vector[int] indptr
         vector[int] indices
         int nnz
@@ -50,6 +45,8 @@ cdef extern from "_csrcore.h":
 cdef class CSRGenerator:
     """
     CSRGenerator class to create and manage a CSR matrix from COO format.
+
+    This class utilizes a C++ core for efficient conversion and updating of the CSR matrix.
 
     Parameters
     ----------
@@ -67,40 +64,31 @@ cdef class CSRGenerator:
             del self.core
 
     def __init__(self, systemMatrix):
-        # CHANGED: Cast to np.int32 (C int) to match C++ signature
         cdef int[::1] I = systemMatrix.I
         cdef int[::1] J = systemMatrix.J
 
         self.nCooPairs = len(I) # Length is still 64-bit capable
 
-        # CHANGED: Cast to int (C int)
         cdef int nDof = int(systemMatrix.nDof)
 
         # 1. Run C++ Core
         with nogil:
             self.core = new CSRCore(&I[0], &J[0], self.nCooPairs, nDof)
 
-        # 2. Direct Zero-Copy Access
         cdef int* ptr_indptr = self.core.indptr.data()
         cdef int* ptr_indices = self.core.indices.data()
 
-        # 3. Cast to Memoryviews
-        # CHANGED: nnz is now int
         cdef int nnz = self.core.nnz
 
-        # We tell Cython: "This pointer is an array of size X"
         cdef int[::1] view_indptr = <int[:nDof+1]> ptr_indptr
         cdef int[::1] view_indices = <int[:nnz]> ptr_indices
 
-        # 4. Create NumPy arrays (Shared Memory)
         cdef np.ndarray nd_indptr = np.asarray(view_indptr)
         cdef np.ndarray nd_indices = np.asarray(view_indices)
 
-        # 5. Create Scipy Object
         cdef np.ndarray[double, ndim=1] data = np.zeros(nnz, dtype=np.double)
         self.csrMatrix = csr_matrix((data, nd_indices, nd_indptr), shape=(nDof, nDof))
 
-        # 6. Safety: Keep 'self' alive as long as 'csrMatrix' is alive
         self.csrMatrix._parent = self
 
         self.data_view = self.csrMatrix.data
@@ -120,11 +108,9 @@ cdef class CSRGenerator:
             The updated CSR matrix.
         """
 
-        # Pointers to raw data
         cdef double* d_ptr = &self.data_view[0]
         cdef double* v_ptr = &V[0]
 
-        # Release GIL:
         with nogil:
             self.core.update(v_ptr, d_ptr)
 
