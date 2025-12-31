@@ -8,7 +8,6 @@
 #include <stdexcept>
 #include <cstring>
 #include <omp.h>
-#include <cstring>
 
 struct PackedEdge {
     uint64_t key;   // High 32: Row, Low 32: Col
@@ -44,12 +43,7 @@ public:
         }
 
         // Determine Partitions based on threads
-        int num_threads = 1;
-        #pragma omp parallel
-        {
-            #pragma omp single
-            num_threads = omp_get_num_threads();
-        }
+        int num_threads = omp_get_max_threads();
 
         // We partition by ROWS.
         // 4x partitions per thread is a good heuristic for load balancing.
