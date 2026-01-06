@@ -114,4 +114,4 @@ cdef class CSRGenerator:
         with nogil:
             self.core.update(v_ptr, d_ptr)
 
-        return self.csrMatrix
+        return self.csrMatrix.copy()
