@@ -90,43 +90,32 @@ class ScatterDofVector(np.ndarray):
     Parameters
     ----------
     entitiesInDofVector
-        A dictionary mapping entities to their indices in the DofVector.
+        The dictionary mapping entities to their indices in the DofVector.
     nDof
         The total number of degrees of freedom.
     """
 
     def __new__(cls, entitiesInDofVector: dict, nDof: int):
-        """
-        Initialize the scatter vector for ALL entities in the DofVector.
-        """
         entities = list(entitiesInDofVector.keys())
 
-        # 1. Determine sizes
         sizes = np.array([len(v) for v in entitiesInDofVector.values()], dtype=np.intc)
         total_size = np.sum(sizes)
 
-        # 2. Allocate Buffer
         obj = np.zeros(total_size, dtype=float).view(cls)
 
-        # 3. Build Offsets
         offsets = np.zeros(len(entities) + 1, dtype=np.intc)
         np.cumsum(sizes, out=offsets[1:])
 
-        # 4. Build Fast Lookup Map (Entity -> Offset)
-        # This allows O(1) access even if we iterate out of order
         obj._offset_map = dict(zip(entities, offsets))
 
-        # 5. Build Global Index Map
         obj._global_indices = np.empty(total_size, dtype=np.int32)
 
-        # We can iterate the dictionary directly since order is preserved
         current_offset = 0
         for entity, indices in entitiesInDofVector.items():
             n = len(indices)
             obj._global_indices[current_offset : current_offset + n] = indices
             current_offset += n
 
-        # 6. Store Metadata
         obj._entitiesInDofVector = entitiesInDofVector
         obj._nDof = nDof
 
@@ -143,16 +132,14 @@ class ScatterDofVector(np.ndarray):
     def __getitem__(self, key):
         """
         Returns a VIEW into the expanded buffer.
+
+        Parameters
+        ----------
+        key
+            The key for indexing, either an entity or an integer index.
         """
-        # Case 1: Random Access by Entity (Fast O(1) Dict Lookup)
-        # This is what _computeParticles will mostly use
         val = self._offset_map.get(key)
         if val is not None:
-            # We need the size.
-            # Optimization: infer size from the next offset or store lengths?
-            # Since _offset_map only gives start, we need a way to know length.
-            # To keep it fast, let's assume standard behavior or query dict.
-            # Querying the DofVector dict is safe:
             size = len(self._entitiesInDofVector[key])
             return super().__getitem__(slice(val, val + size))
 
@@ -193,6 +180,13 @@ class ScatterDofVector(np.ndarray):
 class DofVector(np.ndarray):
     """
     Represents a Dof Vector with entity-aware indexing.
+
+    Parameters
+    ----------
+    nDof
+        The total number of degrees of freedom.
+    entitiesInDofVector
+        A dictionary mapping entities to their indices in the DofVector.
     """
 
     def __new__(cls, nDof: int, entitiesInDofVector: dict):
@@ -220,6 +214,18 @@ class DofVector(np.ndarray):
             super().__setitem__(key, value)
 
     def copy(self, order="C"):
+        """
+        Create a copy of this DofVector.
+
+        Parameters
+        ----------
+        order
+            The memory layout order.
+        Returns
+        -------
+        DofVector
+            The copied DofVector.
+        """
         newDofVector = super().copy(order).view(DofVector)
         if self.entitiesInDofVector is not None:
             newDofVector.entitiesInDofVector = self.entitiesInDofVector.copy()
