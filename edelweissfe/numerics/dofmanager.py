@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ---------------------------------------------------------------------
+#  ---------------------------------------------------------------------
 #
-#   _____     _             _         _____ _____
-#  | ____|__| | ___| |_       _____(_)___ ___|   ___| ____|
-#  |  _| / _` |/ _ \ \ \ /\ / / _ \ / __/ __| |_  |  _|
-#  | |__| (_| |  __/ |\ V  V /  __/ \__ \__ \  _| | |___
-#  |_____\__,_|\___|_| \_/\_/ \___|_|___/___/_|   |_____|
+#  _____    _      _              _         _____ _____
+# | ____|__| | ___| |_      _____(_)___ ___|  ___| ____|
+# |  _| / _` |/ _ \ \ \ /\ / / _ \ / __/ __| |_  |  _|
+# | |__| (_| |  __/ |\ V  V /  __/ \__ \__ \  _| | |___
+# |_____\__,_|\___|_| \_/\_/ \___|_|___/___/_|   |_____|
 #
 #
-#   Unit of Strength of Materials and Structural Analysis
-#   University of Innsbruck,
-#   2017 - today
+#  Unit of Strength of Materials and Structural Analysis
+#  University of Innsbruck,
+#  2017 - today
 #
-#   Matthias Neuner matthias.neuner@uibk.ac.at
+#  Matthias Neuner matthias.neuner@uibk.ac.at
 #
-#   This file is part of EdelweissFE.
+#  This file is part of EdelweissFE.
 #
-#   This library is free software; you can redistribute it and/or
-#   modify it under the terms of the GNU Lesser General Public
-#   License as published by the Free Software Foundation; either
-#   version 2.1 of the License, or (at your option) any later version.
+#  This library is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2.1 of the License, or (at your option) any later version.
 #
-#   The full text of the license can be found in the file LICENSE.md at
-#   the top level directory of EdelweissFE.
-# ---------------------------------------------------------------------
-# Created on Tue Dec 18 09:18:25 2018
+#  The full text of the license can be found in the file LICENSE.md at
+#  the top level directory of EdelweissFE.
+#  ---------------------------------------------------------------------
 
-# @author: Matthias Neuner
 """
 This module contains important classes for describing the global equation system by means of a sparse system.
 """
@@ -155,7 +153,6 @@ class ScatterDofVector(np.ndarray):
         key
             The key for indexing, either an entity or an integer index.
         """
-        # [OPTIMIZATION] Fast path for standard indexing
         if isinstance(key, (int, slice, np.ndarray, list)):
             return super().__getitem__(key)
 
@@ -220,7 +217,6 @@ class DofVector(np.ndarray):
         self.entitiesInDofVector = getattr(obj, "entitiesInDofVector", None)
 
     def __getitem__(self, key):
-        # [OPTIMIZATION] Fast path for standard indexing
         if isinstance(key, (int, slice, np.ndarray, list)):
             return super().__getitem__(key)
 
