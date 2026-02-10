@@ -387,120 +387,53 @@ class DofManager:
 
         return self._gatherElementsInformation(entities)
 
-    # def _locateNodeCouplingEntitiesInDofVector(self, entities: list) -> dict:
-    #     """Creates a dictionary containing the location (indices) of each entity (elements, ...)
-    #     within the DofVector structure.
-
-    #     Parameters
-    #     ----------
-    #     entities
-    #         The list of entities to locate.
-    #     Returns
-    #     -------
-    #     dict
-    #         A dictionary containing the location mapping.
-    #     """
-
-    #     if not entities:
-    #         return {}
-
-    #     entities = list(entities)
-
-    #     nEntities = len(entities)
-
-    #     numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
-    #     chunk_size = max(1, nEntities // numThreads)
-    #     chunks = [entities[i : i + chunk_size] for i in range(0, len(entities), chunk_size)]
-
-    #     fieldVariables = self.idcsOfFieldVariablesInDofVector
-
-    #     def processEntityChunk(chunk):
-    #         localMap = {}
-    #         for ent in chunk:
-    #             indices = [
-    #                 idx
-    #                 for iNode, node in enumerate(ent.nodes)
-    #                 for f_name in ent.fields[iNode]
-    #                 for idx in fieldVariables[node.fields[f_name]]
-    #             ]
-    #             destArr = np.fromiter(indices, dtype=int)
-
-    #             if ent.dofIndicesPermutation is not None:
-    #                 localMap[ent] = destArr[ent.dofIndicesPermutation]
-    #             else:
-    #                 localMap[ent] = destArr
-    #         return localMap
-
-    #     idcsOfElementsInDofVector = {}
-    #     with ThreadPoolExecutor(max_workers=numThreads) as executor:
-    #         results = executor.map(processEntityChunk, chunks)
-    #         for partial_map in results:
-    #             idcsOfElementsInDofVector.update(partial_map)
-
-    #     return idcsOfElementsInDofVector
-
     def _locateNodeCouplingEntitiesInDofVector(self, entities: list) -> dict:
+        """Creates a dictionary containing the location (indices) of each entity (elements, ...)
+        within the DofVector structure.
+
+        Parameters
+        ----------
+        entities
+            The list of entities to locate.
+        Returns
+        -------
+        dict
+            A dictionary containing the location mapping.
+        """
+
         if not entities:
             return {}
 
-        # Ensure we have a list for chunking
-        entities_list = list(entities)
-        nEntities = len(entities_list)
+        entities = list(entities)
+        nEntities = len(entities)
 
-        # Threading setup
         numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
+        chunk_size = max(1, nEntities // numThreads)
+        chunks = [entities[i : i + chunk_size] for i in range(0, len(entities), chunk_size)]
 
-        # Heuristic: Don't spawn threads for tiny workloads
-        if nEntities < 500 or numThreads == 1:
-            return self._locate_serial_internal(entities_list)
-
-        chunk_size = (nEntities + numThreads - 1) // numThreads
-        chunks = [entities_list[i : i + chunk_size] for i in range(0, nEntities, chunk_size)]
-
-        # 1. Localize the global map to a local variable
-        # This prevents threads from accessing 'self' inside the hot loop
-        global_fv_map = self.idcsOfFieldVariablesInDofVector
+        fieldVariables = self.idcsOfFieldVariablesInDofVector
 
         def processEntityChunk(chunk):
             localMap = {}
-            # 2. Bind the .get or dictionary access to a local name
-            # This is a micro-optimization that avoids repeated attribute lookups
-            fv_lookup = global_fv_map
-
             for ent in chunk:
-                # 3. Cache entity attributes to local variables
-                # This avoids the 'dot' overhead inside the nested loops
-                nodes = ent.nodes
-                fields_on_ent = ent.fields
-                permutation = ent.dofIndicesPermutation
+                indices = [
+                    idx
+                    for iNode, node in enumerate(ent.nodes)
+                    for f_name in ent.fields[iNode]
+                    for idx in fieldVariables[node.fields[f_name]]
+                ]
+                destArr = np.fromiter(indices, dtype=int)
 
-                # 4. Use a flat list comprehension or optimized loop
-                # List comprehensions are generally faster than .append/.extend in Python
-                try:
-                    indices = [
-                        idx
-                        for iNode, node in enumerate(nodes)
-                        for f_name in fields_on_ent[iNode]
-                        for idx in fv_lookup[node.fields[f_name]]
-                    ]
-                except (KeyError, AttributeError):
-                    continue
-
-                # 5. Use np.int32 for better cache performance
-                destArr = np.array(indices, dtype=np.int32)
-
-                if permutation is not None:
-                    localMap[ent] = destArr[permutation]
+                if ent.dofIndicesPermutation is not None:
+                    localMap[ent] = destArr[ent.dofIndicesPermutation]
                 else:
                     localMap[ent] = destArr
             return localMap
 
         idcsOfElementsInDofVector = {}
-
-        # We use the executor context manager here as requested (no persistent executor)
         with ThreadPoolExecutor(max_workers=numThreads) as executor:
-            # map() returns a generator; wrapping in list() or iterating merges results
-            for partial_map in executor.map(processEntityChunk, chunks):
+            results = executor.map(processEntityChunk, chunks)
+            for partial_map in results:
                 idcsOfElementsInDofVector.update(partial_map)
 
         return idcsOfElementsInDofVector
