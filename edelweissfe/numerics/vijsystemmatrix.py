@@ -46,7 +46,7 @@ class VIJSystemMatrix(np.ndarray):
     J
         The J vector for the VIJ triple.
     entitiesInVIJ
-        A dictionary containing the indices of an entitiy in the value vector.
+        A dictionary containing the indices of an entity in the value vector.
     """
 
     def __new__(cls, nDof: int, I: np.ndarray, J: np.ndarray, entitiesInVIJ: dict):  # noqa: E741

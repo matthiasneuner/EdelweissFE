@@ -408,6 +408,10 @@ class DofManager:
         nEntities = len(entities)
 
         numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
+        # Ensure a valid, bounded thread count to avoid ZeroDivisionError and ValueError
+        if numThreads <= 0:
+            numThreads = 1
+        numThreads = min(numThreads, nEntities)
         chunk_size = max(1, nEntities // numThreads)
         chunks = [entities[i : i + chunk_size] for i in range(0, len(entities), chunk_size)]
 
