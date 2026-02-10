@@ -90,7 +90,7 @@ class DofVector(np.ndarray):
             newDofVector.entitiesInDofVector = self.entitiesInDofVector.copy()
         return newDofVector
 
-    def createScatterVector(self) -> edelweissfe.numerics.scatterdofvector.ScatterDofVector:
+    def createScatterVector(self) -> "ScatterDofVector":  # noqa: F821
         """
         Create a scatter vector for ALL entities in this DofVector.
 

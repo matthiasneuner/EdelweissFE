@@ -110,7 +110,7 @@ class ScatterDofVector(np.ndarray):
         data = np.abs(self) if absolute else self
         np.add.at(targetDofVector, self._global_indices, data)
 
-    def toDofVector(self, absolute=False) -> edelweissfe.numerics.dofvector.DofVector:
+    def toDofVector(self, absolute=False) -> "DofVector":  # noqa: F821
         """Create a new DofVector from this scatter vector.
 
         Parameters
