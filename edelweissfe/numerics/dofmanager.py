@@ -597,6 +597,8 @@ class DofManager:
         if not entities:
             return {}
 
+        entities = list(entities)
+
         nEntities = len(entities)
 
         numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
