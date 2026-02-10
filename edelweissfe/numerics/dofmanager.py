@@ -30,7 +30,6 @@
 This module contains important classes for describing the global equation system by means of a sparse system.
 """
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 
@@ -40,6 +39,10 @@ from edelweissfe.config.phenomena import phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.nodecouplingentity.base.nodecouplingentity import (
     BaseNodeCouplingEntity,
+)
+from edelweissfe.numerics.parallelizationutilities import (
+    getNumberOfThreads,
+    isFreeThreadingSupported,
 )
 from edelweissfe.points.node import Node
 from edelweissfe.sets.nodeset import NodeSet
@@ -594,38 +597,34 @@ class DofManager:
         if not entities:
             return {}
 
-        entities = list(entities)  # Ensure we have a list to slice
+        nEntities = len(entities)
 
-        # Determine number of workers (typically CPU count)
-        num_workers = int(os.environ.get("PYTHON_GIL_THREADS", os.cpu_count()))
-
-        # Split entities into chunks
-        chunk_size = max(1, len(entities) // num_workers)
+        numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
+        chunk_size = max(1, nEntities // numThreads)
         chunks = [entities[i : i + chunk_size] for i in range(0, len(entities), chunk_size)]
 
-        field_var_map = self.idcsOfFieldVariablesInDofVector
+        fieldVariables = self.idcsOfFieldVariablesInDofVector
 
-        def process_chunk(chunk):
-            local_map = {}
+        def processEntityChunk(chunk):
+            localMap = {}
             for ent in chunk:
-                # Flattening logic
-                indices_gen = chain.from_iterable(
-                    field_var_map[node.fields[nodeField]]
+                indices = [
+                    idx
                     for iNode, node in enumerate(ent.nodes)
-                    for nodeField in ent.fields[iNode]
-                )
-                destArr = np.fromiter(indices_gen, dtype=int)
+                    for f_name in ent.fields[iNode]
+                    for idx in fieldVariables[node.fields[f_name]]
+                ]
+                destArr = np.fromiter(indices, dtype=int)
 
                 if ent.dofIndicesPermutation is not None:
-                    local_map[ent] = destArr[ent.dofIndicesPermutation]
+                    localMap[ent] = destArr[ent.dofIndicesPermutation]
                 else:
-                    local_map[ent] = destArr
-            return local_map
+                    localMap[ent] = destArr
+            return localMap
 
-        # Execute in parallel
         idcsOfElementsInDofVector = {}
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            results = executor.map(process_chunk, chunks)
+        with ThreadPoolExecutor(max_workers=numThreads) as executor:
+            results = executor.map(processEntityChunk, chunks)
             for partial_map in results:
                 idcsOfElementsInDofVector.update(partial_map)
 
