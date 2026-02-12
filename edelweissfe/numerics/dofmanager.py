@@ -438,24 +438,6 @@ class DofManager:
 
         return idcsOfElementsInDofVector
 
-    def _locate_serial_internal(self, entities: list) -> dict:
-        """Fast serial fallback for small chunks to avoid thread overhead."""
-        localMap = {}
-        fv_lookup = self.idcsOfFieldVariablesInDofVector
-        for ent in entities:
-            indices = [
-                idx
-                for iNode, node in enumerate(ent.nodes)
-                for f_name in ent.fields[iNode]
-                for idx in fv_lookup[node.fields[f_name]]
-            ]
-            destArr = np.array(indices, dtype=np.int32)
-            if ent.dofIndicesPermutation is not None:
-                localMap[ent] = destArr[ent.dofIndicesPermutation]
-            else:
-                localMap[ent] = destArr
-        return localMap
-
     def _locateConstraintsInDofVector(self, constraints: list) -> dict:
         """Creates a dictionary containing the location (indices) of each entity (elements, constraints)
         within the DofVector structure.
