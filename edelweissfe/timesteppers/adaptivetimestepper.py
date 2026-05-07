@@ -43,8 +43,8 @@ class AdaptiveTimeStepper:
         minIncrement: float,
         maxNumberIncrements: int,
         journal: Journal,
-        increaseFactor=1.1,
-        makeZeroIncrementFirst=True,
+        increaseFactor: float = 1.1,
+        makeZeroIncrementFirst: bool = True,
     ):
         """
         An increment generator for incremental-iterative simulations.
@@ -107,7 +107,7 @@ class AdaptiveTimeStepper:
             if remainder < self.increment:
                 self.increment = remainder
 
-            # # zero increment; return value for first function call
+            # Force a zero increment only for the first generated step when enabled.
             if self.makeZeroIncrementFirst and (self.incrementCounter == 0):
                 theIncrement = 0.0
             else:
