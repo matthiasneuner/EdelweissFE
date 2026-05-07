@@ -387,59 +387,19 @@ class DofManager:
 
         return self._gatherElementsInformation(entities)
 
-    # def _locateNodeCouplingEntitiesInDofVector(self, entities: list) -> dict:
-    #     """Creates a dictionary containing the location (indices) of each entity (elements, ...)
-    #     within the DofVector structure.
-
-    #     Parameters
-    #     ----------
-    #     entities
-    #         The list of entities to locate.
-    #     Returns
-    #     -------
-    #     dict
-    #         A dictionary containing the location mapping.
-    #     """
-
-    #     if not entities:
-    #         return {}
-
-    #     entities = list(entities)
-
-    #     nEntities = len(entities)
-
-    #     numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
-    #     chunk_size = max(1, nEntities // numThreads)
-    #     chunks = [entities[i : i + chunk_size] for i in range(0, len(entities), chunk_size)]
-
-    #     fieldVariables = self.idcsOfFieldVariablesInDofVector
-
-    #     def processEntityChunk(chunk):
-    #         localMap = {}
-    #         for ent in chunk:
-    #             indices = [
-    #                 idx
-    #                 for iNode, node in enumerate(ent.nodes)
-    #                 for f_name in ent.fields[iNode]
-    #                 for idx in fieldVariables[node.fields[f_name]]
-    #             ]
-    #             destArr = np.fromiter(indices, dtype=int)
-
-    #             if ent.dofIndicesPermutation is not None:
-    #                 localMap[ent] = destArr[ent.dofIndicesPermutation]
-    #             else:
-    #                 localMap[ent] = destArr
-    #         return localMap
-
-    #     idcsOfElementsInDofVector = {}
-    #     with ThreadPoolExecutor(max_workers=numThreads) as executor:
-    #         results = executor.map(processEntityChunk, chunks)
-    #         for partial_map in results:
-    #             idcsOfElementsInDofVector.update(partial_map)
-
-    #     return idcsOfElementsInDofVector
-
     def _locateNodeCouplingEntitiesInDofVector(self, entities: list) -> dict:
+        """Creates a dictionary containing the location (indices) of each entity (elements, ...)
+        within the DofVector structure.
+
+        Parameters
+        ----------
+        entities
+            The list of entities to locate.
+        Returns
+        -------
+        dict
+            A dictionary containing the location mapping.
+        """
         if not entities:
             return {}
 
@@ -496,7 +456,6 @@ class DofManager:
             return localMap
 
         idcsOfElementsInDofVector = {}
-
         # We use the executor context manager here as requested (no persistent executor)
         with ThreadPoolExecutor(max_workers=numThreads) as executor:
             # map() returns a generator; wrapping in list() or iterating merges results
