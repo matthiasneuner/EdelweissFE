@@ -53,6 +53,37 @@ module.addRequiredArg("referencePoint", "Node set containing only the reference 
 documentation = [module]
 
 
+class RigidBodyStiffnessView:
+    """Provides structured 2-D sub-views for the sparse rigid body stiffness matrix slice."""
+
+    def __init__(self, flat_array: np.ndarray, nRot: int, nUc: int, nDim: int, nSlaves: int):
+        self._flat_array = flat_array
+        self._nRot = nRot
+        self._nUc = nUc
+        self._nDim = nDim
+        self._nSlaves = nSlaves
+
+        kuu_size = nRot**2
+        entries_per_slave = 2 * nUc * nDim
+
+        # 2-D view of RP rotation block
+        self.K_UU = flat_array[0:kuu_size].reshape((nRot, nRot))
+
+        # Lists of 2-D views for coupling blocks of each slave node
+        self.K_UL = [
+            flat_array[kuu_size + s * entries_per_slave : kuu_size + s * entries_per_slave + nUc * nDim].reshape(
+                (nUc, nDim)
+            )
+            for s in range(nSlaves)
+        ]
+        self.K_LU = [
+            flat_array[kuu_size + s * entries_per_slave + nUc * nDim : kuu_size + (s + 1) * entries_per_slave].reshape(
+                (nDim, nUc)
+            )
+            for s in range(nSlaves)
+        ]
+
+
 class Constraint(ConstraintBase):
     """
     Geometrically exact rigid body constraint: Constrains a nodeset to a reference point.
@@ -160,6 +191,16 @@ class Constraint(ConstraintBase):
         """
         return self.nRot**2 + len(self.slaveNodes) * 2 * self._nUCoupledPerSlave * self.nDim
 
+    def shapeVIJContribution(self, flat_view: np.ndarray) -> RigidBodyStiffnessView:
+        """Shape the flat VIJ values slice for this constraint using RigidBodyStiffnessView."""
+        return RigidBodyStiffnessView(
+            flat_view,
+            nRot=self.nRot,
+            nUc=self._nUCoupledPerSlave,
+            nDim=self.nDim,
+            nSlaves=len(self.slaveNodes),
+        )
+
     def initializeVIJContribution(self, idcs: np.ndarray, I_: np.ndarray, J_: np.ndarray, offset: int) -> None:
         """Fill the VIJ index arrays with the sparse pattern of this constraint.
 
@@ -266,21 +307,7 @@ class Constraint(ConstraintBase):
     def applyConstraint(self, U_np, dU, PExt, K, timeStep):
         """Apply the rigid body constraint.
 
-        ``K`` is received as a **1-D** array whose entries correspond to the sparse
-        VIJ pattern laid out by :meth:`initializeVIJContribution`:
-
-        * ``K[0 : nRot²]``
-          – K_UU rotation block (accumulated across all slaves, row-major).
-        * for slave *s* (s = 0, …, nSlaves-1):
-
-          * ``K[nRot² + s * 2*nUc*nDim  :  nRot² + s * 2*nUc*nDim + nUc*nDim]``
-            – K_UL block for slave *s*, stored as ``G.T.flatten()``
-            (row-major with *nUc* rows and *nDim* cols).
-          * ``K[nRot² + s * 2*nUc*nDim + nUc*nDim  :  nRot² + (s+1) * 2*nUc*nDim]``
-            – K_LU block for slave *s*, stored as ``G.flatten()``
-            (row-major with *nDim* rows and *nUc* cols).
-
-        where ``nUc = nDim + nDim + nRot`` (= 9 in 3-D).
+        ``K`` is received as a RigidBodyStiffnessView object.
         """
         nConstraints = self.nConstraints
         nDim = self.nDim
@@ -339,10 +366,6 @@ class Constraint(ConstraintBase):
 
         self._reactions.fill(0.0)
 
-        # Per-slave offset constants for the sparse K layout.
-        kuu_size = nRot**2
-        entries_per_slave = 2 * nUc * nDim
-
         for s in range(nSlaves):
             d0 = self.distancesSlaveNodeRP[s]
             indcsUNode = self.indicesOfSlaveNodesInP[s]
@@ -364,23 +387,10 @@ class Constraint(ConstraintBase):
             PExt[indcsU] -= Lambda.T @ G
             PExt[L0 : L0 + nDim] -= g
 
-            # ---- Write to the sparse 1-D K view ----
-
-            # K_UU: only the Phi_RP × Phi_RP block is nonzero (accumulated over slaves).
-            # Layout: K[ri*nRot + rj] ↔ (RP_phi[ri], RP_phi[rj]).
-            # np.einsum gives shape (nRot, nRot); .flatten() is row-major = ri*nRot+rj order.
-            K[0:kuu_size] += np.einsum("i,ijk->jk", Lambda, H[:, -nRot:, -nRot:]).flatten()
-
-            kul_offset = kuu_size + s * entries_per_slave
-            klu_offset = kul_offset + nUc * nDim
-
-            # K_UL: G.T has shape (nUc, nDim); .flatten() is row-major = iu*nDim+il order.
-            # Layout: K[kul_offset + iu*nDim + il] ↔ (indcsU[iu], Lambda_s[il]).
-            K[kul_offset : kul_offset + nUc * nDim] += G.T.flatten()
-
-            # K_LU: G has shape (nDim, nUc); .flatten() is row-major = il*nUc+iu order.
-            # Layout: K[klu_offset + il*nUc + iu] ↔ (Lambda_s[il], indcsU[iu]).
-            K[klu_offset : klu_offset + nDim * nUc] += G.flatten()
+            # ---- Write to the sparse structured K view ----
+            K.K_UU += np.einsum("i,ijk->jk", Lambda, H[:, -nRot:, -nRot:])
+            K.K_UL[s] += G.T
+            K.K_LU[s] += G
 
             self._reactions[0 : self.nDim] += Lambda
             self._reactions[self.nDim :] += np.cross(T @ d0, Lambda)
