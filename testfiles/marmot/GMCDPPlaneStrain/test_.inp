@@ -46,19 +46,19 @@ fieldOutput=RF
 ** direction=1
 
 *output, type=ensight, name=esExport
-create=perNode,    fieldOutput=displacement
-create=perNode,    fieldOutput=micro rotation
-create=perNode,    fieldOutput=nonlocal damage
-create=perElement, fieldOutput=alphaP
-create=perElement, fieldOutput=alphaD
-create=perElement, fieldOutput=omega
-configuration, overwrite=yes
+>>perNode, fieldOutput=displacement
+>>perNode, fieldOutput=micro rotation
+>>perNode, fieldOutput=nonlocal damage
+>>perElement, fieldOutput=alphaP
+>>perElement, fieldOutput=alphaD
+>>perElement, fieldOutput=omega
+>>configuration, overwrite=yes
 
 *output, type=meshplot, name=RFPlot
-figure=1, axSpec=111, c=k, ls=solid, create=xyData, x=time, y=RF
+>>figure=1, axSpec=111, c=k, ls=solid, create=xyData, x=time, y=RF
 
 *step, maxInc=1e-2, minInc=1e-7, maxNumInc=10000, maxIter=25, stepLength=100
-options, category=NISTSolver, extrapolation=linear
-dirichlet, name=bottom, nSet=gen_bottom,  field=displacement, 2=0,
-dirichlet, name=bc, nSet=gen_leftBottom,  field=displacement, 2=0, 1=0
-dirichlet, name=top, nSet=gen_top, field=displacement, 2=-5
+>>options, category=NISTSolver, extrapolation=linear
+>>dirichlet, name=bottom, nSet=gen_bottom,  field=displacement, 2=0,
+>>dirichlet, name=bc, nSet=gen_leftBottom,  field=displacement, 2=0, 1=0
+>>dirichlet, name=top, nSet=gen_top, field=displacement, 2=-5
