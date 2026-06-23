@@ -54,7 +54,69 @@ documentation = [module]
 
 
 class RigidBodyStiffnessView:
-    """Provides structured 2-D sub-views for the sparse rigid body stiffness matrix slice."""
+    """Provides structured 2-D sub-views for the sparse rigid body stiffness matrix slice.
+
+    Theoretical Background
+    ----------------------
+    In a geometrically exact rigid body constraint, a set of slave nodes is tied to a reference point (RP).
+    For each slave node :math:`s`, we define:
+      - Nodal displacement DOFs: :math:`\\mathbf{u}_s` (size ``nDim``)
+      - RP displacement DOFs: :math:`\\mathbf{u}_{RP}` (size ``nDim``)
+      - RP rotation DOFs: :math:`\\boldsymbol{\\phi}_{RP}` (size ``nRot``)
+      - Lagrange multipliers: :math:`\\boldsymbol{\\lambda}_s` (size ``nDim``)
+
+    The constraint equation enforcing the rigid body distance :math:`\\mathbf{d}_0^s` is nonlinear:
+    .. math::
+       \\mathbf{g}_s(\\mathbf{u}_s, \\mathbf{u}_{RP}, \\boldsymbol{\\phi}_{RP}) =
+       -\\mathbf{d}_0^s - (\\mathbf{u}_s - \\mathbf{u}_{RP}) + \\mathbf{T}(\\boldsymbol{\\phi}_{RP}) \\mathbf{d}_0^s = \\mathbf{0}
+
+    where :math:`\\mathbf{T}` is the rotation matrix of the RP.
+
+    The gradient of the constraint with respect to the coupled DOFs (ordered as slave displacement,
+    RP displacement, and RP rotation) is:
+    .. math::
+       \\mathbf{G}_s = \\frac{\\partial \\mathbf{g}_s}{\\partial \\mathbf{U}} =
+       \\begin{bmatrix}
+         -\\mathbf{I}_{\\text{nDim}} &
+         +\\mathbf{I}_{\\text{nDim}} &
+         \\frac{\\partial \\mathbf{T}}{\\partial \\boldsymbol{\\phi}_{RP}} \\mathbf{d}_0^s
+       \\end{bmatrix}
+
+    which is of size ``nDim × nUc``, where ``nUc = nDim + nDim + nRot``.
+
+    The contribution of the constraint to the tangent stiffness matrix arises from:
+      1. The first derivative of the constraint equations, which gives the off-diagonal coupling blocks:
+         :math:`\\mathbf{K}_{UL}^s = \\mathbf{G}_s^T` (size ``nUc × nDim``) and
+         :math:`\\mathbf{K}_{LU}^s = \\mathbf{G}_s` (size ``nDim × nUc``).
+      2. The second derivative of the nonlinear constraint with respect to the rotation DOFs, scaled by the
+         Lagrange multipliers, which gives the RP rotation-rotation stiffness block:
+         :math:`\\mathbf{K}_{UU}^s = \\sum_s \\boldsymbol{\\lambda}_s^T \\frac{\\partial^2 \\mathbf{T}}{\\partial \\boldsymbol{\\phi}_{RP}^2} \\mathbf{d}_0^s` (size ``nRot × nRot``).
+
+    Implementation & Sparse Layout
+    ------------------------------
+    To avoid constructing high-dimensional empty matrices or performing expensive index lookups,
+    the global sparse VIJ system matrix allocates a contiguous 1-D slice for each constraint's contributions.
+    For this rigid body constraint, the 1-D slice (of size ``nRot² + nSlaves × 2 × nUc × nDim``) has the layout:
+      - ``[0 : nRot²]``: Contiguous entries for the :math:`\\mathbf{K}_{UU}` block.
+      - For each slave node :math:`s`:
+        - ``K_UL`` block of size ``nUc × nDim``.
+        - ``K_LU`` block of size ``nDim × nUc``.
+
+    This class wraps the flat 1-D numpy array and exposes reshaped 2-D views (or lists of views)
+    that share the same memory. Any additions or writes to ``K_UU``, ``K_UL[s]``, or ``K_LU[s]``
+    directly modify the global VIJ system matrix in-place.
+
+    Attributes
+    ----------
+    K_UU : np.ndarray
+        2-D view of shape ``(nRot, nRot)`` representing the accumulated reference point rotation-rotation
+        tangent stiffness contribution.
+    K_UL : list[np.ndarray]
+        List of ``nSlaves`` 2-D views, each of shape ``(nUc, nDim)``, representing the gradient coupling between
+        the coupled DOFs (slave displacement, RP displacement, RP rotation) and the Lagrange multipliers.
+    K_LU : list[np.ndarray]
+        List of ``nSlaves`` 2-D views, each of shape ``(nDim, nUc)``, representing the transpose of the gradient coupling.
+    """
 
     def __init__(self, flat_array: np.ndarray, nRot: int, nUc: int, nDim: int, nSlaves: int):
         self._flat_array = flat_array
