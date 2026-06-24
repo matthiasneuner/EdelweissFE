@@ -33,7 +33,8 @@ all
 >>perElement, elSet=all, fieldOutput=dNorm
 >>configuration, overwrite=yes
 
-*step, maxInc=1e0, minInc=1e-5, maxNumInc=100000, maxIter=25, stepLength=1
+*step
+maxInc=1e0, minInc=1e-5, maxNumInc=100000, maxIter=25, stepLength=1
 >>options,         category=NISTSolver, extrapolation=on0
 >>dirichlet,       name=bottom, nSet=gen_bottom,      field=displacement, 2=0.0
 >>dirichlet,       name=leftbottom, nSet=gen_leftBottom,      field=displacement, 1=0.0
@@ -45,15 +46,18 @@ all
 
 
 
-*step, maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
+*step
+maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
 >>dirichlet, name=top, nSet=gen_top,  field=displacement, 2=-0.003
 >>sdvini,    name=ini, elSet=all, sdv=0, val=0.40
 >>sdvini,    name=ini2, elSet=gen_shearBandCenter, sdv=0, val=0.43
 
-*step, maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
+*step
+maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
 >>dirichlet, name=top, nSet=gen_top,  field=displacement, 2=0.002
 
-*step, maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
+*step
+maxInc=1e-2, minInc=1e-9, maxNumInc=100000, maxIter=25, stepLength=1
 >>dirichlet, name=top, nSet=gen_top,  field=displacement, 2=-0.003
 
 *output, type=meshPlot,

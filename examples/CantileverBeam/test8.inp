@@ -37,7 +37,8 @@ configuration, overwrite=yes
 create=perNode,    fieldOutput=displacement
 
 ** set steps with size between 1 and 1e-8, 1000 iterations and max 25 iterations with step length 100
-*step, solver=theSolver, maxInc=1e-0, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
+*step, solver=theSolver
+maxInc=1e-0, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
 ** fix one side (fixed support)
 dirichlet, name=left, nSet=gen_left,  field=displacement, 2=0, 1=0
 ** set load -1000N in one point down

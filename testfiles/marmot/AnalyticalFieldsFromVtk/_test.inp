@@ -40,9 +40,11 @@ all
 file="./HNEA01-01-16b-cleaned-210.0-voidRatio.vtk",
 result="voidRatioBinary",
 
-*step, maxInc=1e0, minInc=1e0, maxNumInc=100, maxIter=25, stepLength=1, solver=theSolver
+*step, solver=theSolver
+maxInc=1e0, minInc=1e0, maxNumInc=100, maxIter=25, stepLength=1
 setfield,   name=sf,  fieldOutput=kappa, type=analyticalField, value=AnalyticalField-01
 >>dirichlet,  name=z0u, nSet=gen_back,      field=displacement, 1=0., 2=0., 3=0.
 
-*step, maxInc=1e-1, minInc=1e-6, maxNumInc=100, maxIter=25, stepLength=1, solver=theSolver
+*step, solver=theSolver
+maxInc=1e-1, minInc=1e-6, maxNumInc=100, maxIter=25, stepLength=1
 >>dirichlet,  name=y1u, nSet=gen_front,    field=displacement, 3=-50.

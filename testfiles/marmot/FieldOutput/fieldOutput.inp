@@ -41,7 +41,8 @@ fieldOutput=RF_bottom, f(x)='sum ( x[:,1] )'
 *output, type=plotAlongPath, name=myNodeSetPlotter
 >>figure=2, nSet=gen_top, fieldOutput=RF_bottom, f(x)='x[:,1]', label=P along bottom, normalize=True
 
-*step, maxInc=1e-1, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
+*step
+maxInc=1e-1, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
 >>options, category=Ensight, intermediateSaveInterval=2,
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=1,          nSet=gen_leftBottom,    field=displacement, 2=0.0, 1=0.0

@@ -45,7 +45,8 @@ create=perNode,     fieldOutput=nonlocal damage
 create=perElement,  fieldOutput=damage
 configuration, overwrite=yes
 
-*step, maxInc=1e-0, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
+*step
+maxInc=1e-0, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
 options, category=NISTArcLength, arcLengthController=off
 initializematerial, name=init, elSet=concrete
 
@@ -56,7 +57,8 @@ dirichlet, name=sym_s, nSet=face_back_steel, field=displacement, 3=0
 dirichlet, name=fixed, nSet=fixed_bc, field=displacement, 1=0., 2=0., 3=0.
 dirichlet, name=supp, nSet=supp_y, field=displacement, 2=0, 3=0
 
-*step, maxInc=1e-2, minInc=1e-6, maxNumInc=1000, maxIter=10, stepLength=1
+*step
+maxInc=1e-2, minInc=1e-6, maxNumInc=1000, maxIter=10, stepLength=1
 options, category=NISTArcLength, arcLengthController=indirectcontrol,
 
 indirectcontrol, dof1=' nodeSets["cmod_left"][0].fields["displacement"][1] ', dof2='nodeSets["cmod_right"][0].fields["displacement"][1] ' , L=+0.5,

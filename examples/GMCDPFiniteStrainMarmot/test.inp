@@ -29,7 +29,8 @@ create=perElement, fieldOutput=alphaP
 create=perElement, fieldOutput=alphaD
 create=perElement, fieldOutput=omega
 
-*step, maxInc=2e-2, minInc=1e-5, maxNumInc=10000, maxIter=25, stepLength=100
+*step
+maxInc=2e-2, minInc=1e-5, maxNumInc=10000, maxIter=25, stepLength=100
 options, category=NISTSolver, extrapolation=linear, numThreads=8
 initializematerial, name=init, elSet=all
 dirichlet, name=front, nSet=front_face,    field=displacement, 3=0

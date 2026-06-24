@@ -14168,7 +14168,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>perElement, elSet=Set-Complete, fieldOutput=Omega
 >>configuration, overwrite=yes
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'
@@ -14179,7 +14180,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=+0.111,
 **indirectcontrol, dof1=' nodes[260].fields["displacement"][0] ', dof2=' nodes[521].fields["displacement"][0] ', L=+0.175,
 
-*step, maxInc=5e-3, minInc=1e-7
+*step
+maxInc=5e-3, minInc=1e-7
 **options, category=NISTArcLength, arcLengthController=off
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition = ' sum(  fieldOutputs["Force_SPnew"][:,0]  ) <= 500 '
@@ -14187,7 +14189,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=50
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=-0.01
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition=False
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'
@@ -14195,7 +14198,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=-100
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=+0.128,
 
-*step, maxInc=5e-3, minInc=1e-7
+*step
+maxInc=5e-3, minInc=1e-7
 **options, category=NISTArcLength, arcLengthController=off
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition = ' sum(  fieldOutputs["Force_SPnew"][:,0]  ) <= 500 '
@@ -14203,7 +14207,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=50
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=-0.01
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition=False
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'
@@ -14211,7 +14216,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=-100
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=+0.151,
 
-*step, maxInc=5e-3, minInc=1e-7
+*step
+maxInc=5e-3, minInc=1e-7
 **options, category=NISTArcLength, arcLengthController=off
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition = ' sum(  fieldOutputs["Force_SPnew"][:,0]  ) <= 500 '
@@ -14219,7 +14225,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=50
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=-0.01
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition=False
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'
@@ -14227,7 +14234,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=-100
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=+0.175,
 
-*step, maxInc=5e-3, minInc=1e-7
+*step
+maxInc=5e-3, minInc=1e-7
 **options, category=NISTArcLength, arcLengthController=off
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition = ' sum(  fieldOutputs["Force_SPnew"][:,0]  ) <= 500 '
@@ -14235,7 +14243,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=50
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=-0.01
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition=False
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'
@@ -14243,7 +14252,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=-100
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=+0.204,
 
-*step, maxInc=5e-3, minInc=1e-7
+*step
+maxInc=5e-3, minInc=1e-7
 **options, category=NISTArcLength, arcLengthController=off
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition = ' sum(  fieldOutputs["Force_SPnew"][:,0]  ) <= 500 '
@@ -14251,7 +14261,8 @@ name=Force_SPnew, nSet=Set-PointLoadL,  field=displacement, result=P, saveHistor
 >>nodeforces, name=cloadLeft, nSet=Set-PointLoadL, field=displacement, 1=50
 >>indirectcontrol, dof1=' nodes[1844].fields["displacement"][0] ', dof2=' nodes[365].fields["displacement"][0] ', L=-0.01
 
-*step, maxInc=1e-1, minInc=1e-7, maxNumInc=10000
+*step
+maxInc=1e-1, minInc=1e-7, maxNumInc=10000
 >>options, category=NISTSolver5, extrapolation=linear
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, extrapolation=linear, stopCondition=False
 ** stopCondition = 'sum(fieldOutputs["Force_SP"][:,0])>=6.0'

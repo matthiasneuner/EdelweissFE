@@ -23,7 +23,8 @@ nset=p_Set-2
 >>perElement, fieldOutput=strain
 >>configuration, overwrite=yes
 
-*step, solver=theSolver, maxInc=1e-2, minInc=1e-4, maxNumInc=1000, maxIter=10
+*step, solver=theSolver
+maxInc=1e-2, minInc=1e-4, maxNumInc=1000, maxIter=10
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=enc, nSet=Set-1, field=displacement, 1=0, 2=0, 3=0
 >>dirichlet, name=enc2, nSet=Set-5, field=displacement, 1=0, 2=0, 3=0

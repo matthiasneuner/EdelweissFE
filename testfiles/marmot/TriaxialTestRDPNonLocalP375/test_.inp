@@ -66,7 +66,8 @@ weak
 >>perElement, fieldOutput=omega
 >>configuration, overwrite=yes
 
-*step, maxInc=2e-1, minInc=1e-5, maxNumInc=1000, maxIter=25, stepLength=1
+*step
+maxInc=2e-1, minInc=1e-5, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=bottom,  nSet=bottom,   field=displacement, 3=0.0
 >>dirichlet, name=origin,  nSet=origin,   field=displacement, 1=0.0,
@@ -77,7 +78,8 @@ weak
 >>options, category=NISTArcLength, arcLengthController=off
 
 **---- STEP WITHOUT SNAPBACK
-*step, maxInc=1e-2, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
+*step
+maxInc=1e-2, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=NISTSolver, extrapolation=linear,
 >>options, category=Ensight, intermediateSaveInterval=1
 >>dirichlet, name=top,  nSet=top,   field=displacement, 3=-.525
