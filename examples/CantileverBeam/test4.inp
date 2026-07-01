@@ -13,9 +13,9 @@ all
 *solver, solver=NIST, name=theSolver
 
 *fieldOutput
-create=perNode, nSet=gen_bottom, result=P, field=displacement, name=RF
+>>perNode, perNode, nSet=gen_bottom, result=P, field=displacement, name=RF
 ** displacement output for all elements
-create=perNode, elSet=all, field=displacement, result=U, name=displacement
+>>perNode, perNode, elSet=all, field=displacement, result=U, name=displacement
 
 *modelGenerator, generator=planeRectQuad, name=gen
 ** create model: length 10000mm, height 100mm with 300 elements in l direction and 4 in h direction
@@ -29,17 +29,17 @@ nX=300
 nY=4
 
 *output, type=monitor
-fieldOutput=RF, f(x)='mean(x[:,1])'
+>>fieldOutput=RF, f(x)='mean(x[:,1])'
 
 ** create output data to open with paraview
 *output, type=ensight, name=esExport
-configuration, overwrite=yes
-create=perNode,    fieldOutput=displacement
+>>configuration, overwrite=yes
+>>perNode,    fieldOutput=displacement
 
 ** set steps with size between 1 and 1e-8, 1000 iterations and max 25 iterations
 *step, solver=theSolver
 maxInc=1e-0, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
 ** fix one side (fixed support)
-dirichlet, name=left, nSet=gen_left,  field=displacement, 2=0, 1=0
+>>dirichlet, name=left, nSet=gen_left,  field=displacement, 2=0, 1=0
 ** set load -1000N in one point down
-nodeforces, name=cloadTop, nSet=gen_rightTop, components='0,-1000', field=displacement
+>>nodeforces, name=cloadTop, nSet=gen_rightTop, components='0,-1000', field=displacement
