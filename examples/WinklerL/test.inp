@@ -35,6 +35,8 @@
 .99,
 ** derivativeMethod (0 ..  AD, 1 ..  CD)
 0
+** dTThresholdElasticStiffness
+0
 
 *material, name=linearElastic, id=steelLoad
 37000.0, 0.3
@@ -43,9 +45,9 @@
 
 *section, name=sectConc, material=GCDP, type=solid
 secConc
-*section, name=secSteel, material=steelLoad, type=solid
+*section, name=secSteelLoad, material=steelLoad, type=solid
 secSteelLoad
-*section, name=secSteel, material=steelBottom, type=solid
+*section, name=secSteelBottom, material=steelBottom, type=solid
 secSteelBottom
 
 *job, domain=3d, solver=NISTParallel

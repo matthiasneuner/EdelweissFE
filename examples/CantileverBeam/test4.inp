@@ -1,5 +1,5 @@
 ** cantilever beam, steel, l=10000mm, h=100mm, b=40mm, calculation in [N/mm²]
-*material, name=linearelastic, id=linearelastic,
+*material, name=linearelastic, id=linearelastic, provider=edelweiss
 ** elasticity module and poisson's ratio
 210000.0, 0.15
 
@@ -13,18 +13,18 @@ all
 *solver, solver=NIST, name=theSolver
 
 *fieldOutput
->>perNode, perNode, nSet=gen_bottom, result=P, field=displacement, name=RF
+>>perNode, nSet=gen_bottom, result=P, field=displacement, name=RF
 ** displacement output for all elements
->>perNode, perNode, elSet=all, field=displacement, result=U, name=displacement
+>>perNode, elSet=all, field=displacement, result=U, name=displacement
 
 *modelGenerator, generator=planeRectQuad, name=gen
 ** create model: length 10000mm, height 100mm with 300 elements in l direction and 4 in h direction
 x0=0, l=10000
 y0=0, h=100
-elType=Quad4NPE
+elType=CPE4
 ** quadrilateral element with 4 nodes, normal integration and plane strain
 ** set provider
-elProvider=displacementelement
+elProvider=edelweiss
 nX=300
 nY=4
 
