@@ -42,6 +42,7 @@ weak
 
 ***job, name=cpe4job, domain=3d, solver=NISTPArcLength
 *job, name=cpe4job, domain=3d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 
 *fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
@@ -66,7 +67,7 @@ weak
 >>perElement, fieldOutput=omega
 >>configuration, overwrite=yes
 
-*step
+*step, solver=theSolver
 maxInc=2e-1, minInc=1e-5, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=bottom,  nSet=bottom,   field=displacement, 3=0.0
@@ -78,7 +79,7 @@ maxInc=2e-1, minInc=1e-5, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=NISTArcLength, arcLengthController=off
 
 **---- STEP WITHOUT SNAPBACK
-*step
+*step, solver=theSolver
 maxInc=1e-2, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=NISTSolver, extrapolation=linear,
 >>options, category=Ensight, intermediateSaveInterval=1

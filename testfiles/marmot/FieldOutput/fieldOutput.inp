@@ -5,6 +5,7 @@
 all
 
 *job, name=cps4job, domain=2d, solver=NIST
+*solver, solver=NIST, name=theSolver
 
 *modelGenerator, generator=planeRectQuad, name=gen
 x0=0, l=50
@@ -41,7 +42,7 @@ fieldOutput=RF_bottom, f(x)='sum ( x[:,1] )'
 *output, type=plotAlongPath, name=myNodeSetPlotter
 >>figure=2, nSet=gen_top, fieldOutput=RF_bottom, f(x)='x[:,1]', label=P along bottom, normalize=True
 
-*step
+*step, solver=theSolver
 maxInc=1e-1, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=100
 >>options, category=Ensight, intermediateSaveInterval=2,
 >>options, category=NISTSolver, extrapolation=linear

@@ -49,6 +49,7 @@ secSteelLoad
 secSteelBottom
 
 *job, domain=3d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 
 *fieldOutput,
 elSet=secConc, name=displacement, field=displacement, result=U
@@ -65,7 +66,7 @@ create=perNode, fieldOutput=nonlocal damage
 create=perElement, fieldOutput=damage
 configuration, overwrite=yes
 
-*step
+*step, solver=theSolver
 maxInc=1e-2, minInc=1e-8, maxNumInc=10000, maxIter=25, stepLength=100
 options, category=NISTSolver, extrapolation=linear
 dirichlet, name=bottom, nSet=setBottom, field=displacement, 2=0, 1=0, 3=0

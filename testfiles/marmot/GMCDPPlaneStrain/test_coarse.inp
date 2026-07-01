@@ -17,6 +17,7 @@ all
 gen_shearBandCenter
 
 *job, name=cpe4job, domain=2d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 *fieldOutput
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 >>perNode, elSet=all, field=micro rotation, result=U, name=micro rotation
@@ -59,7 +60,7 @@ fieldOutput=RF
 *exportPlots,
 figure=2, fileName=mesh
 
-*step
+*step, solver=theSolver
 maxInc=1e-2, minInc=1e-7, maxNumInc=10000, maxIter=25, stepLength=100
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=bottom, nSet=gen_bottom,  field=displacement, 2=0,

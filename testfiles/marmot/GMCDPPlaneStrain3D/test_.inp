@@ -38,6 +38,7 @@ bottom
 
 ** *job, name=cpe4job, domain=3d, solver=NISTParallel, linsolver=amgcl
 *job, name=cpe4job, domain=3d, solver=NISTParallel,
+*solver, solver=NISTParallel, name=theSolver
 *fieldOutput
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 **elSet=all, field=micro rotation, result=U, name=micro rotation
@@ -66,7 +67,7 @@ fieldOutput=RF
 *output, type=meshplot, name=RFPlot
 >>figure=1, axSpec=111, c=k, ls=solid, create=xyData, x=time, y=RF
 
-*step
+*step, solver=theSolver
 maxInc=1e-2, minInc=5e-4, maxNumInc=10000, maxIter=25, stepLength=100
 >>options, category=NISTSolver, extrapolation=linear
 >>options, category=Ensight, intermediateSaveInterval=1

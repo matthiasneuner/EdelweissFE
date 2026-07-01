@@ -6,6 +6,7 @@
 all
 
 *job, name=cps8rnljob, domain=2d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 *fieldOutput
 >>perNode, name=load, nSet=topNodes,  field=displacement, result=P
 >>perNode, name=displacement, elSet=all, field=displacement, result=U, name=displacement
@@ -30,7 +31,7 @@ fieldOutput=load, f(x)='sum(x[:,1])'
 >>perElement, fieldOutput=omega
 >>configuration, overwrite=yes
 
-*step
+*step, solver=theSolver
 maxInc=1e-1, minInc=1e-6, maxNumInc=1000, maxIter=25
 >>options, category=NISTSolver, extrapolation=linear
 >>dirichlet, name=left,  nSet=left,   field=displacement, 1=0.0, 2=0.0
