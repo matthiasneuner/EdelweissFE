@@ -3848,14 +3848,14 @@ _loadsurf_S3, 3
 *material, name=stvenantkirchhoffisotropic, id=stvenantkirchhoffisotropic
 5000, 0.25
 
-*section, name=section1, thickness=1.0, material=stvenantkirchhoffisotropic, type=plane
+*section, name=section1, material=stvenantkirchhoffisotropic, type=plane
 all
 
 *job, name=c3d8job, domain=3d
 *solver, solver=NIST, name=theSolver
 
-*fieldOutput
->>perNode, name=displacement, elSet=all, field=displacement, result=U, name=displacement
+*fieldOutput,
+>>perNode, name=displacement, elSet=all, field=displacement, result=U
 >>perElement, name=stress, elSet=all, result=stress, quadraturePoint=1
 >>perElement, name=strain, elSet=all, result=strain, quadraturePoint=1
 

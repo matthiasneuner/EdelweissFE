@@ -42,7 +42,7 @@ bottom
 
 *fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
->>perNode, nSet=top, field=displacement, result=P, name=displacement, name=RF, f(x)=' sum(x[:,2]) ', saveHistory=True, export=RF
+>>perNode, nSet=top, field=displacement, result=P, name=displacement, f(x)=' sum(x[:,2]) ', saveHistory=True, export=RF
 >>perNode, nSet=top, field=displacement, result=U, name=UTop,  f(x)=' (x[0,2]) ', saveHistory=True, export=UTop
 >>perNode, elSet=all, field=nonlocal damage , result=U, name=nonlocal damage
 >>perNode, elSet=all, field=micro rotation, result=U, name=micro rotation
@@ -51,7 +51,7 @@ bottom
 >>perElement, elSet=all, result=omega, quadraturePoint=0:4, name=omega, f(x)='mean( x[:,:], axis=1) '
 
 *output, type=meshplot, name=RFPlot
->>xyData, x=time, y=RF, legend=RF
+figure=1, axSpec=111, create=xyData, x=time, y=RF, legend=RF
 *output, type=ensight, name=ensightExport
 >>perNode, fieldOutput=displacement
 >>configuration, overwrite=yes

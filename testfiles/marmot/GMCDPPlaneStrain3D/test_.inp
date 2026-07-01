@@ -39,10 +39,10 @@ bottom
 ** *job, name=cpe4job, domain=3d, solver=NISTParallel, linsolver=amgcl
 *job, name=cpe4job, domain=3d, solver=NISTParallel,
 *solver, solver=NISTParallel, name=theSolver
-*fieldOutput
+*fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 **elSet=all, field=micro rotation, result=U, name=micro rotation
->>perElement, elSet=all, field=nonlocal damage, result=U, name=nonlocal damage
+>>perNode, elSet=all, field=nonlocal damage, result=U, name=nonlocal damage
 >>perElement, elSet=all, result=alphaP, quadraturePoint=0:4, name=alphaP, f(x)='max( x[:,:], axis=1) '
 >>perElement, elSet=all, result=alphaD, quadraturePoint=0:4, name=alphaD, f(x)='max( x[:,:], axis=1) '
 >>perElement, elSet=all, result=omega, quadraturePoint=0:4, name=omega, f(x)='max( x[:,:], axis=1) '
@@ -65,7 +65,7 @@ fieldOutput=RF
 >>perElement, fieldOutput=omega
 
 *output, type=meshplot, name=RFPlot
->>figure=1, axSpec=111, c=k, ls=solid, create=xyData, x=time, y=RF
+figure=1, axSpec=111, c=k, ls=solid, create=xyData, x=time, y=RF
 
 *step, solver=theSolver
 maxInc=1e-2, minInc=5e-4, maxNumInc=10000, maxIter=25, stepLength=100

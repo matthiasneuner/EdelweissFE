@@ -3,15 +3,15 @@
 *material, name=stvenantkirchhoffisotropic, id=le
 30000.0, 0.15
 
-*section, name=section1, thickness=1.0, material=le, type=plane
+*section, name=section1, material=le, type=plane
 all
 
 *job, name=c3d8tljob, domain=3d
 *solver, solver=NISTParallel, name=theSolver
 *fieldOutput,
->>perElement, name=displacement, elSet=all, field=displacement, result=U, name=displacement
->>perNode, name=stress, elSet=all, result=stress, f(x)=' mean(x, axis=1) ', quadraturePoint=0:8
->>perNode, name=strain, elSet=all, result=strain, f(x)=' mean(x, axis=1) ', quadraturePoint=0:8
+>>perNode, name=displacement, elSet=all, field=displacement, result=U
+>>perElement, name=stress, elSet=all, result=stress, f(x)=' mean(x, axis=1) ', quadraturePoint=0:8
+>>perElement, name=strain, elSet=all, result=strain, f(x)=' mean(x, axis=1) ', quadraturePoint=0:8
 
 *constraint, type=rigidbody, name=rb1
 referencePoint=RP

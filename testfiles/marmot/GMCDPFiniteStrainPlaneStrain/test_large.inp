@@ -15,7 +15,7 @@ gen_shearBandCenter
 
 *job, name=cpe4job, domain=2d, solver=NISTParallel
 *solver, solver=NISTParallel, name=theSolver
-*fieldOutput
+*fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 >>perNode, elSet=all, field=micro rotation, result=U, name=micro rotation
 >>perNode, elSet=all, field=nonlocal damage, result=U, name=nonlocal damage

@@ -13,7 +13,7 @@ all
 
 *job, name=cpe4job, domain=3d, solver=NISTParallelForMarmotElements
 *solver, solver=NISTParallelForMarmotElements, name=theSolver
-*fieldOutput
+*fieldOutput,
 elSet=all, field=displacement, result=U, name=displacement
 elSet=all, field=micro rotation, result=U, name=micro rotation
 elSet=all, field=nonlocal damage, result=U, name=nonlocal damage

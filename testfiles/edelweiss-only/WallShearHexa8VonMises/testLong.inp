@@ -19,7 +19,7 @@ elType  =C3D8
 *section, name=section1, material=vonmises, type=solid
 all
 
-*fieldOutput
+*fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 >>perElement, elSet=all, result=strain, name=strain, quadraturePoint=0:8, f(x)='np.mean(x,axis=1)'
 >>perElement, elSet=all, result=stress, name=stress, quadraturePoint=0:8, f(x)='np.mean(x,axis=1)'
@@ -45,8 +45,6 @@ all
 >>perElement, fieldOutput=stress5
 >>perElement, fieldOutput=stress6
 >>perElement, fieldOutput=stress7
-
-*output, type=monitor
 
 *step, solver=theSolver
 maxInc=0.1, minInc=1e-9, maxNumInc=1000, maxIter=25, stepLength=1

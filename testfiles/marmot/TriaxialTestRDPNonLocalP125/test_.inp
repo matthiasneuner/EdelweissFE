@@ -46,7 +46,7 @@ weak
 
 *fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
->>perNode, nSet=top, field=displacement, result=P, name=displacement, name=RF, f(x)=' sum(x[:,2]) ', saveHistory=True, export=RF
+>>perNode, nSet=top, field=displacement, result=P, name=displacement, f(x)=' sum(x[:,2]) ', saveHistory=True, export=RF
 >>perNode, nSet=top, field=displacement, result=U, name=UTop,  f(x)=' (x[0,2]) ', saveHistory=True, export=UTop
 >>perNode, elSet=all, field=nonlocal damage , result=U, name=alpha_d_nl
 >>perElement, elSet=all, result=stress, quadraturePoint=0:4, name=stress, f(x)='mean(x, axis=1)'
@@ -56,7 +56,7 @@ weak
 >>perElement, elSet=all, result=sdv, quadraturePoint=0:4, name=omega, f(x)='mean( x[:,:,4], axis=1) '
 
 *output, type=meshplot, name=RFPlot
->>xyData, x=time, y=RF, legend=RF
+figure=1, axSpec=111, create=xyData, x=time, y=RF, legend=RF
 *output, type=ensight, name=ensightExport
 >>perNode, fieldOutput=displacement
 >>perNode, fieldOutput=alpha_d_nl
@@ -91,5 +91,5 @@ maxInc=1e-2, minInc=1e-8, maxNumInc=1000, maxIter=25, stepLength=1
 >>options, category=Ensight, intermediateSaveInterval=1
 >>dirichlet, name=top,  nSet=top,   field=displacement, 3=-0.525
 >>options, category=NISTArcLength, arcLengthController=indirectcontrol, stopCondition='fieldOutputs["UTop"] < -1.0'
->>indirectcontrol, dof1=' nodeSets["all"][490].fields["displacement"][2] ' , dof2=' nodeSets["all"][608].fields["displacement"][2] ' , L=-.525
+>>indirectcontrol, dof1=' nodeSets["all"][490].fields["displacement"][2] ' , dof2=' nodeSets["all"][608].fields["displacement"][2] ' , L=-.525, cVector1='[-1]', cVector2='[1]'
 
