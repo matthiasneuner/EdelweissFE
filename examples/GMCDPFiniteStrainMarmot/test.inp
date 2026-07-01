@@ -11,8 +11,8 @@
 *section, name=section1, thickness=1.0, material=GMCDPFiniteStrain, type=plane
 all
 
-*job, name=cpe4job, domain=3d, solver=NISTParallelForMarmotElements
-*solver, solver=NISTParallelForMarmotElements, name=theSolver
+*job, name=cpe4job, domain=3d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 *fieldOutput,
 >>perNode, elSet=all, field=displacement, result=U, name=displacement
 >>perNode, elSet=all, field=micro rotation, result=U, name=micro rotation
@@ -32,7 +32,7 @@ all
 
 *step, solver=theSolver
 maxInc=2e-2, minInc=1e-5, maxNumInc=10000, maxIter=25, stepLength=100
->>options, category=NISTSolver, extrapolation=linear, numThreads=8
+>>options, category=NISTSolver, extrapolation=linear
 >>initializematerial, name=init, elSet=all
 >>dirichlet, name=front, nSet=front_face,    field=displacement, 3=0
 >>dirichlet, name=frontr, nSet=front_face,    field=micro rotation, 1=0, 2=0

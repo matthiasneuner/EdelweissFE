@@ -29,7 +29,7 @@ nX=300
 nY=4
 
 *output, type=monitor
->>fieldOutput=RF, f(x)='mean(x[:,1])'
+fieldOutput=RF, f(x)='mean(x[:,1])'
 
 ** create output data to open with paraview
 *output, type=ensight, name=esExport

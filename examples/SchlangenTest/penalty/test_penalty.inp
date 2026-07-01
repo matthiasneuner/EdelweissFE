@@ -24,8 +24,8 @@ concrete
 *section, name=sec_steel, material=steel, type=solid
 steel
 
-*job, name=SchlangenTest, domain=3d, solver=NISTParallelForMarmotElements
-*solver, solver=NISTParallelForMarmotElements, name=theSolver
+*job, name=SchlangenTest, domain=3d, solver=NISTParallel
+*solver, solver=NISTParallel, name=theSolver
 
 *fieldOutput,
 >>perNode, elSet=all,  name=displacement,  field=displacement, result=U
@@ -35,9 +35,9 @@ steel
 >>perNode, name=CMSD, nSet=cmod, field=displacement, result=U, f(x)='x[0,1] - x[1,1]', export=CMOD, saveHistory=True
 >>perElement, elSet=concrete,  name=damage,  result=omega, quadraturePoint=0:8, f(x)='np.mean(x,axis=1)'
 *output, type=monitor, name=monitor
->>fieldOutput=RF
->>fieldOutput=CMOD
->>fieldOutput=CMSD
+fieldOutput=RF
+fieldOutput=CMOD
+fieldOutput=CMSD
 
 *output, type=ensight, name=esExport
 >>perNode,     fieldOutput=displacement

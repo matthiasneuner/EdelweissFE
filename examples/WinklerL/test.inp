@@ -58,7 +58,7 @@ secSteelBottom
 >>perElement, elSet=secConc, name=damage, result=omega, quadraturePoint=0:8, f(x)='np.mean(x,axis=1)'
 
 *output, type=monitor, name=monitor
->>fieldOutput=RF
+fieldOutput=RF
 
 *output, type=ensight, name=esExport
 >>perNode, fieldOutput=displacement
