@@ -550,11 +550,11 @@ def test_isRegistered_sees_all_three_registration_mechanisms():
 # PLAN_INPUT_SYSTEM_UNIFICATION.md §1.3/§5) ---
 
 
-def test_keyword_category_covers_all_21_top_level_keywords_after_u2b():
-    """U2b completes ``"keyword"`` with all 21 top-level keywords -- U2a's six structural mesh/job
+def test_keyword_category_covers_all_22_top_level_keywords_after_u2b():
+    """U2b completed ``"keyword"`` with all 21 top-level keywords -- U2a's six structural mesh/job
     keywords plus the fifteen pluggable-module/type-dispatch keywords -- matching the full
-    ``printKeywords()`` surface exactly. This is now the final state of the category (U3 does not
-    add further names, only wires resolution into the running parser).
+    ``printKeywords()`` surface exactly. U3/U4 added no further names; ``restart``
+    (``PLAN_RESTART.md``, P1) is the first keyword added after that gate.
     """
     assert registry.availableNames("keyword") == [
         "advancedmaterial",
@@ -573,6 +573,7 @@ def test_keyword_category_covers_all_21_top_level_keywords_after_u2b():
         "node",
         "nset",
         "output",
+        "restart",
         "section",
         "solver",
         "step",

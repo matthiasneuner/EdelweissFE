@@ -284,7 +284,8 @@ _GOLDEN_PATH = Path(__file__).parent / "golden" / "inputlanguage_surface.txt"
 
 #: Every top-level keyword covered by U2a (the six structural mesh/job keywords) and U2b (the
 #: remaining fifteen pluggable-module/type-dispatch keywords) -- the complete ``printKeywords()``
-#: surface, per ``PLAN_INPUT_SYSTEM_UNIFICATION.md``.
+#: surface, per ``PLAN_INPUT_SYSTEM_UNIFICATION.md`` -- plus ``restart`` (``PLAN_RESTART.md``, P1),
+#: the first top-level keyword added after that gate.
 _ALL_TOP_LEVEL_KEYWORDS = [
     "element",
     "elSet",
@@ -307,6 +308,7 @@ _ALL_TOP_LEVEL_KEYWORDS = [
     "configurePlots",
     "exportPlots",
     "include",
+    "restart",
 ]
 
 
@@ -344,7 +346,7 @@ _PRINT_KEYWORDS_GOLDEN_BLOCKS = _printKeywordsBlocksByName()
 
 
 def _structuralKeywordSpec(keywordName: str) -> KeywordSurfaceSpec:
-    """Build the :class:`KeywordSurfaceSpec` for one of the 21 top-level keywords from its real,
+    """Build the :class:`KeywordSurfaceSpec` for one of the 22 top-level keywords from its real,
     registered ``KeywordBase`` subclass -- name, description and schema all sourced from the class
     via :func:`specFromKeywordClass` (no hand-typed spelling/description), so this test proves the
     *class* encodes the legacy grammar, and also exercises
@@ -368,7 +370,7 @@ def test_structural_keyword_printKeywords_block_matches_golden_byte_for_byte(key
     assert rendered == _PRINT_KEYWORDS_GOLDEN_BLOCKS[keywordName]
 
 
-def test_printKeywords_golden_extraction_found_all_21_top_level_keywords():
+def test_printKeywords_golden_extraction_found_all_22_top_level_keywords():
     """Falsifies the extraction helper itself: if a golden-file reformat ever changed the
     ``printKeywords()`` section's separator/header shape such that :func:`_printKeywordsBlocksByName`
     silently found fewer blocks, the parametrized test above would just stop running for the
@@ -381,14 +383,14 @@ def test_registered_keyword_category_matches_the_golden_printKeywords_surface_ex
     """The end-to-end U2 assertion: every header the golden ``printKeywords()`` section actually
     contains resolves to a registered ``"keyword"`` entry whose rendered block matches, and every
     registered ``"keyword"`` entry is exercised above -- i.e. the registry's ``keyword`` category
-    and the golden's ``printKeywords()`` section describe exactly the same 21 names, not merely a
+    and the golden's ``printKeywords()`` section describe exactly the same 22 names, not merely a
     subset of each other.
     """
     from edelweissfe.config import registry
 
     registeredDisplayNames = {registry.lookup("keyword", name)[0].keywordName for name in _ALL_TOP_LEVEL_KEYWORDS}
     assert registeredDisplayNames == set(_PRINT_KEYWORDS_GOLDEN_BLOCKS)
-    assert len(_ALL_TOP_LEVEL_KEYWORDS) == 21
+    assert len(_ALL_TOP_LEVEL_KEYWORDS) == 22
 
 
 # --- U2c: the ``Module.__doc__`` "module documentation" sections, over every registry entry that ---
@@ -564,8 +566,16 @@ assert len(_U3A_CONSTRAINT_MODULES) == 11
 #: HAdaptivitySchema's own docstring) schema, reproducing its golden module section byte-for-byte.
 _U3C_MODULES = frozenset({"edelweissfe.modelmodifiers.adaptivity.hadaptivity"})
 
+#: PLAN_RESTART.md P1/P3's addition, the first new schema-bearing module after the U2/U3 gate: the
+#: ``*output, type=restart`` output manager writing restart checkpoints.
+_RESTART_MODULES = frozenset({"edelweissfe.outputmanagers.restart"})
+
 _EXPECTED_BYTE_IDENTICAL_MODULES = (
-    _PREVIOUSLY_BYTE_IDENTICAL_MODULES | _NEWLY_BYTE_IDENTICAL_MODULES | _U3A_CONSTRAINT_MODULES | _U3C_MODULES
+    _PREVIOUSLY_BYTE_IDENTICAL_MODULES
+    | _NEWLY_BYTE_IDENTICAL_MODULES
+    | _U3A_CONSTRAINT_MODULES
+    | _U3C_MODULES
+    | _RESTART_MODULES
 )
 
 #: Every module documentation section that HAS a ``[name] ...``-headed golden body (i.e. is a member

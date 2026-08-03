@@ -36,6 +36,8 @@ A ``*job`` definition consists of multiple ``*steps``, associated with that job.
 
 from time import time as getCurrentTime
 
+import h5py
+
 from edelweissfe.config.configurator import loadConfiguration, updateConfiguration
 from edelweissfe.config.phenomena import domainMapping
 from edelweissfe.config.solvers import getSolverByName
@@ -139,6 +141,33 @@ def finiteElementSimulation(
 
     model._linkFieldVariableObjects(model.nodeSets["all"])
 
+    # *restart, readFrom=...: resume from a checkpoint (PLAN_RESTART.md). Reconstruct-then-overwrite,
+    # not full serialization -- the model above was already rebuilt from this same .inp file, and
+    # readRestart only overwrites its converged state (node fields, element history, scalar
+    # variables, stateful constraints' history) plus model.time, so it must run after node fields
+    # exist (createFieldValueEntry above) and after advanceToTime's cold-start bookkeeping, which
+    # would otherwise clobber model.time back to job['startTime'].
+    #
+    # v1 limitation (PLAN_RESTART.md, decision #3 and P2): resuming skips *solving* every step
+    # before the checkpoint's step entirely -- correct for the common case, but a `modelupdate` step
+    # action (or any other topology mutation) in a skipped step's `solve()` never runs, so restart is
+    # only supported for analyses whose topology is static across the resumed run.
+    restartDefinitions = inputfile["restart"]
+    resumeCheckpoint = None
+    resumeStepNumber = None
+    if restartDefinitions and restartDefinitions[0].get("readFrom"):
+        checkpointPath = restartDefinitions[0]["readFrom"]
+        resumeCheckpoint = h5py.File(checkpointPath, "r")
+        resumeStepNumber = int(resumeCheckpoint.attrs["stepNumber"])
+        model.readRestart(resumeCheckpoint)
+        journal.message(
+            "Resuming from restart checkpoint {:} (step {:}, time {:})".format(
+                checkpointPath, resumeStepNumber, model.time
+            ),
+            identification,
+            0,
+        )
+
     plotter = createPlotterFromInputFile(inputfile, journal)
     stepManager = createStepManagerFromInputFile(inputfile)
     fieldOutputController = createFieldOutputFromInputFile(inputfile, model, journal)
@@ -172,6 +201,16 @@ def finiteElementSimulation(
 
     try:
         for step in stepManager.generateSteps(jobInfo, model, fieldOutputController, journal, solvers, outputManagers):
+            if resumeStepNumber is not None:
+                if step.number < resumeStepNumber:
+                    # Constructed (so its StepActions register/accumulate normally, see the comment
+                    # above) but not solved -- it already ran, in full, before the interrupted job
+                    # wrote this checkpoint.
+                    continue
+                if step.number == resumeStepNumber:
+                    step.timeStepper.readRestart(resumeCheckpoint)
+                    resumeStepNumber = None
+
             tic = getCurrentTime()
             try:
                 step.solve()
@@ -196,6 +235,12 @@ def finiteElementSimulation(
                     identification,
                     level=0,
                 )
+
+        if resumeStepNumber is not None:
+            journal.errorMessage(
+                "Restart checkpoint's step {:} was never reached -- nothing was resumed".format(resumeStepNumber),
+                identification,
+            )
 
     except KeyboardInterrupt:
         print("")
@@ -230,5 +275,8 @@ def finiteElementSimulation(
         plotter.finalize()
         if not suppressPlots:
             plotter.show()
+
+        if resumeCheckpoint is not None:
+            resumeCheckpoint.close()
 
     return model, fieldOutputController
