@@ -264,6 +264,10 @@ class ModelModifier(ModelModifierBase):
         self.maxLevel = options.maxLevel
         self.minMarkedElements = max(1, options.minMarkedElements)
         self._pendingMarkedElements = set()  # elements marked but not yet refined (below minMarkedElements)
+        # element labels that triggered each refinement that has actually materialized, in commit
+        # order -- the record restart replays (see getRestartData/setRestartData) to reproduce this
+        # instance's topology history without re-running (and trusting bit-identical) marker evaluation.
+        self._committedOccasions = []
         self.splitFactor = options.splitFactor
         self._stateTransfer = _buildStateTransferStrategy(options.stateTransfer, options.stateTransferOverrides)
         self._provider = options.elementProvider
@@ -436,8 +440,32 @@ class ModelModifier(ModelModifierBase):
                 )
             return False
 
-        markedEids = [elForEid[el] for el in eligible]
         self._pendingMarkedElements = set()
+        self._refineAndMaterialize(model, eligible)
+        return True
+
+    def _refineAndMaterialize(self, model: FEModel, eligible: list) -> None:
+        """Refine exactly ``eligible`` and materialize the resulting children: the deterministic,
+        marking-decision-independent half of a refinement pass (octree split, 2:1 balance,
+        hanging-node MPCs, element/node/set bookkeeping, and the :class:`ModelChange` notification).
+
+        Shared by the live marking path (:meth:`updateModel`, which has already decided *which*
+        elements to refine before calling this) and restart's occasion replay
+        (:meth:`setRestartData`, which recreates a past decision from the checkpoint instead of
+        re-evaluating markers) -- both grow :attr:`_committedOccasions` identically and produce
+        byte-identical topology given the same ``eligible`` input, since everything here is pure
+        octree/topology mechanics with no dependence on solution history.
+
+        Parameters
+        ----------
+        model
+            The FEModel object.
+        eligible
+            The (already-decided) elements to refine, sorted by ``elNumber``.
+        """
+
+        elForEid = {v: k for k, v in self._eidToEl.items()}
+        markedEids = [elForEid[el] for el in eligible]
 
         # (WS-B/C) refine + 2:1 balance in the mirror
         nBefore = len(self._mesh.active())
@@ -465,7 +493,7 @@ class ModelModifier(ModelModifierBase):
             0,
         )
         self._lastRefinedTime = float(model.time)
-        return True
+        self._committedOccasions.append([el.elNumber for el in eligible])
 
     def _materialize(self, model: FEModel, records: dict):
         mesh = self._mesh
@@ -624,3 +652,59 @@ class ModelModifier(ModelModifierBase):
 
             model._linkFieldVariableObjects(model.nodeSets["all"])
         return change
+
+    def getRestartData(self) -> dict[str, np.ndarray] | None:
+        """This instance's refinement history: every committed occasion's marked element labels
+        (flattened CSR-style, since occasions have varying size), the not-yet-refined pending
+        labels, and the cutback-reentry guard. ``None`` if nothing has ever happened (no
+        refinement, nothing pending) -- see :meth:`ModelModifierBase.getRestartData`.
+
+        Deliberately does not store node coordinates, connectivity, or hanging-node records --
+        :meth:`setRestartData` rederives all of that deterministically by replaying each occasion
+        through :meth:`_refineAndMaterialize`, the same mechanics a live run uses.
+        """
+
+        if not self._committedOccasions and not self._pendingMarkedElements:
+            return None
+
+        occasionSizes = [len(labels) for labels in self._committedOccasions]
+        occasionLabels = [label for labels in self._committedOccasions for label in labels]
+        pendingLabels = [el.elNumber for el in self._pendingMarkedElements]
+        return {
+            "occasionSizes": np.array(occasionSizes, dtype=int),
+            "occasionLabels": np.array(occasionLabels, dtype=int),
+            "pendingLabels": np.array(pendingLabels, dtype=int),
+            "lastRefinedTime": np.array([self._lastRefinedTime if self._lastRefinedTime is not None else np.nan]),
+        }
+
+    def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
+        """Replay every committed occasion, in order, through :meth:`_refineAndMaterialize` --
+        exactly the mechanics :meth:`updateModel` uses live, just fed a recorded decision instead
+        of evaluating markers -- to reconstruct this instance's topology, then restore the pending
+        marks and the cutback guard.
+
+        Must run before :meth:`~edelweissfe.models.femodel.FEModel.readRestart` restores node
+        fields/element state variables (see :meth:`ModelModifierBase.setRestartData`): the elements
+        this replays are not in ``model.elements`` yet otherwise, so that restore would silently
+        skip them.
+        """
+
+        # A checkpoint only ever exists after at least one increment converged (checkpoints are
+        # written from finalizeIncrement), which means updateModel already ran at least once
+        # before it was written -- so this is never truly a first call. Without this, the live
+        # path's initialOnly markers would re-evaluate on the next updateModel call as if it were,
+        # redundantly re-marking whatever they select (harmless today only because a refined
+        # parent is no longer in self._eidToEl for the marker to re-select, and maxLevel/eligibility
+        # filtering catches the rest -- not a guarantee every marker implementation shares).
+        self._isFirstCall = False
+
+        offset = 0
+        for size in data["occasionSizes"]:
+            labels = data["occasionLabels"][offset : offset + int(size)]
+            offset += int(size)
+            eligible = [model.elements[int(label)] for label in labels]
+            self._refineAndMaterialize(model, eligible)
+
+        self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
+        lastRefinedTime = float(data["lastRefinedTime"][0])
+        self._lastRefinedTime = None if np.isnan(lastRefinedTime) else lastRefinedTime

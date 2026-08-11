@@ -401,6 +401,15 @@ class FEModel:
             for entryName, entryValues in restartData.items():
                 constraintGroup.create_dataset(entryName, data=entryValues)
 
+        modelModifiersGroup = f.create_group("modelModifiers")
+        for name, modifier in self.modelModifiers.items():
+            restartData = modifier.getRestartData()
+            if restartData is None:
+                continue
+            modifierGroup = modelModifiersGroup.create_group(name)
+            for entryName, entryValues in restartData.items():
+                modifierGroup.create_dataset(entryName, data=entryValues)
+
     def readRestart(self, restartFile: h5py.File):
         """Read the state of the model from a restart checkpoint written by :meth:`writeRestart`.
 
@@ -416,6 +425,17 @@ class FEModel:
         f = restartFile
 
         self.time = f.attrs["time"]
+
+        # Must run before every restore below: unlike a constraint's setRestartData (passive), a
+        # model modifier's setRestartData (e.g. AMR replaying past refinements) can materialize
+        # elements/nodes a plain rebuild from the .inp file cannot reproduce -- the node-field and
+        # element-statevar restores that follow address them by label and would silently skip
+        # anything not already in self.elements/self.nodeFields by this point.
+        for name, modifier in self.modelModifiers.items():
+            if name not in f["modelModifiers"]:
+                continue
+            restartData = {entryName: values[:] for entryName, values in f["modelModifiers"][name].items()}
+            modifier.setRestartData(self, restartData)
 
         for nf in self.nodeFields.values():
             for entryName, entryValues in nf._values.items():

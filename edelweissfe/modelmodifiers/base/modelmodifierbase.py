@@ -30,6 +30,8 @@
 
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider
@@ -76,3 +78,44 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
 
     def onIncrementEnd(self, model: FEModel, step, timeStep: float):
         """Optional lifecycle hook called after an increment converges."""
+
+    def getRestartData(self) -> dict[str, np.ndarray] | None:
+        """Return this modifier's history needed to reproduce its effect on the model topology
+        (e.g. AMR's log of past refinement decisions), to be serialized by
+        :meth:`~edelweissfe.models.femodel.FEModel.writeRestart`, or ``None`` if the modifier never
+        changed the topology and has nothing pending.
+
+        The default implementation returns ``None``, correct for any modifier that never mutates
+        topology at all.
+
+        Returns
+        -------
+        dict[str, np.ndarray] | None
+            A flat mapping of array name to array, or ``None``.
+        """
+
+        return None
+
+    def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]):
+        """Reproduce this modifier's effect on ``model``'s topology from a restart checkpoint.
+
+        Unlike :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.setRestartData`
+        (passive: only restores internal history, never touches the model), this is expected to
+        *mutate* ``model`` -- e.g. AMR replaying past refinements to recreate the elements/nodes a
+        plain rebuild from the ``.inp`` file cannot reproduce. That is why it takes ``model``
+        explicitly rather than relying on a modifier-held reference.
+
+        Called by :meth:`~edelweissfe.models.femodel.FEModel.readRestart` *before* it restores node
+        fields, element state variables, and scalar variables -- any element this call materializes
+        must already exist by the time that follow-up restore runs, since it addresses elements by
+        label.
+
+        Parameters
+        ----------
+        model
+            The FEModel object, to be mutated as needed.
+        data
+            The mapping previously returned by :meth:`getRestartData`.
+        """
+
+        raise NotImplementedError("This model modifier does not carry restartable topology history.")
