@@ -493,7 +493,10 @@ class BlockAMGSolver(LinearSolver):
         against (the first solve, or the one right after a new increment / cutback jump -- the ratio
         across that jump does not reflect Newton convergence and is not meaningful).
         """
-        if self._lastResidualNorm is None or newIncrement:
+        if self._lastResidualNorm is None or newIncrement or self._lastResidualNorm == 0.0:
+            # A previous residual of exactly zero (typically an already-converged, e.g.
+            # linear-elastic, prior iterate) makes the ratio undefined rather than just
+            # uninformative -- fall back the same way as the no-history case.
             return self._etaMax
 
         ratio = residualNorm / self._lastResidualNorm
