@@ -252,6 +252,25 @@ amrtransparencyprobe``) that does exactly this, registers no observer and implem
 refinement it should have seen -- guarding against a regression that reintroduces replacing a set
 instead of mutating it.
 
+Restart / checkpointing
+------------------------
+
+A model modifier that mutates topology, like ``hAdaptivity``, cannot rely on the plain
+reconstruct-then-overwrite scheme every other checkpointed component uses (see ``*restart``): a
+refined mesh's new elements/nodes aren't in the ``.inp`` file to rebuild from. Instead, a
+checkpoint records only the *decision* that drove each past refinement -- the marked element
+labels, in commit order -- and resuming replays it through the same deterministic mechanics a live
+run uses (``HAdaptivity._refineAndMaterialize``), never the marker evaluation that produced the
+decision in the first place. This is why the recorded decision, not the resulting topology or the
+marker's own internal state, is what gets serialized.
+
+A modifier opts into this by overriding
+:meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.getRestartData` and
+:meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.setRestartData` --
+unlike a constraint's equivalent pair, ``setRestartData`` is expected to mutate the model (not
+just restore passive internal state) and is called before any node-field/element-statevar restore,
+since whatever it materializes needs to already exist for that later restore to reach by label.
+
 Implementing your own model modifiers
 -------------------------------------
 

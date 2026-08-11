@@ -38,6 +38,42 @@ Branch: `feat/restart` (split off `feat/amr-recovery-marker`)
   uninterrupted reference (matches to ~1e-17).
 - P5 (fallback-on-failure) remains out of scope, per the plan's own stretch-goal framing.
 
+## Status (v2 -- AMR)
+
+**AMR + restart, previously an explicit v1 non-goal (decision #3 below), is now supported.**
+Reconstruct-then-overwrite doesn't extend to a refined mesh's topology on its own (the refined
+elements/nodes aren't in the `.inp`), so this doesn't serialize topology directly -- it replays
+it. `HAdaptivity.updateModel` splits into a marking decision (history-dependent, evaluated from
+error markers against the converged solution) and everything downstream of it (octree split, 2:1
+balance, hanging-node MPCs, materialization, the `ModelChange` notification -- pure topology
+mechanics, deterministic given only the marked-element set). The checkpoint records only the
+marking decision's *output*, never re-derives it:
+
+- `HAdaptivity._committedOccasions`: every refinement that actually materialized, as the FE
+  element labels that triggered it, in commit order.
+- `HAdaptivity._pendingMarkedElements`: the `minMarkedElements` batching buffer (elements already
+  marked but not yet refined at checkpoint time) -- kept, not dropped, since it's exactly as cheap
+  to persist as the committed log and removes a real (if minor) divergence from an uninterrupted
+  run otherwise.
+- `_lastRefinedTime` (the cutback-reentry guard).
+
+`ModelModifierBase` gained `getRestartData()`/`setRestartData(model, data)` (mirroring
+`ConstraintBase`'s pair, except `setRestartData` takes `model` explicitly and is expected to
+*mutate* it -- replaying occasions materializes elements a passive restore couldn't reproduce).
+`FEModel.readRestart` calls every modifier's `setRestartData` **first**, before node-field/
+element-statevar restore, so replayed elements exist in time for that pass to reach them by label.
+`HAdaptivity._refineAndMaterialize(model, eligible)` is the shared, deterministic mechanics both
+the live marking path and restart replay call -- reusing it verbatim is what makes AMR's side
+effects (hanging-node MPCs, tie/contact `MeshDependent` reconciliation, set/surface/field-output
+re-binding) replay correctly for free, since they fire through the same observer path a live run
+uses. Verified: `tests/test_hadaptivity_restart.py` (direct `getRestartData`/`setRestartData`
+round-trip, both the committed-occasion and pending-marks cases) and
+`tests/test_restart_integration.py`'s AMR case (full driver-level truncate-mid-refinement +
+resume, diffing both final `U` and element/node counts against an uninterrupted reference).
+
+Still out of scope: coarsening (AMR here is refine-only) and any marker whose criterion is not
+purely a function of the converged solution at evaluation time (none currently exist).
+
 ## Why now
 
 EdelweissMeshfree already has a working restart mechanism, and it turns out **the shared
@@ -76,14 +112,13 @@ restart configuration should be an `.inp` keyword, not a `solveStep()` kwarg pil
    implemented for the Marmot particle wrapper, not the Python one. **No new interface
    needed here, just wiring it into `FEModel.writeRestart`/`readRestart`.**
 
-3. **AMR interaction is an open risk, not solved by this plan.** The reconstruct-then-overwrite
-   assumption implicitly requires that rebuilding from the `.inp` file reproduces the exact
-   same mesh topology. That's false once adaptive mesh refinement (hanging-nodes AMR,
-   `feat/amr-hanging-nodes`) has altered the mesh at runtime based on error markers — the
-   refined topology is not recoverable from the original `.inp` alone. **v1 of restart should
-   explicitly only be supported for static-topology analyses**; AMR+restart is called out as
-   follow-up work (would need to serialize the refinement history or the element/node tree
-   itself, not just state).
+3. **AMR interaction, resolved in v2 (see "Status (v2 -- AMR)" above).** The
+   reconstruct-then-overwrite assumption implicitly requires that rebuilding from the `.inp` file
+   reproduces the exact same mesh topology, which is false once adaptive mesh refinement
+   (hanging-nodes AMR, `feat/amr-hanging-nodes`) has altered the mesh at runtime based on error
+   markers — the refined topology is not recoverable from the original `.inp` alone. v1 restricted
+   restart to static-topology analyses for exactly this reason. v2 lifts that restriction by
+   replaying the refinement (not serializing the resulting topology) — see the v2 status section.
 
 4. **Writing vs. fallback-on-failure are different mechanisms, keep them that way.**
    Periodic checkpoint *writing* fits neatly into the existing `OutputManagerBase` lifecycle
@@ -185,7 +220,7 @@ In `drivers/inputfiledrivensimulation.py`, right after
 
 ## Explicit non-goals for v1
 
-- AMR-refined mesh restart (see decision #3).
+- AMR-refined mesh restart (see decision #3) — lifted in v2, see "Status (v2 -- AMR)" above.
 - True material-point (non-particle) restart — N/A in EdelweissFE, only relevant to
   EdelweissMeshfree, and even there it's an existing gap (material points aren't
   serialized at all today, only RKPM particles).
