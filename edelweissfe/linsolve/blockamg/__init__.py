@@ -48,27 +48,27 @@ def createSolver(opts) -> Callable:
         :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`):
 
         ``outerTol``, ``outerRestart``, ``outerMaxiter``, ``sweeps``, ``symmetric``
-            The outer GMRES and block Gauss-Seidel knobs. ``outerTol`` defaults to a fixed ``1e-6``;
-            pass the literal string ``"adaptive"`` (JSON has no bare ``null`` in this cast pipeline) to
-            opt into the Eisenstat--Walker forcing described next -- not the default, since a live
-            confirmation run changed the Newton path itself, see
-            :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver` and
-            PERF_LINSOLVE_INVESTIGATION.md §19.2.
+            The outer GMRES and block Gauss-Seidel knobs. ``outerTol`` unset, ``None``, or the literal
+            string ``"adaptive"`` (JSON has no bare ``null`` in this cast pipeline) all mean the same
+            thing: use Eisenstat--Walker adaptive forcing (the default) instead of a fixed tolerance --
+            pass an actual float to pin a fixed outer GMRES relative tolerance instead. See
+            :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver` for the forcing scheme
+            itself.
         ``outerSolver``, ``lgmresM``, ``lgmresK``, ``lgmresAlwaysReset``, ``lgmresResetOnNewIncrement``
-            ``outerSolver`` selects the outer Krylov solve: ``"amgcl_lgmres"`` (default, §23.7/§23.9 --
-            AMGCL's own native ``amgcl::solver::lgmres`` in place of ``scipy.sparse.linalg.gmres``,
-            live-gated at 8/16/32 threads, faster than scipy at every thread count and increasingly so)
-            or ``"scipy"`` (the prior default, kept as a fallback/opt-out). The other four are only used
-            with ``"amgcl_lgmres"``; see :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`
-            for their meaning.
+            ``outerSolver`` selects the outer Krylov solve: ``"amgcl_lgmres"`` (default -- AMGCL's own
+            native ``amgcl::solver::lgmres`` in place of ``scipy.sparse.linalg.gmres``, live-gated at
+            several thread counts, faster than SciPy at every thread count tested and increasingly so
+            as thread count grows) or ``"scipy"`` (the prior default, kept as a fallback/opt-out). The
+            other four are only used with ``"amgcl_lgmres"``; see
+            :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver` for their meaning.
         ``etaMin``, ``etaMax``, ``ewGamma``, ``ewAlpha``, ``residualGrowthFactor``,
         ``hierarchyStalenessFactor``
             Knobs for the adaptive outer tolerance and the per-field AMG hierarchy reuse across Newton
             iterations -- see :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`.
         ``trueResidualMaxContinuations``
             How many warm-restart continuations enforce the requested tolerance on the true residual,
-            not just GMRES's own preconditioned stopping check (§20.2). Defaults to ``2``; ``0``
-            restores the original preconditioned-residual-only behaviour.
+            not just GMRES's own preconditioned stopping check. Defaults to ``2``; ``0`` restores the
+            original preconditioned-residual-only behaviour.
         ``verbosity``
             ``"silent"``, ``"warning"`` (default), ``"info"``, or ``"debug"`` -- see
             :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`. Replaces the old boolean
@@ -76,15 +76,29 @@ def createSolver(opts) -> Callable:
         ``warnOuterIterationsThreshold``
             Outer-iteration count past which a solve prints a ``"warning"``-level message even at the
             default verbosity.
+        ``dumpOnDegradationDir``, ``dumpOnDegradationThreshold``, ``dumpOnDegradationMaxDumps``,
+        ``dumpOnDegradationContextSolves``
+            Capture the raw ``(A, b)`` and field-block layout of solves that degrade (outer-iteration
+            count past a threshold), plus optionally a window of preceding solves and per-solve
+            solver-state bookkeeping, for offline diagnosis -- see
+            :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`. ``dumpOnDegradationDir``
+            unset (the default) disables this entirely.
         ``fieldPreconds``
             Optional mapping of field name (e.g. ``"displacement"``) to an AMGCL preconditioner
             parameter tree, overriding the dimension-based default for that field.
+        ``useRigidBodyNullspace``
+            ``True`` (default) builds a vector field's near null-space as the full rigid-body basis
+            (translations + rotations) once nodal coordinates arrive, instead of translations alone --
+            see :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`. Set ``False`` to force
+            translations-only unconditionally.
         ``p1FieldNames``
             Optional list of vector field names (e.g. ``["displacement"]``) to precondition with
-            p-multigrid (§22) instead of the single-level AMGCL default -- the actual topology map is
-            computed by the nonlinear solver and supplied later via
-            :meth:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver.setP1Maps` (§22.5's NIST
-            plumbing), since it is not known at construction time.
+            p-multigrid instead of the single-level AMGCL default -- an opt-in, experimental variant,
+            not recommended as a default (see the module docstring of
+            :mod:`edelweissfe.linsolve.blockamg.ptwogrid`). The actual topology map is computed
+            lazily by the solver itself, from the live model reference ``setModel`` provides, the
+            first time one of these fields' hierarchies is built -- not known at construction time,
+            so nothing needs to be pushed in ahead of it.
 
         As with the other factories, a non-mapping ``opts`` is tolerated (the implicit-static solver
         passes ``""`` when no configuration file is given), in which case every default applies.
@@ -113,6 +127,7 @@ def createSolver(opts) -> Callable:
         ("lgmresResetOnNewIncrement", bool),
         ("sweeps", int),
         ("symmetric", bool),
+        ("useRigidBodyNullspace", bool),
         ("etaMin", float),
         ("etaMax", float),
         ("ewGamma", float),
@@ -122,6 +137,10 @@ def createSolver(opts) -> Callable:
         ("trueResidualMaxContinuations", int),
         ("verbosity", str),
         ("warnOuterIterationsThreshold", int),
+        ("dumpOnDegradationDir", str),
+        ("dumpOnDegradationThreshold", int),
+        ("dumpOnDegradationMaxDumps", int),
+        ("dumpOnDegradationContextSolves", int),
     ):
         if key in optionMap:
             kwargs[key] = cast(optionMap[key])

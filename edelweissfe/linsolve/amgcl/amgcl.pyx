@@ -38,9 +38,9 @@ cdef class PyAMGCLSolver:
     cdef LinearSolverBlock2* solverBlock2
     cdef LinearSolverBlock3* solverBlock3
     cdef readonly bint isFloat
-    """True if this instance runs the mixed-precision (builtin<float>) hierarchy, see §19.3."""
+    """True if this instance runs the mixed-precision (builtin<float>) hierarchy."""
     cdef readonly int blockSize
-    """1 (scalar, default), 2, or 3 -- the AMGCL backend's block size, see §20.1."""
+    """1 (scalar, default), 2, or 3 -- the AMGCL backend's block size."""
     cdef readonly int lastIterations
     """The iteration count AMGCL reported for the most recent solve, -1 before the first."""
     cdef readonly double lastError
@@ -56,13 +56,13 @@ cdef class PyAMGCLSolver:
 
         ``backendPrecision``: ``"double"`` (default) or ``"float"``. Selects the AMGCL backend's value
         type -- ``"float"`` halves the memory traffic of the hierarchy build and, more importantly, of
-        every :meth:`applyPreconditioner` call (the dominant cost on large coupled solves, §18). Not an
+        every :meth:`applyPreconditioner` call (the dominant cost on large coupled solves). Not an
         AMGCL parameter itself, so it is popped out before the rest of ``params`` is forwarded as JSON.
         The near null-space (:meth:`set_nullspace`) always stays double regardless -- AMGCL's own
         ``coarsening::nullspace_params::B`` is hardcoded double, independent of the backend.
 
         ``backendBlockSize``: ``1`` (default, scalar), ``2``, or ``3``. Selects a block-valued backend
-        (§20.1, B3) operating on node-major B x B nodal blocks instead of scalar entries -- shrinks the
+        operating on node-major B x B nodal blocks instead of scalar entries -- shrinks the
         CSR index traffic by ~B² and lets block-aware smoothers (block-ILU0, block-GS) invert each
         node's coupling exactly. The matrix still arrives as a plain scalar CSR; the wrapper adapts it
         internally. Not yet combinable with ``backendPrecision == "float"`` (raises) -- float-block is
@@ -98,8 +98,7 @@ cdef class PyAMGCLSolver:
         self.blockSize = blockSize
         if self.blockSize > 1 and self.isFloat:
             raise NotImplementedError(
-                "backendBlockSize > 1 combined with backendPrecision='float' is not implemented "
-                "(§20.1: float-block is a follow-up column, not this pass's target)."
+                "backendBlockSize > 1 combined with backendPrecision='float' is not implemented."
             )
 
         self.lastIterations = -1
@@ -144,7 +143,7 @@ cdef class PyAMGCLSolver:
         the C++ solver, so the array need not be kept alive. Must be called before the first solve().
         Passing an (n, 0) array clears any previously set null-space. Always double, regardless of
         ``backendPrecision`` -- see the class docstring. Raises on a block backend (``blockSize > 1``)
-        -- AMGCL's own near-null-space path is unimplemented for block value types (§20.1).
+        -- AMGCL's own near-null-space path is unimplemented for block value types.
         """
         cdef np.ndarray[np.float64_t, ndim=2, mode="c"] B_arr = np.ascontiguousarray(B, dtype=np.float64)
         cdef int rows = B_arr.shape[0]
@@ -352,7 +351,7 @@ cdef class PyAMGCLSolver:
 
 
 cdef class PyAMGCLRelaxationSmoother:
-    """A standalone, OpenMP-threaded relaxation smoother (§22.4) -- e.g. the p-two-grid
+    """A standalone, OpenMP-threaded relaxation smoother -- e.g. the p-two-grid
     preconditioner's fine sweep (:mod:`edelweissfe.linsolve.blockamg.ptwogrid`), one level below a
     full AMG hierarchy. Wraps ``amgcl::runtime::relaxation::wrapper``, which is itself
     runtime-selectable via the ``type`` key (``chebyshev``, ``gauss_seidel``, ``ilu0``, ``spai0``,
@@ -410,7 +409,7 @@ cdef class PyAMGCLRelaxationSmoother:
     def residual(self, object rhs, object x):
         """``rhs - A@x`` on the same OpenMP-threaded backend matrix :meth:`build` already converted --
         a plain ``scipy.sparse`` CSR matvec is not thread-parallel regardless of ``OMP_NUM_THREADS``
-        (§22.4-bis), so callers computing the fine-level residual for a two-grid restriction should use
+        so callers computing the fine-level residual for a two-grid restriction should use
         this instead of ``A @ x`` in Python. Returns a new float64 array; does not mutate ``x``."""
         cdef np.ndarray[np.float64_t, ndim=1, mode="c"] rhs_arr = np.ascontiguousarray(rhs, dtype=np.float64)
         cdef np.ndarray[np.float64_t, ndim=1, mode="c"] x_arr = np.ascontiguousarray(x, dtype=np.float64)
@@ -424,13 +423,13 @@ cdef class PyAMGCLRelaxationSmoother:
 
 
 cdef class PyAMGCLMatrix:
-    """A plain OpenMP-threaded matvec/residual wrapper, no smoother attached (§23.2, Phase 8).
+    """A plain OpenMP-threaded matvec/residual wrapper, no smoother attached.
 
     The shipped default's outer GMRES operator (``gmres(As, bs, ...)`` in
     :mod:`edelweissfe.linsolve.blockamg.blockamg`) previously called ``As`` directly as a
-    ``scipy.sparse`` CSR matrix -- not thread-parallel regardless of ``OMP_NUM_THREADS`` (the same
-    mechanism §22.4-ter found for the p-two-grid fine level's residual, here on the full coupled
-    system instead, ~15% of the shipped arm's own wall). Wrap ``As`` once per solve with
+    ``scipy.sparse`` CSR matrix -- not thread-parallel regardless of ``OMP_NUM_THREADS`` (scipy
+    sparse matvec is single-threaded C code; measured at ~15% of the shipped arm's own wall-clock on
+    a real reference model). Wrap ``As`` once per solve with
     :meth:`build`, then pass ``scipy.sparse.linalg.LinearOperator(matvec=this.matvec)`` as the
     operator instead of ``As`` itself.
     """
@@ -445,7 +444,8 @@ cdef class PyAMGCLMatrix:
 
     def build(self, object A):
         """Convert A (scipy.sparse csr_matrix) once. Not amortized across solves -- this pattern's
-        sparsity churns every solve (§3.1/§21.1), so the conversion is paid fresh every call."""
+        sparsity churns every solve on a model with contact/tie constraints, so the conversion is
+        paid fresh every call."""
         if not scipy.sparse.isspmatrix_csr(A):
             A = A.tocsr()
 
@@ -483,7 +483,7 @@ cdef class PyAMGCLMatrix:
 
 cdef void _lgmresPrecondApplyTrampoline(void* ctx, int n, const double* rhs, double* x) noexcept:
     """The C-callable trampoline bridging amgcl::solver::lgmres's per-``apply()`` Precond callback
-    (§23.7) back into Python -- passed to :class:`LGMRESOuterSolver` as a bare function pointer (see
+    back into Python -- passed to :class:`LGMRESOuterSolver` as a bare function pointer (see
     ``amgcl-wrapper.hpp``'s ``PyPrecondApplyFn``/``PyLGMRESPrecondT``).
 
     ``ctx`` is the calling :class:`PyAMGCLLGMRESSolver` instance itself, cast to ``void*`` and back --
@@ -537,7 +537,7 @@ cdef void _lgmresPrecondApplyTrampoline(void* ctx, int n, const double* rhs, dou
 
 
 cdef class PyAMGCLLGMRESSolver:
-    """AMGCL's own native ``amgcl::solver::lgmres`` as blockamg.py's outer Krylov solve (§23.7), in
+    """AMGCL's own native ``amgcl::solver::lgmres`` as blockamg.py's outer Krylov solve, in
     place of ``scipy.sparse.linalg.gmres`` -- see ``amgcl-wrapper.hpp``'s ``LGMRESOuterSolverT`` for
     the full motivation and design reasoning (this class is a thin Cython shell around it).
 
@@ -552,8 +552,8 @@ cdef class PyAMGCLLGMRESSolver:
     be mutated per call onto the same object without paying construction cost every solve (see
     :meth:`solve`), independent of ``always_reset``. ``always_reset: false`` would additionally let
     AMGCL's own recycled/augmented Krylov vectors survive *across* separate :meth:`solve` calls, but
-    PERF_LINSOLVE_INVESTIGATION.md §23.9's attribution ablation and live gate found that recycling
-    contributes nothing measurable and can actively compound a struggling solve's poorly-conditioned
+    an attribution ablation and a live gate found that recycling contributes nothing measurable and
+    can actively compound a struggling solve's poorly-conditioned
     subspace into a much more expensive (or NaN) subsequent one -- ``blockamg.py`` now defaults
     ``always_reset=True`` accordingly; this class still earns its keep over plain scipy GMRES from
     threading and lgmres's own intra-call restart-cycle augmentation alone. The problem size ``n`` is
@@ -622,7 +622,7 @@ cdef class PyAMGCLLGMRESSolver:
             Optional initial guess (warm start), e.g. blockamg.py's true-residual continuation retry.
             Defaults to zero.
         resetOnce
-            §23.9 step 2: discard this instance's recycled/augmented Krylov vectors for this call only
+            Discard this instance's recycled/augmented Krylov vectors for this call only
             (by temporarily flipping the underlying solver's ``prm.always_reset`` to true and restoring
             it immediately after -- see ``amgcl-wrapper.hpp``'s ``LGMRESOuterSolverT::solve`` for why
             this reuses AMGCL's own reset mechanism rather than touching ``outer_v`` directly), without
@@ -686,7 +686,7 @@ cdef class PyAMGCLLGMRESSolver:
 
 
 cdef class PyAMGCLSpGEMM:
-    """§24 (task #31): OpenMP-threaded sparse-matrix product/sum, wrapping AMGCL's own
+    """OpenMP-threaded sparse-matrix product/sum, wrapping AMGCL's own
     ``amgcl::backend::builtin::product()``/``sum()`` -- verified directly (not assumed) against the
     installed headers that both are OpenMP-parallel (``spgemm_saad``/``spgemm_rmerge`` and ``sum()``
     itself each carry ``#pragma omp parallel``/``#pragma omp for``).

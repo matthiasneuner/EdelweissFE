@@ -134,6 +134,10 @@ class MatrixDumpSolver(LinearSolver):
         """Forward the field structure to the delegate -- see :meth:`setJournal`."""
         self._delegate.setFieldStructure(fields)
 
+    def setModel(self, model, dofManager) -> None:
+        """Forward the model/DOF-manager references to the delegate -- see :meth:`setJournal`."""
+        self._delegate.setModel(model, dofManager)
+
     def _shouldDump(self, ordinal: int) -> bool:
         """Decide whether the solve with this ordinal gets dumped."""
 

@@ -21,7 +21,7 @@
 
 // Templated on the AMGCL backend's value type, so the same wrapper serves both the default
 // double-precision hierarchy and a float32 one (half the memory traffic in the smoother apply, the
-// dominant cost on large coupled solves -- see PERF_LINSOLVE_INVESTIGATION.md §18/§19.3). The outer
+// dominant cost on large coupled solves). The outer
 // Krylov solve (blockamg's GMRES) always stays double; only the preconditioner's own storage and
 // arithmetic narrow. rhs/x at the applyPreconditioner()/solve() boundary are always double -- the
 // value-type-dependent scratch conversion happens inside this class, not at the Cython/Python
@@ -177,10 +177,10 @@ public:
   }
 };
 
-// Block-valued backend (§20.1, B3): the per-field hierarchy stores/operates on B×B nodal blocks
+// Block-valued backend: the per-field hierarchy stores/operates on B×B nodal blocks
 // (amgcl::static_matrix<double,B,B>) instead of scalar entries. Two motivations, in confidence order:
 // (i) the CSR index arrays shrink by ~B² (one column index per block instead of per scalar entry --
-// §19.3 found index traffic, not values, is the larger share of hierarchy bandwidth, which is exactly
+// index traffic, not values, is typically the larger share of hierarchy bandwidth, which is exactly
 // what this attacks); (ii) block-aware smoothers (block-ILU0, block-GS) invert each node's B×B
 // coupling exactly, AMGCL's own canonical recipe for vector-PDE (elasticity) operators.
 //
@@ -197,8 +197,9 @@ public:
 // nullspace path self-flags as unimplemented for block value types (amgcl/coarsening/
 // tentative_prolongation.hpp: "TODO: this is just a workaround to make non-scalar value types
 // compile. Most probably this won't actually work.") -- not merely undocumented, upstream itself does
-// not trust it. This is an accepted, measured non-loss: rigid-body near-null-space vectors do not help
-// on this operator anyway (§11, §13).
+// not trust it. A block-aware smoother's own per-node B×B inversion is expected to substitute for
+// some of what a near-null-space would otherwise buy the scalar backend, but this has not been
+// re-measured against the current (Chebyshev, rigid-body-aware) scalar-backend default.
 template < typename BlockType >
 class LinearSolverBlockT {
 public:
@@ -319,8 +320,8 @@ public:
 };
 
 // A standalone, runtime-selectable smoother -- e.g. the p-two-grid preconditioner's fine sweep
-// (§22.3/§22.4, ptwogrid.py), which previously ran a hand-rolled serial scipy/numpy Chebyshev
-// polynomial and was measured at 81%+ of the preconditioner's own apply time. amgcl::relaxation::
+// (ptwogrid.py), which previously ran a hand-rolled serial scipy/numpy Chebyshev polynomial and was
+// measured at 81%+ of the preconditioner's own apply time. amgcl::relaxation::
 // as_preconditioner<Backend, Relax> cannot serve this directly: its Relax parameter is a
 // *compile-time* template-template parameter, so a JSON "type" string (the convention every other
 // method here follows, chosen via amgcl::runtime::preconditioner<Backend>) cannot select it. AMGCL
@@ -433,19 +434,20 @@ public:
   }
 };
 
-// A plain OpenMP-threaded matrix wrapper, no smoother attached (§23.2, Phase 8): the shipped
-// default's outer GMRES operator SpMV (`gmres(As, bs, ...)` in blockamg.py) is a scipy CSR matvec on
-// the *full* coupled system -- larger than the 26.5M-nnz displacement free block §22.4-ter found
-// flat against `OMP_NUM_THREADS`, and by the same mechanism (scipy sparse matvec is single-threaded
-// C code). Census (§23.1) measured it at 14.6% of the shipped arm's total wall across all 9 ords,
-// clearing this phase's 5% attack threshold.
+// A plain OpenMP-threaded matrix wrapper, no smoother attached: the shipped default's outer GMRES
+// operator SpMV (`gmres(As, bs, ...)` in blockamg.py) is a scipy CSR matvec on the *full* coupled
+// system, flat against `OMP_NUM_THREADS` for the same reason any raw scipy sparse matvec is (scipy
+// sparse matvec is single-threaded C code). Measured at roughly 14.6% of the shipped arm's total
+// wall-clock across a range of real reference systems -- large enough on its own to be worth
+// threading independently of anything else.
 //
 // Deliberately a separate class from RelaxationSmootherT, not a reuse of it: RelaxationSmootherT's
 // constructor runs a smoother build (chebyshev's power iteration for the spectral radius, etc.) --
 // pure waste for something that only ever needs matvec()/residual(). This class never constructs a
-// relaxation object, so §22.4's ADL/crs_tuple trap does not apply here; build() still converts
-// through Backend::matrix regardless, matching the proven pattern rather than relying on the raw
-// crs_tuple adapter's own (narrower) spmv/residual specializations.
+// relaxation object, so RelaxationSmootherT's own ADL/crs_tuple pitfall (see its own comment) does
+// not apply here; build() still converts through Backend::matrix regardless, matching the proven
+// pattern rather than relying on the raw crs_tuple adapter's own (narrower) spmv/residual
+// specializations.
 class ThreadedMatrixT {
 public:
   typedef amgcl::backend::builtin< double > Backend;
@@ -453,10 +455,10 @@ public:
 
   std::shared_ptr< BackendMatrix > A_;
 
-  // Build (convert) the matrix once per solve -- this pattern churns every solve (§3.1/§21.1), so
-  // there is no build-once/apply-many amortization across solves the way LinearSolverT's hierarchy
-  // gets; the conversion cost is paid fresh here every time and must be timed as part of this
-  // phase's own budget, not assumed free.
+  // Build (convert) the matrix once per solve -- this pattern churns every solve on a model with
+  // contact/tie constraints, so there is no build-once/apply-many amortization across solves the way
+  // LinearSolverT's hierarchy gets; the conversion cost is paid fresh here every time and must be
+  // measured, not assumed free.
   void build( int n, const int* ptr, const int* col, const double* val )
   {
     int  nnz = ptr[n];
@@ -491,7 +493,7 @@ public:
   }
 };
 
-// §24 (task #31): exposes AMGCL's own OpenMP-threaded sparse-matrix-matrix product and
+// Exposes AMGCL's own OpenMP-threaded sparse-matrix-matrix product and
 // sparse-matrix addition (amgcl::backend::builtin's product()/sum(), verified directly against the
 // installed headers: spgemm_saad/spgemm_rmerge both carry `#pragma omp parallel`/`#pragma omp for`,
 // and so does sum()). Wired into edelweissfe/numerics/mpctransformation.py's `T^T @ K @ T + C`
@@ -597,18 +599,16 @@ public:
   }
 };
 
-// §23.7: bridges AMGCL's own native amgcl::solver::lgmres (an outer Krylov solve running entirely on
+// Bridges AMGCL's own native amgcl::solver::lgmres (an outer Krylov solve running entirely on
 // the OpenMP-threaded builtin backend) to blockamg.py's Python-level block Gauss-Seidel preconditioner
 // (the same closure the shipped scipy.sparse.linalg.gmres path already uses), via a plain C
 // function-pointer callback + opaque context set from Cython.
 //
-// Motivation (PERF_LINSOLVE_INVESTIGATION.md §23.1's census): with the outer operator SpMV already
-// threaded (§23.2, ThreadedMatrixT above), the single largest remaining bucket in the shipped arm's
-// own solve wall (~38%, bucket (h), "GMRES internals by subtraction") is scipy's *own* GMRES
-// orchestration -- Arnoldi/Gram-Schmidt/restart bookkeeping -- which is unavoidably serial CPython
-// regardless of any matvec/preconditioner threading, and scales with the square of the restart length.
-// §23 explicitly parked this out of its own scope as the sizing input for a follow-up phase; this is
-// that follow-up's first pass.
+// Motivation: with the outer operator SpMV already threaded (ThreadedMatrixT above), the single
+// largest remaining bucket in the shipped arm's own solve wall (measured at roughly 38% of total
+// wall-clock on a real reference model) is scipy's *own* GMRES orchestration -- Arnoldi/Gram-Schmidt/
+// restart bookkeeping -- which is unavoidably serial CPython regardless of any matvec/preconditioner
+// threading, and scales with the square of the restart length.
 //
 // Why a C function pointer + void* context, not a Cython-overridden C++ virtual method: lgmres's
 // Precond parameter (see amgcl/solver/lgmres.hpp's operator()) is a compile-time template argument,
@@ -658,10 +658,10 @@ private:
 //
 // One instance is meant to be constructed once per BlockAMGSolver and reused for that solver's entire
 // lifetime, not rebuilt per solve like the per-field AMG hierarchies (see blockamg.py's own
-// mustRefresh bookkeeping for those). This persistence is independent of `always_reset` (PERF_
-// LINSOLVE_INVESTIGATION.md §23.9): it is what lets tol/maxiter be mutated per call onto the same
-// underlying object (see below) without paying construction cost every solve, and it is what
-// `always_reset=false` would use *if* enabled -- but §23.9's attribution ablation found cross-call
+// mustRefresh bookkeeping for those). This persistence is independent of `always_reset`: it is what
+// lets tol/maxiter be mutated per call onto the same underlying object (see below) without paying
+// construction cost every solve, and it is what `always_reset=false` would use *if* enabled -- but an
+// attribution ablation found cross-call
 // recycling (`outer_v` surviving across separate operator() calls, AMGCL's own doc comment on `K`
 // naming "solving multiple similar problems" as the intended use) contributes nothing measurable on
 // 9 representative systems and, on a live pryout trajectory, actively compounds a struggling solve's
@@ -672,7 +672,8 @@ private:
 //
 // The system matrix itself is *not* cached across calls the way the AMG hierarchies are -- it is
 // rebuilt fresh in every solve() call from the raw CSR arrays, exactly like ThreadedMatrixT above
-// (the pattern churns every solve regardless, §3.1/§21.1, so there is nothing to amortize). lgmres's
+// (the pattern churns every solve regardless on a model with contact/tie constraints, so there is
+// nothing to amortize). lgmres's
 // own header comment explicitly names this usage pattern too: "The system matrix may differ from the
 // matrix used during initialization[...] used for the solution of non-stationary problems with
 // slowly changing coefficients."
@@ -754,15 +755,15 @@ public:
     solver_->prm.tol     = tol;
     solver_->prm.maxiter = static_cast< size_t >( maxiter );
 
-    // §23.9 step 2 (the ord-00009 fix candidate, Fable's review): a caller-requested one-shot reset
+    // A caller-requested one-shot reset
     // of the recycled/augmented Krylov vectors (`outer_v`), without discarding the persistent solver_
     // object or reconstructing it. AMGCL's own operator() clears outer_v itself, unconditionally,
     // whenever prm.always_reset is true (verified directly in lgmres.hpp: the very first statement in
     // operator()) -- so flipping it true for exactly this one call and restoring it immediately after
     // reuses that already-correct mechanism instead of reaching into outer_v/outer_v_data directly.
     // blockamg.py wires this to its own `newIncrement` signal: reset across increment/cutback
-    // boundaries (where a stale recycled subspace is hypothesized to cost pure overhead, §23.7's
-    // ord-00009 finding), keep recycling within an increment's own Newton sequence (AMGCL's own
+    // boundaries (where a stale recycled subspace is hypothesized to cost pure overhead), keep
+    // recycling within an increment's own Newton sequence (AMGCL's own
     // intended use for K, and where every other ord showed recycling helping, not hurting).
     // RAII, not a plain save/mutate/restore: `(*solver_)(...)` below can throw (AMGCL internals,
     // e.g. an allocation failure -- not a Python exception from the preconditioner callback, which
@@ -788,7 +789,8 @@ public:
                               amgcl::make_iterator_range( col, col + nnz ),
                               amgcl::make_iterator_range( val, val + nnz ) );
     // Converted through Backend::matrix, not passed as the raw adapter tuple -- the same ADL trap
-    // §22.4/§23.2 already found and documented above: amgcl::solver::lgmres's operator() calls
+    // RelaxationSmootherT and ThreadedMatrixT above already found and documented: amgcl::solver::
+    // lgmres's operator() calls
     // backend::residual()/backend::spmv() on A via ADL-found amgcl::backend overloads that only
     // resolve against amgcl::backend::crs<...>, not the raw std::tuple adapter (amgcl/adapter/
     // crs_tuple.hpp).
@@ -807,23 +809,23 @@ public:
   }
 };
 
-// The default, unchanged double-precision wrapper, and the new float32 one added for §19.3.
+// The default, unchanged double-precision wrapper, and a float32 one for a mixed-precision backend.
 typedef LinearSolverT< double > LinearSolver;
 typedef LinearSolverT< float >  LinearSolverFloat;
 
-// Block-valued instantiations (§20.1): 3×3 for the pryout's 3D displacement field, 2×2 for the
-// registered 2D CantileverBeamQuad4BlockAMG regression test -- one template parameter apart.
+// Block-valued instantiations: 3×3 for a 3D displacement field, 2×2 for a 2D one -- one template
+// parameter apart.
 typedef LinearSolverBlockT< amgcl::static_matrix< double, 2, 2 > > LinearSolverBlock2;
 typedef LinearSolverBlockT< amgcl::static_matrix< double, 3, 3 > > LinearSolverBlock3;
 
-// §22.4: standalone OpenMP-threaded relaxation smoother, see RelaxationSmootherT above.
+// Standalone OpenMP-threaded relaxation smoother, see RelaxationSmootherT above.
 typedef RelaxationSmootherT RelaxationSmoother;
 
-// §23.2: standalone OpenMP-threaded matvec/residual, see ThreadedMatrixT above.
+// Standalone OpenMP-threaded matvec/residual, see ThreadedMatrixT above.
 typedef ThreadedMatrixT ThreadedMatrix;
 
-// §23.7: AMGCL's own native outer Krylov solve (lgmres), see LGMRESOuterSolverT above.
+// AMGCL's own native outer Krylov solve (lgmres), see LGMRESOuterSolverT above.
 typedef LGMRESOuterSolverT LGMRESOuterSolver;
 
-// §24 (task #31, scoping): OpenMP-threaded SpGEMM/sparse-sum probe, see SpGEMMHelperT above.
+// OpenMP-threaded SpGEMM/sparse-sum, see SpGEMMHelperT above.
 typedef SpGEMMHelperT SpGEMMHelper;

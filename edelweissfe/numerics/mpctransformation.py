@@ -34,17 +34,17 @@ from scipy.sparse import csr_matrix
 from edelweissfe.utils import performancetiming
 
 #: Set to enable a per-call cross-check of :meth:`MultiPointConstraintTransformation.transformSystemMatrix`'s
-#: AMGCL-threaded expression (§24, ``useAmgclSpgemm``) against the plain SciPy ``T^T @ K @ T + C``
+#: AMGCL-threaded expression (``useAmgclSpgemm``) against the plain SciPy ``T^T @ K @ T + C``
 #: expression it is an alternative to. Expensive (recomputes the plain expression every call it fires
 #: on) -- development/CI use only.
 _ASSERT_EXACT_ENV_VAR = "EDELWEISS_MPC_ASSERT_EXACT"
 
 #: Set to a directory to dump the raw K plus this transformation's own T/D/S/C matrices for the
 #: first few calls to :meth:`MultiPointConstraintTransformation.transformSystemMatrix` -- an offline
-#: harness for the SpGEMM-threading scoping in PERF_LINSOLVE_INVESTIGATION.md §24 (task #31): unlike
-#: the linsolve-level ``linsolveDumps`` harness (whose dumps are already-condensed ``Kt``), this
-#: needs the *pre*-condensation K and T/D/S/C themselves. Capped (see ``_DUMP_MPC_MAX_CALLS``) --
-#: `K` on this model is hundreds of MB uncompressed, and this is a diagnostic tool, not a feature.
+#: harness for investigating the SpGEMM-threading behaviour below: unlike the linsolve-level
+#: ``linsolveDumps`` harness (whose dumps are already-condensed ``Kt``), this needs the
+#: *pre*-condensation K and T/D/S/C themselves. Capped (see ``_DUMP_MPC_MAX_CALLS``) -- `K` on a
+#: large coupled model is hundreds of MB uncompressed, and this is a diagnostic tool, not a feature.
 _DUMP_MPC_ENV_VAR = "EDELWEISS_DUMP_MPC"
 _DUMP_MPC_MAX_CALLS = 3
 _dumpMpcCallsWritten = 0
@@ -143,11 +143,11 @@ class MultiPointConstraintTransformation:
         The total size of the equation system.
     useAmgclSpgemm
         Compute ``transformSystemMatrix`` as the direct ``Tᵀ K T + C`` expression, but via AMGCL's
-        own OpenMP-threaded ``product()``/``sum()`` (§24, task #31) instead of SciPy's single-
-        threaded CSR sparse routines -- SciPy's sparse module carries no OpenMP parallelism at all,
-        the same gap already closed elsewhere for the outer GMRES matvec (§23.2) and AMG relaxation
-        (§22.4). Offline-measured on the reference 280k-dof model: **~2.4–2.6x faster** than the
-        direct expression (``~1.4–1.5 s/call`` vs ``~2.4–2.7 s/call``), correctness-verified to
+        own OpenMP-threaded ``product()``/``sum()`` instead of SciPy's single-threaded CSR sparse
+        routines -- SciPy's sparse module carries no OpenMP parallelism at all, the same gap this
+        codebase also closes for its outer GMRES matvec and AMG relaxation kernels elsewhere.
+        Offline-measured on a reference 280k-dof model: **~2.4–2.6x faster** than the direct
+        expression (``~1.4–1.5 s/call`` vs ``~2.4–2.7 s/call``), correctness-verified to
         floating-point precision.
 
         AMGCL's ``product()``/``sum()`` do not eliminate exact-cancellation zeros the way SciPy's
@@ -304,9 +304,9 @@ class MultiPointConstraintTransformation:
     def transformSystemMatrix(self, K: csr_matrix) -> csr_matrix:
         """Condense the system matrix: :math:`\\tilde{K} = T^T K \\, T + C`.
 
-        Dispatches to the AMGCL-threaded expression (§24, ``useAmgclSpgemm``) or the plain SciPy
-        expression (default) -- see the class docstring for why the AMGCL path is not yet the
-        default despite being faster (pending a live gate).
+        Dispatches to the AMGCL-threaded expression (``useAmgclSpgemm``) or the plain SciPy
+        expression (default) -- see the constructor's ``useAmgclSpgemm`` docstring for why the
+        AMGCL path is not yet the default despite being faster (pending a live gate).
         """
         self._dumpForOfflineProbe(K)
         if self._useAmgclSpgemm:
@@ -320,9 +320,9 @@ class MultiPointConstraintTransformation:
     def _transformSystemMatrixAmgcl(self, K: csr_matrix) -> csr_matrix:
         """Condense the system matrix via the same direct :math:`T^T K \\, T + C` expression
         :meth:`_transformSystemMatrixLegacy` computes, but through AMGCL's own OpenMP-threaded
-        ``product()``/``sum()`` (§24, task #31) instead of SciPy's single-threaded CSR sparse
-        routines -- see ``useAmgclSpgemm``'s own constructor-argument docstring for the measured
-        speedup and the ``eliminate_zeros()`` rationale.
+        ``product()``/``sum()`` instead of SciPy's single-threaded CSR sparse routines -- see
+        ``useAmgclSpgemm``'s own constructor-argument docstring for the measured speedup and the
+        ``eliminate_zeros()`` rationale.
         """
         from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLSpGEMM
 
@@ -332,8 +332,8 @@ class MultiPointConstraintTransformation:
         Kt = helper.sum(1.0, KtNoC, 1.0, self._C)
         # No eliminate_zeros() here, deliberately -- not because it is unneeded (AMGCL's
         # product()/sum() leave far more exact-cancellation zeros unpruned than SciPy's own SpGEMM
-        # does, confirmed directly (§24): 54.3M nnz here vs. the plain expression's 34.2M on the
-        # reference model, with >99.9999% of that gap being bit-exact zero, not numerical
+        # does, confirmed directly: 54.3M nnz here vs. the plain expression's 34.2M on a reference
+        # model, with >99.9999% of that gap being bit-exact zero, not numerical
         # approximation), but because NISTSolver.applyDirichletK already does this immediately
         # after, gated by pruneCondensedMatrixZeros (default True), uniformly for both condensation
         # strategies -- that gate exists precisely because PARDISO's reordering on these

@@ -208,6 +208,13 @@ extensions += [
 ]
 
 print("Gather the AMGCL interface")
+# Deliberately NOT *arch_flags here, unlike this extension's siblings above: measured on a Xeon
+# Gold 6140 (Skylake-SP) -- -march=native resolves to skylake-avx512 there, and AMGCL's SpMV/relaxation
+# inner loops issue enough sustained 512-bit vector instructions to trigger that CPU generation's
+# well-documented package-wide AVX-512 downclock, making the whole solve slower, not faster (measured:
+# 811s -> 1134s baseline, 302s -> 412s with the power_iters=300 fix, both +~40%, same iteration counts
+# either way -- a pure clock-speed effect, not a numerics one). Revisit per-machine if this extension
+# ever needs to build for hardware where that erratum does not apply.
 extensions += [
     Extension(
         "*",

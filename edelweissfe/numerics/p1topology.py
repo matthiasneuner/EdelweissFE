@@ -24,7 +24,8 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 """Corner/midside node topology for building a P1 (linear) restriction operator over a quadratic
-serendipity displacement mesh (§22, the p-multigrid enabler).
+serendipity displacement mesh -- the enabler for p-multigrid
+(:class:`~edelweissfe.linsolve.blockamg.ptwogrid.PTwoGridPreconditioner`).
 
 The projection :math:`P` is purely topological: identity on corner nodes, ½/½ on each exclusive
 midside node from its two edge-endpoint corners (the P1 function expressed in the serendipity
@@ -122,10 +123,10 @@ def buildP1Map(model, fieldName: str):
     midside by the coarse side of a 2:1-balanced non-conforming refinement boundary can
     legitimately coincide, in raw 3D coordinates, with a node the AMR module's coordinate-based
     node registry (``edelweissfe.adaptivity.refinement.NodeRegistry``) also assigns to an
-    unrelated fine element on the other side of that boundary -- found live on the reference
-    pryout model (§22.1): two genuine, currently-active ``GC3D20R`` elements, both individually
-    geometry-verified as internally self-consistent, disagreeing about one shared node's edge
-    endpoints. Silently keeping only the first element's guess would be an arbitrary, unauditable
+    unrelated fine element on the other side of that boundary -- found live on a real reference
+    model: two genuine, currently-active ``GC3D20R`` elements, both individually geometry-verified
+    as internally self-consistent, disagreeing about one shared node's edge endpoints. Silently
+    keeping only the first element's guess would be an arbitrary, unauditable
     choice; hard-erroring would block every model exhibiting this (evidently not rare) AMR
     interface pattern. Treating the node as a corner instead is always *structurally* safe for a
     P1 restriction operator -- a corner is identity in ``P`` regardless of why it was classified
