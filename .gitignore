@@ -20,3 +20,7 @@ EdelweissFE.egg-info
 docs
 edelweissfe/built_extensions.log
 edelweissfe/linsolve/klu/klu.c
+
+# Investigation/handoff working docs -- local scratch, not project documentation
+PERF_LINSOLVE_INVESTIGATION.md
+PERF_LINSOLVE_ARCHIVE_PHASES1-20.md
