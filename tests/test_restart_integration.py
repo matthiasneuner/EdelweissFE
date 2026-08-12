@@ -202,6 +202,13 @@ def test_restart_ensight_output_continues_across_resume(tmp_path):
     for i in range(resumedStepCount):
         assert (ensightName.parent / f"{ensightName.name}" / f"displacement.var_{i:04d}").exists()
 
+    # the GEOMETRY section must still reference the model: since this mesh never changes, the
+    # resumed run's own writeOutput never calls writeGeometryTrendChunk (mesh_changed stays False
+    # the whole time), so geometryTrends -- which the "model:" line is written from -- would stay
+    # empty unless it was restored too, even though timeAndFileSets/the sequence itself is correct.
+    caseText = (ensightName.parent / f"{ensightName.name}.case").read_text()
+    assert "model:" in caseText, "GEOMETRY section lost its model: reference after resume"
+
 
 def _ensightStepCount(ensightName: Path) -> int:
     return _ensightStepCountAndTimes(ensightName)[0]
