@@ -322,3 +322,163 @@ def test_restart_resume_matches_uninterrupted_reference_with_amr(tmp_path):
     assert set(resumedModel.elements.keys()) == set(referenceModel.elements.keys())
     assert set(resumedModel.nodes.keys()) == set(referenceModel.nodes.keys())
     np.testing.assert_allclose(resumedU, referenceU, atol=1e-10)
+
+
+_AMR_PLASTIC_MATERIAL_AND_MESH = """
+*material, name=VonMises, id=mat
+210000, 0.3, 100, 1000, 200, 1400
+
+*section, name=sec, material=mat, type=solid
+all
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =1
+nY      =1
+nZ      =1
+lX      =1
+lY      =1
+lZ      =1
+elType  =C3D20
+
+*modelModifier, type=hAdaptivity, name=amr
+>>marker, type=fieldOutput, fieldOutput=stressForAMR, operator=\'>\', threshold=100.0
+maxLevel=1
+
+*job, name=amrPlasticRestartTestJob, domain=3d
+*solver, solver=NIST, name=theSolver
+*fieldOutput
+>>perNode, elSet=all, field=displacement, result=U, name=U
+>>perElement, elSet=all, result=stress, quadraturePoint=0:27, name=stressForAMR, f(x)=\'np.abs(x)\'
+"""
+
+
+def _amrPlasticStep(maxNumInc) -> str:
+    return f"""
+*step, solver=theSolver
+maxInc=0.02, minInc=1e-6, maxNumInc={maxNumInc}, maxIter=25, stepLength=1
+>>options, name=theSolver, extrapolation=off
+>>dirichlet, name=fixLeft, nSet=gen_left, field=displacement, 1=0.0
+>>dirichlet, name=fixBottomLeftFront, nSet=gen_bottomLeftFront, field=displacement, 2=0.0, 3=0.0
+>>dirichlet, name=fixBottomLeftBack, nSet=gen_bottomLeftBack, field=displacement, 2=0.0
+>>dirichlet, name=pushRight, nSet=gen_right, field=displacement, 1=-0.2
+"""
+
+
+def test_restart_resume_matches_uninterrupted_reference_with_amr_and_plastic_state(tmp_path):
+    """AMR + a history-dependent material (VonMises): refined child elements must retain their
+    accumulated plastic state across a restart. Regresses the bug where AMR-replayed children were
+    restored virgin -- their element numbers are not reproducible across replay (facet elements
+    claim labels between refinements), so FEModel.readRestart's number-keyed state restore missed
+    them -- causing return-mapping failures / a diverged solution deep in a run. The plain AMR
+    restart test uses linearelastic and so has no material history to lose; this one does."""
+    fullPath = tmp_path / "full.inp"
+    fullPath.write_text(_AMR_PLASTIC_MATERIAL_AND_MESH + _amrPlasticStep(maxNumInc=10000))
+    referenceModel = _runInputFile(fullPath)
+    referenceU = referenceModel.nodeFields["displacement"]["U"].copy()
+    assert len(referenceModel.elements) > 1, "the stress marker never triggered a refinement"
+
+    checkpointBaseName = tmp_path / "ckpt"
+    truncatedPath = tmp_path / "truncated.inp"
+    truncatedPath.write_text(
+        _AMR_PLASTIC_MATERIAL_AND_MESH + f"\n*output, type=restart, name=restartwriter\n"
+        f"writeInterval=1, baseName={checkpointBaseName}, numberOfFilesToKeep=3\n"
+        + _amrPlasticStep(maxNumInc=6)
+    )
+    truncatedModel = _runInputFile(truncatedPath)
+    assert len(truncatedModel.elements) > 1, "truncated too early: refinement had not happened yet"
+    assert truncatedModel.time < 1.0, "the step already finished -- not a real truncation"
+
+    checkpoint = _mostRecentCheckpoint(tmp_path)
+    resumePath = tmp_path / "resume.inp"
+    resumePath.write_text(
+        _AMR_PLASTIC_MATERIAL_AND_MESH + f"\n*restart, readFrom={checkpoint}\n" + _amrPlasticStep(maxNumInc=10000)
+    )
+    resumedModel = _runInputFile(resumePath)
+    resumedU = resumedModel.nodeFields["displacement"]["U"]
+
+    assert set(resumedModel.elements.keys()) == set(referenceModel.elements.keys())
+    np.testing.assert_allclose(resumedU, referenceU, atol=1e-10)
+
+
+_AMR_STATE_UNIT_INP = """
+*material, name=VonMises, id=mat
+210000, 0.3, 100, 1000, 200, 1400
+
+*section, name=sec, material=mat, type=solid
+all
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =2
+nY      =2
+nZ      =2
+lX      =1
+lY      =1
+lZ      =1
+elType  =C3D20
+
+*modelModifier, type=hAdaptivity, name=amr
+>>marker, type=nodeSet, nSet=gen_top, initialOnly=True
+maxLevel=1
+
+*job, name=amrStateUnitJob, domain=3d
+*solver, solver=NIST, name=theSolver
+*fieldOutput
+>>perNode, elSet=all, field=displacement, result=U, name=U
+"""
+
+
+def _buildDirect(tmp_path, name):
+    from edelweissfe.config.phenomena import domainMapping
+    from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+
+    p = tmp_path / name
+    p.write_text(_AMR_STATE_UNIT_INP)
+    inputfile = parseInputFile(str(p))
+    journal = Journal(verbose=False)
+    job = inputfile["job"][0]
+    model = FEModel(domainMapping[job["domain"]])
+    model = fillFEModelFromInputFile(model, inputfile, journal)
+    model.prepareYourself(journal)
+    model.advanceToTime(job.get("startTime", 0.0))
+    for nf in model.nodeFields.values():
+        nf.createFieldValueEntry("U")
+        nf.createFieldValueEntry("P")
+    model._linkFieldVariableObjects(model.nodeSets["all"])
+    return model
+
+
+def test_hadaptivity_restart_restores_child_state(tmp_path):
+    modelA = _buildDirect(tmp_path, "a.inp")
+    amrA = modelA.modelModifiers["amr"]
+    assert amrA.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
+
+    # Give every managed (leaf) element a distinctive, eid-derived state so a lost/virgin restore is
+    # unambiguous. Skip any element without a state buffer.
+    expected = {}
+    for eid, el in amrA._eidToEl.items():
+        try:
+            sv = np.asarray(el.getStateVars(), dtype=float)
+        except NotImplementedError:
+            continue
+        distinctive = np.arange(sv.size, dtype=float) + float(eid) + 0.5
+        el.setStateVars(np.ascontiguousarray(distinctive))
+        expected[eid] = distinctive
+    assert expected, "test needs a stateful element (VonMises should have per-QP plastic state)"
+    assert any(v.size > 0 for v in expected.values()), "state buffers are empty; nothing to test"
+
+    restartData = amrA.getRestartData()
+    assert "stateEids" in restartData, "getRestartData must checkpoint child state by eid"
+
+    modelB = _buildDirect(tmp_path, "b.inp")
+    amrB = modelB.modelModifiers["amr"]
+    amrB.setRestartData(modelB, restartData)
+
+    # State must be restored by eid regardless of the (churn-prone) element number.
+    for eid, want in expected.items():
+        el = amrB._eidToEl.get(eid)
+        assert el is not None, f"eid {eid} not reconstructed on replay"
+        got = np.asarray(el.getStateVars(), dtype=float)
+        np.testing.assert_allclose(got, want, atol=1e-12,
+                                   err_msg=f"child state for eid {eid} not restored (virgin?)")

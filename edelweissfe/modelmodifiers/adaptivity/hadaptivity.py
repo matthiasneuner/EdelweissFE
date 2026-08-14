@@ -670,11 +670,35 @@ class ModelModifier(ModelModifierBase):
         occasionSizes = [len(labels) for labels in self._committedOccasions]
         occasionLabels = [label for labels in self._committedOccasions for label in labels]
         pendingLabels = [el.elNumber for el in self._pendingMarkedElements]
+
+        # Material state (quadrature-point history) of every currently-materialized leaf element,
+        # keyed by the octree element id (eid) rather than the element number. AMR child element
+        # numbers are NOT reproducible across a restart replay -- contact/tie facet elements claim
+        # element labels between refinements, so the running label counter interleaves differently --
+        # which would leave every refined child at a number FEModel.readRestart's number-keyed state
+        # restore cannot match, i.e. restored virgin. The eid IS reproducible (topology is
+        # byte-identical given the replayed occasions), so setRestartData restores by it instead.
+        stateEids = []
+        stateSizes = []
+        stateChunks = []
+        for eid, el in self._eidToEl.items():
+            try:
+                sv = np.asarray(el.getStateVars(), dtype=float).ravel()
+            except NotImplementedError:
+                continue
+            stateEids.append(int(eid))
+            stateSizes.append(sv.size)
+            stateChunks.append(sv)
+        stateData = np.concatenate(stateChunks) if stateChunks else np.zeros(0, dtype=float)
+
         return {
             "occasionSizes": np.array(occasionSizes, dtype=int),
             "occasionLabels": np.array(occasionLabels, dtype=int),
             "pendingLabels": np.array(pendingLabels, dtype=int),
             "lastRefinedTime": np.array([self._lastRefinedTime if self._lastRefinedTime is not None else np.nan]),
+            "stateEids": np.array(stateEids, dtype=int),
+            "stateSizes": np.array(stateSizes, dtype=int),
+            "stateData": stateData,
         }
 
     def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
@@ -708,3 +732,19 @@ class ModelModifier(ModelModifierBase):
         self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
         lastRefinedTime = float(data["lastRefinedTime"][0])
         self._lastRefinedTime = None if np.isnan(lastRefinedTime) else lastRefinedTime
+
+        # Restore refined elements' material history by octree eid (see getRestartData). Element
+        # numbers assigned during the replay above do not match those at checkpoint time, so
+        # FEModel.readRestart's number-keyed restore leaves these children virgin; this runs after the
+        # full replay, when self._eidToEl maps each checkpointed eid to its (renumbered) live element.
+        if "stateEids" in data and len(data["stateEids"]):
+            sizes = data["stateSizes"]
+            flat = data["stateData"]
+            offset = 0
+            for i, eid in enumerate(data["stateEids"]):
+                size = int(sizes[i])
+                chunk = flat[offset : offset + size]
+                offset += size
+                el = self._eidToEl.get(int(eid))
+                if el is not None:
+                    el.setStateVars(np.ascontiguousarray(chunk, dtype=float))
