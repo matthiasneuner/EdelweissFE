@@ -782,7 +782,11 @@ class BlockAMGSolver(LinearSolver):
                 # wrong answer.
                 dinv = self._dinv
 
-            As = (sp.diags(dinv) @ A @ sp.diags(dinv)).tocsr()
+            # INV1: fast in-place diagonal equilibration As = D A D (D = diag(dinv)), vectorized
+            # over the CSR data array -- avoids two full scipy SpGEMMs. Numerically identical.
+            As = A.copy()
+            As.data *= dinv[As.indices]
+            As.data *= np.repeat(dinv, np.diff(As.indptr))
             bs = dinv * b
 
         # The outer GMRES operator SpMV and the true-residual check both otherwise run through a
