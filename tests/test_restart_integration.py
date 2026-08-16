@@ -482,3 +482,32 @@ def test_hadaptivity_restart_restores_child_state(tmp_path):
         got = np.asarray(el.getStateVars(), dtype=float)
         np.testing.assert_allclose(got, want, atol=1e-12,
                                    err_msg=f"child state for eid {eid} not restored (virgin?)")
+
+
+def test_adaptivity_managed_elements_are_excluded_from_number_keyed_restore(tmp_path):
+    """Element state must not be restored by element NUMBER for adaptivity-managed elements.
+
+    Element numbers are not reproducible across a refinement replay (children are renumbered, and
+    facet elements claim labels in between), so a number-keyed restore can hand an element another
+    element's material history, or hit a stateless facet element. The adaptivity modifier restores
+    its own elements by octree eid and publishes them via `restoredElementLabels`; this pins that
+    contract, since violating it fails silently and only shows up as a diverged run much later.
+    """
+    modelA = _buildDirect(tmp_path, "inv_a.inp")
+    amr = modelA.modelModifiers["amr"]
+    assert amr.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
+
+    restartData = amr.getRestartData()
+    assert "stateEids" in restartData, "managed element state must be checkpointed by octree eid"
+
+    modelB = _buildDirect(tmp_path, "inv_b.inp")
+    amrB = modelB.modelModifiers["amr"]
+    amrB.setRestartData(modelB, restartData)
+
+    published = set(amrB.restoredElementLabels)
+    managed = {el.elNumber for el in amrB._eidToEl.values()}
+    assert published == managed, (
+        "every element the modifier restored by eid must be published so FEModel.readRestart skips "
+        "it in the number-keyed restore"
+    )
+    assert published, "the replay materialised no managed elements -- test would be vacuous"
