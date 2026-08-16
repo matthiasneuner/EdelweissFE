@@ -269,7 +269,24 @@ A modifier opts into this by overriding
 :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.setRestartData` --
 unlike a constraint's equivalent pair, ``setRestartData`` is expected to mutate the model (not
 just restore passive internal state) and is called before any node-field/element-statevar restore,
-since whatever it materializes needs to already exist for that later restore to reach by label.
+since whatever it materializes needs to already exist for that later restore to reach.
+
+.. warning::
+   **Element numbers are not reproducible across a replay.** Refined children are renumbered, and
+   facet elements (contact/tie surfaces, rebuilt whenever a surface refines) claim labels in
+   between, so the element that carries a given number after resuming is generally *not* the one
+   that carried it when the checkpoint was written.
+
+   A modifier that materializes elements must therefore checkpoint and restore *their* state itself,
+   keyed by something stable across the replay -- ``hAdaptivity`` uses the octree element id, and
+   node labels are likewise stable -- and then publish those elements via
+   :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.restoredElementLabels`
+   so that :meth:`~edelweissfe.models.femodel.FEModel.readRestart` skips them in its own
+   number-keyed element-state restore. Without that, the number-keyed pass runs *after* the
+   modifier and overwrites correctly restored state with another element's material history (or
+   hits a stateless element and fails outright). The symptom is not a crash at resume but a run
+   that diverges much later, so this contract is worth honouring even when a quick test appears to
+   pass.
 
 Implementing your own model modifiers
 -------------------------------------
