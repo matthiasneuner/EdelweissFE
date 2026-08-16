@@ -79,6 +79,12 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     def onIncrementEnd(self, model: FEModel, step, timeStep: float):
         """Optional lifecycle hook called after an increment converges."""
 
+    #: Element labels whose state this modifier restored itself in :meth:`setRestartData`
+    #: (keyed by something stable, e.g. an octree id). FEModel.readRestart skips these in its own
+    #: number-keyed element-state restore, because element numbers are not reproducible across a
+    #: replay -- see :meth:`~edelweissfe.models.femodel.FEModel.readRestart`.
+    restoredElementLabels: frozenset = frozenset()
+
     def getRestartData(self) -> dict[str, np.ndarray] | None:
         """Return this modifier's history needed to reproduce its effect on the model topology
         (e.g. AMR's log of past refinement decisions), to be serialized by

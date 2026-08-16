@@ -333,6 +333,12 @@ class ModelModifier(ModelModifierBase):
         self._topology = Hex20Topology()
         self._mesh = AdaptiveMesh(splitFactor=self.splitFactor, topology=self._topology)
         self._eidToEl = {}  # mesh element id -> live element
+        #: True only while setRestartData() replays committed occasions; lets _materialize skip
+        #: per-occasion work whose result the checkpoint restore overwrites anyway.
+        self._replayMode = False
+        #: Octree eids of each committed occasion, parallel to _committedOccasions (which holds
+        #: element numbers). Eids stay valid across a restart replay; element numbers do not.
+        self._committedOccasionEids = []
         for el in refineElements:
             componentId = componentOfElement[el]
             for n in el.nodes:
@@ -494,6 +500,7 @@ class ModelModifier(ModelModifierBase):
         )
         self._lastRefinedTime = float(model.time)
         self._committedOccasions.append([el.elNumber for el in eligible])
+        self._committedOccasionEids.append(list(markedEids))
 
     def _materialize(self, model: FEModel, records: dict):
         mesh = self._mesh
@@ -511,12 +518,16 @@ class ModelModifier(ModelModifierBase):
 
         # snapshot the converged nodal values BEFORE the mesh mutates, for the warm start
         oldValues = {}
-        for fieldName, nodeField in model.nodeFields.items():
-            if "U" in nodeField:
-                U = np.asarray(nodeField["U"])
-                oldValues[fieldName] = {
-                    node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
-                }
+        # On the restart replay path the warm start is dead work: readRestart overwrites every node
+        # field right afterwards. Leaving oldValues empty makes the interpolation below and the
+        # fields-restore block no-ops, and skips one array copy per node per field per occasion.
+        if not self._replayMode:
+            for fieldName, nodeField in model.nodeFields.items():
+                if "U" in nodeField:
+                    U = np.asarray(nodeField["U"])
+                    oldValues[fieldName] = {
+                        node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
+                    }
 
         # new nodes
         newNodes = {}
@@ -529,7 +540,9 @@ class ModelModifier(ModelModifierBase):
         active = set(mesh.active())
         materialized = set(self._eidToEl.keys())
         newValues = {fieldName: {} for fieldName in oldValues}  # interpolated values for new nodes
-        newChildEids = active - materialized
+        # Only children whose parent is already materialised: the batched restart replay can leave
+        # several refinement levels pending at once, and this keeps each pass to one level.
+        newChildEids = {eid for eid in (active - materialized) if mesh.elements[eid]["parent"] in self._eidToEl}
 
         # the changeset this call produces (Finding 1/2 above become its faceMap/*Sets entries)
         change = ModelChange(kind=ModelChangeType.REFINEMENT, addedNodes=set(newNodes.keys()))
@@ -544,7 +557,10 @@ class ModelModifier(ModelModifierBase):
                 self._nextElLabel += 1
                 child.setNodes([model.nodes[label] for label in e["conn"]])
                 self._sectionOf[parentEl].assignSectionPropertiesToElement(child)
-                self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
+                if not self._replayMode:
+                    # Replay restores each child's checkpointed state by eid afterwards, so the
+                    # transferred values would be overwritten (see setRestartData).
+                    self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
 
                 # warm start (WS-H): interpolate each NEW node's field values from the parent via the
                 # HEX20 isoparametric map, so the increment restarts from a consistent state, not zero
@@ -669,6 +685,7 @@ class ModelModifier(ModelModifierBase):
 
         occasionSizes = [len(labels) for labels in self._committedOccasions]
         occasionLabels = [label for labels in self._committedOccasions for label in labels]
+        occasionEids = [eid for eids in self._committedOccasionEids for eid in eids]
         pendingLabels = [el.elNumber for el in self._pendingMarkedElements]
 
         # Material state (quadrature-point history) of every currently-materialized leaf element,
@@ -694,12 +711,66 @@ class ModelModifier(ModelModifierBase):
         return {
             "occasionSizes": np.array(occasionSizes, dtype=int),
             "occasionLabels": np.array(occasionLabels, dtype=int),
+            "occasionEids": np.array(occasionEids, dtype=int),
             "pendingLabels": np.array(pendingLabels, dtype=int),
             "lastRefinedTime": np.array([self._lastRefinedTime if self._lastRefinedTime is not None else np.nan]),
             "stateEids": np.array(stateEids, dtype=int),
             "stateSizes": np.array(stateSizes, dtype=int),
             "stateData": stateData,
         }
+
+    def _replayOccasionsByEid(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
+        """Reconstruct the refinement history from recorded octree eids.
+
+        Refines the octree mirror for every occasion first -- pure topology, no model objects, so
+        none of the per-occasion model-side cost is paid -- then materialises the model once per
+        refinement *level*. The 2:1 balance stays per occasion because a later occasion's eids were
+        chosen in a mesh that had already been balanced, so batching it could change the topology.
+        """
+        offset = 0
+        occasions = []
+        for size in data["occasionSizes"]:
+            occasions.append([int(eid) for eid in data["occasionEids"][offset : offset + int(size)]])
+            offset += int(size)
+
+        for eids in occasions:
+            for eid in eids:
+                if self._mesh.elements[eid]["active"]:
+                    self._mesh.refine(eid)
+            self._mesh.balance_2to1()
+
+        # Materialise level by level: _materialize only takes children whose parent is already
+        # materialised, so one pass per refinement level is enough (maxLevel bounds the count).
+        passes = 0
+        while set(self._mesh.active()) - set(self._eidToEl.keys()):
+            with timeit("hanging nodes"):
+                records = self._mesh.hanging_mpc_records()
+            with timeit("materialize"):
+                change = self._materialize(model, records)
+            self._hanging.setRecords(records)
+            with timeit("notify observers"):
+                model.notifyModelChanged(ModelChangeType.REFINEMENT, change)
+            passes += 1
+            if not change.addedElements or passes > 64:
+                break
+
+        self._committedOccasions = [list(labels) for labels in self._splitByOccasion(data, "occasionLabels")]
+        self._committedOccasionEids = occasions
+        self._journal.message(
+            "AMR ModelModifier: replayed {:} occasion(s) from eids in {:} materialisation pass(es), "
+            "active elements {:}".format(len(occasions), passes, len(self._mesh.active())),
+            "hadaptivity",
+            0,
+        )
+
+    def _splitByOccasion(self, data: dict[str, np.ndarray], key: str):
+        """Split a flattened per-occasion array back into one list per occasion."""
+        out = []
+        offset = 0
+        for size in data["occasionSizes"]:
+            out.append([int(v) for v in data[key][offset : offset + int(size)]])
+            offset += int(size)
+        return out
 
     def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
         """Replay every committed occasion, in order, through :meth:`_refineAndMaterialize` --
@@ -723,11 +794,23 @@ class ModelModifier(ModelModifierBase):
         self._isFirstCall = False
 
         offset = 0
-        for size in data["occasionSizes"]:
-            labels = data["occasionLabels"][offset : offset + int(size)]
-            offset += int(size)
-            eligible = [model.elements[int(label)] for label in labels]
-            self._refineAndMaterialize(model, eligible)
+        self._replayMode = True
+        try:
+            if "occasionEids" in data and len(data["occasionEids"]):
+                self._replayOccasionsByEid(model, data)
+            else:
+                # legacy checkpoint (no eids recorded): per-occasion materialisation
+                for size in data["occasionSizes"]:
+                    labels = data["occasionLabels"][offset : offset + int(size)]
+                    offset += int(size)
+                    eligible = [model.elements[int(label)] for label in labels]
+                    self._refineAndMaterialize(model, eligible)
+        finally:
+            self._replayMode = False
+
+        # Every element this modifier manages had its state restored above by octree eid; tell
+        # FEModel.readRestart not to restore them again by (renumbered) element number.
+        self.restoredElementLabels = frozenset(el.elNumber for el in self._eidToEl.values())
 
         self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
         lastRefinedTime = float(data["lastRefinedTime"][0])

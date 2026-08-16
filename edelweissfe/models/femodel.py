@@ -444,11 +444,24 @@ class FEModel:
         for name, scalarVariable in self.scalarVariables.items():
             scalarVariable.value = f["scalarVariables"].attrs[name]
 
+        # Elements a model modifier already restored itself (by a stable key -- see
+        # ModelModifierBase.restoredElementLabels). Their numbers are reassigned by the replay, so
+        # restoring them again by number would hand them another element's history, or hit a
+        # stateless facet element that happens to hold the number now.
+        alreadyRestored = set()
+        for modifier in self.modelModifiers.values():
+            alreadyRestored |= set(getattr(modifier, "restoredElementLabels", frozenset()))
+
         for elNumber, element in self.elements.items():
             elementKey = str(elNumber)
-            if elementKey not in f["elements"]:
+            if elementKey not in f["elements"] or elNumber in alreadyRestored:
                 continue
-            element.setStateVars(f["elements"][elementKey][:])
+            try:
+                element.setStateVars(f["elements"][elementKey][:])
+            except NotImplementedError:
+                # This number belonged to a stateful element when the checkpoint was written and to
+                # a stateless one now -- nothing sensible to restore.
+                continue
 
         for name, constraint in self.constraints.items():
             if name not in f["constraints"]:
