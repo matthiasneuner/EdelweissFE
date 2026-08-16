@@ -333,6 +333,9 @@ class ModelModifier(ModelModifierBase):
         self._topology = Hex20Topology()
         self._mesh = AdaptiveMesh(splitFactor=self.splitFactor, topology=self._topology)
         self._eidToEl = {}  # mesh element id -> live element
+        #: True only while setRestartData() replays committed occasions; lets _materialize skip
+        #: per-occasion work whose result the checkpoint restore overwrites anyway.
+        self._replayMode = False
         for el in refineElements:
             componentId = componentOfElement[el]
             for n in el.nodes:
@@ -511,12 +514,16 @@ class ModelModifier(ModelModifierBase):
 
         # snapshot the converged nodal values BEFORE the mesh mutates, for the warm start
         oldValues = {}
-        for fieldName, nodeField in model.nodeFields.items():
-            if "U" in nodeField:
-                U = np.asarray(nodeField["U"])
-                oldValues[fieldName] = {
-                    node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
-                }
+        # On the restart replay path the warm start is dead work: readRestart overwrites every node
+        # field right afterwards. Leaving oldValues empty makes the interpolation below and the
+        # fields-restore block no-ops, and skips one array copy per node per field per occasion.
+        if not self._replayMode:
+            for fieldName, nodeField in model.nodeFields.items():
+                if "U" in nodeField:
+                    U = np.asarray(nodeField["U"])
+                    oldValues[fieldName] = {
+                        node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
+                    }
 
         # new nodes
         newNodes = {}
@@ -544,7 +551,10 @@ class ModelModifier(ModelModifierBase):
                 self._nextElLabel += 1
                 child.setNodes([model.nodes[label] for label in e["conn"]])
                 self._sectionOf[parentEl].assignSectionPropertiesToElement(child)
-                self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
+                if not self._replayMode:
+                    # Replay restores each child's checkpointed state by eid afterwards, so the
+                    # transferred values would be overwritten (see setRestartData).
+                    self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
 
                 # warm start (WS-H): interpolate each NEW node's field values from the parent via the
                 # HEX20 isoparametric map, so the increment restarts from a consistent state, not zero
@@ -723,11 +733,15 @@ class ModelModifier(ModelModifierBase):
         self._isFirstCall = False
 
         offset = 0
-        for size in data["occasionSizes"]:
-            labels = data["occasionLabels"][offset : offset + int(size)]
-            offset += int(size)
-            eligible = [model.elements[int(label)] for label in labels]
-            self._refineAndMaterialize(model, eligible)
+        self._replayMode = True
+        try:
+            for size in data["occasionSizes"]:
+                labels = data["occasionLabels"][offset : offset + int(size)]
+                offset += int(size)
+                eligible = [model.elements[int(label)] for label in labels]
+                self._refineAndMaterialize(model, eligible)
+        finally:
+            self._replayMode = False
 
         self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
         lastRefinedTime = float(data["lastRefinedTime"][0])
