@@ -743,6 +743,10 @@ class ModelModifier(ModelModifierBase):
         finally:
             self._replayMode = False
 
+        # Every element this modifier manages had its state restored above by octree eid; tell
+        # FEModel.readRestart not to restore them again by (renumbered) element number.
+        self.restoredElementLabels = frozenset(el.elNumber for el in self._eidToEl.values())
+
         self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
         lastRefinedTime = float(data["lastRefinedTime"][0])
         self._lastRefinedTime = None if np.isnan(lastRefinedTime) else lastRefinedTime
