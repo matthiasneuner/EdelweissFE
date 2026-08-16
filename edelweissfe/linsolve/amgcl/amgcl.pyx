@@ -434,9 +434,11 @@ cdef class PyAMGCLMatrix:
     operator instead of ``As`` itself.
     """
     cdef ThreadedMatrix* matrix
+    cdef int _nrows
 
     def __cinit__(self):
         self.matrix = new ThreadedMatrix()
+        self._nrows = 0
 
     def __dealloc__(self):
         if self.matrix != NULL:
@@ -466,6 +468,35 @@ cdef class PyAMGCLMatrix:
         cdef double[::1] x_ = x_arr
         cdef double[::1] y_ = y
         self.matrix.matvec(n, &x_[0], &y_[0])
+        return y
+
+    def buildRect(self, object A):
+        """Convert a *rectangular* A (scipy.sparse csr_matrix, nrows x ncols) for matvecRect().
+
+        Needed for the off-diagonal field-coupling blocks of blockamg's block Gauss-Seidel sweep:
+        build()/matvec() above assume a square operator and size the output by the input length.
+        """
+        if not scipy.sparse.isspmatrix_csr(A):
+            A = A.tocsr()
+
+        cdef int nrows = A.shape[0]
+        cdef int ncols = A.shape[1]
+        cdef np.ndarray[np.int32_t, ndim=1, mode="c"] indptr = np.ascontiguousarray(A.indptr, dtype=np.int32)
+        cdef np.ndarray[np.int32_t, ndim=1, mode="c"] indices = np.ascontiguousarray(A.indices, dtype=np.int32)
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] data = np.ascontiguousarray(A.data, dtype=np.float64)
+        cdef int[::1] indptr_ = indptr
+        cdef int[::1] indices_ = indices
+        cdef double[::1] data_ = data
+        self.matrix.buildRect(nrows, ncols, &indptr_[0], &indices_[0], &data_[0])
+        self._nrows = nrows
+
+    def matvecRect(self, object x):
+        """Returns A @ x (length nrows) for a matrix built with buildRect()."""
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] x_arr = np.ascontiguousarray(x, dtype=np.float64)
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] y = np.empty(self._nrows, dtype=np.float64)
+        cdef double[::1] x_ = x_arr
+        cdef double[::1] y_ = y
+        self.matrix.matvecRect(&x_[0], &y_[0])
         return y
 
     def residual(self, object rhs, object x):

@@ -110,6 +110,8 @@ cdef extern from "amgcl-wrapper.hpp":
         void build(int n, const int* ptr, const int* col, const double* val) except +
         void matvec(int n, const double* x, double* y) except +
         void residual(int n, const double* rhs, const double* x, double* r) except +
+        void buildRect(int nrows, int ncols, const int* ptr, const int* col, const double* val) except +
+        void matvecRect(const double* x, double* y) except +
 
     # Callback signature bridging AMGCL's native lgmres Krylov loop back into a Python-level
     # preconditioner -- see amgcl-wrapper.hpp's own comment on PyPrecondApplyFn/
