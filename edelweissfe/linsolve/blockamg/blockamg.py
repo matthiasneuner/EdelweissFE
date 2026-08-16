@@ -806,7 +806,12 @@ class BlockAMGSolver(LinearSolver):
                 rowBlock = As[slices[i], :]
                 for j in range(len(slices)):
                     if i != j:
-                        offBlocks[(i, j)] = rowBlock[:, slices[j]].tocsr()
+                        # INV4: hand the coupling block to AMGCL's OpenMP-threaded matvec instead of
+                        # keeping it as a scipy CSR whose `@` is single-threaded C (measured at 12-16%
+                        # of the whole preconditioner apply). Same operator, same arithmetic.
+                        threadedOffBlock = PyAMGCLMatrix()
+                        threadedOffBlock.buildRect(rowBlock[:, slices[j]].tocsr())
+                        offBlocks[(i, j)] = threadedOffBlock
 
         if mustRefresh:
             with performancetiming.timeit("blockamg: hierarchy build"):
@@ -897,7 +902,7 @@ class BlockAMGSolver(LinearSolver):
                 localResidual = residual[slices[i]].copy()
                 for j in range(nFields):
                     if j != i:
-                        localResidual -= offBlocks[(i, j)] @ x[j]
+                        localResidual -= offBlocks[(i, j)].matvecRect(x[j])  # INV4: threaded
                 x[i] = preconditioners[i].applyPreconditioner(localResidual)
 
         def blockGaussSeidel(residual):

@@ -491,6 +491,40 @@ public:
     auto r_rng   = amgcl::make_iterator_range( r, r + n );
     amgcl::backend::residual( rhs_rng, *A_, x_rng, r_rng );
   }
+
+  // --- rectangular support -------------------------------------------------------------------
+  // An off-diagonal field-coupling block (blockamg.py's block Gauss-Seidel sweep) is nrows x ncols
+  // with nrows != ncols. build()/matvec() above size the input and output ranges by the same n,
+  // which for a rectangular operator writes past the end of the output buffer, so rectangular
+  // blocks carry their own dimension bookkeeping. Dimensions are taken from buildRect(), not from
+  // the caller, so the output length can never be inferred from the input length again.
+  int nrows_ = 0;
+  int ncols_ = 0;
+
+  void buildRect( int nrows, int ncols, const int* ptr, const int* col, const double* val )
+  {
+    int nnz = ptr[nrows];
+    // crs has a dedicated rectangular constructor (nrows, ncols, ptr, col, val); the crs_tuple
+    // adapter only understands the square 4-element form, so build the backend matrix directly.
+    A_ = std::make_shared< BackendMatrix >( static_cast< size_t >( nrows ),
+                                            static_cast< size_t >( ncols ),
+                                            amgcl::make_iterator_range( ptr, ptr + nrows + 1 ),
+                                            amgcl::make_iterator_range( col, col + nnz ),
+                                            amgcl::make_iterator_range( val, val + nnz ) );
+    nrows_   = nrows;
+    ncols_   = ncols;
+  }
+
+  // y (length nrows_) <- A (nrows_ x ncols_) * x (length ncols_)
+  void matvecRect( const double* x, double* y )
+  {
+    if ( !A_ ) {
+      throw std::runtime_error( "matvecRect(): no matrix built yet -- call buildRect() first" );
+    }
+    auto x_rng = amgcl::make_iterator_range( x, x + ncols_ );
+    auto y_rng = amgcl::make_iterator_range( y, y + nrows_ );
+    amgcl::backend::spmv( 1.0, *A_, x_rng, 0.0, y_rng );
+  }
 };
 
 // Exposes AMGCL's own OpenMP-threaded sparse-matrix-matrix product and
