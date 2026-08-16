@@ -458,6 +458,8 @@ class BlockAMGSolver(LinearSolver):
         self._lastNnz = None
         self._lastOuterIters = None
         self._lastContinuations = None
+        # INV6: cached scaled->true relative-residual gap, used to pre-compensate the first pass.
+        self._trueResidualGap = 1.0
         self._refreshNext = False
 
         # The persistent AMGCL lgmres outer-solver instance (only used when outerSolver ==
@@ -918,6 +920,11 @@ class BlockAMGSolver(LinearSolver):
         else:
             eta = self._forcingTolerance(residualNorm, newIncrement)
 
+        # INV6: the outer Krylov converges the *scaled* residual, but acceptance is on the *true*
+        # residual; ask the first pass for eta/gap (gap cached from previous solves, safety 0.3) so it
+        # lands on target in one pass instead of paying a warm-restart continuation.
+        firstPassEta = max(0.3 * eta / max(self._trueResidualGap, 1.0), 1e-14)
+
         # outerSolver == "amgcl_lgmres" (the default): both outer-solve call sites below (this one and
         # the true-residual continuation retry) dispatch to AMGCL's own native amgcl::solver::lgmres
         # (self._lgmresSolver, built/reused above) instead of scipy.sparse.linalg.gmres. lgmres's own
@@ -934,7 +941,7 @@ class BlockAMGSolver(LinearSolver):
                     outerOperator,
                     bs,
                     M=preconditioner,
-                    rtol=eta,
+                    rtol=firstPassEta,
                     atol=0.0,
                     restart=self._outerRestart,
                     maxiter=self._outerMaxiter,
@@ -955,7 +962,7 @@ class BlockAMGSolver(LinearSolver):
                     As,
                     bs,
                     blockGaussSeidel,
-                    eta,
+                    firstPassEta,
                     self._outerRestart * self._outerMaxiter,
                     resetOnce=(newIncrement and self._lgmresResetOnNewIncrement),
                 )
@@ -988,8 +995,14 @@ class BlockAMGSolver(LinearSolver):
         # Fix: geometrically tighten the *requested* rtol itself by a fixed factor each continuation
         # (0.01x), guaranteeing a strictly smaller, dimensionally-consistent target with no dependency
         # on the callback's residual scale.
+        # INV6: learn the gap from this pass (true residual achieved vs the scaled tolerance it was
+        # given), smoothed so one atypical solve cannot swing the next one's first-pass tolerance.
+        _measuredGap = trueResidual / max(firstPassEta, 1e-300)
+        if np.isfinite(_measuredGap) and _measuredGap > 0.0:
+            self._trueResidualGap = max(0.5 * self._trueResidualGap + 0.5 * _measuredGap, 1.0)
+
         with performancetiming.timeit("blockamg: true-residual continuations"):
-            continuationEta = eta
+            continuationEta = min(eta, firstPassEta)
             continuations = 0
             while trueResidual > eta and continuations < self._trueResidualMaxContinuations:
                 continuations += 1
