@@ -288,6 +288,25 @@ class BlockAMGSolver(LinearSolver):
         A solve whose ``||b||`` exceeds this multiple of the previous solve's ``||b||`` is treated as
         the first solve of a new increment (or a cutback): the forcing tolerance resets to ``etaMax``
         and the AMG hierarchies are refreshed rather than reused.
+    gapCompensatedTolerance, gapSafetyFactor
+        Opt-in (default ``False``, i.e. unchanged behaviour). The outer Krylov converges the
+        *scaled* (equilibrated) residual while acceptance is on the *true* relative residual; the
+        ratio between them (the "gap", measured 1.0-3.5 here) is why ~99% of production solves need
+        a warm-restart continuation. When enabled, the first pass asks for
+        ``gapSafetyFactor * eta / gap`` (gap EMA-smoothed across solves) so it lands on target in one
+        pass, and any remaining continuation tightens by the *measured* gap instead of the fixed
+        0.01x factor.
+
+        **Measured, and why it is not the default.** Per increment it is a clear win: on a live
+        12-increment AnchorPryOut window, continuations 126 -> 1 and outer iterations 8943 -> 7124
+        (-20%), with no cutbacks or return-mapping failures. But the default path over-solves by
+        ~30x, and Newton quietly relies on that: landing merely in-spec costs about one extra Newton
+        iteration per increment, which parks the run just above the adaptive time stepper's
+        ``criticalIter`` growth threshold. In the same window the default arm grew its increment
+        0.000375 -> 0.000413 and covered 16% more simulated time, while this arm never grew. Judged
+        per unit of *simulated time* rather than per increment, the per-increment saving is largely
+        or wholly given back. ``gapSafetyFactor`` is the knob between the two regimes (smaller =
+        more accurate = closer to the default's Newton behaviour); the sweet spot is unexplored.
     hierarchyStalenessFactor
         Refresh the AMG hierarchies before the *next* solve if this solve's outer GMRES count exceeded
         this factor times the previous solve's -- a growing count is the signal that the reused
@@ -385,6 +404,8 @@ class BlockAMGSolver(LinearSolver):
         ewAlpha: float = 1.618033988749895,
         residualGrowthFactor: float = 4.0,
         hierarchyStalenessFactor: float = 1.5,
+        gapCompensatedTolerance: bool = False,
+        gapSafetyFactor: float = 0.3,
         trueResidualMaxContinuations: int = 2,
         verbosity: str = "warning",
         warnOuterIterationsThreshold: int = 100,
@@ -415,6 +436,8 @@ class BlockAMGSolver(LinearSolver):
         self._ewAlpha = ewAlpha
         self._residualGrowthFactor = residualGrowthFactor
         self._hierarchyStalenessFactor = hierarchyStalenessFactor
+        self._gapCompensatedTolerance = gapCompensatedTolerance
+        self._gapSafetyFactor = gapSafetyFactor
         self._trueResidualMaxContinuations = trueResidualMaxContinuations
         if verbosity not in _VERBOSITY_LEVELS:
             raise ValueError("verbosity must be one of {:}, got {:!r}".format(_VERBOSITY_LEVELS, verbosity))
@@ -925,7 +948,10 @@ class BlockAMGSolver(LinearSolver):
         # INV6: the outer Krylov converges the *scaled* residual, but acceptance is on the *true*
         # residual; ask the first pass for eta/gap (gap cached from previous solves, safety 0.3) so it
         # lands on target in one pass instead of paying a warm-restart continuation.
-        firstPassEta = max(0.3 * eta / max(self._trueResidualGap, 1.0), 1e-14)
+        if self._gapCompensatedTolerance:
+            firstPassEta = max(self._gapSafetyFactor * eta / max(self._trueResidualGap, 1.0), 1e-14)
+        else:
+            firstPassEta = eta
 
         # outerSolver == "amgcl_lgmres" (the default): both outer-solve call sites below (this one and
         # the true-residual continuation retry) dispatch to AMGCL's own native amgcl::solver::lgmres
@@ -1004,7 +1030,7 @@ class BlockAMGSolver(LinearSolver):
             self._trueResidualGap = max(0.5 * self._trueResidualGap + 0.5 * _measuredGap, 1.0)
 
         with performancetiming.timeit("blockamg: true-residual continuations"):
-            continuationEta = min(eta, firstPassEta)
+            continuationEta = min(eta, firstPassEta) if self._gapCompensatedTolerance else eta
             continuations = 0
             while trueResidual > eta and continuations < self._trueResidualMaxContinuations:
                 continuations += 1
@@ -1014,9 +1040,12 @@ class BlockAMGSolver(LinearSolver):
                 # scaled->true gap g. Landing the next pass on target needs ~eta/g, so tighten by that
                 # (with a safety margin), never looser, and always at least 2x per round so the loop
                 # still terminates.
-                _gap = trueResidual / max(continuationEta, 1e-300)
-                _proposed = 0.3 * eta / max(_gap, 1.0)
-                continuationEta = max(min(_proposed, continuationEta * 0.5), 1e-14)
+                if self._gapCompensatedTolerance:
+                    _gap = trueResidual / max(continuationEta, 1e-300)
+                    _proposed = self._gapSafetyFactor * eta / max(_gap, 1.0)
+                    continuationEta = max(min(_proposed, continuationEta * 0.5), 1e-14)
+                else:
+                    continuationEta *= 0.01
                 if self._outerSolver == "scipy":
                     continuationHistory = []
                     z, info = gmres(
