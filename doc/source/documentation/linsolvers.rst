@@ -214,9 +214,43 @@ Recognised keys, all optional:
     * - ``etaMin`` / ``etaMax`` / ``ewGamma`` / ``ewAlpha``
       - see the ``inexactnewton`` table above
       - The same Eisenstat–Walker forcing-tolerance scheme, applied to the outer Krylov solve's own stopping tolerance.
+    * - ``gapCompensatedTolerance`` / ``gapSafetyFactor``
+      - ``false`` / ``0.3``
+      - **Opt-in** — compensate the outer solve's stopping tolerance for the gap between the *scaled* residual the Krylov solver actually minimises and the *true* residual it is judged on, so most solves converge in a single pass instead of needing a warm-restart continuation. See "Gap-compensated tolerance" below, including why it is not the default.
     * - ``verbosity``
       - ``"warning"``
       - Log level (``"debug"``/``"info"``/``"warning"``/``"error"``) for this solver's own diagnostic output.
+
+Gap-compensated tolerance (opt-in)
+""""""""""""""""""""""""""""""""""
+
+``blockamg`` equilibrates the system before solving, so the outer Krylov method minimises the
+*scaled* residual :math:`\|D(b - Ax)\|`, while the stopping criterion is checked on the *true*
+relative residual :math:`\|b - Ax\| / \|b\|`. The two differ by a factor — the *gap* — that grows
+with the conditioning of the equilibration. When the true-residual check fails, the solve is
+re-run as a warm restart at a tighter tolerance (a *continuation*).
+
+In practice almost every solve needs one: on a reference gradient-enhanced damage model, 4467 of
+4499 solves ran a continuation, i.e. effectively every linear solve was performed twice — and the
+continuation is disproportionately expensive because restarting discards most of the accumulated
+Krylov subspace.
+
+With ``gapCompensatedTolerance = true`` the gap is measured, smoothed across solves, and used to
+pre-compensate the *first* pass (asking it for ``gapSafetyFactor * eta / gap``); any continuation
+that is still required then tightens by the measured gap rather than by a fixed factor.
+
+.. note::
+   **Why this is opt-in and not the default.** Measured on a 12-increment window of a reference
+   model, enabling it cut continuations from 126 to 1 and outer iterations by 20% per increment.
+   However, the default path happens to over-solve every system by roughly 30x, and the Newton
+   iteration relies on that: converging merely inside the requested tolerance costs about one extra
+   Newton iteration per increment, which is enough to keep the run above the adaptive time
+   stepper's ``criticalIter`` threshold and so prevent it from growing the time increment. In the
+   same window the default configuration grew its increment and covered 6.3% more simulated time.
+   Normalised per unit of *simulated time* — the metric that matters — the net gain was 15% fewer
+   iterations and 6.8% less wall-clock, roughly half the per-increment headline. ``gapSafetyFactor``
+   is the knob between the two regimes (smaller values solve more accurately, closer to the
+   default's Newton behaviour); its optimum has not been explored.
 
 .. note::
    ``blockamg`` is the O(n)-memory route to the 1M+-DOF regime a direct factorization cannot reach, not necessarily the fastest solver at moderate problem sizes — a direct factorization (e.g. ``pardiso``) can still be competitive, or faster, on systems that comfortably fit its fill-in. Which is faster depends on problem size, conditioning, and how severely damage/contact nonlinearity degrades the per-field AMG hierarchies' convergence on a given increment.
