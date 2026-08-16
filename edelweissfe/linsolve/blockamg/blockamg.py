@@ -995,7 +995,15 @@ class BlockAMGSolver(LinearSolver):
             continuations = 0
             while trueResidual > eta and continuations < self._trueResidualMaxContinuations:
                 continuations += 1
-                continuationEta *= 0.01
+                # INV5 (experiment): gap-informed tightening instead of a blunt fixed 0.01x. The pass
+                # just finished converged the *scaled* residual to continuationEta and landed at
+                # trueResidual; both are relative residuals in the same units, so their ratio is the
+                # scaled->true gap g. Landing the next pass on target needs ~eta/g, so tighten by that
+                # (with a safety margin), never looser, and always at least 2x per round so the loop
+                # still terminates.
+                _gap = trueResidual / max(continuationEta, 1e-300)
+                _proposed = 0.3 * eta / max(_gap, 1.0)
+                continuationEta = max(min(_proposed, continuationEta * 0.5), 1e-14)
                 if self._outerSolver == "scipy":
                     continuationHistory = []
                     z, info = gmres(
