@@ -1111,7 +1111,45 @@ The hotfix stays in place and correct until P5 lands, then is deleted wholesale.
     The four `AMR_*` cases run to completion and fail on `U` vs `U.ref`, i.e. stale references or
     genuine drift — **not** crashes. Logs preserved on xeon at `~/tp-suite-logs/`.
 
-    ### The failures are mostly a stale-`libMarmot` artifact (measured 2026-08-17)
+    ### `AMR_ContactRefineShear` — traced 2026-08-17, two follow-ups kept
+
+**It is not a pre-existing failure. `a8bfda33` (this branch) changed its answer**, found by
+`git bisect` over this branch's own commits.
+
+| | result |
+|---|---|
+| base `d8dd9963`, AVX2 | **passes** |
+| base `d8dd9963`, AVX-512 | fails — MKL ISA dispatch (a *second*, unrelated cause) |
+| HEAD (MKL pinned to AVX2) | **fails: 8.5e-5, 4.7e-4 relative, 1392/3318 entries** |
+| old code, repeated | 0.000e+00 — deterministic |
+| new code, repeated at OMP 1/2/3 | 0.000e+00 — deterministic |
+
+Both versions are stable; they differ because `a8bfda33` deliberately replaced hash/address-derived
+entity creation order with sorted, mesh-derived order. This test is sensitive to that ordering: a
+slave node whose closest-facet decision is near-tied gets a different winner, which then freezes for
+the increment. The new ordering is deterministic *by construction* rather than by luck, so the new
+result is the one to keep — but the reference (2026-07-28) encodes the old one.
+
+**How it stayed hidden, worth internalising:** every suite comparison in this plan matched failure
+*sets*, and this test failed on both sides of every comparison — on the base for the ISA reason, on
+the branch for this one. **Equal failure counts are not equal causes.** A set-based regression check
+cannot see a changed reason; re-derive *why* for any test that fails on both sides.
+
+**Two follow-ups, both open, neither actioned:**
+
+1. **Regenerate `U.ref`.** The precedent is PR #57 regenerating `PullOut` and `FrictionHysteresis`
+   after its triangulation change — and `HANDOFF_PR_STRATEGY.md` records that as needing the user's
+   explicit sign-off, which is why it has not been done here.
+2. **Remove the underlying fragility.** The test should not be ordering-sensitive at all. Tried the
+   #57 remedy (offset one block's `x0` by 0.0037 to break the mirror symmetry about x=0.5) and
+   **measured that it does not work** — 9.7e-5, unchanged magnitude — so the mechanism is not the
+   symmetry plane I guessed. Per `HANDOFF_PR_STRATEGY.md`'s own methodology note, spot-checks in this
+   class look convincing and are not; the only trustworthy diagnostic is a full discriminant scan for
+   near-zero `va`/`vb`/`vc` across the run. That is real work inside
+   `nodetodeformablesurfacepenalty` — #57's territory, and the file P3 rewrites — so it belongs with
+   the contact work, not here.
+
+### The failures are mostly a stale-`libMarmot` artifact (measured 2026-08-17)
 
     Running the same 8 cases on **x9** with the identical EdelweissFE commit — and with the same
     `OMP_NUM_THREADS=4 PYTHON_GIL=0`, so it is not a threading effect:
