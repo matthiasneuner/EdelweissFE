@@ -48,33 +48,64 @@ do not try to rebase this work onto `next_v26.11` directly.
 
 Push to `mn` only, per the workspace convention.
 
-## 0.1a Integration with PR #57 (decided 2026-08-17)
+## 0.1a Integration with `next_v26.11` — do NOT merge at the top (revised 2026-08-17)
 
-**EdelweissFE PR #57** (`matthias/deformable_surface_contact` → `next_v26.11`, *"feat:
-node-to-surface contact with facets"*) is finalized and merges into `next_v26.11` today. This
-branch's base predates it, and the two overlap:
+**#57 is merged upstream (squashed as `0612a4d5`), and the correct response is to do nothing about
+it here.** An earlier version of this section said "land #57, then merge `next_v26.11` into this
+branch before P3". That was wrong, and `HANDOFF_PR_STRATEGY.md` is why.
 
-| file | commits on PR #57 | this branch |
-|---|---|---|
-| `generators/surfaceelementgenerator.py` | **9** | rewritten by P1, replaced by P3 |
-| `models/femodel.py` | **4** | rewritten by P1/P2 |
-| `generators/planerectquad.py` | 1 (`a671843c`, label continuation) | subsumed by the allocator |
-| `abqmodelconstructor.py` | 1 (`4d1a2eeb`, elSet ordering) | **same fix**, now byte-identical (`c369e71f`) |
-| `hadaptivity.py`, `boxgen`, `pipegen`, `microstructuregenerator` | 0 | — |
+**This branch is the top of a seven-deep unlanded stack.** Verified by ancestry — every one of these
+is an ancestor of `feat/topology-pipeline`, and **none** is upstream:
 
-**Sequencing:** land #57, then **merge** `next_v26.11` into `feat/topology-pipeline` **before
-starting P3** — P3 rewrites `surfaceelementgenerator.py`, and reconciling that file once against
-#57's nine commits is much cheaper than twice. **Merge, do not rebase**: #57's history is long
-enough that a linear rebase has already produced ghost conflicts from dead history on this repo,
-where a merge resolved the current-state divergence cleanly.
+```
+feat/amr-hanging-nodes (#64, still a DRAFT PR)
+  -> feat/amr-recovery-marker -> feat/amgcl-lgmres-outer-solver
+  -> perf/linsolve-investigation -> feat/restart -> perf/linsolve-restart
+  -> perf/blockamg-efficiency -> feat/topology-pipeline  (here)
+```
 
-**Already handled:** `c369e71f` makes this branch's `abqmodelconstructor` hunks byte-identical to
-`4d1a2eeb`, so that file merges as a no-op instead of a conflict.
+The project lands such a stack **bottom-up**, rebasing each branch onto the then-current
+`next_v26.11` as its turn comes (`HANDOFF_PR_STRATEGY.md`, "Next steps" item 5). So:
 
-**Two tests this branch saw failing are fixed on #57**, not here — `NodeToDeformableSurfaceContactPullOut`
-(`7815c011`) and `NodeToDeformableSurfaceContactCurvedHexa20` (`b715bf6a`), both razor-edge
-closest-point ties broken by floating-point noise. `AMR_ContactRefineShear` is **not** touched by
-#57 and remains the one genuinely open failure.
+- The reconciliation debt against #57 belongs to **`#64`'s rebase at the bottom**, not to a merge at
+  the top. Paying it here would pay it twice.
+- A trial `git merge origin/next_v26.11` produces **43 conflicts** (25 source/doc + 18 add/add
+  testfiles), concentrated in exactly the contact files: `surfaceelementgenerator.py` 16 hunks,
+  `nodetodeformablesurfacepenalty.py` 16, `nonlinearimplicitstatic.py` 10, `femodel.py` 1. That is
+  the stack's debt made visible, not this branch's integration task.
+- A merge commit in the middle of a stack that will later be rebased/flattened is debt in the wrong
+  place, and it would drag contact work this branch has no need for.
+
+**Nuance on rebase vs merge, since the project prefers rebasing:** rebasing is right for *prepping a
+branch for its own PR*. It is **not** right for *updating a long messy branch onto a moved base* --
+`HANDOFF_PR_STRATEGY.md` records exactly that experiment on #57 ("Did not do a linear git rebase ...
+tried it first, aborted immediately" -- ghost conflicts from superseded history on the very first
+replayed commit) and a merge was used instead. Same conclusion as
+`memory/feedback_rebase_vs_merge_long_branch.md`. Neither applies *yet* here, because this branch's
+turn has not come.
+
+### Consequences for the work order
+
+| phase | files | debt against #57 | do it now? |
+|---|---|---|---|
+| **P5** restart onto plans + fingerprint | `femodel.py` (1 hunk), `hadaptivity.py` (**0**), `modelmodifierbase.py` (0) | negligible | **yes -- this is where the original bug dies** |
+| **P7** domain/round conflict detection | `modelmodifierbase.py`, `hadaptivity.py` | none | yes |
+| docs (§9) | new file | none | yes |
+| **P3** facets become a modifier | `surfaceelementgenerator.py` | **16 hunks, the worst file** | **defer** until the stack catches up |
+| **P6 item 1** incremental refresh | `surfaceelementgenerator.py`, `tie.py` | worst | defer, blocked behind P3 |
+
+**When P3 does come**, design it against #57's *final* `surfaceelementgenerator.py` rather than this
+branch's, so the reconciliation is "take theirs, then apply the modifier wrapper" instead of a
+hand-merge of two rewrites.
+
+### A correction to this plan's own test method
+
+`HANDOFF_PR_STRATEGY.md` ("Working-directory note") warns that running `testfiles/marmot/` from a
+worktree with copied `.so` files produces **~74 spurious failures** from a `MarmotElementWrapper`/
+`BaseElement` module-identity mismatch -- the same setup every suite run in this plan used. Those
+runs showed 6 failures, not 74, and base-vs-feature sets were identical, so the *comparisons* here
+hold. But the absolute marmot numbers from a worktree are not trustworthy on their own: **confirm any
+marmot-suite verdict in the main checkout** before treating it as a property of the code.
 
 ## 0.2 Machines
 
