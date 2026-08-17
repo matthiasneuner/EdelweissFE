@@ -968,7 +968,12 @@ The hotfix stays in place and correct until P5 lands, then is deleted wholesale.
 11. perf(amr): skip the neighbour search away from a refinement front            [P6.2] DONE ccf79a9
 12. perf(amr): incremental hanging-node classification / set sync / relink               [P6]
 13. perf(contact): rebuild only the facets of changed faces, via ModelChange.faceMap     [P6]
-14. feat(modifiers): domain overlap check, round conflict detection, convergence guard   [P7]
+14. feat(topology): refuse conflicting model modifiers, at setup and per round   [P7] DONE 1ddd41ba
+    ↳ **P7 COMPLETE**, verified on xeon: pytest 301 passed / 5 pre-existing; suites 2 + 3, identical
+      to the baseline. declaredDomain generalises hAdaptivity's own pairwise check to ANY pair of
+      modifiers; per-round tracking additionally catches one modifier changing what another just
+      changed, which disjoint domains do not cover.
+15. docs(topology): the pipeline page + correcting the pages it obsoleted   [docs] DONE d185c83d
 15. test(topology): fingerprint round-trip, determinism, conflict and convergence        [tests]
 16. docs(topology): the pipeline, the contract, the three tiers                          [docs]
 17. TEMP: convert pre-pipeline checkpoints during validation -- REVERT BEFORE MERGE      [bridge]
