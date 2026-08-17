@@ -846,6 +846,27 @@ doing whole-mesh work for a local change. Seconds per topology round, tie varian
    dominated. The reason is visible in the code: the scan does early-out per element, but it still
    iterates *every* active element to ask `hasFinerNeighbour(eid)` — the early-out is not free.
 
+**P6 item 2 delivered (`ccf79a9`).** The scan now records the highest level per (grid cell, body)
+during the grid pass and rejects an element before any set union unless some cell it touches holds a
+strictly finer element of the same body -- a necessary condition, with the exact test unchanged
+behind it. Measured on the same probe:
+
+| stage @1152 el | before | after |
+|---|---|---|
+| `hanging: interface-shell scan` | 0.0152 | **0.0095** (−37%) |
+| `hanging: whole-mesh index build` | 0.0078 | 0.0081 (+4%, the new bookkeeping) |
+| hanging total | 0.0230 | **0.0176** (−23%) |
+| `topology update` | 0.1153 | 0.1098 (−5%) |
+
+The win grows with mesh size (−1% / −20% / −37% at 128 / 512 / 1152 elements), which is the
+signature of skipping a conforming majority that grows with the mesh -- so it should be worth
+considerably more at AnchorPryOut scale. Exactness was verified by loading the previous
+implementation side by side from git and running it unbound on live meshes from real AMR runs:
+`classify_hanging` output identical, including a tied two-body case with 44 hanging records.
+
+**Still the dominant cost: `refresh mesh dependents` (0.0399 s, unchanged).** That is P6 item 1 and
+it lives in `surfaceelementgenerator.py`/`tie.py` -- blocked behind PR #57 (§0.1a).
+
 **One stage is already right:** `elements & state transfer` is flat to three digits across a 9×
 mesh growth *and* across both variants — 0.048 s of fixed cost for one refined element. It needs no
 work; it should be the model for the others.
