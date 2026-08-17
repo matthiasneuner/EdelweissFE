@@ -1022,7 +1022,21 @@ The hotfix stays in place and correct until P5 lands, then is deleted wholesale.
       Load-bearing discovery: `tie` lives in `model.multiPointConstraints`, which **no**
       per-increment sweep iterates -- push was the only mechanism reaching it, so
       `registerMeshDependent` is what makes pull work at all, not ceremony.
- 8. feat(modifiers): promote contact facet generation to a model modifier                [P3]
+ 8. feat(modifiers): promote contact facet generation to a model modifier        [P3] DONE 100c223e
+    + fix(contact): rebind the master surface on its own branch          0982ac23
+    + fix(topology): show a modifier what earlier modifiers did in a round e05ca123
+    ↳ **P3 COMPLETE**, verified on xeon: suites back to the 2 + 3 baseline. Added **zero** lines to
+      `surfaceelementgenerator.py` (the modifier is a new file calling the existing
+      `buildContactFacets`, whose signature is identical in #57), so it contributes nothing to the
+      reconciliation the stack owes there. The temporary phase-2 topology window is REMOVED --
+      nothing in the refresh phase may mutate, and the closed window now enforces it.
+    ↳ Two bugs the marmot suite caught that pytest could not, both worth remembering:
+      (a) a replacement string one line short left `_rebindMaster` nested in the wrong branch;
+      (b) `lastPlannedVersion` seeded with None meant a purely REACTIVE modifier never saw the
+          round-1 change it existed to react to -- facets were never regenerated after refinement,
+          so contact ran on facets tiling the unrefined surface (11% / 7.7% error, deterministic).
+          Fixed by seeding with the version at the start of the update; both cases now match to
+          8.3e-17. A test now pins that invariant.
  7. refactor(constraints): tie and contact become pure readers of their facet sets       [P3]
  8. refactor(model): single pull-based refresh phase; delete ModelChangeObserver         [P4]
  9. feat(model): topologyFingerprint + the restart invariant it makes checkable   [P5] DONE ec26affc
