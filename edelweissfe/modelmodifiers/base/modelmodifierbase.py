@@ -126,6 +126,22 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     def decodePlan(self, data: dict):
         """Inverse of :meth:`encodePlan`."""
 
+    def declaredDomain(self, model: FEModel) -> set:
+        """The element numbers this modifier claims exclusive authority over.
+
+        Two modifiers that both own an element will fight over it: each mutates ``model.elements``
+        directly, so one deleting or subdividing an element the other still tracks leaves the second
+        holding a stale reference, which later corrupts element-set membership and can surface as a
+        node that is simultaneously Dirichlet-prescribed and a multi-point-constraint slave.
+
+        :meth:`~edelweissfe.models.femodel.FEModel.checkModelModifierDomains` compares these
+        pairwise once, at the end of setup, and refuses the model rather than letting the conflict
+        appear deep in the solve loop. The default claims nothing, which is correct for a modifier
+        that only ever *adds* entities.
+        """
+
+        return set()
+
     def restoreDecisionState(self, records):
         """Restore whatever *decision-side* state :meth:`plan` needs, from this modifier's own
         records, after a restart replay.

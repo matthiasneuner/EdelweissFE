@@ -308,28 +308,11 @@ class ModelModifier(ModelModifierBase):
                 "'refineElSet' (or 'elSet') to select the solid element set explicitly."
             )
 
-        # two hAdaptivity instances cannot independently own overlapping elements: each maintains
-        # its own AdaptiveMesh mirror and materializes/deletes elements directly in the model, so a
-        # second instance refining/removing an element the first still tracks leaves the first with
-        # a stale reference (an Element object no longer in model.elements) -- which later corrupts
-        # element-set membership (a "deleted" element gets carried back into e.g. 'fixed_all') and
-        # can surface as a node simultaneously Dirichlet-prescribed and a hanging-node MPC slave.
-        # Fail loud at construction time instead of silently corrupting state deep in the solve loop.
-        refineElementNumbers = {el.elNumber for el in refineElements}
-        for otherName, otherModifier in model.modelModifiers.items():
-            if isinstance(otherModifier, ModelModifier):
-                overlap = refineElementNumbers & otherModifier._refineElementNumbers
-                if overlap:
-                    raise ValueError(
-                        f"hAdaptivity modifier {name!r} and existing modifier {otherName!r} both "
-                        f"claim {len(overlap)} of the same element(s) (e.g. label "
-                        f"{sorted(overlap)[0]}) as refineable roots via overlapping 'refineElSet'/"
-                        "'elSet' (or no restriction at all). Combine all markers -- including "
-                        "'initialOnly' ones -- into a single hAdaptivity block via multiple "
-                        "'>>marker' lines instead of stacking separate modifiers over the same "
-                        "elements."
-                    )
-        self._refineElementNumbers = refineElementNumbers
+        # Which elements this instance owns. Checked pairwise against every other modifier by
+        # FEModel.checkModelModifierDomains at the end of setup -- two hAdaptivity instances cannot
+        # independently own overlapping elements, since each maintains its own AdaptiveMesh mirror
+        # and materializes/deletes elements directly in the model.
+        self._refineElementNumbers = {el.elNumber for el in refineElements}
 
         # element type: infer from a refineable element if not given
         anyEl = refineElements[0]
@@ -399,6 +382,14 @@ class ModelModifier(ModelModifierBase):
         self._isFirstCall = True
         # parent-parametric coords of each child's nodes (used for warm-start interpolation)
         self._octantParams = self._topology.subdivision_children_param(self.splitFactor)
+
+    def declaredDomain(self, model: FEModel) -> set:
+        """The refineable roots this instance owns; see
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.declaredDomain`.
+        Two hAdaptivity blocks over the same elements must be combined into one with several
+        ``>>marker`` lines instead -- including ``initialOnly`` ones."""
+
+        return self._refineElementNumbers
 
     @timeit("AMR")
     def plan(self, model: FEModel, change, step, timeStep: float) -> "RefinementPlan | None":

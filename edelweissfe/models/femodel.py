@@ -213,6 +213,34 @@ class FEModel:
         del self.elements[elNumber]
 
     @timeit("topology update")
+    def checkModelModifierDomains(self):
+        """Refuse a model in which two modifiers claim the same element.
+
+        Run once, at the end of setup. Each modifier declares what it owns via
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.declaredDomain`;
+        an overlap means both will mutate the same element and each will end up holding stale
+        references to the other's work. Failing here costs a clear message at startup; failing later
+        costs a corrupted element set or a node that is both Dirichlet-prescribed and an MPC slave,
+        discovered mid-solve.
+        """
+
+        claimed = list(self.modelModifiers.items())
+        for index, (name, modifier) in enumerate(claimed):
+            domain = modifier.declaredDomain(self)
+            if not domain:
+                continue
+            for otherName, otherModifier in claimed[index + 1 :]:
+                overlap = domain & otherModifier.declaredDomain(self)
+                if overlap:
+                    raise TopologyError(
+                        "model modifiers {!r} and {!r} both claim {:} of the same element(s) "
+                        "(e.g. {:}). Two modifiers cannot own one element: each mutates it directly, "
+                        "so the other is left holding a stale reference. Restrict their element sets "
+                        "so they do not overlap, or combine them into a single modifier.".format(
+                            name, otherName, len(overlap), sorted(overlap)[0]
+                        )
+                    )
+
     def updateTopology(self, step=None, timeStep: float = None) -> bool:
         """Run every model modifier to a fixed point, inside one topology window.
 
@@ -245,6 +273,12 @@ class FEModel:
             while True:
                 roundNumber += 1
                 plannedThisRound = []
+                # Which modifier touched which element in THIS round. Two modifiers mutating one
+                # element within a round is a conflict even when their declared domains are
+                # disjoint -- e.g. one deleting what the other just created -- and the result
+                # depends on their order, which is exactly the kind of thing that must not decide a
+                # simulation quietly.
+                touchedBy = {}
                 for name, modifier in self.modelModifiers.items():
                     seenVersion = lastPlannedVersion[name]
                     change = self.changesSince(seenVersion) if seenVersion is not None else None
@@ -253,6 +287,18 @@ class FEModel:
                     if plan is None:
                         continue
                     modelChange = modifier.apply(self, plan)
+                    if modelChange is not None:
+                        for elNumber in modelChange.addedElements | modelChange.removedElements:
+                            previous = touchedBy.setdefault(elNumber, name)
+                            if previous != name:
+                                raise TopologyError(
+                                    "model modifiers {!r} and {!r} both changed element {:} in round "
+                                    "{:} of one topology update. Whichever ran second silently won; "
+                                    "make their domains disjoint, or have one react to the other's "
+                                    "change in a later round instead of the same one.".format(
+                                        previous, name, elNumber, roundNumber
+                                    )
+                                )
                     self.recordTopologyChange(roundNumber, name, modifier, plan, modelChange)
                     plannedThisRound.append(name)
                     changed = True
@@ -660,6 +706,7 @@ class FEModel:
         """
 
         self.adoptSetupElementNumbers()
+        self.checkModelModifierDomains()
         self._prepareVariablesAndFields(journal)
         self._prepareElements(journal)
 

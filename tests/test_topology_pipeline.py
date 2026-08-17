@@ -40,6 +40,7 @@ import pytest
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
+from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
 from edelweissfe.utils.exceptions import TopologyError
 
@@ -452,3 +453,64 @@ def test_fingerprint_is_insensitive_to_dict_insertion_order():
     backward.elements = dict(reversed(list(backward.elements.items())))
     backward.nodes = dict(reversed(list(backward.nodes.items())))
     assert forward.topologyFingerprint() == backward.topologyFingerprint()
+
+
+class _OwningModifier(_StubModifier):
+    """A modifier that claims a fixed set of elements, and can be told to mutate an arbitrary one."""
+
+    def __init__(self, name, log, owns=(), touches=()):
+        super().__init__(name, plansLeft=1, log=log)
+        self._owns = set(owns)
+        self._touches = set(touches)
+
+    def declaredDomain(self, model):
+        return self._owns
+
+    def apply(self, model, plan):
+        self._log.append(plan["who"])
+        change = ModelChange(kind=_MCT.REFINEMENT)
+        change.addedElements |= self._touches
+        model.notifyModelChanged(_MCT.REFINEMENT, change)
+        return change
+
+
+def test_overlapping_modifier_domains_are_refused_at_setup():
+    """Two modifiers owning one element each end up holding stale references to the other's work.
+    Cheap to catch at startup, expensive to discover mid-solve."""
+
+    model = _modelWithModifiers(
+        amr_left=_OwningModifier("amr_left", [], owns={1, 2, 3}),
+        amr_right=_OwningModifier("amr_right", [], owns={3, 4}),
+    )
+    with pytest.raises(TopologyError, match=r"both claim 1 of the same element\(s\).*3"):
+        model.checkModelModifierDomains()
+
+
+def test_disjoint_modifier_domains_are_accepted():
+    model = _modelWithModifiers(
+        amr_left=_OwningModifier("amr_left", [], owns={1, 2}),
+        amr_right=_OwningModifier("amr_right", [], owns={3, 4}),
+    )
+    model.checkModelModifierDomains()  # must not raise
+
+
+def test_two_modifiers_changing_one_element_in_a_round_is_refused():
+    """Disjoint *declared* domains are not enough: one modifier deleting what another just created,
+    within the same round, is order-dependent and must not decide a simulation quietly."""
+
+    log = []
+    model = _modelWithModifiers(
+        first=_OwningModifier("first", log, owns={1}, touches={99}),
+        second=_OwningModifier("second", log, owns={2}, touches={99}),
+    )
+    with pytest.raises(TopologyError, match="both changed element 99 in round 1"):
+        model.updateTopology(step=None, timeStep=0.0)
+
+
+def test_the_same_modifier_may_touch_an_element_in_successive_rounds():
+    """The guard is about two modifiers colliding, not about one modifier revisiting its own work."""
+
+    log = []
+    model = _modelWithModifiers(solo=_OwningModifier("solo", log, owns={1}, touches={99}))
+    model.updateTopology(step=None, timeStep=0.0)
+    assert log == ["solo"]
