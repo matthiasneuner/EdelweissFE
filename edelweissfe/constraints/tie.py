@@ -58,11 +58,7 @@ explicit dynamics untouched.
 This constraint is a :class:`~edelweissfe.models.meshdependent.MeshDependent`: if either surface's
 source solid elements are refined mid-run (e.g. by :mod:`~edelweissfe.modelmodifiers.adaptivity.
 hadaptivity`), it regenerates that side's facets and re-projects the tied records -- no separate
-wiring needed. Unlike the penalty contact constraint, a tie has no per-increment tick of its own
-that runs *before* the DofManager/system matrix is rebuilt (its only hook,
-:meth:`getMultiPointConstraints`, is called from inside that rebuild -- too late to safely swap in
-freshly regenerated facet elements), so it reconciles via the model's push notification instead,
-synchronously as part of the mesh-mutating modifier's own call. The re-projection never re-adjusts
+wiring needed beyond registering once. The re-projection never re-adjusts
 slave node coordinates regardless of the ``adjust`` setting: that snap is a setup-time convenience
 for removing an initial geometric gap, not something to repeat on an already-loaded, already-tied
 node.
@@ -248,13 +244,12 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         )
         self._updateNodeSets(model)
 
-        # A tie has no per-increment tick of its own that runs before the DofManager/VIJSystemMatrix
-        # rebuild -- getMultiPointConstraints() is only called from inside that rebuild, too late to
-        # safely swap in newly regenerated facet elements (the just-built system wouldn't know about
-        # them). So, unlike nodeToDeformableSurfacePenalty, a tie reconciles via the push escape
-        # hatch: model.notifyModelChanged() calls onModelChanged() synchronously, from inside the
-        # model modifier's own updateModel(), strictly before the rebuild decision is even made.
-        model.registerObserver(self)
+        # Registration is what gets a tie refreshed at all: multi-point constraints live in
+        # model.multiPointConstraints, which no per-increment sweep iterates, and
+        # getMultiPointConstraints() is called from inside the DofManager/VIJSystemMatrix rebuild --
+        # too late to safely swap in newly regenerated facet elements. FEModel.refreshMeshDependents
+        # runs after the model modifiers have settled and strictly before that rebuild decision.
+        model.registerMeshDependent(self)
 
     @classmethod
     def fromConstraintDefinition(cls, name: str, definition: dict, model: FEModel) -> "Constraint":
@@ -269,10 +264,6 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
             model.elementSets[configuration.masterSurface],
             configuration=configuration,
         )
-
-    def onModelChanged(self, model: FEModel, changeType, change) -> None:
-        if change is not None:
-            self.reconcile(model, change)
 
     def _buildTiedRecords(self, model: FEModel, slaveFacetElements, masterFacetElements, adjust: bool):
         """Project every unique slave-surface node onto its closest master facet (reference
@@ -385,7 +376,7 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
 
         return tiedRecords, untiedSlaveNodes
 
-    def reconcile(self, model: FEModel, change) -> bool:
+    def refresh(self, model: FEModel, change) -> bool:
         """Regenerate whichever side's facets were affected by ``change`` (via its recorded
         :attr:`~edelweissfe.models.femodel.FEModel.contactFacetRecipes`) and re-project the tied
         records from scratch against the rebuilt surfaces -- never adjusting coordinates, since the

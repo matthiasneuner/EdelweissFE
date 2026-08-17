@@ -72,7 +72,7 @@ class FEModel:
         self.constraintSets = {}  #: ConstraintsSets in the model.
         self.multiPointConstraints = {}  #: Multi-point (DOF-elimination) constraints in the model.
         self.modelModifiers = {}  #: Model modifiers (dynamic topology / mesh mutation entities) in the model.
-        self._modelChangeObservers = []  #: Observers notified when the model is mutated (e.g. AMR).
+        self.meshDependents = []  #: Consumers that cache mesh-derived state; see :meth:`refreshMeshDependents`.
         self.topologyVersion = 0  #: Bumped on every structural mutation; drives pull-based reconcile.
         self._changeLog = []  #: Recorded :class:`ModelChange` per mutation, newest last.
         self.contactFacetRecipes = {}  #: facet elSet name -> (surfaceName, prefix, triangulation).
@@ -254,18 +254,47 @@ class FEModel:
                     )
         return changed
 
-    def registerObserver(self, observer):
-        """Register a :class:`~edelweissfe.models.modelchangeobserver.ModelChangeObserver` to be
-        notified when the model is mutated (e.g. by adaptive mesh refinement)."""
-        if not any(observer is obs for obs in self._modelChangeObservers):
-            self._modelChangeObservers.append(observer)
+    def registerMeshDependent(self, consumer):
+        """Register a :class:`~edelweissfe.models.meshdependent.MeshDependent` to be refreshed after
+        every topology update.
 
-    def unregisterObserver(self, observer):
-        self._modelChangeObservers = [obs for obs in self._modelChangeObservers if obs is not observer]
+        Registration is the freshness guarantee: a consumer that is not in this list is never told
+        the mesh changed. That matters most for the consumers the solver does not otherwise tick --
+        multi-point constraints live in ``model.multiPointConstraints``, which no per-increment sweep
+        iterates, so a tie could only ever learn about refinement this way.
+        """
+
+        if not any(consumer is registered for registered in self.meshDependents):
+            self.meshDependents.append(consumer)
+
+    def refreshMeshDependents(self) -> bool:
+        """Let every registered mesh-dependent consumer catch up, once, after the topology update.
+
+        Phase 2 of the increment (see :meth:`updateTopology` for phase 1). Consumers are pure
+        readers here -- the topology window is closed -- so **their order does not matter** and no
+        fixed-point iteration is needed: none of them can invalidate another's work.
+
+        Each consumer sees the *net* change across every round of the topology update, which is why
+        this is pull and not push: a push fires per mutation, i.e. at moments that are by
+        construction mid-pipeline, handing a consumer a state that no longer exists by the time the
+        solve begins.
+
+        Returns
+        -------
+        bool
+            True if any consumer reported that its DOF footprint changed.
+        """
+
+        # materialise the list: any() would short-circuit and leave later consumers unrefreshed
+        return any([consumer.refreshIfMeshChanged(self) for consumer in self.meshDependents])
 
     def notifyModelChanged(self, changeType, change: ModelChange = None):
-        """Record a model mutation (bumping :attr:`topologyVersion`, so a pull-based consumer can
-        catch up later via :meth:`changesSince`) and notify all registered push observers.
+        """Record a model mutation: bump :attr:`topologyVersion` and append the changeset, so that
+        every :class:`~edelweissfe.models.meshdependent.MeshDependent` can catch up from
+        :meth:`changesSince` at the end of the topology update.
+
+        Recording only -- there is no synchronous callback. Consumers are refreshed once, by
+        :meth:`refreshMeshDependents`, after the modifiers have settled; see there for why.
 
         Parameters
         ----------
@@ -281,8 +310,6 @@ class FEModel:
             change = ModelChange(kind=changeType)
         change.version = self.topologyVersion
         self._changeLog.append(change)
-        for observer in list(self._modelChangeObservers):
-            observer.onModelChanged(self, changeType, change)
 
     def changesSince(self, version: int) -> ModelChange:
         """The :class:`ModelChange` coalesced across every mutation recorded after ``version``, or

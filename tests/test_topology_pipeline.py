@@ -36,6 +36,7 @@ function of the ordered *creation* sequence -- never of the deletion history, ne
 import pytest
 
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.meshdependent import MeshDependent
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
 from edelweissfe.utils.exceptions import TopologyError
 
@@ -291,3 +292,58 @@ def test_the_window_is_closed_again_after_the_update():
     model.updateTopology(step=None, timeStep=0.0)
     with pytest.raises(TopologyError):
         model.reserveElementNumbers(1)
+
+
+class _StubMeshDependent:
+    """A consumer that records how many times it was refreshed, and with what."""
+
+    _lastSeenTopologyVersion = 0
+
+    def __init__(self, relevant=True):
+        self.refreshes = []
+        self._relevant = relevant
+
+    def refresh(self, model, change):
+        self.refreshes.append(change)
+        return self._relevant
+
+    refreshIfMeshChanged = MeshDependent.refreshIfMeshChanged
+
+
+def test_consumers_refresh_once_on_the_net_change_of_all_rounds():
+    """The point of pull: a consumer sees the settled model, not each intermediate round. Under the
+    old push observer it would have been called once per mutation."""
+
+    log = []
+    model = _modelWithModifiers(
+        amr=_StubModifier("amr", 2, log, reactsToOthers=True),
+        facets=_StubModifier("facets", 2, log, reactsToOthers=True),
+    )
+    consumer = _StubMeshDependent()
+    model.registerMeshDependent(consumer)
+
+    model.updateTopology(step=None, timeStep=0.0)
+    assert len(log) == 4, "four mutations across two rounds"
+    assert consumer.refreshes == [], "consumers must not be refreshed during the topology update"
+
+    assert model.refreshMeshDependents() is True
+    assert len(consumer.refreshes) == 1, "one refresh, on the net change"
+
+
+def test_refresh_reports_whether_any_consumer_changed_its_footprint():
+    model = _modelWithModifiers(amr=_StubModifier("amr", 1, []))
+    indifferent = _StubMeshDependent(relevant=False)
+    model.registerMeshDependent(indifferent)
+    model.updateTopology(step=None, timeStep=0.0)
+    assert model.refreshMeshDependents() is False
+    assert len(indifferent.refreshes) == 1
+
+
+def test_registration_is_idempotent_and_a_quiet_model_refreshes_nobody():
+    model = FEModel(3)
+    consumer = _StubMeshDependent()
+    model.registerMeshDependent(consumer)
+    model.registerMeshDependent(consumer)
+    assert len(model.meshDependents) == 1
+    assert model.refreshMeshDependents() is False
+    assert consumer.refreshes == []

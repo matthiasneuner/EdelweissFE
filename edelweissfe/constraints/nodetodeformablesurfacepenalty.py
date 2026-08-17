@@ -329,6 +329,7 @@ class Constraint(ConstraintBase, MeshDependent):
 
         self._journal = Journal()
         self._lastSeenTopologyVersion = model.topologyVersion
+        model.registerMeshDependent(self)
 
         self._slaveSurfaceSetName = slaveSurface.name
         self._masterSurfaceSetName = masterSurface.name
@@ -458,7 +459,7 @@ class Constraint(ConstraintBase, MeshDependent):
         source solid elements) first, at this natural per-increment tick -- see
         :class:`~edelweissfe.models.meshdependent.MeshDependent`."""
 
-        self.reconcileIfChanged(model)
+        # refreshed by FEModel.refreshMeshDependents; nothing extra to do at this tick
 
         slaveCoords = self._currentCoordinates(self.slaveNodes, model, self._referenceCoordsSlaves)
         facetCoords = [
@@ -527,7 +528,7 @@ class Constraint(ConstraintBase, MeshDependent):
 
         return hasChanged
 
-    def reconcile(self, model: FEModel, change) -> bool:
+    def refresh(self, model: FEModel, change) -> bool:
         """Regenerate whichever side's facets were affected by ``change`` (via its recorded
         :attr:`~edelweissfe.models.femodel.FEModel.contactFacetRecipes`) and rebind the cached
         per-slave/per-facet arrays to match. A currently-tracked slave node keeps its frictional

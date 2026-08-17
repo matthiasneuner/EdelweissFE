@@ -260,16 +260,18 @@ class NIST(NonlinearSolverBase):
                 # Phase 1: model modifiers, run to a fixed point inside a topology window.
                 modelHasChanged = model.updateTopology(step, timeStep)
 
-                # Phase 2: mesh-dependent consumers catch up. Still inside a window of its own only
-                # because contact facet generation hangs off constraint reconcile -- the pull-based
-                # penalty constraints mint their facets from updateConnectivity, i.e. here.
-                # PLAN_TOPOLOGY_PIPELINE.md P3 moves facet generation into a model modifier, after
-                # which constraints become pure readers and this window must be REMOVED: it is
-                # exactly what would otherwise let a consumer mutate behind the pipeline's back.
+                # Phase 2: mesh-dependent consumers catch up, once, on the net change. Order is
+                # irrelevant here -- they are pure readers of a settled model.
+                #
+                # Still inside a window of its own only because contact facet generation still hangs
+                # off a consumer's refresh. PLAN_TOPOLOGY_PIPELINE.md P3 moves facet generation into
+                # a model modifier, after which this window must be REMOVED: it is exactly what
+                # would otherwise let a consumer mutate behind the pipeline's back.
                 with model.topologyChanges():
-                    connectivityHasChanged = any(
-                        [constraint.updateConnectivity(model) for constraint in model.constraints.values()]
-                    )
+                    # materialise both: neither sweep may be short-circuited by the other
+                    refreshed = model.refreshMeshDependents()
+                    ticked = any([constraint.updateConnectivity(model) for constraint in model.constraints.values()])
+                    connectivityHasChanged = refreshed or ticked
 
                 if modelHasChanged or connectivityHasChanged or self.theDofManager is None:
                     self.journal.message("Creating monolithic equation system", self.identification, 0)
