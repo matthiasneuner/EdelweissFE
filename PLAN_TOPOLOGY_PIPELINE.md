@@ -17,7 +17,7 @@ Diagrams: <https://claude.ai/code/artifact/e8fac0d5-bf65-427f-9e88-65ba74cc1cce>
 
 # STATUS — read this first (2026-08-17, end of session)
 
-**Branch `feat/topology-pipeline`, 30 commits off `perf/blockamg-efficiency@d8dd996`.**
+**Branch `feat/topology-pipeline`, 31 commits off `perf/blockamg-efficiency@d8dd996`.**
 Pushed to `mn`. Working tree clean.
 
 **The original bug is fixed and verified.** Restart replay and the live run now share one
