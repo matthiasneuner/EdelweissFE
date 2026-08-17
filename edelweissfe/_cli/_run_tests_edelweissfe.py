@@ -52,6 +52,22 @@ from edelweissfe.utils.inputfileparser import parseInputFile
 # which can be as early as extension import time -- setting it inside main() is too late.
 os.environ["OMP_NUM_THREADS"] = "1"
 
+# Same reproducibility argument, second source: MKL (hence PARDISO, and NumPy/SciPy's BLAS) selects
+# its kernels at RUNTIME from the host CPU's instruction set, so an AVX-512 machine and an AVX2
+# machine compute measurably different results from identical code. The U.ref comparison below is an
+# ABSOLUTE 1e-6 on displacements of order 1e-3, i.e. it demands ~1e-3 relative agreement -- tight
+# enough that this matters, and adaptivity amplifies it further, since a marker threshold comparison
+# can flip and change *which* elements get refined.
+#
+# Measured 2026-08-17: AMR_MinMarkedElements, AMR_MixedMeshRefine and AMR_RecoveryError fail on a
+# Xeon Gold 6140 (AVX-512) and pass on a Core Ultra 7 258V (AVX2) from the same commit; forcing AVX2
+# on the Xeon makes them pass. Deviations were 1.2e-6 (just over the threshold) and 8.6e-5.
+#
+# Pin the ISA so the suite means the same thing on every machine. This costs some speed on AVX-512
+# hosts, which is irrelevant for these small cases and does not affect production runs -- they go
+# through the `edelweissfe` entry point, not this one. Override by setting the variable yourself.
+os.environ.setdefault("MKL_ENABLE_INSTRUCTIONS", "AVX2")
+
 matplotlib.use("Agg")
 
 
