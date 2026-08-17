@@ -712,6 +712,9 @@ class ModelModifier(ModelModifierBase):
                         U[idx] = new[node]
                         P[idx] = new[node]
 
+        # Separately timed: this relinks EVERY node's field variables, so its cost scales with the
+        # whole mesh rather than with what this refinement actually changed (P0, PLAN §6).
+        with timeit("relink field variables"):
             model._linkFieldVariableObjects(model.nodeSets["all"])
         return change
 

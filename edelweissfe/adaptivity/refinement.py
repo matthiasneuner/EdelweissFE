@@ -43,6 +43,7 @@ from edelweissfe.adaptivity.geometry import (
     point_in_convex_quad,
     quadratic_edge_parameter,
 )
+from edelweissfe.utils.performancetiming import timeit
 
 
 class NodeRegistry:
@@ -341,6 +342,12 @@ class AdaptiveMesh:
         """
         act = self.active()
         coords = self.registry.coordinates
+        # Timed separately from the scan below: these indices are rebuilt from scratch on every
+        # call, over the WHOLE active mesh, whereas the scan itself is restricted to the refined
+        # interface shell. If the index build dominates, the cost to attack is incrementality, not
+        # the search (P0, PLAN_TOPOLOGY_PIPELINE.md §6).
+        timerIndex = timeit("hanging: whole-mesh index build")
+        timerIndex.__enter__()
         used = {lab for eid in act for lab in self.elements[eid]["conn"]}
 
         # spatial hash of nodes, so each element only tests nearby candidate nodes (local, not O(n*N))
@@ -376,7 +383,11 @@ class AdaptiveMesh:
                 if f != eid and comp[f] == comp[eid]
             )
 
+        timerIndex.__exit__(None, None, None)
+
         best = {}  # slave -> (dim, level, masters)
+        timerScan = timeit("hanging: interface-shell scan")
+        timerScan.__enter__()
         for eid in act:
             if not hasFinerNeighbour(eid):
                 continue  # no level jump here -> this element cannot host a hanging node
@@ -408,6 +419,8 @@ class AdaptiveMesh:
                 cur = best.get(h["slave"])
                 if cur is None or key < (cur[0], cur[1]):
                     best[h["slave"]] = (dim, E["level"], h["masters"])
+
+        timerScan.__exit__(None, None, None)
 
         return [{"slave": s, "kind": "edge" if v[0] == 1 else "face", "masters": v[2]} for s, v in best.items()]
 

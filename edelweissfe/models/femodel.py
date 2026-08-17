@@ -41,6 +41,7 @@ from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.modelchange import ModelChange, coalesce
 from edelweissfe.utils.exceptions import TopologyError
+from edelweissfe.utils.performancetiming import timeit
 from edelweissfe.variables.fieldvariable import FieldVariable
 from edelweissfe.variables.scalarvariable import ScalarVariable
 
@@ -200,6 +201,7 @@ class FEModel:
 
         del self.elements[elNumber]
 
+    @timeit("topology update")
     def updateTopology(self, step=None, timeStep: float = None) -> bool:
         """Run every model modifier to a fixed point, inside one topology window.
 
@@ -267,6 +269,7 @@ class FEModel:
         if not any(consumer is registered for registered in self.meshDependents):
             self.meshDependents.append(consumer)
 
+    @timeit("refresh mesh dependents")
     def refreshMeshDependents(self) -> bool:
         """Let every registered mesh-dependent consumer catch up, once, after the topology update.
 
