@@ -81,6 +81,9 @@ class DiscreteRigidBody(RigidBody):
         if self.mass is not None:
             from edelweissfe.elements.pointmass import PointMass
 
+            # see the note in surfaceelementgenerator.buildContactFacets: base mesh generators may
+            # still have placed elements directly since the last adoption pass
+            model.adoptSetupElementNumbers()
             (el_num,) = model.reserveElementNumbers(1)
             self.point_mass_element = PointMass(
                 el_num, [self.rpNode], model, self.mass, self.inertia, self.initial_velocity
