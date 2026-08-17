@@ -15,6 +15,63 @@ Diagrams: <https://claude.ai/code/artifact/e8fac0d5-bf65-427f-9e88-65ba74cc1cce>
 
 ---
 
+# STATUS — read this first (2026-08-17, end of session)
+
+**Branch `feat/topology-pipeline`, 30 commits off `perf/blockamg-efficiency@d8dd996`.**
+Pushed to `mn`. Working tree clean.
+
+**The original bug is fixed and verified.** Restart replay and the live run now share one
+`apply()` path; the `1393803` hotfix is gone in full. L3 at production scale (AnchorPryOut, 380k
+dof, 18 039 stateful elements, 5 ties, 2 contacts, GCDP, AMR) shows a resumed run and a continuous
+run with **identical element numbering and identical topology fingerprints** at all 7 overlapping
+checkpoints; residuals 2e-17 (U) and 7e-13 (state), versus the hotfix era's flat ~2.3e-4.
+
+| phase | status |
+|---|---|
+| P0 profiling + scaling probe | done, xeon |
+| P1 monotonic allocator + enforced mutation window + deterministic ordering | done, xeon |
+| P2 `plan`/`apply`, modifiers run to a fixed point in rounds | done, xeon |
+| P3 facet generation is a model modifier; phase-2 window removed | done, xeon |
+| P4 one pull-based refresh phase; push observer retired | done, xeon |
+| P5 restart replays recorded plans through `apply()` | done, xeon |
+| P6.2 hanging-node scan (−37% at the largest size) | done, xeon |
+| P7 conflicting-modifier detection, setup and per round | done, xeon |
+| docs: `topologypipeline.rst` + two corrected pages | done, builds clean |
+| L3 production-scale faithfulness | **PASSED** |
+
+**Suite baseline (xeon):** `edelweiss-only` 2, `marmot` 3 — every one explained: `MeshPlot`,
+`OutputManagers`, `IndirectDisplacementControl` need `latex` (absent on xeon);
+`NodeToDeformableSurfaceContactPullOut` is fixed on PR #57, not here. **No unexplained failures.**
+
+## OPEN POINTS
+
+1. **P6.1 — recommended NOT to do next.** §6 re-measured after P3: the cost fell 34% and the
+   residual is contact *re-projection*, not facet retiling, so the plan's stated fix targets the
+   wrong half. See §6 for the numbers and the reasoning.
+2. **`AMR_ContactRefineShear` fragility — open.** Its reference was regenerated (`11632634`, with
+   sign-off) for the new deterministic ordering, but the case should not be ordering-sensitive at
+   all. The PR #57 geometric remedy was tried and **measured not to work**; a full discriminant scan
+   is needed, inside contact code. §8.
+3. **The probe misreports `topology update`** as self time — fix before trusting it. §6.
+4. **Shipping is gated by the stack, not by this work.** `#64` is a draft expected to merge
+   ~2026-08-18. But this branch sits **seven** deep: `#64 → amr-recovery-marker →
+   amgcl-lgmres-outer-solver → linsolve-investigation → feat/restart → perf/linsolve-restart →
+   perf/blockamg-efficiency → here`. Of those, only `#64` has a PR; `feat/restart` is not pushed
+   anywhere; `perf/linsolve-restart` has an open `git stash` to clear before it can be opened.
+   **The real gate is that the restart feature has never been proposed as a PR**, not `#64`.
+5. **Extraction slice — not started, worth considering.** Everything here except P5 is independent
+   of restart (allocator, window, `plan`/`apply`, pipeline, pull-only refresh, facet modifier,
+   conflict detection, docs). That slice could go onto `next_v26.11` directly once `#64` and `#57`
+   are in, and be reviewed on its own merits, leaving P5 to follow with the restart chain. It needs
+   the small allocator hunks in `surfaceelementgenerator.py` reconciled against the non-schema
+   version — minor. §0.1a.
+6. **Do NOT merge `next_v26.11` into this branch.** §0.1a: it is the top of an unlanded stack; that
+   reconciliation belongs to `#64`'s rebase at the bottom. A trial merge produced 43 conflicts.
+7. **Pinned v1 checkpoints are dead to this branch** by design. A fresh production-scale v2
+   checkpoint plus inputs and logs is preserved on xeon at `~/tp-l3-artifacts/`. §0.4.
+
+---
+
 # 0. Strategy: branches, machines, verification
 
 ## 0.1 Branch strategy
