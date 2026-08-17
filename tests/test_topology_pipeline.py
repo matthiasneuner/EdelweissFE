@@ -33,12 +33,17 @@ function of the ordered *creation* sequence -- never of the deletion history, ne
 ``max(model.elements)`` -- and entities may only be created or deleted inside a topology change.
 """
 
+from pathlib import Path as _Path
+
+import numpy as np
 import pytest
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
 from edelweissfe.utils.exceptions import TopologyError
+
+_REPO_ROOT = _Path(__file__).resolve().parents[1]
 
 
 class _StubElement:
@@ -347,3 +352,90 @@ def test_registration_is_idempotent_and_a_quiet_model_refreshes_nobody():
     assert len(model.meshDependents) == 1
     assert model.refreshMeshDependents() is False
     assert consumer.refreshes == []
+
+
+def _tinyMeshModel(elementNumbers=(1, 2), shiftCoordinate=0.0):
+    """Two CPE4s sharing an edge, numbered as asked -- enough to exercise numbering, connectivity
+    and coordinates without a solver."""
+
+    from edelweissfe.config.elementlibrary import getElementClass
+    from edelweissfe.points.node import Node
+
+    model = FEModel(2)
+    coords = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (0.0, 1.0), (1.0, 1.0), (2.0, 1.0)]
+    for label, (x, y) in enumerate(coords, start=1):
+        model.nodes[label] = Node(label, np.array([x + shiftCoordinate, y]))
+
+    ElementClass = getElementClass("CPE4", "edelweiss")
+    for elNumber, conn in zip(elementNumbers, [(1, 2, 5, 4), (2, 3, 6, 5)]):
+        element = ElementClass("CPE4", elNumber)
+        element.setNodes([model.nodes[label] for label in conn])
+        model.elements[elNumber] = element
+    return model
+
+
+def test_fingerprint_is_stable_across_processes():
+    """blake2b, not hash(): Python randomises string hashing per process, so a hash()-based digest
+    would differ between two runs of the same code and render the whole check useless."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import numpy as np\n"
+        "from edelweissfe.models.femodel import FEModel\n"
+        "from edelweissfe.points.node import Node\n"
+        "from edelweissfe.config.elementlibrary import getElementClass\n"
+        "m = FEModel(2)\n"
+        "for label, (x, y) in enumerate([(0.,0.),(1.,0.),(1.,1.),(0.,1.)], start=1):\n"
+        "    m.nodes[label] = Node(label, np.array([x, y]))\n"
+        "e = getElementClass('CPE4', 'edelweiss')('CPE4', 1)\n"
+        "e.setNodes([m.nodes[i] for i in (1, 2, 3, 4)])\n"
+        "m.elements[1] = e\n"
+        "print(m.topologyFingerprint())\n"
+    )
+    digests = set()
+    for seed in ("0", "1", "random"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, cwd=str(_REPO_ROOT), env=env
+        )
+        assert result.returncode == 0, result.stderr
+        digests.add(result.stdout.strip())
+
+    assert len(digests) == 1, "digest varies with PYTHONHASHSEED: {:}".format(digests)
+    assert digests != {""}
+
+
+def test_fingerprint_detects_renumbering():
+    """The failure this whole plan exists to catch: same mesh, different element numbers."""
+
+    assert _tinyMeshModel(elementNumbers=(1, 2)).topologyFingerprint() != (
+        _tinyMeshModel(elementNumbers=(7, 8)).topologyFingerprint()
+    )
+
+
+def test_fingerprint_detects_moved_nodes():
+    assert _tinyMeshModel().topologyFingerprint() != _tinyMeshModel(shiftCoordinate=1e-12).topologyFingerprint()
+
+
+def test_fingerprint_ignores_solution_state():
+    """A mismatch must mean the mesh diverged, not that the solver took a different path."""
+
+    model = _tinyMeshModel()
+    before = model.topologyFingerprint()
+    model.time = 17.0
+    model.scalarVariables["lambda"] = object()
+    assert model.topologyFingerprint() == before
+
+
+def test_fingerprint_is_insensitive_to_dict_insertion_order():
+    """Two models built in different orders are the same mesh and must agree -- otherwise the check
+    would fire on differences that do not matter."""
+
+    forward = _tinyMeshModel(elementNumbers=(1, 2))
+    backward = _tinyMeshModel(elementNumbers=(1, 2))
+    backward.elements = dict(reversed(list(backward.elements.items())))
+    backward.nodes = dict(reversed(list(backward.nodes.items())))
+    assert forward.topologyFingerprint() == backward.topologyFingerprint()

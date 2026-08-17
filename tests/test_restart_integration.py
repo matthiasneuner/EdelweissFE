@@ -513,3 +513,128 @@ def test_adaptivity_managed_elements_are_excluded_from_number_keyed_restore(tmp_
         "it in the number-keyed restore"
     )
     assert published, "the replay materialised no managed elements -- test would be vacuous"
+
+
+# A tie interleaves facet minting with AMR's own: every refinement of the tied surface makes the tie
+# regenerate that surface's facets, so the two claim element numbers alternately. That interleaving
+# is what a batched replay does not reproduce, and it is invisible in the plain AMR test above --
+# which asserts matching element numbers and passes, because nothing else mints there.
+_AMR_TIE_MATERIAL_AND_MESH = """
+*material, name=linearelastic, id=mat
+30000, 0.15
+
+*section, name=sec, material=mat, type=solid
+lower_all
+upper_all
+
+*modelGenerator, generator=boxGen, name=lower
+nX      =1
+nY      =1
+nZ      =1
+x0      =0
+y0      =0
+z0      =0
+lX      =1
+lY      =1
+lZ      =1
+elType  =C3D20
+
+*modelGenerator, generator=boxGen, name=upper
+nX      =1
+nY      =1
+nZ      =1
+x0      =0
+y0      =0
+z0      =1
+lX      =1
+lY      =1
+lZ      =1
+elType  =C3D20
+
+*modelGenerator, generator=surfaceElementGenerator, name=genMaster
+surface = lower_front
+name    = masterSurf
+
+*modelGenerator, generator=surfaceElementGenerator, name=genSlave
+surface = upper_back
+name    = slaveSurf
+
+*constraint, name=tie, type=tie
+slaveSurface  = slaveSurf_facets
+masterSurface = masterSurf_facets
+
+*modelModifier, type=hAdaptivity, name=amr
+>>marker, type=fieldOutput, fieldOutput=stressForAMR, operator='>', threshold=300.0
+refineElSet=lower_all
+maxLevel=2
+
+*job, name=amrTieRestartTestJob, domain=3d
+*solver, solver=NIST, name=theSolver
+*fieldOutput
+>>perNode, elSet=all, field=displacement, result=U, name=U
+>>perElement, elSet=lower_all, result=stress, quadraturePoint=0:27, name=stressForAMR, f(x)='np.abs(x)'
+"""
+
+
+def _amrTieStep(maxNumInc) -> str:
+    return f"""
+*step, solver=theSolver
+maxInc=0.02, minInc=1e-6, maxNumInc={maxNumInc}, maxIter=25, stepLength=1
+>>options, name=theSolver, extrapolation=off
+>>dirichlet, name=fixFar, nSet=lower_back, field=displacement, 1=0.0, 2=0.0, 3=0.0
+>>dirichlet, name=pushFar, nSet=upper_front, field=displacement, 3=-0.05
+"""
+
+
+def test_restart_with_amr_and_a_tie_reproduces_the_topology_exactly(tmp_path):
+    """The invariant the whole topology pipeline exists to establish: a resumed run rebuilds the
+    same mesh, with the same element numbers, as the run it resumed.
+
+    Uses topologyFingerprint, which covers element numbers, types, connectivity and node
+    coordinates -- and deliberately not solution state, so a failure here means the *mesh*
+    diverged.
+    """
+
+    fullPath = tmp_path / "full.inp"
+    fullPath.write_text(_AMR_TIE_MATERIAL_AND_MESH + _amrTieStep(maxNumInc=10000))
+    referenceModel = _runInputFile(fullPath)
+    # Guard against a vacuous pass: the divergence this pins comes from AMR and the tie's facet
+    # regeneration claiming element numbers ALTERNATELY across several refinement occasions, and
+    # from the replay materialising level-wise rather than occasion-wise. One occasion at one level
+    # exercises neither.
+    occasions = referenceModel.modelModifiers["amr"]._committedOccasionEids
+    levels = {
+        referenceModel.modelModifiers["amr"]._mesh.elements[eid]["level"]
+        for eid in referenceModel.modelModifiers["amr"]._eidToEl
+    }
+    assert len(occasions) >= 2, "only {:} refinement occasion(s): the interleaving is not exercised".format(
+        len(occasions)
+    )
+    assert levels >= {1, 2}, "only levels {:}: the level-wise replay batching is not exercised".format(sorted(levels))
+    assert len(referenceModel.elements) > 4, "the stress marker never triggered a refinement"
+
+    checkpointBaseName = tmp_path / "ckpt"
+    truncPath = tmp_path / "trunc.inp"
+    truncPath.write_text(
+        _AMR_TIE_MATERIAL_AND_MESH + "\n*output, type=restart, name=restartwriter\n"
+        f"writeInterval=1, baseName={checkpointBaseName}, numberOfFilesToKeep=3\n" + _amrTieStep(maxNumInc=5)
+    )
+    truncatedModel = _runInputFile(truncPath)
+    assert len(truncatedModel.elements) > 4, "truncated too early: refinement had not happened yet"
+    assert truncatedModel.time < 1.0, "the step already finished within maxNumInc -- not a truncation"
+
+    checkpoint = _mostRecentCheckpoint(tmp_path)
+    resumePath = tmp_path / "resume.inp"
+    resumePath.write_text(
+        _AMR_TIE_MATERIAL_AND_MESH + f"\n*restart, readFrom={checkpoint}\n" + _amrTieStep(maxNumInc=10000)
+    )
+    resumedModel = _runInputFile(resumePath)
+
+    assert (
+        resumedModel.topologyFingerprint() == referenceModel.topologyFingerprint()
+    ), "resumed topology differs from the uninterrupted run: " "{:} elements vs {:}, numbers {:} vs {:}".format(
+        len(resumedModel.elements),
+        len(referenceModel.elements),
+        sorted(resumedModel.elements)[:12],
+        sorted(referenceModel.elements)[:12],
+    )

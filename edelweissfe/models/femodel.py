@@ -29,6 +29,7 @@
 
 # @author: Matthias Neuner
 
+import hashlib
 import textwrap
 from contextlib import contextmanager
 from operator import attrgetter
@@ -255,6 +256,38 @@ class FEModel:
                         )
                     )
         return changed
+
+    def topologyFingerprint(self) -> str:
+        """A short digest of the model's topology *and its numbering*, for verifying that a restart
+        replay reproduced the original run.
+
+        Covers exactly what a replay must get right and nothing else: every element's number, type
+        and connectivity (in order -- a rotated connectivity is a real difference), and every node's
+        label and coordinates. Deliberately excludes solution state, so a mismatch means the *mesh*
+        diverged, not that the solver took a different path.
+
+        Recorded per round in the topology history, this turns "the resumed run diverged somewhere"
+        into "increment 471, round 2, modifier amr" -- a divergence you can bisect rather than hunt.
+        Cheap enough to leave enabled in CI.
+
+        Uses blake2b rather than :func:`hash`, whose string hashing is randomised per process and
+        would make the digest differ between two runs of the *same* code.
+
+        Returns
+        -------
+        str
+            A 32-character hex digest.
+        """
+
+        digest = hashlib.blake2b(digest_size=16)
+        for elNumber in sorted(self.elements):
+            element = self.elements[elNumber]
+            digest.update(b"E|%d|%s|" % (elNumber, element.elType.encode()))
+            digest.update(b",".join(b"%d" % node.label for node in element.nodes))
+        for label in sorted(self.nodes):
+            digest.update(b"N|%d|" % label)
+            digest.update(np.asarray(self.nodes[label].coordinates, dtype=float).tobytes())
+        return digest.hexdigest()
 
     def registerMeshDependent(self, consumer):
         """Register a :class:`~edelweissfe.models.meshdependent.MeshDependent` to be refreshed after
