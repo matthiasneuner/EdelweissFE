@@ -169,8 +169,10 @@ class Generator(GeneratorBase):
                 elements_per_block.append(newEl)
                 idx += 1
 
+            # not set(...): ElementSet already deduplicates and keeps the order it is fed, whereas a
+            # set of identity-hashed elements would fix the member order from object addresses
             model.elementSets[f"{name}_block-{block_id + 1}"] = ElementSet(
-                f"{name}_block-{block_id + 1}", set(elements_per_block)
+                f"{name}_block-{block_id + 1}", elements_per_block
             )
 
         # replicate the mesh of the unit cell in x direction

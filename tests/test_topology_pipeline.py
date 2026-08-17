@@ -171,3 +171,46 @@ def test_window_closes_on_exception():
 
     with pytest.raises(TopologyError):
         model.reserveElementNumbers(1)
+
+
+def test_parsed_element_set_keeps_its_declaration_order():
+    """An ``*elSet`` must come out in the order it was declared.
+
+    Element sets are OrderedSets, and their member order reaches element *numbering*: an
+    element-based ``*surface`` is built from such a set, and ``surfaceElementGenerator`` walks it
+    handing out sequential facet element labels. Elements are hashed by identity, so building the
+    set through a raw ``set()`` fixed that order from object *addresses* -- reproducible only for a
+    bit-identical allocation history, which a resumed run does not have (its ``.inp`` carries
+    ``*restart``, and it has an extra open file). Verified to fail before the fix, with this exact
+    fixture producing [1, 4, 9, 3, 8, 12, 2, 7, 11, 6, 5, 10].
+
+    See PLAN_TOPOLOGY_PIPELINE.md determinism rule 2.
+    """
+
+    from collections import defaultdict
+
+    from edelweissfe.generators.abqmodelconstructor import AbqModelConstructor
+    from edelweissfe.journal.journal import Journal
+
+    nElements = 12
+    inputFile = defaultdict(list)
+    inputFile["node"] = [
+        {"nSet": None, "datalines": ["{:}, {:}, 0.0".format(i, float(i)) for i in range(1, 2 * nElements + 3)]}
+    ]
+    inputFile["element"] = [
+        {
+            "type": "CPE4",
+            "provider": "edelweiss",
+            "elSet": None,
+            "elset": None,
+            "datalines": [
+                "{:}, {:}, {:}, {:}, {:}".format(e, e, e + 1, e + nElements + 2, e + nElements + 1)
+                for e in range(1, nElements + 1)
+            ],
+        }
+    ]
+    inputFile["elSet"] = [{"elSet": "declared", "datalines": [", ".join(str(e) for e in range(1, nElements + 1))]}]
+
+    model = AbqModelConstructor(Journal(verbose=False)).createGeometryFromInputFile(FEModel(2), inputFile)
+
+    assert [el.elNumber for el in model.elementSets["declared"]] == list(range(1, nElements + 1))
