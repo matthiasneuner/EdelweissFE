@@ -289,7 +289,12 @@ class FEModel:
 
         changed = False
         with self.topologyChanges():
-            lastPlannedVersion = {name: None for name in self.modelModifiers}
+            # Seeded with the version at the START of this update, not None: a modifier must see
+            # what earlier modifiers did in the SAME round. Seeding with None meant a purely
+            # reactive modifier (one that only acts on someone else's change) was handed None in
+            # round 1 -- after the change it needed to see had already happened -- and then had its
+            # version stamped, so round 2 showed nothing new either. It never reacted at all.
+            lastPlannedVersion = {name: self.topologyVersion for name in self.modelModifiers}
             roundNumber = 0
             while True:
                 roundNumber += 1
@@ -301,8 +306,7 @@ class FEModel:
                 # simulation quietly.
                 touchedBy = {}
                 for name, modifier in self.modelModifiers.items():
-                    seenVersion = lastPlannedVersion[name]
-                    change = self.changesSince(seenVersion) if seenVersion is not None else None
+                    change = self.changesSince(lastPlannedVersion[name])
                     lastPlannedVersion[name] = self.topologyVersion
                     plan = modifier.plan(self, change, step, timeStep)
                     if plan is None:

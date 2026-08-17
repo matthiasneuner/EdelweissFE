@@ -458,8 +458,8 @@ def test_fingerprint_is_insensitive_to_dict_insertion_order():
 class _OwningModifier(_StubModifier):
     """A modifier that claims a fixed set of elements, and can be told to mutate an arbitrary one."""
 
-    def __init__(self, name, log, owns=(), touches=()):
-        super().__init__(name, plansLeft=1, log=log)
+    def __init__(self, name, log, owns=(), touches=(), reactsToOthers=False):
+        super().__init__(name, plansLeft=1, log=log, reactsToOthers=reactsToOthers)
         self._owns = set(owns)
         self._touches = set(touches)
 
@@ -501,7 +501,9 @@ def test_two_modifiers_changing_one_element_in_a_round_is_refused():
     log = []
     model = _modelWithModifiers(
         first=_OwningModifier("first", log, owns={1}, touches={99}),
-        second=_OwningModifier("second", log, owns={2}, touches={99}),
+        # reactsToOthers, so it still plans after seeing the first modifier's change in the same
+        # round -- which is the only way two modifiers can collide within one round at all
+        second=_OwningModifier("second", log, owns={2}, touches={99}, reactsToOthers=True),
     )
     with pytest.raises(TopologyError, match="both changed element 99 in round 1"):
         model.updateTopology(step=None, timeStep=0.0)
@@ -535,3 +537,31 @@ def test_a_consumer_cannot_mutate_the_topology():
     model.updateTopology(step=None, timeStep=0.0)
     with pytest.raises(TopologyError, match="only be reserved during a topology change"):
         model.refreshMeshDependents()
+
+
+def test_a_purely_reactive_modifier_sees_the_first_round_change():
+    """The bug this pins cost two marmot regressions: a modifier that only ever reacts to someone
+    else's change was handed None in round 1 -- after the change it needed had already happened --
+    and then had its version stamped, so round 2 showed nothing new either. It never reacted at all,
+    and contact ran against facets still tiling the unrefined surface.
+
+    A reactive modifier must see, in round 1, what an earlier modifier did in round 1.
+    """
+
+    seen = []
+
+    class _Reactive(_StubModifier):
+        def plan(self, model, change, step, timeStep):
+            seen.append(change)
+            return None
+
+    log = []
+    model = _modelWithModifiers(
+        acts=_OwningModifier("acts", log, owns={1}, touches={7}),
+        reacts=_Reactive("reacts", plansLeft=0, log=log),
+    )
+    model.updateTopology(step=None, timeStep=0.0)
+
+    assert seen, "the reactive modifier was never asked to plan"
+    assert seen[0] is not None, "round 1 handed it None despite an earlier modifier having changed the model"
+    assert 7 in seen[0].addedElements
