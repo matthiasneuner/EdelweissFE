@@ -280,9 +280,8 @@ class ModelModifier(ModelModifierBase):
         self.maxLevel = options.maxLevel
         self.minMarkedElements = max(1, options.minMarkedElements)
         self._pendingMarkedElements = set()  # elements marked but not yet refined (below minMarkedElements)
-        # element labels that triggered each refinement that has actually materialized, in commit
-        # order -- the record restart replays (see getRestartData/setRestartData) to reproduce this
-        # instance's topology history without re-running (and trusting bit-identical) marker evaluation.
+        # Diagnostics only, for the journal and for tests. The authoritative record of what this
+        # modifier did -- the one a restart replays -- is model.topologyHistory.
         self._committedOccasions = []
         self.splitFactor = options.splitFactor
         self._stateTransfer = _buildStateTransferStrategy(options.stateTransfer, options.stateTransferOverrides)
@@ -348,11 +347,7 @@ class ModelModifier(ModelModifierBase):
         self._topology = Hex20Topology()
         self._mesh = AdaptiveMesh(splitFactor=self.splitFactor, topology=self._topology)
         self._eidToEl = {}  # mesh element id -> live element
-        #: True only while setRestartData() replays committed occasions; lets _materialize skip
-        #: per-occasion work whose result the checkpoint restore overwrites anyway.
-        self._replayMode = False
-        #: Octree eids of each committed occasion, parallel to _committedOccasions (which holds
-        #: element numbers). Eids stay valid across a restart replay; element numbers do not.
+        #: Diagnostics only, parallel to _committedOccasions; see there.
         self._committedOccasionEids = []
         for el in refineElements:
             componentId = componentOfElement[el]
@@ -555,16 +550,17 @@ class ModelModifier(ModelModifierBase):
 
         # snapshot the converged nodal values BEFORE the mesh mutates, for the warm start
         oldValues = {}
-        # On the restart replay path the warm start is dead work: readRestart overwrites every node
-        # field right afterwards. Leaving oldValues empty makes the interpolation below and the
-        # fields-restore block no-ops, and skips one array copy per node per field per occasion.
-        if not self._replayMode:
-            for fieldName, nodeField in model.nodeFields.items():
-                if "U" in nodeField:
-                    U = np.asarray(nodeField["U"])
-                    oldValues[fieldName] = {
-                        node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
-                    }
+        # Runs on the replay path too. It is dead work there -- readRestart overwrites every node
+        # field right afterwards -- but apply() is ONE code path, and a "skip this on replay" branch
+        # is exactly the kind of live/replay divergence that made a resumed run rebuild a different
+        # mesh. If this ever costs measurably, the flag belongs in the recorded plan, not in an
+        # ambient replay mode.
+        for fieldName, nodeField in model.nodeFields.items():
+            if "U" in nodeField:
+                U = np.asarray(nodeField["U"])
+                oldValues[fieldName] = {
+                    node: U[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
+                }
 
         # new nodes
         newNodes = {}
@@ -599,10 +595,9 @@ class ModelModifier(ModelModifierBase):
                 child = self._elementClass(self._elementType, elNumber)
                 child.setNodes([model.nodes[label] for label in e["conn"]])
                 self._sectionOf[parentEl].assignSectionPropertiesToElement(child)
-                if not self._replayMode:
-                    # Replay restores each child's checkpointed state by eid afterwards, so the
-                    # transferred values would be overwritten (see setRestartData).
-                    self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
+                # Runs on replay too, identically: apply() is one code path, and element state is
+                # restored by number afterwards either way.
+                self._stateTransfer.transferState(parentEl, [child], self._topology)  # WS-F (state)
 
                 # warm start (WS-H): interpolate each NEW node's field values from the parent via the
                 # HEX20 isoparametric map, so the increment restarts from a consistent state, not zero
@@ -718,166 +713,31 @@ class ModelModifier(ModelModifierBase):
             model._linkFieldVariableObjects(model.nodeSets["all"])
         return change
 
-    def getRestartData(self) -> dict[str, np.ndarray] | None:
-        """This instance's refinement history: every committed occasion's marked element labels
-        (flattened CSR-style, since occasions have varying size), the not-yet-refined pending
-        labels, and the cutback-reentry guard. ``None`` if nothing has ever happened (no
-        refinement, nothing pending) -- see :meth:`ModelModifierBase.getRestartData`.
+    def encodePlan(self, plan: "RefinementPlan") -> dict:
+        """Serialize a :class:`RefinementPlan` -- just the octree eids it names."""
 
-        Deliberately does not store node coordinates, connectivity, or hanging-node records --
-        :meth:`setRestartData` rederives all of that deterministically by replaying each occasion
-        through :meth:`apply`, the same mechanics a live run uses.
+        return {"eids": np.array(plan.eids, dtype=int)}
+
+    def decodePlan(self, data: dict) -> "RefinementPlan":
+        """Inverse of :meth:`encodePlan`."""
+
+        return RefinementPlan(eids=[int(eid) for eid in data["eids"]])
+
+    def restoreDecisionState(self, records) -> None:
+        """Re-establish what the *next* decision needs, after a restart replay.
+
+        Two things, neither of which touches the mesh:
+
+        - the cutback guard, so the first post-resume call does not re-refine at a time this
+          modifier already refined at;
+        - the initial-marker latch, since a checkpoint only exists after an increment converged, so
+          a resumed run is never truly making its first call.
+
+        Notably absent: the pending marks. Those are re-derived by the next :meth:`plan` from the
+        restored solution state -- which is exactly what the live run would have done -- so they need
+        no checkpointing at all.
         """
 
-        if not self._committedOccasions and not self._pendingMarkedElements:
-            return None
-
-        occasionSizes = [len(labels) for labels in self._committedOccasions]
-        occasionLabels = [label for labels in self._committedOccasions for label in labels]
-        occasionEids = [eid for eids in self._committedOccasionEids for eid in eids]
-        pendingLabels = [el.elNumber for el in self._pendingMarkedElements]
-
-        # Material state (quadrature-point history) of every currently-materialized leaf element,
-        # keyed by the octree element id (eid) rather than the element number. AMR child element
-        # numbers are NOT reproducible across a restart replay -- contact/tie facet elements claim
-        # element labels between refinements, so the running label counter interleaves differently --
-        # which would leave every refined child at a number FEModel.readRestart's number-keyed state
-        # restore cannot match, i.e. restored virgin. The eid IS reproducible (topology is
-        # byte-identical given the replayed occasions), so setRestartData restores by it instead.
-        stateEids = []
-        stateSizes = []
-        stateChunks = []
-        for eid, el in self._eidToEl.items():
-            try:
-                sv = np.asarray(el.getStateVars(), dtype=float).ravel()
-            except NotImplementedError:
-                continue
-            stateEids.append(int(eid))
-            stateSizes.append(sv.size)
-            stateChunks.append(sv)
-        stateData = np.concatenate(stateChunks) if stateChunks else np.zeros(0, dtype=float)
-
-        return {
-            "occasionSizes": np.array(occasionSizes, dtype=int),
-            "occasionLabels": np.array(occasionLabels, dtype=int),
-            "occasionEids": np.array(occasionEids, dtype=int),
-            "pendingLabels": np.array(pendingLabels, dtype=int),
-            "lastRefinedTime": np.array([self._lastRefinedTime if self._lastRefinedTime is not None else np.nan]),
-            "stateEids": np.array(stateEids, dtype=int),
-            "stateSizes": np.array(stateSizes, dtype=int),
-            "stateData": stateData,
-        }
-
-    def _replayOccasionsByEid(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
-        """Reconstruct the refinement history from recorded octree eids.
-
-        Refines the octree mirror for every occasion first -- pure topology, no model objects, so
-        none of the per-occasion model-side cost is paid -- then materialises the model once per
-        refinement *level*. The 2:1 balance stays per occasion because a later occasion's eids were
-        chosen in a mesh that had already been balanced, so batching it could change the topology.
-        """
-        offset = 0
-        occasions = []
-        for size in data["occasionSizes"]:
-            occasions.append([int(eid) for eid in data["occasionEids"][offset : offset + int(size)]])
-            offset += int(size)
-
-        for eids in occasions:
-            for eid in eids:
-                if self._mesh.elements[eid]["active"]:
-                    self._mesh.refine(eid)
-            self._mesh.balance_2to1()
-
-        # Materialise level by level: _materialize only takes children whose parent is already
-        # materialised, so one pass per refinement level is enough (maxLevel bounds the count).
-        passes = 0
-        while set(self._mesh.active()) - set(self._eidToEl.keys()):
-            with timeit("hanging nodes"):
-                records = self._mesh.hanging_mpc_records()
-            with timeit("materialize"):
-                change = self._materialize(model, records)
-            self._hanging.setRecords(records)
-            with timeit("notify observers"):
-                model.notifyModelChanged(ModelChangeType.REFINEMENT, change)
-            passes += 1
-            if not change.addedElements or passes > 64:
-                break
-
-        self._committedOccasions = [list(labels) for labels in self._splitByOccasion(data, "occasionLabels")]
-        self._committedOccasionEids = occasions
-        self._journal.message(
-            "AMR ModelModifier: replayed {:} occasion(s) from eids in {:} materialisation pass(es), "
-            "active elements {:}".format(len(occasions), passes, len(self._mesh.active())),
-            "hadaptivity",
-            0,
-        )
-
-    def _splitByOccasion(self, data: dict[str, np.ndarray], key: str):
-        """Split a flattened per-occasion array back into one list per occasion."""
-        out = []
-        offset = 0
-        for size in data["occasionSizes"]:
-            out.append([int(v) for v in data[key][offset : offset + int(size)]])
-            offset += int(size)
-        return out
-
-    def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
-        """Replay every committed occasion, in order, through :meth:`apply` --
-        exactly the mechanics a live run uses, just fed a recorded decision instead
-        of evaluating markers -- to reconstruct this instance's topology, then restore the pending
-        marks and the cutback guard.
-
-        Must run before :meth:`~edelweissfe.models.femodel.FEModel.readRestart` restores node
-        fields/element state variables (see :meth:`ModelModifierBase.setRestartData`): the elements
-        this replays are not in ``model.elements`` yet otherwise, so that restore would silently
-        skip them.
-        """
-
-        # A checkpoint only ever exists after at least one increment converged (checkpoints are
-        # written from finalizeIncrement), which means updateModel already ran at least once
-        # before it was written -- so this is never truly a first call. Without this, the live
-        # path's initialOnly markers would re-evaluate on the next updateModel call as if it were,
-        # redundantly re-marking whatever they select (harmless today only because a refined
-        # parent is no longer in self._eidToEl for the marker to re-select, and maxLevel/eligibility
-        # filtering catches the rest -- not a guarantee every marker implementation shares).
+        if records:
+            self._lastRefinedTime = float(records[-1].time)
         self._isFirstCall = False
-
-        offset = 0
-        self._replayMode = True
-        try:
-            if "occasionEids" in data and len(data["occasionEids"]):
-                self._replayOccasionsByEid(model, data)
-            else:
-                # legacy checkpoint (no eids recorded): per-occasion materialisation
-                for size in data["occasionSizes"]:
-                    labels = data["occasionLabels"][offset : offset + int(size)]
-                    offset += int(size)
-                    eligible = [model.elements[int(label)] for label in labels]
-                    elForEid = {v: k for k, v in self._eidToEl.items()}
-                    self.apply(model, RefinementPlan(eids=[elForEid[el] for el in eligible]))
-        finally:
-            self._replayMode = False
-
-        # Every element this modifier manages had its state restored above by octree eid; tell
-        # FEModel.readRestart not to restore them again by (renumbered) element number.
-        self.restoredElementLabels = frozenset(el.elNumber for el in self._eidToEl.values())
-
-        self._pendingMarkedElements = {model.elements[int(label)] for label in data["pendingLabels"]}
-        lastRefinedTime = float(data["lastRefinedTime"][0])
-        self._lastRefinedTime = None if np.isnan(lastRefinedTime) else lastRefinedTime
-
-        # Restore refined elements' material history by octree eid (see getRestartData). Element
-        # numbers assigned during the replay above do not match those at checkpoint time, so
-        # FEModel.readRestart's number-keyed restore leaves these children virgin; this runs after the
-        # full replay, when self._eidToEl maps each checkpointed eid to its (renumbered) live element.
-        if "stateEids" in data and len(data["stateEids"]):
-            sizes = data["stateSizes"]
-            flat = data["stateData"]
-            offset = 0
-            for i, eid in enumerate(data["stateEids"]):
-                size = int(sizes[i])
-                chunk = flat[offset : offset + size]
-                offset += size
-                el = self._eidToEl.get(int(eid))
-                if el is not None:
-                    el.setStateVars(np.ascontiguousarray(chunk, dtype=float))

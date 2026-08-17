@@ -30,8 +30,6 @@
 
 from abc import ABC, abstractmethod
 
-import numpy as np
-
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider
@@ -115,6 +113,35 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
             The changeset this mutation produced.
         """
 
+    @abstractmethod
+    def encodePlan(self, plan) -> dict:
+        """Serialize a plan for the topology history, as a flat mapping of name to
+        :class:`numpy.ndarray` (or scalar).
+
+        Everything :meth:`apply` needs must be here: on a restart, the plan is rebuilt from this and
+        nothing else -- :meth:`plan` is not called.
+        """
+
+    @abstractmethod
+    def decodePlan(self, data: dict):
+        """Inverse of :meth:`encodePlan`."""
+
+    def restoreDecisionState(self, records):
+        """Restore whatever *decision-side* state :meth:`plan` needs, from this modifier's own
+        records, after a restart replay.
+
+        Optional -- the default does nothing, which is correct for any modifier whose next decision
+        depends only on the model and the solution state, both of which the restart restores anyway.
+        Deliberately separate from :meth:`apply`: this is about how the *next* decision is made, not
+        about reconstructing the model, so getting it wrong cannot corrupt the mesh.
+
+        Parameters
+        ----------
+        records
+            This modifier's :class:`~edelweissfe.models.modelchange.TopologyRecord` entries, in
+            order. Empty if it never changed anything.
+        """
+
     def updateModel(self, model: FEModel, step, timeStep: float) -> bool:
         """Plan, then apply, in one call.
 
@@ -141,49 +168,9 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     def onIncrementEnd(self, model: FEModel, step, timeStep: float):
         """Optional lifecycle hook called after an increment converges."""
 
-    #: Element labels whose state this modifier restored itself in :meth:`setRestartData`
-    #: (keyed by something stable, e.g. an octree id). FEModel.readRestart skips these in its own
-    #: number-keyed element-state restore, because element numbers are not reproducible across a
-    #: replay -- see :meth:`~edelweissfe.models.femodel.FEModel.readRestart`.
-    restoredElementLabels: frozenset = frozenset()
-
-    def getRestartData(self) -> dict[str, np.ndarray] | None:
-        """Return this modifier's history needed to reproduce its effect on the model topology
-        (e.g. AMR's log of past refinement decisions), to be serialized by
-        :meth:`~edelweissfe.models.femodel.FEModel.writeRestart`, or ``None`` if the modifier never
-        changed the topology and has nothing pending.
-
-        The default implementation returns ``None``, correct for any modifier that never mutates
-        topology at all.
-
-        Returns
-        -------
-        dict[str, np.ndarray] | None
-            A flat mapping of array name to array, or ``None``.
-        """
-
-        return None
-
-    def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]):
-        """Reproduce this modifier's effect on ``model``'s topology from a restart checkpoint.
-
-        Unlike :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.setRestartData`
-        (passive: only restores internal history, never touches the model), this is expected to
-        *mutate* ``model`` -- e.g. AMR replaying past refinements to recreate the elements/nodes a
-        plain rebuild from the ``.inp`` file cannot reproduce. That is why it takes ``model``
-        explicitly rather than relying on a modifier-held reference.
-
-        Called by :meth:`~edelweissfe.models.femodel.FEModel.readRestart` *before* it restores node
-        fields, element state variables, and scalar variables -- any element this call materializes
-        must already exist by the time that follow-up restore runs, since it addresses elements by
-        label.
-
-        Parameters
-        ----------
-        model
-            The FEModel object, to be mutated as needed.
-        data
-            The mapping previously returned by :meth:`getRestartData`.
-        """
-
-        raise NotImplementedError("This model modifier does not carry restartable topology history.")
+    # getRestartData/setRestartData are gone. A modifier no longer serializes its own history, nor
+    # implements its own replay: FEModel records every applied plan in model.topologyHistory and
+    # replays it through this class's apply(). The previous arrangement had each modifier
+    # reimplementing the mutation for the replay path, which is precisely why a resumed run could
+    # rebuild a differently-numbered mesh -- two implementations of one mutation always drift.
+    # Decision-side state that plan() needs goes through restoreDecisionState() instead.

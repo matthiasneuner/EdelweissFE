@@ -41,6 +41,8 @@ test_restart_integration.py already covers separately.
 
 from pathlib import Path
 
+import pytest
+
 from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
@@ -111,53 +113,68 @@ def _hangingRecordsByLabel(hangingConstraint) -> dict:
     }
 
 
-def test_restart_data_roundtrip_reproduces_committed_refinement(tmp_path):
+def test_topology_history_roundtrip_reproduces_the_refinement(tmp_path):
+    """The replay contract, at the level of one modifier: a model that replays the recorded history
+    ends up byte-identical to the one that made the decisions live.
+
+    Compares by topologyFingerprint, which covers element numbers, connectivity and node
+    coordinates -- not just the element-number set the old per-modifier round-trip checked.
+    """
+
     modelA = _buildModel(tmp_path, "a.inp")
     amrA = modelA.modelModifiers["amr"]
 
-    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
-        refined = amrA.updateModel(modelA, step=None, timeStep=0.0)
+    refined = modelA.updateTopology(step=None, timeStep=0.0)
     assert refined, "the initialOnly marker should have triggered a refinement on the first call"
-    assert amrA._committedOccasions, "the committed occasion log should now have one entry"
-
-    restartData = amrA.getRestartData()
-    assert restartData is not None
+    assert modelA.topologyHistory, "an applied decision must be recorded in the topology history"
 
     modelB = _buildModel(tmp_path, "b.inp")
-    amrB = modelB.modelModifiers["amr"]
     assert len(modelB.elements) < len(modelA.elements), "model B must start unrefined"
 
-    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
-        amrB.setRestartData(modelB, restartData)
+    modelB.replayTopologyHistory(modelA.topologyHistory)
 
-    assert set(modelB.elements.keys()) == set(modelA.elements.keys())
-    assert set(modelB.nodes.keys()) == set(modelA.nodes.keys())
-    assert amrB._committedOccasions == amrA._committedOccasions
-    assert _hangingRecordsByLabel(amrB._hanging) == _hangingRecordsByLabel(amrA._hanging)
-    # A checkpoint only exists after at least one increment converged, so this can never truly be
-    # modelB's first updateModel call -- otherwise the live path would re-evaluate initialOnly
-    # markers redundantly on its next real call.
-    assert amrB._isFirstCall is False
+    assert modelB.topologyFingerprint() == modelA.topologyFingerprint()
+    assert _hangingRecordsByLabel(modelB.modelModifiers["amr"]._hanging) == _hangingRecordsByLabel(amrA._hanging)
+    # A checkpoint only exists after an increment converged, so a replayed run is never truly making
+    # its first call -- otherwise initialOnly markers would re-evaluate redundantly on the next one.
+    assert modelB.modelModifiers["amr"]._isFirstCall is False
 
 
-def test_restart_data_roundtrip_reproduces_pending_marks(tmp_path):
+def test_replay_detects_a_tampered_plan_and_names_it(tmp_path):
+    """The fingerprint recorded with each decision is what turns "the resumed run diverged" into
+    "it diverged at THIS record" -- so a plan that no longer reproduces its recorded topology must
+    be reported, not silently applied."""
+
+    from dataclasses import replace
+
+    from edelweissfe.utils.exceptions import TopologyError
+
     modelA = _buildModel(tmp_path, "a.inp")
-    amrA = modelA.modelModifiers["amr"]
-    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
-        amrA.updateModel(modelA, step=None, timeStep=0.0)
+    modelA.updateTopology(step=None, timeStep=0.0)
+    assert modelA.topologyHistory
 
-    # Simulate a second marking round that hasn't reached minMarkedElements yet: still-active,
-    # not-yet-refined elements sitting in the batching buffer at checkpoint time.
-    stillActive = [el for eid, el in amrA._eidToEl.items() if amrA._mesh.elements[eid]["active"]]
-    pendingLabels = {el.elNumber for el in stillActive[:1]}
-    amrA._pendingMarkedElements = {el for el in stillActive if el.elNumber in pendingLabels}
-
-    restartData = amrA.getRestartData()
-    assert restartData is not None
+    tampered = [replace(record, fingerprint="0" * 32) for record in modelA.topologyHistory]
 
     modelB = _buildModel(tmp_path, "b.inp")
-    amrB = modelB.modelModifiers["amr"]
-    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
-        amrB.setRestartData(modelB, restartData)
+    with pytest.raises(TopologyError, match="replay diverged at record 0"):
+        modelB.replayTopologyHistory(tampered)
 
-    assert {el.elNumber for el in amrB._pendingMarkedElements} == pendingLabels
+
+def test_pending_marks_are_not_checkpointed_but_re_derived(tmp_path):
+    """Pending marks deliberately do NOT round-trip: they are a decision-side buffer, and the next
+    plan() re-derives them from the restored solution state -- exactly as the live run would have.
+    Checkpointing them would be a second source of truth for something already implied."""
+
+    modelA = _buildModel(tmp_path, "a.inp")
+    amrA = modelA.modelModifiers["amr"]
+    modelA.updateTopology(step=None, timeStep=0.0)
+
+    stillActive = [el for eid, el in amrA._eidToEl.items() if amrA._mesh.elements[eid]["active"]]
+    amrA._pendingMarkedElements = set(stillActive[:1])
+
+    modelB = _buildModel(tmp_path, "b.inp")
+    modelB.replayTopologyHistory(modelA.topologyHistory)
+
+    assert modelB.modelModifiers["amr"]._pendingMarkedElements == set()
+    # what IS restored is the decision-side state the next plan() needs
+    assert modelB.modelModifiers["amr"]._lastRefinedTime == modelA.topologyHistory[-1].time

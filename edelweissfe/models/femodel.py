@@ -40,11 +40,15 @@ import numpy as np
 from edelweissfe.config.phenomena import getFieldSize, phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.modelchange import ModelChange, coalesce
-from edelweissfe.utils.exceptions import TopologyError
+from edelweissfe.models.modelchange import ModelChange, TopologyRecord, coalesce
+from edelweissfe.utils.exceptions import RestartError, TopologyError
 from edelweissfe.utils.performancetiming import timeit
 from edelweissfe.variables.fieldvariable import FieldVariable
 from edelweissfe.variables.scalarvariable import ScalarVariable
+
+#: Checkpoint layout this build writes and reads. A checkpoint stamped with anything else is
+#: refused rather than partially restored -- see FEModel.readRestart.
+RESTART_FORMAT_VERSION = 2
 
 
 class FEModel:
@@ -90,6 +94,12 @@ class FEModel:
         self._topologyOpen = False  #: True only inside :meth:`topologyChanges`; see there.
         #: Guard against a model modifier that keeps planning in response to its own output.
         self.maxTopologyRounds = 16
+        #: Ordered record of every applied model-modifier decision; see :meth:`updateTopology`. This
+        #: IS the restart history -- a resumed run replays it rather than re-deciding.
+        self.topologyHistory = []
+        #: Compare each replayed round's fingerprint against the recorded one. On by default: it is
+        #: the difference between "the resumed run diverged" and "it diverged HERE".
+        self.verifyTopologyFingerprints = True
 
     @contextmanager
     def topologyChanges(self):
@@ -242,7 +252,8 @@ class FEModel:
                     plan = modifier.plan(self, change, step, timeStep)
                     if plan is None:
                         continue
-                    modifier.apply(self, plan)
+                    modelChange = modifier.apply(self, plan)
+                    self.recordTopologyChange(roundNumber, name, modifier, plan, modelChange)
                     plannedThisRound.append(name)
                     changed = True
                 if not plannedThisRound:
@@ -288,6 +299,84 @@ class FEModel:
             digest.update(b"N|%d|" % label)
             digest.update(np.asarray(self.nodes[label].coordinates, dtype=float).tobytes())
         return digest.hexdigest()
+
+    def recordTopologyChange(self, roundNumber: int, name: str, modifier, plan, modelChange) -> TopologyRecord:
+        """Append an applied decision to :attr:`topologyHistory`.
+
+        Records the plan in the modifier's own serializable form plus the resulting topology
+        fingerprint, which is what lets a resumed run be checked round by round instead of only at
+        the end. Cost is one fingerprint per *applied* decision -- a handful per analysis, not per
+        iteration.
+        """
+
+        record = TopologyRecord(
+            modifier=name,
+            roundNumber=roundNumber,
+            time=float(self.time),
+            plan=modifier.encodePlan(plan),
+            fingerprint=self.topologyFingerprint(),
+            nElementsAdded=len(modelChange.addedElements) if modelChange is not None else 0,
+            nElementsRemoved=len(modelChange.removedElements) if modelChange is not None else 0,
+            nNodesAdded=len(modelChange.addedNodes) if modelChange is not None else 0,
+        )
+        self.topologyHistory.append(record)
+        return record
+
+    def replayTopologyHistory(self, records, journal: Journal = None):
+        """Reconstruct the topology by re-applying recorded decisions, in order.
+
+        This is the whole point of the plan/apply split: the modifier's :meth:`apply` runs here
+        exactly as it did live, fed a decoded plan instead of a freshly evaluated one. There is no
+        replay-specific code path to drift from the live one -- which is what the previous design
+        had, and why a resumed run silently renumbered its elements.
+
+        Parameters
+        ----------
+        records
+            The :class:`~edelweissfe.models.modelchange.TopologyRecord` sequence to replay.
+        journal
+            Optional Journal for progress messages.
+
+        Raises
+        ------
+        TopologyError
+            If a replayed round's fingerprint differs from the recorded one (when
+            :attr:`verifyTopologyFingerprints`), naming the exact record -- so a divergence is
+            located rather than merely detected.
+        """
+
+        with self.topologyChanges():
+            for index, record in enumerate(records):
+                modifier = self.modelModifiers.get(record.modifier)
+                if modifier is None:
+                    raise TopologyError(
+                        "the checkpoint records a decision by model modifier {!r}, which this model "
+                        "does not define -- the input file must declare the same modifiers as the run "
+                        "being resumed".format(record.modifier)
+                    )
+                modelChange = modifier.apply(self, modifier.decodePlan(record.plan))
+                replayed = self.recordTopologyChange(
+                    record.roundNumber, record.modifier, modifier, modifier.decodePlan(record.plan), modelChange
+                )
+                if self.verifyTopologyFingerprints and record.fingerprint:
+                    if replayed.fingerprint != record.fingerprint:
+                        raise TopologyError(
+                            "restart replay diverged at record {:} of {:}: modifier {!r}, round {:}, "
+                            "time {:}. The replayed topology does not match the recorded one, so this "
+                            "modifier's apply() is not a pure function of (model, plan).".format(
+                                index, len(records), record.modifier, record.roundNumber, record.time
+                            )
+                        )
+        for name, modifier in self.modelModifiers.items():
+            modifier.restoreDecisionState([r for r in records if r.modifier == name])
+        if journal is not None:
+            journal.message(
+                "Replayed {:} recorded topology change(s); {:} elements, {:} nodes".format(
+                    len(records), len(self.elements), len(self.nodes)
+                ),
+                self.identification,
+                0,
+            )
 
     def registerMeshDependent(self, consumer):
         """Register a :class:`~edelweissfe.models.meshdependent.MeshDependent` to be refreshed after
@@ -609,6 +698,7 @@ class FEModel:
         f = restartFile
 
         f.attrs["time"] = self.time
+        f.attrs["restartFormatVersion"] = RESTART_FORMAT_VERSION
 
         nodeFieldsGroup = f.create_group("nodeFields")
         for nf in self.nodeFields.values():
@@ -637,14 +727,19 @@ class FEModel:
             for entryName, entryValues in restartData.items():
                 constraintGroup.create_dataset(entryName, data=entryValues)
 
-        modelModifiersGroup = f.create_group("modelModifiers")
-        for name, modifier in self.modelModifiers.items():
-            restartData = modifier.getRestartData()
-            if restartData is None:
-                continue
-            modifierGroup = modelModifiersGroup.create_group(name)
-            for entryName, entryValues in restartData.items():
-                modifierGroup.create_dataset(entryName, data=entryValues)
+        # The ordered record of every applied model-modifier decision. A resumed run replays these
+        # through the modifiers' own apply(), rather than each modifier reimplementing its own replay
+        # -- see replayTopologyHistory.
+        historyGroup = f.create_group("topologyHistory")
+        historyGroup.attrs["count"] = len(self.topologyHistory)
+        for index, record in enumerate(self.topologyHistory):
+            recordGroup = historyGroup.create_group("{:06d}".format(index))
+            recordGroup.attrs["modifier"] = record.modifier
+            recordGroup.attrs["roundNumber"] = record.roundNumber
+            recordGroup.attrs["time"] = record.time
+            recordGroup.attrs["fingerprint"] = record.fingerprint
+            for entryName, entryValues in record.plan.items():
+                recordGroup.create_dataset(entryName, data=entryValues)
 
     def readRestart(self, restartFile: h5py.File):
         """Read the state of the model from a restart checkpoint written by :meth:`writeRestart`.
@@ -660,6 +755,16 @@ class FEModel:
 
         f = restartFile
 
+        version = int(f.attrs.get("restartFormatVersion", 0))
+        if version != RESTART_FORMAT_VERSION:
+            raise RestartError(
+                "this checkpoint is format version {:}, this build reads version {:}. Restart "
+                "checkpoints are not a stable format yet -- regenerate it rather than resuming from "
+                "it, which would restore a topology history this build cannot interpret.".format(
+                    version or "pre-versioning", RESTART_FORMAT_VERSION
+                )
+            )
+
         self.time = f.attrs["time"]
 
         # Must run before every restore below: unlike a constraint's setRestartData (passive), a
@@ -670,11 +775,20 @@ class FEModel:
         # Replaying a modifier's history materializes elements, so it is a topology change like any
         # other and needs the window open (see :meth:`topologyChanges`).
         with self.topologyChanges():
-            for name, modifier in self.modelModifiers.items():
-                if name not in f["modelModifiers"]:
-                    continue
-                restartData = {entryName: values[:] for entryName, values in f["modelModifiers"][name].items()}
-                modifier.setRestartData(self, restartData)
+            records = []
+            historyGroup = f["topologyHistory"]
+            for index in range(int(historyGroup.attrs["count"])):
+                recordGroup = historyGroup["{:06d}".format(index)]
+                records.append(
+                    TopologyRecord(
+                        modifier=str(recordGroup.attrs["modifier"]),
+                        roundNumber=int(recordGroup.attrs["roundNumber"]),
+                        time=float(recordGroup.attrs["time"]),
+                        plan={entryName: values[:] for entryName, values in recordGroup.items()},
+                        fingerprint=str(recordGroup.attrs["fingerprint"]),
+                    )
+                )
+            self.replayTopologyHistory(records)
 
         for nf in self.nodeFields.values():
             for entryName, entryValues in nf._values.items():
@@ -683,24 +797,20 @@ class FEModel:
         for name, scalarVariable in self.scalarVariables.items():
             scalarVariable.value = f["scalarVariables"].attrs[name]
 
-        # Elements a model modifier already restored itself (by a stable key -- see
-        # ModelModifierBase.restoredElementLabels). Their numbers are reassigned by the replay, so
-        # restoring them again by number would hand them another element's history, or hit a
-        # stateless facet element that happens to hold the number now.
-        alreadyRestored = set()
-        for modifier in self.modelModifiers.values():
-            alreadyRestored |= set(getattr(modifier, "restoredElementLabels", frozenset()))
-
-        for elNumber, element in self.elements.items():
-            elementKey = str(elNumber)
-            if elementKey not in f["elements"] or elNumber in alreadyRestored:
-                continue
-            try:
-                element.setStateVars(f["elements"][elementKey][:])
-            except NotImplementedError:
-                # This number belonged to a stateful element when the checkpoint was written and to
-                # a stateless one now -- nothing sensible to restore.
-                continue
+        # One uniform loop, by element number, with no skip set and nothing swallowed. That is only
+        # sound because the replay above reproduces the original numbering exactly -- verified per
+        # round by the recorded fingerprints. The previous design could not make this claim, so it
+        # needed a skip set published by each modifier and a bare `except NotImplementedError` that
+        # made a genuinely wrong restore indistinguishable from a harmless one.
+        for elementKey, stateVars in f["elements"].items():
+            elNumber = int(elementKey)
+            element = self.elements.get(elNumber)
+            if element is None:
+                raise RestartError(
+                    "the checkpoint holds state for element {:}, which does not exist after the "
+                    "topology replay -- the replayed model does not match the one checkpointed".format(elNumber)
+                )
+            element.setStateVars(stateVars[:])
 
         for name, constraint in self.constraints.items():
             if name not in f["constraints"]:

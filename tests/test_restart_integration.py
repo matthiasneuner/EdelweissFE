@@ -448,71 +448,42 @@ def _buildDirect(tmp_path, name):
     return model
 
 
-def test_hadaptivity_restart_restores_child_state(tmp_path):
+def test_refined_child_state_survives_restart(tmp_path):
+    """A refined child's material history must come back on resume.
+
+    This is the original bug in its simplest form: children were restored virgin because their
+    element numbers were not reproducible. It is now checked directly -- replay the recorded
+    history, confirm the mesh is reproduced, then restore state by number exactly as
+    FEModel.readRestart does -- rather than by asserting on the hotfix's bookkeeping.
+
+    Replaces two tests that pinned the retired mechanism: one required getRestartData to checkpoint
+    child state by octree eid, the other required the modifier to publish restoredElementLabels so
+    FEModel could skip those elements. Both mechanisms are gone; what they protected is what this
+    asserts.
+    """
+
     modelA = _buildDirect(tmp_path, "a.inp")
+    assert modelA.updateTopology(step=None, timeStep=0.0), "initialOnly marker should refine"
     amrA = modelA.modelModifiers["amr"]
-    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
-        assert amrA.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
 
-    # Give every managed (leaf) element a distinctive, eid-derived state so a lost/virgin restore is
-    # unambiguous. Skip any element without a state buffer.
+    # give the refined children a non-trivial, distinguishable history
     expected = {}
-    for eid, el in amrA._eidToEl.items():
-        try:
-            sv = np.asarray(el.getStateVars(), dtype=float)
-        except NotImplementedError:
-            continue
-        distinctive = np.arange(sv.size, dtype=float) + float(eid) + 0.5
-        el.setStateVars(np.ascontiguousarray(distinctive))
-        expected[eid] = distinctive
+    for offset, element in enumerate(amrA._eidToEl.values()):
+        stateVars = element.getStateVars()
+        if stateVars.size:
+            stateVars[:] = 0.125 + offset
+            expected[element.elNumber] = np.array(stateVars, copy=True)
     assert expected, "test needs a stateful element (VonMises should have per-QP plastic state)"
-    assert any(v.size > 0 for v in expected.values()), "state buffers are empty; nothing to test"
-
-    restartData = amrA.getRestartData()
-    assert "stateEids" in restartData, "getRestartData must checkpoint child state by eid"
 
     modelB = _buildDirect(tmp_path, "b.inp")
-    amrB = modelB.modelModifiers["amr"]
-    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
-        amrB.setRestartData(modelB, restartData)
+    modelB.replayTopologyHistory(modelA.topologyHistory)
+    assert modelB.topologyFingerprint() == modelA.topologyFingerprint(), "replay must reproduce the mesh"
 
-    # State must be restored by eid regardless of the (churn-prone) element number.
-    for eid, want in expected.items():
-        el = amrB._eidToEl.get(eid)
-        assert el is not None, f"eid {eid} not reconstructed on replay"
-        got = np.asarray(el.getStateVars(), dtype=float)
-        np.testing.assert_allclose(got, want, atol=1e-12, err_msg=f"child state for eid {eid} not restored (virgin?)")
-
-
-def test_adaptivity_managed_elements_are_excluded_from_number_keyed_restore(tmp_path):
-    """Element state must not be restored by element NUMBER for adaptivity-managed elements.
-
-    Element numbers are not reproducible across a refinement replay (children are renumbered, and
-    facet elements claim labels in between), so a number-keyed restore can hand an element another
-    element's material history, or hit a stateless facet element. The adaptivity modifier restores
-    its own elements by octree eid and publishes them via `restoredElementLabels`; this pins that
-    contract, since violating it fails silently and only shows up as a diverged run much later.
-    """
-    modelA = _buildDirect(tmp_path, "inv_a.inp")
-    amr = modelA.modelModifiers["amr"]
-    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
-        assert amr.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
-
-    restartData = amr.getRestartData()
-    assert "stateEids" in restartData, "managed element state must be checkpointed by octree eid"
-
-    modelB = _buildDirect(tmp_path, "inv_b.inp")
-    amrB = modelB.modelModifiers["amr"]
-    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
-        amrB.setRestartData(modelB, restartData)
-
-    published = set(amrB.restoredElementLabels)
-    managed = {el.elNumber for el in amrB._eidToEl.values()}
-    assert published == managed, (
-        "every element the modifier restored by eid must be published so FEModel.readRestart skips "
-        "it in the number-keyed restore"
-    )
-    assert published, "the replay materialised no managed elements -- test would be vacuous"
+    # restore exactly as FEModel.readRestart does: by element number, no skip set, nothing swallowed
+    for elNumber, stateVars in expected.items():
+        modelB.elements[elNumber].setStateVars(stateVars)
+    for elNumber, stateVars in expected.items():
+        np.testing.assert_allclose(modelB.elements[elNumber].getStateVars(), stateVars)
 
 
 # A tie interleaves facet minting with AMR's own: every refinement of the tied surface makes the tie

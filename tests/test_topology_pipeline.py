@@ -47,7 +47,11 @@ _REPO_ROOT = _Path(__file__).resolve().parents[1]
 
 
 class _StubElement:
-    """A bare element stand-in: FEModel's allocator and window only ever look at ``elNumber``."""
+    """A bare element stand-in: the allocator, the window and the fingerprint only look at
+    ``elNumber``, ``elType`` and ``nodes``."""
+
+    elType = "STUB"
+    nodes = ()
 
     def __init__(self, elNumber: int):
         self.elNumber = elNumber
@@ -241,6 +245,15 @@ class _StubModifier:
             return None
         self._plansLeft -= 1
         return {"who": self.name}
+
+    def encodePlan(self, plan):
+        return {"who": plan["who"]}
+
+    def decodePlan(self, data):
+        return {"who": str(data["who"])}
+
+    def restoreDecisionState(self, records):
+        pass
 
     def apply(self, model, plan):
         self._log.append(plan["who"])
