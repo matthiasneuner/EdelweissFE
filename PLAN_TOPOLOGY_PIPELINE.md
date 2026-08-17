@@ -962,8 +962,46 @@ considerably more at AnchorPryOut scale. Exactness was verified by loading the p
 implementation side by side from git and running it unbound on live meshes from real AMR runs:
 `classify_hanging` output identical, including a tied two-body case with 44 hanging records.
 
-**Still the dominant cost: `refresh mesh dependents` (0.0399 s, unchanged).** That is P6 item 1 and
-it lives in `surfaceelementgenerator.py`/`tie.py` -- blocked behind PR #57 (§0.1a).
+**RE-MEASURED AFTER P3 (2026-08-17) -- this ranking changed, and P6.1's premise with it.**
+
+P3 moved facet regeneration out of consumer refresh into its own modifier, so the P0 ranking above
+describes a layout that no longer exists. Re-run of the same probe, `--tie 12`:
+
+```
+| topology update              0.00084 s   <- SELF time; the probe misreports this, see below
+| AMR                          0.10890 s   3 calls
+|   hanging nodes               0.02069
+|     index build                0.00814
+|     interface-shell scan       0.00951
+|   elements & state transfer    0.04766
+| refresh mesh dependents      0.02610 s
+```
+
+| stage | pre-P3 | post-P3 |
+|---|---|---|
+| consumer refresh | 0.0394 | **0.0261 (-34%)** |
+
+**P3 already harvested a third of P6.1's target**, and what remains is *not* what the plan assumed.
+The residual 0.0261 s is the tie/contact **re-projection** (`_buildTiedRecords`, cKDTree, slave
+records); the facet rebuild itself is only ~0.013 s. So "use `faceMap` to retile only the changed
+faces" attacks the smaller half of an already-reduced cost. The real remaining item is making
+**re-projection** incremental -- re-project only slave nodes whose master facets changed -- which
+lives in `tie.py`/`nodetodeformablesurfacepenalty.py`, not in `buildContactFacets`.
+
+The ranking has also flattened: consumer refresh is no longer 2.6x the next item, it is 0.026
+against hanging-node work at 0.021. The single largest stage, `elements & state transfer` at 0.048,
+is **flat** -- already change-proportional, and correctly so.
+
+**Recommendation: P6.1 is NOT worth doing next.** It is a ~0.026 s item on a ~0.135 s round, its
+cheap half is already taken, and the remaining half sits in the most fragile code in this codebase
+-- the contact re-projection that produced razor-edge ties twice for PR #57 and an ordering
+sensitivity here. Poor trade while the stack starts moving.
+
+**Harness gotcha, fix before trusting the probe again:** `performancetiming` reports **self** time for
+`topology update`, and its children (`AMR`, `refresh mesh dependents`) are siblings at the same
+level rather than nested under it. `profile_amr_round.py` reads that number as if it were inclusive,
+which made a 0.135 s round look like 0.0009 s. It misled this session for one full cycle. Read the
+raw table, or fix the probe to sum the components.
 
 **One stage is already right:** `elements & state transfer` is flat to three digits across a 9×
 mesh growth *and* across both variants — 0.048 s of fixed cost for one refined element. It needs no
