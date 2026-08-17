@@ -202,6 +202,45 @@ this branch will read them again.
 
 ---
 
+### L3 RESULT (2026-08-17, xeon) -- PASSED
+
+AnchorPryOut at full scale: 380k dof, 18 039 stateful elements, 5 ties, 2 contacts, GCDP, AMR at
+`splitFactor=3`. Arm A ran 10 increments from scratch (`extrapolation=off`, checkpoint every
+increment, 1468 s, 21 converged increments, ending on the expected `maxNumInc` truncation). Arm B
+resumed from arm A's mid-run checkpoint and continued, writing its own.
+
+Compared at all **7 overlapping checkpoint times**:
+
+| | result |
+|---|---|
+| element numbering | **identical at every time** |
+| topology fingerprints | **identical at every time** |
+| max abs(dU) | 3.7e-18 … 2.1e-17 |
+| max abs(dState) | 1.6e-13 … 6.6e-13 |
+
+The residuals are floating-point noise in the solve, not topology differences -- element numbers and
+fingerprints match exactly. For contrast, the hotfix-era restart was recorded as "trajectory-faithful
+but not bit-identical", with a flat ~2.3e-4 displacement offset
+(`memory/project_amr_restart_state_bug.md`). A resumed run is now bit-identical for practical
+purposes.
+
+**What this does and does not establish.** It covers production *scale* and production *complexity*
+-- a real AMR occasion, five ties and two contacts regenerating facets, state restored across 18 039
+elements, through a GCDP return-mapping cutback. It does **not** cover production *duration*: every
+checkpoint carried `history=1`, because only the `initialOnly` surface marker fired. The stress
+marker needs `minMarkedElements=10` worth of damage, which ten increments do not produce.
+Multi-occasion interleaving therefore remains covered only at L2 scale, where
+`test_restart_with_amr_and_a_tie_reproduces_the_topology_exactly` exercises 2 occasions across 2
+refinement levels. Extending L3 to a second occasion means running until damage develops -- hours,
+not minutes.
+
+**Artifacts preserved on xeon at `~/tp-l3-artifacts/`**: `anchorpryout_v2_checkpoint.h5` (33 MB, the
+newest arm A checkpoint), both arm input files, and both logs. This is now the **only readable
+production-scale checkpoint** -- the pinned v1 ones are refused by design -- so a future session can
+resume from it instead of paying the 24-minute run again.
+
+---
+
 **Superseded, kept for the reasoning -- the cheap path to production-scale faithfulness** (do this once, in P5 — the old checkpoints are a
 launchpad, not the reference):
 
