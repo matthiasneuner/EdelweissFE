@@ -204,14 +204,6 @@ def buildContactFacets(model: FEModel, surfaceName: str, prefix: str, triangulat
     facetsSetName = f"{prefix}_facets"
     nodesSetName = f"{prefix}_nodes"
 
-    # Transitional: the base mesh generators still place their elements straight into model.elements
-    # instead of going through the allocator, and some of them run *after* setup's first adoption
-    # pass (the executeAfterManualGeneration=True generators). Re-adopt here so the facets below
-    # cannot be handed a number the mesh already uses. Monotonic -- it only ever raises the mark, so
-    # it is a no-op once the analysis is running, and it never lets a deleted facet's number be
-    # reissued. Remove once the base generators reserve their numbers too.
-    model.adoptSetupElementNumbers()
-
     # remove any facets a previous call under this prefix created, so re-running is idempotent
     for staleFacet in model.elementSets.get(facetsSetName, []):
         if staleFacet.elNumber in model.elements:
