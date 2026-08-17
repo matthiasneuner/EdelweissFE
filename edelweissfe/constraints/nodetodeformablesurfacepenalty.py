@@ -545,9 +545,10 @@ class Constraint(ConstraintBase, MeshDependent):
             return False
 
         # Facets are regenerated in the topology-update phase by the implicit surfaceFacets
-        # modifier; this constraint only rebinds to them.
+        # modifier; this constraint only rebinds to whichever side changed.
         if touchedSlave:
             self._rebindSlave(model)
+        if touchedMaster:
             self._rebindMaster(model)
         return True
 
