@@ -175,11 +175,9 @@ class AbqModelConstructor:
                         els += [elements[n] for n in elNumbers]
 
                     elif booleanDef == "intersection":
-                        # Keep the base set's order rather than a set's: the resulting member order
-                        # is what a downstream generator (e.g. surfaceElementGenerator) numbers
-                        # entities by, and must not depend on iteration order of a temporary.
-                        wanted = set(elNumbers)
-                        els = [n for n in elementSets[name] if n.elNumber in wanted]
+                        elNumbersBase = [n.elNumber for n in elementSets[name]]
+                        elNumbersSet = set(elNumbers)
+                        els = [elements[n] for n in elNumbersBase if n in elNumbersSet]
                     else:
                         raise Exception("Undefined boolean operation!")
 
@@ -189,13 +187,10 @@ class AbqModelConstructor:
                         del elementSets[name]
                 else:
                     els = [elements[elNum] for elNum in elNumbers]
-                # NOT set(els): ElementSet is an OrderedSet and already deduplicates, but it keeps
-                # the order it is fed. Elements are hashed by identity, so a set() here would fix the
-                # set's member order from object addresses -- reproducible only for a bit-identical
-                # allocation history, which a resumed run (different .inp, extra open files) does not
-                # have. That order reaches element numbering: an element-based *surface* built from
-                # this set hands its facets sequential labels in exactly this order.
-                elementSets[name] = ElementSet(name, els)
+                # dict.fromkeys deduplicates while preserving first-occurrence order -- a plain
+                # set() here would make facet numbering, slave-node order, and closest-facet tie
+                # breaking depend on Python's hash-based set iteration order instead.
+                elementSets[name] = ElementSet(name, list(dict.fromkeys(els)))
             else:
                 elementSets[name] = []
                 for line in data:
