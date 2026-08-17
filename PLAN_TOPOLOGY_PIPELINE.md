@@ -958,9 +958,14 @@ The hotfix stays in place and correct until P5 lands, then is deleted wholesale.
  8. feat(modifiers): promote contact facet generation to a model modifier                [P3]
  7. refactor(constraints): tie and contact become pure readers of their facet sets       [P3]
  8. refactor(model): single pull-based refresh phase; delete ModelChangeObserver         [P4]
- 9. feat(restart): record the topology history; replay plans through apply()             [P5]
-10. feat(model): topology fingerprint, recorded per round                                [P5]
-11. refactor(restart): restore element state by number; delete the 1393803 hotfix        [P5]
+ 9. feat(model): topologyFingerprint + the restart invariant it makes checkable   [P5] DONE ec26affc
+10. feat(restart): replay recorded plans through apply(), retiring the hotfix     [P5] DONE 5850147a
+    ↳ **P5 COMPLETE**, verified on xeon: pytest 297 passed / 5 pre-existing; suites 2 + 3, identical
+      to the baseline. The 1393803 hotfix is gone in full -- `restoredElementLabels`, the `getattr`,
+      the doubled element-state serialisation, `_replayMode`, `_isFirstCall`, `_replayOccasionsByEid`,
+      the read-side `except NotImplementedError`, and both per-modifier restart hooks.
+      **The original bug is fixed at its root**: replay and the live run now share one `apply()`.
+11. perf(amr): skip the neighbour search away from a refinement front            [P6.2] DONE ccf79a9
 12. perf(amr): incremental hanging-node classification / set sync / relink               [P6]
 13. perf(contact): rebuild only the facets of changed faces, via ModelChange.faceMap     [P6]
 14. feat(modifiers): domain overlap check, round conflict detection, convergence guard   [P7]
