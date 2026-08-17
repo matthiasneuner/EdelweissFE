@@ -213,6 +213,27 @@ class FEModel:
         del self.elements[elNumber]
 
     @timeit("topology update")
+    def ensureSurfaceFacetModifier(self, journal: Journal):
+        """Create the implicit facet-regeneration modifier, if any facet recipe was declared.
+
+        Retiling a contact/tie surface creates and deletes elements, so it is a topology change and
+        belongs in the topology-update phase -- not in a consumer's refresh, which is where it used
+        to live and which is what made every tie a mutating consumer. Users never declare this
+        modifier: they already declared the ``*surface`` recipe it acts on.
+
+        Ordered **last**, so that within a round it reacts to whatever the primary modifiers (a
+        refinement, a deposition) just did.
+        """
+
+        if not self.contactFacetRecipes or "surfaceFacets" in self.modelModifiers:
+            return
+
+        from edelweissfe.modelmodifiers.surfacefacets.surfacefacets import (
+            ModelModifier as SurfaceFacetsModifier,
+        )
+
+        self.modelModifiers["surfaceFacets"] = SurfaceFacetsModifier("surfaceFacets", self, journal)
+
     def checkModelModifierDomains(self):
         """Refuse a model in which two modifiers claim the same element.
 
@@ -706,6 +727,7 @@ class FEModel:
         """
 
         self.adoptSetupElementNumbers()
+        self.ensureSurfaceFacetModifier(journal)
         self.checkModelModifierDomains()
         self._prepareVariablesAndFields(journal)
         self._prepareElements(journal)

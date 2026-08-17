@@ -34,7 +34,6 @@ from scipy.spatial import cKDTree
 from edelweissfe.constraints.base.multipointconstraintbase import (
     MultiPointConstraintBase,
 )
-from edelweissfe.generators.surfaceelementgenerator import buildContactFacets
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -389,11 +388,9 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         if not (touchedSlave or touchedMaster):
             return False
 
-        if touchedSlave:
-            buildContactFacets(model, *slaveRecipe, self._journal)
-        if touchedMaster:
-            buildContactFacets(model, *masterRecipe, self._journal)
-
+        # The facets themselves were already regenerated, in the topology-update phase, by the
+        # implicit surfaceFacets modifier (see FEModel.ensureSurfaceFacetModifier). This constraint
+        # is a pure reader: it re-projects onto whatever now tiles the surface.
         slaveFacetElements = list(model.elementSets[self._slaveSurfaceSetName])
         masterFacetElements = list(model.elementSets[self._masterSurfaceSetName])
         self.tiedRecords, self.untiedSlaveNodes = self._buildTiedRecords(

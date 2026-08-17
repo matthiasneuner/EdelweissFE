@@ -514,3 +514,24 @@ def test_the_same_modifier_may_touch_an_element_in_successive_rounds():
     model = _modelWithModifiers(solo=_OwningModifier("solo", log, owns={1}, touches={99}))
     model.updateTopology(step=None, timeStep=0.0)
     assert log == ["solo"]
+
+
+def test_a_consumer_cannot_mutate_the_topology():
+    """Phase 2 runs with the window closed, so a mesh-dependent that tries to create an element
+    raises instead of quietly mutating behind the pipeline's back. This is what P3 bought by moving
+    facet regeneration out of constraint refresh and into its own modifier."""
+
+    class _MutatingConsumer(_StubMeshDependent):
+        def refresh(self, model, change):
+            (number,) = model.reserveElementNumbers(1)  # must raise: window is closed
+            model.createElement(_StubElement(number))
+            return True
+
+    log = []
+    model = _modelWithModifiers(amr=_StubModifier("amr", 1, log))
+    consumer = _MutatingConsumer()
+    model.registerMeshDependent(consumer)
+
+    model.updateTopology(step=None, timeStep=0.0)
+    with pytest.raises(TopologyError, match="only be reserved during a topology change"):
+        model.refreshMeshDependents()

@@ -32,7 +32,6 @@ import numpy as np
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.elements.contactsurfaceelement import facetNormalAndMeasure
-from edelweissfe.generators.surfaceelementgenerator import buildContactFacets
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -545,11 +544,10 @@ class Constraint(ConstraintBase, MeshDependent):
         if not (touchedSlave or touchedMaster):
             return False
 
+        # Facets are regenerated in the topology-update phase by the implicit surfaceFacets
+        # modifier; this constraint only rebinds to them.
         if touchedSlave:
-            buildContactFacets(model, *slaveRecipe, self._journal)
             self._rebindSlave(model)
-        if touchedMaster:
-            buildContactFacets(model, *masterRecipe, self._journal)
             self._rebindMaster(model)
         return True
 
