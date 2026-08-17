@@ -257,20 +257,16 @@ class NIST(NonlinearSolverBase):
             for timeStep in step.getTimeStep():
                 # NOTE: materialize the list before any() -- a generator would short-circuit at
                 # the first modifier/constraint reporting a change.
-                # Both sweeps run inside one topology window (see FEModel.topologyChanges): outside
-                # it, creating or deleting an element raises.
-                #
-                # The second sweep is in the window only because contact facet generation still
-                # hangs off constraint reconcile -- the push-based tie mints its facets from inside
-                # the modifier sweep, while the pull-based penalty constraints mint theirs from
-                # updateConnectivity, i.e. here. PLAN_TOPOLOGY_PIPELINE.md P3 moves facet generation
-                # into a model modifier of its own, after which constraints become pure readers and
-                # this second window must be REMOVED -- it is what would otherwise let a consumer
-                # keep mutating the model behind the pipeline's back.
+                # Phase 1: model modifiers, run to a fixed point inside a topology window.
+                modelHasChanged = model.updateTopology(step, timeStep)
+
+                # Phase 2: mesh-dependent consumers catch up. Still inside a window of its own only
+                # because contact facet generation hangs off constraint reconcile -- the pull-based
+                # penalty constraints mint their facets from updateConnectivity, i.e. here.
+                # PLAN_TOPOLOGY_PIPELINE.md P3 moves facet generation into a model modifier, after
+                # which constraints become pure readers and this window must be REMOVED: it is
+                # exactly what would otherwise let a consumer mutate behind the pipeline's back.
                 with model.topologyChanges():
-                    modelHasChanged = any(
-                        [modifier.updateModel(model, step, timeStep) for modifier in model.modelModifiers.values()]
-                    )
                     connectivityHasChanged = any(
                         [constraint.updateConnectivity(model) for constraint in model.constraints.values()]
                     )

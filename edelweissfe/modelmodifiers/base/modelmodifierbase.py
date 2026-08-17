@@ -53,13 +53,28 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
         return self._name
 
     @abstractmethod
-    def updateModel(self, model: FEModel, step, timeStep: float) -> bool:
-        """Invoked by the solver at designated lifecycle hooks (e.g. start of increment).
+    def plan(self, model: FEModel, change, step, timeStep: float):
+        """Decide what, if anything, this modifier wants to change about the model -- without
+        changing it.
+
+        This half is allowed to read solution state: markers, node fields, the current time, the
+        step. It must return a **serializable** description of the decision, which
+        :meth:`apply` can carry out on its own, or ``None`` if there is nothing to do.
+
+        A restart replay never calls this. It reads the recorded plan and calls :meth:`apply`
+        directly, which is what makes a resumed run reproduce the original topology exactly instead
+        of re-deciding from state that may not be identical.
 
         Parameters
         ----------
         model
-            The FEModel object.
+            The FEModel object. Read only -- do not mutate it here.
+        change
+            The net :class:`~edelweissfe.models.modelchange.ModelChange` since this modifier last
+            planned within the current topology update, or ``None`` on the first round. **Return
+            ``None`` when it does not touch this modifier's domain** -- that is what lets the
+            pipeline reach a fixed point instead of looping (see
+            :meth:`~edelweissfe.models.femodel.FEModel.updateTopology`).
         step
             The current step.
         timeStep
@@ -67,11 +82,58 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
 
         Returns
         -------
-        bool
-            True if the model topology, element/node count, or DOF system changed,
-            signaling the solver to rebuild equation system structures (DofManager,
-            CSR matrices, solution vectors, and MPC transformations).
+        object | None
+            A plan for :meth:`apply`, or ``None``.
         """
+
+    @abstractmethod
+    def apply(self, model: FEModel, plan):
+        """Carry out ``plan``, mutating the model.
+
+        **Must not read solution state.** A pure function of ``(model, plan)`` -- everything the
+        decision depended on belongs in the plan. This is the single code path shared by a live run
+        and a restart replay, and the reason a replayed mesh is numbered identically: there is no
+        second implementation to drift apart from this one.
+
+        Runs inside an open topology window (see
+        :meth:`~edelweissfe.models.femodel.FEModel.topologyChanges`), so it may create and delete
+        elements -- through :meth:`~edelweissfe.models.femodel.FEModel.reserveElementNumbers` and
+        :meth:`~edelweissfe.models.femodel.FEModel.createElement`, never by writing
+        ``model.elements`` directly.
+
+        Parameters
+        ----------
+        model
+            The FEModel object, mutated in place.
+        plan
+            A plan previously returned by :meth:`plan` (live) or restored from the recorded
+            topology history (replay).
+
+        Returns
+        -------
+        ModelChange
+            The changeset this mutation produced.
+        """
+
+    def updateModel(self, model: FEModel, step, timeStep: float) -> bool:
+        """Plan, then apply, in one call.
+
+        A convenience for callers outside the pipeline (and for tests). The pipeline itself --
+        :meth:`~edelweissfe.models.femodel.FEModel.updateTopology` -- calls :meth:`plan` and
+        :meth:`apply` separately, so that it can run the modifiers to a fixed point and record each
+        plan for restart.
+
+        Returns
+        -------
+        bool
+            True if the topology changed.
+        """
+
+        plan = self.plan(model, None, step, timeStep)
+        if plan is None:
+            return False
+        self.apply(model, plan)
+        return True
 
     def onStepStart(self, model: FEModel, step):
         """Optional lifecycle hook called at the start of an analysis step."""

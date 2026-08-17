@@ -36,6 +36,7 @@ function of the ordered *creation* sequence -- never of the deletion history, ne
 import pytest
 
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
 from edelweissfe.utils.exceptions import TopologyError
 
 
@@ -214,3 +215,79 @@ def test_parsed_element_set_keeps_its_declaration_order():
     model = AbqModelConstructor(Journal(verbose=False)).createGeometryFromInputFile(FEModel(2), inputFile)
 
     assert [el.elNumber for el in model.elementSets["declared"]] == list(range(1, nElements + 1))
+
+
+class _StubModifier:
+    """A modifier that plans a fixed number of times, then settles."""
+
+    def __init__(self, name, plansLeft, log, reactsToOthers=False):
+        self.name = name
+        self._plansLeft = plansLeft
+        self._log = log
+        self._reactsToOthers = reactsToOthers
+
+    def plan(self, model, change, step, timeStep):
+        # react to another modifier's mutation once, then settle -- the contract that makes the
+        # pipeline converge (see ModelModifierBase.plan)
+        if change is not None and not self._reactsToOthers:
+            return None
+        if self._plansLeft <= 0:
+            return None
+        self._plansLeft -= 1
+        return {"who": self.name}
+
+    def apply(self, model, plan):
+        self._log.append(plan["who"])
+        (number,) = model.reserveElementNumbers(1)
+        model.createElement(_StubElement(number))
+        model.notifyModelChanged(_MCT.REFINEMENT)
+        return None
+
+
+def _modelWithModifiers(**modifiers) -> FEModel:
+    model = FEModel(3)
+    model.modelModifiers.update(modifiers)
+    return model
+
+
+def test_a_single_round_suffices_when_nobody_reacts():
+    log = []
+    model = _modelWithModifiers(
+        amr=_StubModifier("amr", 1, log),
+        printer=_StubModifier("printer", 1, log),
+    )
+    assert model.updateTopology(step=None, timeStep=0.0) is True
+    # both planned in round 1; in round 2 each sees only the other's change and settles
+    assert log == ["amr", "printer"]
+
+
+def test_modifiers_run_in_declaration_order_every_round():
+    log = []
+    model = _modelWithModifiers(
+        amr=_StubModifier("amr", 2, log, reactsToOthers=True),
+        facets=_StubModifier("facets", 2, log, reactsToOthers=True),
+    )
+    model.updateTopology(step=None, timeStep=0.0)
+    assert log == ["amr", "facets", "amr", "facets"]
+
+
+def test_no_change_means_no_topology_update():
+    log = []
+    model = _modelWithModifiers(amr=_StubModifier("amr", 0, log))
+    assert model.updateTopology(step=None, timeStep=0.0) is False
+    assert log == []
+
+
+def test_non_convergence_raises_naming_the_offender():
+    log = []
+    model = _modelWithModifiers(runaway=_StubModifier("runaway", 10**6, log, reactsToOthers=True))
+    model.maxTopologyRounds = 4
+    with pytest.raises(TopologyError, match="did not settle within 4 rounds.*runaway"):
+        model.updateTopology(step=None, timeStep=0.0)
+
+
+def test_the_window_is_closed_again_after_the_update():
+    model = _modelWithModifiers(amr=_StubModifier("amr", 1, []))
+    model.updateTopology(step=None, timeStep=0.0)
+    with pytest.raises(TopologyError):
+        model.reserveElementNumbers(1)

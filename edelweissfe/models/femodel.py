@@ -86,6 +86,8 @@ class FEModel:
         #: High-water mark of the element number allocator; see :meth:`reserveElementNumbers`.
         self._nextElementNumber = 1
         self._topologyOpen = False  #: True only inside :meth:`topologyChanges`; see there.
+        #: Guard against a model modifier that keeps planning in response to its own output.
+        self.maxTopologyRounds = 16
 
     @contextmanager
     def topologyChanges(self):
@@ -197,6 +199,60 @@ class FEModel:
             )
 
         del self.elements[elNumber]
+
+    def updateTopology(self, step=None, timeStep: float = None) -> bool:
+        """Run every model modifier to a fixed point, inside one topology window.
+
+        Modifiers depend on each other -- refinement invalidates a tied surface's facets, a
+        deposition modifier creates elements refinement may then want to split, and a 2:1 balance
+        may need to refine what another modifier just activated. Rather than asking the user to
+        declare a dependency order (which cannot express mutual dependence anyway), each **round**
+        offers every modifier the net change since that modifier last planned. A round in which
+        nobody plans anything is the fixed point.
+
+        Determinism comes from the round structure, not from luck: within a round, modifiers run in
+        ``self.modelModifiers`` order, which is input-file order.
+
+        Returns
+        -------
+        bool
+            True if the topology changed, so the solver rebuilds its equation system.
+
+        Raises
+        ------
+        TopologyError
+            If the rounds do not settle within :attr:`maxTopologyRounds`, which means some modifier
+            keeps planning in response to its own output. The message names the offenders.
+        """
+
+        changed = False
+        with self.topologyChanges():
+            lastPlannedVersion = {name: None for name in self.modelModifiers}
+            roundNumber = 0
+            while True:
+                roundNumber += 1
+                plannedThisRound = []
+                for name, modifier in self.modelModifiers.items():
+                    seenVersion = lastPlannedVersion[name]
+                    change = self.changesSince(seenVersion) if seenVersion is not None else None
+                    lastPlannedVersion[name] = self.topologyVersion
+                    plan = modifier.plan(self, change, step, timeStep)
+                    if plan is None:
+                        continue
+                    modifier.apply(self, plan)
+                    plannedThisRound.append(name)
+                    changed = True
+                if not plannedThisRound:
+                    break
+                if roundNumber >= self.maxTopologyRounds:
+                    raise TopologyError(
+                        "model modifiers did not settle within {:} rounds; still planning in the "
+                        "last round: {:}. A modifier must return None from plan() once the change "
+                        "since its own last plan no longer touches its domain.".format(
+                            self.maxTopologyRounds, ", ".join(plannedThisRound)
+                        )
+                    )
+        return changed
 
     def registerObserver(self, observer):
         """Register a :class:`~edelweissfe.models.modelchangeobserver.ModelChangeObserver` to be

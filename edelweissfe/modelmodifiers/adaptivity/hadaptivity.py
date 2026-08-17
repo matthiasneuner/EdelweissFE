@@ -156,6 +156,22 @@ class HAdaptivitySchema:
     )
 
 
+@dataclass(frozen=True)
+class RefinementPlan:
+    """One refinement decision, as octree element ids.
+
+    Eids rather than element numbers: an eid is this modifier's own identifier for a cell, minted by
+    its private octree counter and reproduced exactly by replaying the same decisions. Element
+    numbers are assigned by the model's allocator in an order that also depends on what else minted,
+    so they are not a decision this modifier can record and re-apply.
+    """
+
+    eids: tuple
+
+    def __init__(self, eids):
+        object.__setattr__(self, "eids", tuple(int(eid) for eid in eids))
+
+
 def _buildStateTransferStrategy(defaultName, overridesSpec):
     """Construct the state-transfer strategy from the input arguments. With no per-variable
     overrides this is just the named default strategy; otherwise a
@@ -390,10 +406,23 @@ class ModelModifier(ModelModifierBase):
         self._octantParams = self._topology.subdivision_children_param(self.splitFactor)
 
     @timeit("AMR")
-    def updateModel(self, model: FEModel, step, timeStep: float) -> bool:
+    def plan(self, model: FEModel, change, step, timeStep: float) -> "RefinementPlan | None":
+        """Evaluate the markers and decide which octree cells to refine. See
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.plan`.
+
+        The decision is returned as octree eids rather than element numbers: eids are this
+        modifier's own stable identifiers, reproducible by its replay, whereas element numbers are
+        assigned by the model's allocator in an order that depends on what else minted.
+        """
+
+        # Nothing this modifier cares about changed since it last planned in this topology update
+        # -- another modifier's mutation. Returning None here is what lets the pipeline settle.
+        if change is not None and not (change.addedElements or change.removedElements):
+            return None
+
         # Do not re-refine if the solver is re-trying the exact same time state after a cutback
         if self._lastRefinedTime is not None and abs(model.time - self._lastRefinedTime) < 1e-12:
-            return False
+            return None
 
         elForEid = {v: k for k, v in self._eidToEl.items()}
         marked_elements = set()
@@ -423,7 +452,7 @@ class ModelModifier(ModelModifierBase):
         self._pendingMarkedElements.update(marked_elements)
 
         if not self._pendingMarkedElements:
-            return False
+            return None
 
         # keep only active elements below maxLevel
         with timeit("marking filter"):
@@ -443,34 +472,45 @@ class ModelModifier(ModelModifierBase):
                     "hadaptivity",
                     1,
                 )
-            return False
+            return None
 
         self._pendingMarkedElements = set()
-        self._refineAndMaterialize(model, eligible)
-        return True
 
-    def _refineAndMaterialize(self, model: FEModel, eligible: list) -> None:
-        """Refine exactly ``eligible`` and materialize the resulting children: the deterministic,
-        marking-decision-independent half of a refinement pass (octree split, 2:1 balance,
-        hanging-node MPCs, element/node/set bookkeeping, and the :class:`ModelChange` notification).
+        # Stamped here, not in apply(): it guards the *next* planning pass against re-refining after
+        # a cutback, and apply() must not read solution state (model.time included).
+        self._lastRefinedTime = float(model.time)
 
-        Shared by the live marking path (:meth:`updateModel`, which has already decided *which*
-        elements to refine before calling this) and restart's occasion replay
-        (:meth:`setRestartData`, which recreates a past decision from the checkpoint instead of
-        re-evaluating markers) -- both grow :attr:`_committedOccasions` identically and produce
-        byte-identical topology given the same ``eligible`` input, since everything here is pure
-        octree/topology mechanics with no dependence on solution history.
+        elForEid = {v: k for k, v in self._eidToEl.items()}
+        return RefinementPlan(eids=[elForEid[el] for el in eligible])
+
+    @timeit("AMR")
+    def apply(self, model: FEModel, plan: "RefinementPlan"):
+        """Refine exactly the cells named by ``plan`` and materialize the resulting children: the
+        octree split, 2:1 balance, hanging-node MPCs, element/node/set bookkeeping, and the
+        :class:`ModelChange` notification.
+
+        Pure octree/topology mechanics with no dependence on solution history, which is what lets a
+        live run and a restart replay share it: given the same plan they produce byte-identical
+        topology, element numbers included. See
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.apply`.
 
         Parameters
         ----------
         model
-            The FEModel object.
-        eligible
-            The (already-decided) elements to refine, sorted by ``elNumber``.
+            The FEModel object, mutated in place.
+        plan
+            The refinement decision, as octree eids.
+
+        Returns
+        -------
+        ModelChange
+            The changeset this refinement produced.
         """
 
-        elForEid = {v: k for k, v in self._eidToEl.items()}
-        markedEids = [elForEid[el] for el in eligible]
+        markedEids = list(plan.eids)
+        # Captured now, not at the end: the refined parents are popped from _eidToEl during
+        # materialisation, so afterwards their element numbers are no longer resolvable here.
+        markedElementNumbers = [self._eidToEl[eid].elNumber for eid in markedEids if eid in self._eidToEl]
 
         # (WS-B/C) refine + 2:1 balance in the mirror
         nBefore = len(self._mesh.active())
@@ -497,9 +537,9 @@ class ModelModifier(ModelModifierBase):
             "hadaptivity",
             0,
         )
-        self._lastRefinedTime = float(model.time)
-        self._committedOccasions.append([el.elNumber for el in eligible])
+        self._committedOccasions.append(markedElementNumbers)
         self._committedOccasionEids.append(list(markedEids))
+        return change
 
     def _materialize(self, model: FEModel, records: dict):
         mesh = self._mesh
@@ -683,7 +723,7 @@ class ModelModifier(ModelModifierBase):
 
         Deliberately does not store node coordinates, connectivity, or hanging-node records --
         :meth:`setRestartData` rederives all of that deterministically by replaying each occasion
-        through :meth:`_refineAndMaterialize`, the same mechanics a live run uses.
+        through :meth:`apply`, the same mechanics a live run uses.
         """
 
         if not self._committedOccasions and not self._pendingMarkedElements:
@@ -779,8 +819,8 @@ class ModelModifier(ModelModifierBase):
         return out
 
     def setRestartData(self, model: FEModel, data: dict[str, np.ndarray]) -> None:
-        """Replay every committed occasion, in order, through :meth:`_refineAndMaterialize` --
-        exactly the mechanics :meth:`updateModel` uses live, just fed a recorded decision instead
+        """Replay every committed occasion, in order, through :meth:`apply` --
+        exactly the mechanics a live run uses, just fed a recorded decision instead
         of evaluating markers -- to reconstruct this instance's topology, then restore the pending
         marks and the cutback guard.
 
@@ -810,7 +850,8 @@ class ModelModifier(ModelModifierBase):
                     labels = data["occasionLabels"][offset : offset + int(size)]
                     offset += int(size)
                     eligible = [model.elements[int(label)] for label in labels]
-                    self._refineAndMaterialize(model, eligible)
+                    elForEid = {v: k for k, v in self._eidToEl.items()}
+                    self.apply(model, RefinementPlan(eids=[elForEid[el] for el in eligible]))
         finally:
             self._replayMode = False
 
