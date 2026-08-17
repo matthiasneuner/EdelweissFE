@@ -65,6 +65,12 @@ class DivergingSolution(Exception):
     """The solutions seems to be diverging within the nonlinear solving scheme."""
 
 
+class TopologyError(Exception):
+    """An illegal attempt to change the model topology: creating or deleting an entity outside a
+    :meth:`~edelweissfe.models.femodel.FEModel.topologyChanges` window, or claiming an element
+    number that is already in use."""
+
+
 class ConditionalStop(Exception):
     """Simulation stops sucessfully."""
 

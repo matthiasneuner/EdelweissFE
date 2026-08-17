@@ -30,6 +30,7 @@
 # @author: Matthias Neuner
 
 import textwrap
+from contextlib import contextmanager
 from operator import attrgetter
 
 import h5py
@@ -39,6 +40,7 @@ from edelweissfe.config.phenomena import getFieldSize, phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.modelchange import ModelChange, coalesce
+from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.variables.fieldvariable import FieldVariable
 from edelweissfe.variables.scalarvariable import ScalarVariable
 
@@ -81,6 +83,120 @@ class FEModel:
         self.rigidBodies = {}  #: RigidBodies in the model.
         self.domainSize = dimension  #: Spatial dimension of the model
         self.fieldOutputController = None  #: Set once by the driver; lets in-model entities (e.g. AMR markers) look up a named *fieldOutput by value, not just by declaration.
+        #: High-water mark of the element number allocator; see :meth:`reserveElementNumbers`.
+        self._nextElementNumber = 1
+        self._topologyOpen = False  #: True only inside :meth:`topologyChanges`; see there.
+
+    @contextmanager
+    def topologyChanges(self):
+        """The only scope in which elements may be created or deleted.
+
+        Opened once around model setup, and once per increment around the model modifiers. Outside
+        it, :meth:`createElement` and :meth:`removeElement` raise -- which is what makes "only model
+        modifiers mutate the topology" an enforced property rather than a convention, and what lets
+        :meth:`reserveElementNumbers` guarantee that element numbering is a pure function of the
+        ordered creation sequence.
+
+        Nesting is permitted and is a no-op for the inner scope: setup-time helpers may open a
+        window without knowing whether their caller already did.
+        """
+
+        wasOpen = self._topologyOpen
+        self._topologyOpen = True
+        try:
+            yield
+        finally:
+            self._topologyOpen = wasOpen
+
+    def reserveElementNumbers(self, count: int = 1) -> range:
+        """Reserve ``count`` fresh element numbers.
+
+        The allocator is **monotonic**: numbers are never recycled, and are never derived from
+        ``max(self.elements)``. Both properties matter beyond tidiness.
+
+        Deriving the next number from ``max(self.elements)`` makes numbering a function of the
+        deletion history as well as the creation history -- a contact facet set that is deleted and
+        rebuilt (the common case between two refinements) hands the freed numbers straight back out
+        -- so a restart replay would have to reproduce creations, deletions *and* their interleaving
+        to renumber identically. With one monotonic counter it only has to reproduce the ordered
+        creation sequence, which is exactly what the recorded topology history holds.
+
+        Never recycling additionally means a number refers to one element for the model's entire
+        lifetime, so :meth:`~edelweissfe.models.modelchange.ModelChange.mergedWith`'s documented
+        no-reuse assumption holds, and a reference cached by number cannot silently alias a
+        different element.
+
+        Parameters
+        ----------
+        count
+            How many consecutive numbers to reserve.
+
+        Returns
+        -------
+        range
+            The reserved numbers, in ascending order.
+        """
+
+        if not self._topologyOpen:
+            raise TopologyError(
+                "element numbers may only be reserved during a topology change -- see FEModel.topologyChanges()"
+            )
+        if count < 1:
+            raise ValueError("cannot reserve {:} element numbers".format(count))
+
+        first = self._nextElementNumber
+        self._nextElementNumber += count
+        return range(first, self._nextElementNumber)
+
+    def adoptSetupElementNumbers(self):
+        """Raise the allocator above every element number setup has already handed out.
+
+        Called once, at the end of model setup. The base mesh (input file and every mesh generator)
+        numbers its elements as a pure function of the input file, is re-run identically by a
+        resumed run before the checkpoint is read, and is never renumbered afterwards -- so those
+        numbers need no allocator. This just makes sure nothing minted later can collide with them.
+        """
+
+        self._nextElementNumber = max(self._nextElementNumber, max(self.elements.keys(), default=0) + 1)
+
+    def createElement(self, element):
+        """Add a freshly created element to the model.
+
+        Parameters
+        ----------
+        element
+            The element, already carrying a number obtained from :meth:`reserveElementNumbers`.
+        """
+
+        if not self._topologyOpen:
+            raise TopologyError(
+                "element {:} was created outside a topology change: only model modifiers may create "
+                "or delete elements, inside FEModel.topologyChanges()".format(element.elNumber)
+            )
+        if element.elNumber in self.elements:
+            raise TopologyError(
+                "element number {:} is already taken -- element numbers are reserved via "
+                "FEModel.reserveElementNumbers() and never recycled".format(element.elNumber)
+            )
+
+        self.elements[element.elNumber] = element
+
+    def removeElement(self, elNumber: int):
+        """Remove an element from the model. Its number is retired, never reissued.
+
+        Parameters
+        ----------
+        elNumber
+            The number of the element to remove.
+        """
+
+        if not self._topologyOpen:
+            raise TopologyError(
+                "element {:} was deleted outside a topology change: only model modifiers may create "
+                "or delete elements, inside FEModel.topologyChanges()".format(elNumber)
+            )
+
+        del self.elements[elNumber]
 
     def registerObserver(self, observer):
         """Register a :class:`~edelweissfe.models.modelchangeobserver.ModelChangeObserver` to be
@@ -335,6 +451,7 @@ class FEModel:
             The journal instance.
         """
 
+        self.adoptSetupElementNumbers()
         self._prepareVariablesAndFields(journal)
         self._prepareElements(journal)
 
