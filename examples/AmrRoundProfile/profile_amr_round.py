@@ -109,8 +109,11 @@ name    = slaveSurf
 slaveSurface  = slaveSurf_facets
 masterSurface = masterSurf_facets
 
+** Element 2 is (ix=0, iy=0, iz=1) in boxGen's ix-iy-iz loop order, i.e. ON the tied interface.
+** Refining element 1 instead would sit at the far face, and the tie would early-out on
+** touchesSurface -- correct behaviour, but it measures nothing.
 *elSet, elSet=refineMe
-1
+2
 
 *modelModifier, type=hAdaptivity, name=amr
 >>marker, type=elementSet, elSet=refineMe, initialOnly=True
