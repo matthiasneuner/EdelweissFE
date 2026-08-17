@@ -174,7 +174,35 @@ the continuation will use *different* element numbers than the original live run
 interleaving is unrecoverable by construction. That is expected and harmless; it is simply not
 evidence of faithfulness.
 
-**The cheap path to production-scale faithfulness** (do this once, in P5 — the old checkpoints are a
+**REVISED 2026-08-17 -- the converter is not worth building; mint a fresh checkpoint instead.**
+Working the converter through showed it is not the ~40 lines this section assumed. Converting the
+old `occasionEids` into a topology history is indeed easy, but the replay it drives produces
+*different* element numbers than the original 2026-08-16 run -- that interleaving was never
+recorded -- so restoring element state by number would reproduce the very bug P5 fixed. A faithful
+converter would therefore have to **resurrect the eid-keyed state restore P5 deleted**, i.e. re-add
+the hotfix inside a commit whose whole purpose is to be reverted.
+
+Cheaper and stronger: **mint a fresh v2 checkpoint from a short AnchorPryOut run.** Its AMR marker
+is `initialOnly=True` on the `concrete_to_mortar` surface, so refinement fires at the *first*
+increment -- reaching increment 470 was never necessary to exercise the machinery. Ten increments
+buy AMR occasions, five ties and two contacts regenerating facets, GCDP material state, and the real
+380k-dof mesh.
+
+The comparison then needs no new code at all: every checkpoint already carries
+`/topologyHistory/*/fingerprint` per applied decision plus `/elements/<number>`. Arm A runs
+continuously; arm B resumes from arm A's mid-run checkpoint and continues to the same end. Matching
+fingerprint sequences and element-number sets is the faithfulness claim, at production scale.
+
+Scope honestly when reporting it: this is production *scale* and production *complexity*, but not
+production *duration* -- ten increments and a handful of occasions, not the 54 of the full run.
+
+**The pinned `restart_ckpt_470_*.h5` / `LATE_incr4xx.h5` are now unreadable** (format v1, refused by
+design). They remain useful only as inputs to the old code on `perf/blockamg-efficiency`; nothing on
+this branch will read them again.
+
+---
+
+**Superseded, kept for the reasoning -- the cheap path to production-scale faithfulness** (do this once, in P5 — the old checkpoints are a
 launchpad, not the reference):
 
 1. resume from the converted `restart_ckpt_470` and run ~4–6 increments, **writing new-format
