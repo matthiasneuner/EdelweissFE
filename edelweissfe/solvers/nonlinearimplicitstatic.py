@@ -257,12 +257,23 @@ class NIST(NonlinearSolverBase):
             for timeStep in step.getTimeStep():
                 # NOTE: materialize the list before any() -- a generator would short-circuit at
                 # the first modifier/constraint reporting a change.
-                modelHasChanged = any(
-                    [modifier.updateModel(model, step, timeStep) for modifier in model.modelModifiers.values()]
-                )
-                connectivityHasChanged = any(
-                    [constraint.updateConnectivity(model) for constraint in model.constraints.values()]
-                )
+                # Both sweeps run inside one topology window (see FEModel.topologyChanges): outside
+                # it, creating or deleting an element raises.
+                #
+                # The second sweep is in the window only because contact facet generation still
+                # hangs off constraint reconcile -- the push-based tie mints its facets from inside
+                # the modifier sweep, while the pull-based penalty constraints mint theirs from
+                # updateConnectivity, i.e. here. PLAN_TOPOLOGY_PIPELINE.md P3 moves facet generation
+                # into a model modifier of its own, after which constraints become pure readers and
+                # this second window must be REMOVED -- it is what would otherwise let a consumer
+                # keep mutating the model behind the pipeline's back.
+                with model.topologyChanges():
+                    modelHasChanged = any(
+                        [modifier.updateModel(model, step, timeStep) for modifier in model.modelModifiers.values()]
+                    )
+                    connectivityHasChanged = any(
+                        [constraint.updateConnectivity(model) for constraint in model.constraints.values()]
+                    )
 
                 if modelHasChanged or connectivityHasChanged or self.theDofManager is None:
                     self.journal.message("Creating monolithic equation system", self.identification, 0)

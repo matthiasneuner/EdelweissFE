@@ -320,7 +320,6 @@ class ModelModifier(ModelModifierBase):
         anyEl = refineElements[0]
         self._elementType = options.elementType or anyEl.elType
         self._elementClass = getElementClass(self._elementType, self._provider)
-        self._nextElLabel = max(model.elements.keys()) + 1
 
         # bodies of the refineable mesh: node labels are namespaced per body, so coincident nodes of
         # two bodies (a tied interface -- 'adjust' makes it flush by default --, a zero-gap contact
@@ -506,15 +505,13 @@ class ModelModifier(ModelModifierBase):
         mesh = self._mesh
         reg = mesh.registry
 
-        # Resync against the model's current label range before claiming any new ones. Other
-        # components can legitimately claim element labels between two refinements -- notably a
-        # tied surface's facets, rebuilt via the observer/MeshDependent escape hatches fired at the
-        # end of THIS very call (see below), which pick their labels fresh from max(model.elements).
-        # self._nextElLabel is otherwise a plain running counter that would stay oblivious to that
-        # and, on the next call, collide with (and silently overwrite) those facets -- which then
-        # get erroneously deleted as "stale" the next time they are rebuilt, orphaning the solid
-        # elements (and their nodes) that stole their labels. Only ever advance the counter.
-        self._nextElLabel = max(self._nextElLabel, max(model.elements.keys(), default=0) + 1)
+        # Element numbers come from the model's single monotonic allocator
+        # (FEModel.reserveElementNumbers). This modifier deliberately keeps no counter of its own:
+        # the one it used to keep had to be resynced against max(model.elements) on every call,
+        # because a tied surface's facets -- rebuilt via the observer/MeshDependent escape hatches
+        # fired at the end of THIS very call -- claim labels in between, and a private counter would
+        # collide with (and silently overwrite) them, after which they were deleted as "stale",
+        # orphaning the solid elements that had taken their labels.
 
         # snapshot the converged nodal values BEFORE the mesh mutates, for the warm start
         oldValues = {}
@@ -548,15 +545,18 @@ class ModelModifier(ModelModifierBase):
         change = ModelChange(kind=ModelChangeType.REFINEMENT, addedNodes=set(newNodes.keys()))
 
         # new child elements (single level of new refinement per call -> parents are materialized)
-        # Iterate SORTED: element labels are handed out in this order, so an unordered set here would
-        # make which child gets which label depend on set iteration order rather than on the mesh.
+        # Sorted, with the whole batch's numbers reserved up front: which octree child gets which
+        # element number is then a pure function of this sorted list of eids -- not of the order an
+        # unordered set happened to iterate in, and not of what else claimed a number partway
+        # through the loop.
+        newChildEidsInOrder = sorted(newChildEids)
+        childNumbers = model.reserveElementNumbers(len(newChildEidsInOrder)) if newChildEidsInOrder else []
         with timeit("elements & state transfer"):
-            for eid in sorted(newChildEids):
+            for eid, elNumber in zip(newChildEidsInOrder, childNumbers):
                 e = mesh.elements[eid]
                 parentEid = e["parent"]
                 parentEl = self._eidToEl[parentEid]
-                child = self._elementClass(self._elementType, self._nextElLabel)
-                self._nextElLabel += 1
+                child = self._elementClass(self._elementType, elNumber)
                 child.setNodes([model.nodes[label] for label in e["conn"]])
                 self._sectionOf[parentEl].assignSectionPropertiesToElement(child)
                 if not self._replayMode:
@@ -577,7 +577,7 @@ class ModelModifier(ModelModifierBase):
                                 parentVals = np.array([vals[pn] for pn in parentEl.nodes])
                                 newValues[fieldName][node] = N @ parentVals
 
-                model.elements[child.elNumber] = child
+                model.createElement(child)
                 self._eidToEl[eid] = child
                 self._sectionOf[child] = self._sectionOf[parentEl]
 
@@ -596,10 +596,10 @@ class ModelModifier(ModelModifierBase):
                 ]
                 change.faceMap[(parentLabel, faceID)] = [(label, faceID) for label in childLabels]
 
-        # remove refined parents
-        for eid in materialized - active:
+        # remove refined parents (sorted, so the changeset is built in a reproducible order)
+        for eid in sorted(materialized - active):
             el = self._eidToEl.pop(eid)
-            del model.elements[el.elNumber]
+            model.removeElement(el.elNumber)
             change.removedElements.add(el.elNumber)
 
         # keep model.surfaces in sync (Finding 2): parent (eid,faceID) -> child faces

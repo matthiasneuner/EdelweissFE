@@ -81,11 +81,11 @@ class DiscreteRigidBody(RigidBody):
         if self.mass is not None:
             from edelweissfe.elements.pointmass import PointMass
 
-            el_num = max(model.elements.keys()) + 1 if model.elements else 1
+            (el_num,) = model.reserveElementNumbers(1)
             self.point_mass_element = PointMass(
                 el_num, [self.rpNode], model, self.mass, self.inertia, self.initial_velocity
             )
-            model.elements[el_num] = self.point_mass_element
+            model.createElement(self.point_mass_element)
 
     def getCurrentKinematics(self):
         """Return the current rigid body motion.

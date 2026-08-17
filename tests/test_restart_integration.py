@@ -381,8 +381,7 @@ def test_restart_resume_matches_uninterrupted_reference_with_amr_and_plastic_sta
     truncatedPath = tmp_path / "truncated.inp"
     truncatedPath.write_text(
         _AMR_PLASTIC_MATERIAL_AND_MESH + f"\n*output, type=restart, name=restartwriter\n"
-        f"writeInterval=1, baseName={checkpointBaseName}, numberOfFilesToKeep=3\n"
-        + _amrPlasticStep(maxNumInc=6)
+        f"writeInterval=1, baseName={checkpointBaseName}, numberOfFilesToKeep=3\n" + _amrPlasticStep(maxNumInc=6)
     )
     truncatedModel = _runInputFile(truncatedPath)
     assert len(truncatedModel.elements) > 1, "truncated too early: refinement had not happened yet"
@@ -452,7 +451,8 @@ def _buildDirect(tmp_path, name):
 def test_hadaptivity_restart_restores_child_state(tmp_path):
     modelA = _buildDirect(tmp_path, "a.inp")
     amrA = modelA.modelModifiers["amr"]
-    assert amrA.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
+    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
+        assert amrA.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
 
     # Give every managed (leaf) element a distinctive, eid-derived state so a lost/virgin restore is
     # unambiguous. Skip any element without a state buffer.
@@ -473,15 +473,15 @@ def test_hadaptivity_restart_restores_child_state(tmp_path):
 
     modelB = _buildDirect(tmp_path, "b.inp")
     amrB = modelB.modelModifiers["amr"]
-    amrB.setRestartData(modelB, restartData)
+    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
+        amrB.setRestartData(modelB, restartData)
 
     # State must be restored by eid regardless of the (churn-prone) element number.
     for eid, want in expected.items():
         el = amrB._eidToEl.get(eid)
         assert el is not None, f"eid {eid} not reconstructed on replay"
         got = np.asarray(el.getStateVars(), dtype=float)
-        np.testing.assert_allclose(got, want, atol=1e-12,
-                                   err_msg=f"child state for eid {eid} not restored (virgin?)")
+        np.testing.assert_allclose(got, want, atol=1e-12, err_msg=f"child state for eid {eid} not restored (virgin?)")
 
 
 def test_adaptivity_managed_elements_are_excluded_from_number_keyed_restore(tmp_path):
@@ -495,14 +495,16 @@ def test_adaptivity_managed_elements_are_excluded_from_number_keyed_restore(tmp_
     """
     modelA = _buildDirect(tmp_path, "inv_a.inp")
     amr = modelA.modelModifiers["amr"]
-    assert amr.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
+    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
+        assert amr.updateModel(modelA, step=None, timeStep=0.0), "initialOnly marker should refine"
 
     restartData = amr.getRestartData()
     assert "stateEids" in restartData, "managed element state must be checkpointed by octree eid"
 
     modelB = _buildDirect(tmp_path, "inv_b.inp")
     amrB = modelB.modelModifiers["amr"]
-    amrB.setRestartData(modelB, restartData)
+    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
+        amrB.setRestartData(modelB, restartData)
 
     published = set(amrB.restoredElementLabels)
     managed = {el.elNumber for el in amrB._eidToEl.values()}

@@ -115,7 +115,8 @@ def test_restart_data_roundtrip_reproduces_committed_refinement(tmp_path):
     modelA = _buildModel(tmp_path, "a.inp")
     amrA = modelA.modelModifiers["amr"]
 
-    refined = amrA.updateModel(modelA, step=None, timeStep=0.0)
+    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
+        refined = amrA.updateModel(modelA, step=None, timeStep=0.0)
     assert refined, "the initialOnly marker should have triggered a refinement on the first call"
     assert amrA._committedOccasions, "the committed occasion log should now have one entry"
 
@@ -126,7 +127,8 @@ def test_restart_data_roundtrip_reproduces_committed_refinement(tmp_path):
     amrB = modelB.modelModifiers["amr"]
     assert len(modelB.elements) < len(modelA.elements), "model B must start unrefined"
 
-    amrB.setRestartData(modelB, restartData)
+    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
+        amrB.setRestartData(modelB, restartData)
 
     assert set(modelB.elements.keys()) == set(modelA.elements.keys())
     assert set(modelB.nodes.keys()) == set(modelA.nodes.keys())
@@ -141,7 +143,8 @@ def test_restart_data_roundtrip_reproduces_committed_refinement(tmp_path):
 def test_restart_data_roundtrip_reproduces_pending_marks(tmp_path):
     modelA = _buildModel(tmp_path, "a.inp")
     amrA = modelA.modelModifiers["amr"]
-    amrA.updateModel(modelA, step=None, timeStep=0.0)
+    with modelA.topologyChanges():  # the solver opens this per increment; see FEModel.topologyChanges
+        amrA.updateModel(modelA, step=None, timeStep=0.0)
 
     # Simulate a second marking round that hasn't reached minMarkedElements yet: still-active,
     # not-yet-refined elements sitting in the batching buffer at checkpoint time.
@@ -154,6 +157,7 @@ def test_restart_data_roundtrip_reproduces_pending_marks(tmp_path):
 
     modelB = _buildModel(tmp_path, "b.inp")
     amrB = modelB.modelModifiers["amr"]
-    amrB.setRestartData(modelB, restartData)
+    with modelB.topologyChanges():  # FEModel.readRestart opens this around the replay
+        amrB.setRestartData(modelB, restartData)
 
     assert {el.elNumber for el in amrB._pendingMarkedElements} == pendingLabels

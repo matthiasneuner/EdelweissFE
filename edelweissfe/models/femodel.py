@@ -548,11 +548,14 @@ class FEModel:
         # elements/nodes a plain rebuild from the .inp file cannot reproduce -- the node-field and
         # element-statevar restores that follow address them by label and would silently skip
         # anything not already in self.elements/self.nodeFields by this point.
-        for name, modifier in self.modelModifiers.items():
-            if name not in f["modelModifiers"]:
-                continue
-            restartData = {entryName: values[:] for entryName, values in f["modelModifiers"][name].items()}
-            modifier.setRestartData(self, restartData)
+        # Replaying a modifier's history materializes elements, so it is a topology change like any
+        # other and needs the window open (see :meth:`topologyChanges`).
+        with self.topologyChanges():
+            for name, modifier in self.modelModifiers.items():
+                if name not in f["modelModifiers"]:
+                    continue
+                restartData = {entryName: values[:] for entryName, values in f["modelModifiers"][name].items()}
+                modifier.setRestartData(self, restartData)
 
         for nf in self.nodeFields.values():
             for entryName, entryValues in nf._values.items():
