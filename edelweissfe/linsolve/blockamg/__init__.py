@@ -135,6 +135,8 @@ def createSolver(opts) -> Callable:
         ("residualGrowthFactor", float),
         ("hierarchyStalenessFactor", float),
         ("trueResidualMaxContinuations", int),
+        ("gapCompensatedTolerance", bool),
+        ("gapSafetyFactor", float),
         ("verbosity", str),
         ("warnOuterIterationsThreshold", int),
         ("dumpOnDegradationDir", str),
