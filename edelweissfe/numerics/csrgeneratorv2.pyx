@@ -112,6 +112,8 @@ cdef extern from "_csrcore.h":
         int nDof
 
         void update(const double* V_data, double* csr_data) nogil
+        void releaseGatherMap()
+        bint gatherMapReleased
         long memoryBytes()
 
     cdef cppclass CSRDirectAssembler nogil:
@@ -208,6 +210,26 @@ cdef class CSRGenerator:
         """Number of stored entries in the CSR pattern."""
         return self.core.nnz
 
+    @property
+    def gatherMapReleased(self):
+        """True once :meth:`releaseGatherMap` has been called and this generator can no longer gather."""
+        return bool(self.core.gatherMapReleased)
+
+    def releaseGatherMap(self):
+        """Give back the gather map, keeping the CSR pattern -- and give up the ability to gather.
+
+        ``gather_sources`` is one int32 per COO pair, so the map is by far the largest thing this
+        object holds (6.69 GiB at 43,350 DOF against 0.80 GiB for the pattern and the data array).
+        A solver assembling directly into CSR borrows only the pattern, so holding the map would
+        cancel most of what the direct path saves.
+
+        After this call :meth:`updateInPlace` and :meth:`updateCSR` raise. That is deliberate: the
+        alternative is a ``nogil`` loop reading freed vectors, and a matrix that is quietly wrong is
+        worse than one that is loudly unavailable. :attr:`csrMatrix` and the pattern stay valid and
+        usable, and :attr:`memoryBytes` drops accordingly.
+        """
+        self.core.releaseGatherMap()
+
     def updateInPlace(self, double[:] V):
         """
         Update the values of the CSR matrix in-place based on the input vector V.
@@ -230,6 +252,14 @@ cdef class CSRGenerator:
         AliasedCSRMatrix
             A live view of the internal CSR matrix (not a copy).
         """
+
+        if self.core.gatherMapReleased:
+            raise RuntimeError(
+                "CSRGenerator.updateInPlace after releaseGatherMap(): this generator gave back its "
+                "gather map to free memory and can only supply the CSR pattern now. Assemble through "
+                "the DirectCSRAssembler that borrowed the pattern, or build a generator that keeps "
+                "its map."
+            )
 
         cdef double* d_ptr = &self.data_view[0]
         cdef double* v_ptr = &V[0]

@@ -25,9 +25,10 @@ public:
   int                nnz  = 0;
   int                nDof = 0;
 
-  // Assembly Mapping
+  // Assembly Mapping. Only the gather needs these; see releaseGatherMap().
   std::vector< int32_t > gather_sources;
   std::vector< int32_t > assembly_ptr;
+  bool                   gatherMapReleased = false;
 
   CSRCore( const int* I, const int* J, int64_t n_pairs, int n_dof ) : nDof( n_dof )
   {
@@ -236,6 +237,22 @@ public:
         }
       }
     }
+  }
+
+  // Give back the gather map, keeping the pattern. The direct-to-CSR assembler borrows only indptr
+  // and indices; gather_sources is one int32 per COO pair, so at 43k DOF the map is 6.69 GiB -- the
+  // second-largest allocation in the whole assembly, and larger than everything the direct path
+  // holds. Leaving it around would cancel most of what that path saves, so a solver that has
+  // committed to scattering releases it once the assembler has been built.
+  //
+  // update() must not be called afterwards. It cannot check cheaply enough to be worth it (it is a
+  // nogil hot loop over nnz), so the guard lives in the Python binding, which raises. The swap idiom
+  // is what actually returns the capacity; clear() alone would not.
+  void releaseGatherMap()
+  {
+    std::vector< int32_t >().swap( gather_sources );
+    std::vector< int32_t >().swap( assembly_ptr );
+    gatherMapReleased = true;
   }
 
   void update( const double* V_data, double* csr_data ) const
