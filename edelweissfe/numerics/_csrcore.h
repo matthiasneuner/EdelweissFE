@@ -431,25 +431,19 @@ struct CSRDirectAssembler {
     for ( int a = 0; a < nd; ++a )
       rowStart[a] = indptr[entityRows[ds + a]];
 
-    // Traverse by ROW even though the block is column-major. The alternative -- following the
-    // block's own column-major order -- makes the inner loop write into nDof *different* CSR rows
-    // (~375 cache lines, revisited every column), which measured no faster than the gather it is
-    // meant to replace. Iterating rows outer confines all writes of an inner loop to a single CSR
-    // row (~8-16 kB, cache-resident once touched); the price is a stride-nDof read of the block and
-    // of the offsets, both of which are small enough to stay in cache (1.12 MB and 281 kB at
-    // nDof = 375).
-    // Traverse by ROW, even though the block is stored column-major.
+    // Traverse by ROW even though the block is stored column-major. Iterating rows outer confines
+    // all writes of an inner loop to a single CSR row (~8-16 kB, cache-resident once touched) and
+    // pays a stride-nDof read of the block and of the offsets instead; both are small enough to stay
+    // in cache (1.12 MB and 281 kB at nDof = 375), whereas scattered writes across nDof different
+    // CSR rows would not be.
     //
-    // A/B measured on a 478M-op assembly (15,120 DOF, block resident, single thread):
-    //   row-outer     1562 ms   <- this
-    //   column-major  1873 ms   (sequential reads, but writes spread over nDof CSR rows)
-    // Row-outer confines the writes of each inner loop to a single CSR row and pays a stride-nDof
-    // read of the block and the offsets instead; both are small enough to stay in cache
-    // (1.12 MB and 281 kB at nDof = 375), whereas the scattered writes are not.
-    //
-    // For reference the gather it replaces takes 1866 ms with 16 threads, because it must
-    // random-access the 3.83 GB VIJ value array while this random-accesses only the ~164 MB CSR
-    // array -- a ~23x smaller working set, which is where the advantage actually comes from.
+    // That is the reasoning, NOT a measurement. An earlier A/B here quoted row-outer at 1562 ms
+    // against 1873 ms column-major; it was withdrawn. The harness sliced each block out of the VIJ
+    // array with numpy, which streamed 3.83 GB and allocated 5328 times, and that alone inverted the
+    // ranking; repeats then showed the scatter varying by +-18% run to run, wider than the gap being
+    // claimed. So the traversal choice is currently justified by the cache argument above and by
+    // nothing else. Anyone reordering these loops should measure it properly first -- with the block
+    // already resident, and with enough repeats to see the variance -- rather than trust this comment.
     const uint16_t* off0 = offsets.data() + ms;
     for ( int a = 0; a < nd; ++a ) {
       double* __restrict row = my + rowStart[a];
