@@ -7,6 +7,7 @@
 #include <numeric>
 #include <omp.h>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 struct PackedEdge {
@@ -16,6 +17,18 @@ struct PackedEdge {
   // Default comparison for std::sort is now extremely fast
   bool operator<( const PackedEdge& other ) const { return key < other.key; }
 };
+
+// The pattern needs only the (row, col) key; the gather map additionally needs to know which COO pair
+// each key came from. These overloads let one build() serve both element types, so there is exactly one
+// definition of how the pattern is derived and a pattern-only build cannot drift from the full one.
+inline uint64_t keyOf( const PackedEdge& e )
+{
+  return e.key;
+}
+inline uint64_t keyOf( uint64_t k )
+{
+  return k;
+}
 
 class CSRCore {
 public:
@@ -30,18 +43,53 @@ public:
   std::vector< int32_t > assembly_ptr;
   bool                   gatherMapReleased = false;
 
-  CSRCore( const int* I, const int* J, int64_t n_pairs, int n_dof ) : nDof( n_dof )
+  // patternOnly builds indptr/indices and nothing else. Two reasons, and the second is the one that
+  // matters:
+  //
+  //  * The sort payload disappears. With the gather map, each pair is a PackedEdge -- 8 bytes of key
+  //    plus a 4-byte origin index, padded to 16. Without it, a bare uint64_t key: 8 bytes. That array
+  //    is the largest single allocation in the build (25.7 GiB at 43,350 DOF), so this halves it.
+  //  * It removes every 32-bit pair index. `PackedEdge::orig`, `gather_sources` and `assembly_ptr` all
+  //    hold indices into the COO list, which is why the full build has to refuse more than INT32_MAX
+  //    pairs. Measured, that limit -- not memory -- is what caps the model: it bites at ~50,000 DOF
+  //    with only a third of the machine in use, where memory alone would allow ~121,000. The
+  //    pattern-only build has no such index, so the only 32-bit quantity left is nnz, which is three
+  //    orders of magnitude from its limit at these sizes.
+  //
+  // A direct-to-CSR assembler borrows only the pattern, so it should always ask for this.
+  CSRCore( const int* I, const int* J, int64_t n_pairs, int n_dof, bool patternOnly = false ) : nDof( n_dof )
   {
     if ( n_pairs == 0 ) {
       // Empty pattern: indptr is all-zeros, indices/gather_sources/assembly_ptr
       // remain empty. update() is guarded by nnz==0 and is a no-op in that case.
       indptr.assign( nDof + 1, 0 );
+      gatherMapReleased = patternOnly;
       return;
     }
 
+    if ( patternOnly )
+      build< false >( I, J, n_pairs );
+    else
+      build< true >( I, J, n_pairs );
+  }
+
+private:
+  template < bool WithGatherMap >
+  void build( const int* I, const int* J, int64_t n_pairs )
+  {
+    // One key per pair, plus its origin index only when the gather map is wanted.
+    using Elem = std::conditional_t< WithGatherMap, PackedEdge, uint64_t >;
+
     // --- SAFETY & CONFIG ---
-    if ( n_pairs > std::numeric_limits< int32_t >::max() ) {
-      throw std::overflow_error( "CSRCore: n_pairs exceeds 32-bit limit." );
+    if constexpr ( WithGatherMap ) {
+      // gather_sources and assembly_ptr are int32 indices into the COO list
+      if ( n_pairs > std::numeric_limits< int32_t >::max() ) {
+        throw std::overflow_error( "CSRCore: n_pairs exceeds 32-bit limit. Build the pattern only "
+                                   "(patternOnly = true) if the gather map is not needed." );
+      }
+    }
+    else {
+      gatherMapReleased = true;   // there never was one; update() must refuse
     }
 
     // Determine Partitions based on threads
@@ -97,7 +145,7 @@ public:
 
     // --- STEP 2: PARALLEL SCATTER (BUCKETING) ---
     // Pack data into a structure that is fast to sort.
-    std::vector< PackedEdge > edges( n_pairs );
+    std::vector< Elem > edges( n_pairs );
 
 #pragma omp parallel
     {
@@ -119,7 +167,10 @@ public:
         // means only this thread writes to write_offsets[tid][*]).
         int64_t pos = write_offsets[tid][p_id]++;
 
-        edges[pos] = { key, (int32_t)k };
+        if constexpr ( WithGatherMap )
+          edges[pos] = { key, (int32_t)k };
+        else
+          edges[pos] = key;
       }
     }
 
@@ -160,14 +211,14 @@ public:
         // Determine Row range for this partition
         // We must be careful: indptr is size nDof+1.
         // We extract row from the key.
-        int prev_row = static_cast< int32_t >( edges[start].key >> 32 );
+        int prev_row = static_cast< int32_t >( keyOf( edges[start] ) >> 32 );
 
         // Mark first row count
         indptr[prev_row + 1]++;
 
         for ( int64_t k = start + 1; k < end; ++k ) {
-          uint64_t curr_key = edges[k].key;
-          uint64_t prev_key = edges[k - 1].key;
+          uint64_t curr_key = keyOf( edges[k] );
+          uint64_t prev_key = keyOf( edges[k - 1] );
 
           int curr_row = static_cast< int32_t >( curr_key >> 32 );
 
@@ -200,9 +251,11 @@ public:
 
     // --- STEP 5: FINAL FILL ---
     indices.resize( nnz );
-    gather_sources.resize( n_pairs );
-    assembly_ptr.resize( nnz + 1 );
-    assembly_ptr[nnz] = static_cast< int32_t >( n_pairs ); // Sentinel; safe: guarded by INT32_MAX check above
+    if constexpr ( WithGatherMap ) {
+      gather_sources.resize( n_pairs );
+      assembly_ptr.resize( nnz + 1 );
+      assembly_ptr[nnz] = static_cast< int32_t >( n_pairs ); // Sentinel; safe: guarded by INT32_MAX above
+    }
 
 #pragma omp parallel for schedule( dynamic, 1 )
     for ( int p = 0; p < num_partitions; ++p ) {
@@ -214,23 +267,28 @@ public:
       int32_t write_idx = global_nnz_offsets[p];
 
       // Fill first entry of the partition
-      indices[write_idx]      = static_cast< int32_t >( edges[start].key & 0xFFFFFFFFu );
-      assembly_ptr[write_idx] = start;
-      gather_sources[start]   = edges[start].orig;
+      indices[write_idx] = static_cast< int32_t >( keyOf( edges[start] ) & 0xFFFFFFFFu );
+      if constexpr ( WithGatherMap ) {
+        assembly_ptr[write_idx] = start;
+        gather_sources[start]   = edges[start].orig;
+      }
 
       int32_t internal_count = 0;
 
       for ( int64_t k = start + 1; k < end; ++k ) {
-        uint64_t curr_key = edges[k].key;
-        uint64_t prev_key = edges[k - 1].key;
+        uint64_t curr_key = keyOf( edges[k] );
+        uint64_t prev_key = keyOf( edges[k - 1] );
 
-        gather_sources[k] = edges[k].orig;
+        if constexpr ( WithGatherMap )
+          gather_sources[k] = edges[k].orig;
 
         if ( curr_key != prev_key ) {
           internal_count++;
-          // Close previous assembly pointer
-          // (assembly_ptr[i+1] is start of next, which is current k)
-          assembly_ptr[write_idx + internal_count] = k;
+          if constexpr ( WithGatherMap ) {
+            // Close previous assembly pointer
+            // (assembly_ptr[i+1] is start of next, which is current k)
+            assembly_ptr[write_idx + internal_count] = k;
+          }
 
           // Write new column index
           indices[write_idx + internal_count] = static_cast< int32_t >( curr_key & 0xFFFFFFFFu );
@@ -238,6 +296,8 @@ public:
       }
     }
   }
+
+public:
 
   // Give back the gather map, keeping the pattern. The direct-to-CSR assembler borrows only indptr
   // and indices; gather_sources is one int32 per COO pair, so at 43k DOF the map is 6.69 GiB -- the

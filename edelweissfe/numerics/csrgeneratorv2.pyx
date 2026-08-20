@@ -104,7 +104,7 @@ class AliasedCSRMatrix(csr_matrix):
 
 cdef extern from "_csrcore.h":
     cdef cppclass CSRCore nogil:
-        CSRCore(const int* I, const int* J, long n_pairs, int n_dof) except +
+        CSRCore(const int* I, const int* J, long n_pairs, int n_dof, bint patternOnly) except +
 
         vector[int] indptr
         vector[int] indices
@@ -139,6 +139,13 @@ cdef class CSRGenerator:
     ----------
     systemMatrix : object
         An object containing COO format data with attributes I, J, and nDof.
+    patternOnly : bool
+        Build only the CSR pattern (``indptr``/``indices``), not the gather map. Halves the sort
+        array and, more importantly, removes the 32-bit limit on the pair count -- ``gather_sources``
+        and ``assembly_ptr`` are int32 indices into the COO list, so a full build refuses more than
+        INT32_MAX pairs. :meth:`updateInPlace` and :meth:`updateCSR` then raise, exactly as after
+        :meth:`releaseGatherMap`. Use it when the pattern is being borrowed by a
+        :class:`DirectCSRAssembler` and nothing will gather.
     """
 
     cdef CSRCore* core
@@ -150,7 +157,7 @@ cdef class CSRGenerator:
         if self.core != NULL:
             del self.core
 
-    def __init__(self, systemMatrix):
+    def __init__(self, systemMatrix, bint patternOnly=False):
         # Ensure int32 dtype regardless of the source array's dtype.
         # dofmanager.py already produces np.intc arrays, but we guard here
         # in case CSRGenerator is called from outside the standard path.
@@ -163,7 +170,7 @@ cdef class CSRGenerator:
 
         # 1. Run C++ Core
         with nogil:
-            self.core = new CSRCore(&I[0], &J[0], self.nCooPairs, nDof)
+            self.core = new CSRCore(&I[0], &J[0], self.nCooPairs, nDof, patternOnly)
 
         cdef int* ptr_indptr = self.core.indptr.data()
         cdef int* ptr_indices = self.core.indices.data()
@@ -255,10 +262,10 @@ cdef class CSRGenerator:
 
         if self.core.gatherMapReleased:
             raise RuntimeError(
-                "CSRGenerator.updateInPlace after releaseGatherMap(): this generator gave back its "
-                "gather map to free memory and can only supply the CSR pattern now. Assemble through "
-                "the DirectCSRAssembler that borrowed the pattern, or build a generator that keeps "
-                "its map."
+                "CSRGenerator.updateInPlace on a generator with no gather map: it was either built "
+                "with patternOnly=True or gave the map back via releaseGatherMap(), and can only "
+                "supply the CSR pattern now. Assemble through the DirectCSRAssembler that borrowed "
+                "the pattern, or build a generator that keeps its map."
             )
 
         cdef double* d_ptr = &self.data_view[0]
