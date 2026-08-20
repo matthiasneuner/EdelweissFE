@@ -258,6 +258,24 @@ public:
       csr_data[i] = sum;
     }
   }
+
+  // Bytes held by the CSR pattern and the gather map -- the counterpart to
+  // CSRDirectAssembler::memoryBytes(), so the two assembly paths can be compared on the same
+  // basis: what the object itself owns. That is the pattern (indptr, indices) plus the gather map,
+  // which is the term the direct path does away with -- gather_sources is one int32 per COO pair,
+  // so it scales with sizeVIJ rather than with nnz and is the second-largest array in the VIJ path
+  // after the value array itself.
+  //
+  // Not counted here, because this object does not own them: the VIJ value and index arrays (held
+  // by the DofManager) and the CSR data array (allocated by the Python-level CSRGenerator, which
+  // adds it in its own memoryBytes).
+  int64_t memoryBytes() const
+  {
+    return static_cast< int64_t >( indptr.size() ) * sizeof( int )
+           + static_cast< int64_t >( indices.size() ) * sizeof( int )
+           + static_cast< int64_t >( gather_sources.size() ) * sizeof( int32_t )
+           + static_cast< int64_t >( assembly_ptr.size() ) * sizeof( int32_t );
+  }
 };
 
 
@@ -275,12 +293,29 @@ public:
 // offset fits in uint16 -- half the width of the int32 gather index it replaces, and it makes the
 // value array unnecessary entirely.
 //
-// Reduction is privatised rather than atomic. Measured on a 708M-op scatter at this problem's
-// contention: privatised beats atomics by 2.13x / 1.94x / 1.57x at 4 / 8 / 16 threads, and unlike
-// atomics it keeps the summation order fixed, so results stay reproducible. The cost is
-// nThreads * nnz * 8 bytes of private buffer, which is still less than the VIJ array it replaces
-// at practical thread counts -- but it grows with thread count, so at very high counts the
-// trade-off reverses.
+// How many private CSR copies to keep is configurable, via setNumBuffers(), because it is a pure
+// memory/speed trade and the right point depends on the problem size:
+//
+//   nBuffers == nThreads   one copy per thread, no synchronisation at all, summation order fixed
+//                          (so bit-reproducible). Costs nThreads * nnz * 8 bytes, which at 16
+//                          threads and 43k DOF is 8.5 GiB -- measured to be 72% of this
+//                          assembler's whole footprint, i.e. it consumes most of the saving.
+//   nBuffers <  nThreads   threads sharing a copy synchronise with `#pragma omp atomic` on the
+//                          scatter. nBuffers == 1 is the fully atomic case, at nnz * 8 bytes.
+//
+// An earlier standalone benchmark found atomics 1.57-2.13x slower than privatisation at 4-16
+// threads, and that was taken as settling the question -- wrongly, because it timed the
+// *reduction*, which is only 0.16 s of a 3.40 s assembly at 43k DOF. What actually matters is the
+// cost of atomics inside the scatter, in the entity loop, which that benchmark never isolated.
+// Hence the knob rather than a fixed choice: the totals are what get compared.
+//
+// Note that fewer buffers than threads makes the summation order depend on thread interleaving,
+// so results stop being bit-reproducible run to run (they stay correct to round-off). Anything
+// that needs reproducibility must keep nBuffers == nThreads.
+//
+// IMPORTANT: scatterBlock is called from EdelweissMeshfree's particle kernel, which includes this
+// header and therefore *inlines* this code into its own extension. Any change here needs BOTH
+// extensions rebuilt; a stale meshfree build keeps scattering the old way.
 struct CSRDirectAssembler {
   const int*            indptr;      // borrowed from the shared pattern
   const int*            indices;     // borrowed
@@ -290,6 +325,9 @@ struct CSRDirectAssembler {
   int                   nThreads = 1;
   std::vector< uint16_t > offsets;   // within-row offset per entry; the whole map
   std::vector< std::vector< double > > priv;
+  int                     nBuffers   = 1;       // number of private CSR copies; see setNumBuffers
+  bool                    useAtomics = false;   // set when nBuffers < nThreads
+  std::vector< int >      bufferOfThread;       // thread id -> which copy it accumulates into
 
   // Builds the map against an existing pattern, so there is exactly one definition of what the
   // CSR pattern is and the two assembly paths cannot drift apart.
@@ -332,34 +370,62 @@ struct CSRDirectAssembler {
                                 "the 16-bit range (row longer than 65535); a uint32 offset variant "
                                 "is required for this pattern." );
 
-    priv.resize( this->nThreads );
-    for ( int t = 0; t < this->nThreads; ++t )
-      priv[t].assign( nnz, 0.0 );
+    setNumBuffers( this->nThreads );
+  }
+
+  // Choose how many private CSR copies to keep. nThreads (the default) is the privatised,
+  // synchronisation-free, bit-reproducible mode; anything smaller makes threads share a copy and
+  // synchronise with atomics, trading speed for (nThreads - n) * nnz * 8 bytes.
+  //
+  // Reallocates the buffers, so it is not something to call inside an assembly. The old buffers are
+  // released before the new ones are taken, so shrinking never needs both at once. Consecutive
+  // thread ids are grouped onto the same copy, which keeps a shared copy's writers close together.
+  void setNumBuffers( int n )
+  {
+    if ( n < 1 )
+      n = 1;
+    if ( n > nThreads )
+      n = nThreads;
+
+    nBuffers   = n;
+    useAtomics = ( n < nThreads );
+
+    priv.assign( nBuffers, std::vector< double >() );   // frees the previous buffers first
+    for ( int b = 0; b < nBuffers; ++b )
+      priv[b].assign( nnz, 0.0 );
+
+    bufferOfThread.resize( nThreads );
+    for ( int t = 0; t < nThreads; ++t )
+      bufferOfThread[t] = static_cast< int >( ( static_cast< int64_t >( t ) * nBuffers ) / nThreads );
   }
 
   // Scatter a whole VIJ value array through the map. This is the equivalence path used to validate
   // the addressing against CSRCore::update; the fused path hands each entity's block straight in.
   void assembleFromVIJ( const double* V, const int* I, double* csr_data )
   {
+    beginAssembly();
+
 #pragma omp parallel num_threads( nThreads )
     {
-      const int tid = omp_get_thread_num();
-      double*   my  = priv[tid].data();
-      std::fill( my, my + nnz, 0.0 );
+      const int tid   = omp_get_thread_num();
+      double*   myBuf = priv[bufferOfThread[tid]].data();
 
+      if ( !useAtomics ) {
 #pragma omp for schedule( static )
-      for ( int64_t k = 0; k < nPairs; ++k )
-        my[indptr[I[k]] + offsets[k]] += V[k];
+        for ( int64_t k = 0; k < nPairs; ++k )
+          myBuf[indptr[I[k]] + offsets[k]] += V[k];
+      }
+      else {
+#pragma omp for schedule( static )
+        for ( int64_t k = 0; k < nPairs; ++k ) {
+          double* dst = myBuf + indptr[I[k]] + offsets[k];
+#pragma omp atomic
+          *dst += V[k];
+        }
+      }
     }
 
-    const int nT = nThreads;
-#pragma omp parallel for schedule( static ) num_threads( nThreads )
-    for ( int i = 0; i < nnz; ++i ) {
-      double s = 0.0;
-      for ( int t = 0; t < nT; ++t )
-        s += priv[t][i];
-      csr_data[i] = s;
-    }
+    reduce( csr_data );
   }
 
   // ---- fused path -------------------------------------------------------------------------
@@ -408,18 +474,32 @@ struct CSRDirectAssembler {
 
   void beginAssembly()
   {
+    if ( !useAtomics ) {
+      // one copy per thread: each thread clears its own, which is both perfectly parallel and
+      // keeps the pages it will later write on its own NUMA node
 #pragma omp parallel num_threads( nThreads )
-    {
-      double* my = priv[omp_get_thread_num()].data();
-      std::fill( my, my + nnz, 0.0 );
+      {
+        double* my = priv[omp_get_thread_num()].data();
+        std::fill( my, my + nnz, 0.0 );
+      }
+    }
+    else {
+      // shared copies: no thread owns one, so clear each with all threads
+      for ( int b = 0; b < nBuffers; ++b ) {
+        double* my = priv[b].data();
+#pragma omp parallel for schedule( static ) num_threads( nThreads )
+        for ( int i = 0; i < nnz; ++i )
+          my[i] = 0.0;
+      }
     }
   }
 
   // Called from inside the entity loop, once per entity, by the thread that computed the block.
-  // Race-free by construction: each thread owns its private CSR copy.
+  // With one copy per thread this is race-free by construction; with fewer copies than threads the
+  // writes are made atomic instead (see setNumBuffers).
   void scatterBlock( int tid, int entity, const double* block ) noexcept
   {
-    double* __restrict my = priv[tid].data();
+    double*       myBuf = priv[bufferOfThread[tid]].data();
     const int64_t ms = entityMapStart[entity];
     const int64_t ds = entityDofStart[entity];
     const int     nd = entityNDof[entity];
@@ -445,18 +525,36 @@ struct CSRDirectAssembler {
     // nothing else. Anyone reordering these loops should measure it properly first -- with the block
     // already resident, and with enough repeats to see the variance -- rather than trust this comment.
     const uint16_t* off0 = offsets.data() + ms;
-    for ( int a = 0; a < nd; ++a ) {
-      double* __restrict row = my + rowStart[a];
-      for ( int b = 0; b < nd; ++b ) {
-        const int64_t k = static_cast< int64_t >( b ) * nd + a;
-        row[off0[k]] += block[k];
+
+    if ( !useAtomics ) {
+      double* __restrict my = myBuf;   // this thread's own copy: no other writer, so __restrict holds
+      for ( int a = 0; a < nd; ++a ) {
+        double* __restrict row = my + rowStart[a];
+        for ( int b = 0; b < nd; ++b ) {
+          const int64_t k = static_cast< int64_t >( b ) * nd + a;
+          row[off0[k]] += block[k];
+        }
+      }
+    }
+    else {
+      // shared copy: concurrent writers are the point, so no __restrict here, and every update is
+      // atomic. Same traversal, so the only difference against the branch above is the
+      // synchronisation -- which is what makes the two timings comparable.
+      for ( int a = 0; a < nd; ++a ) {
+        double* row = myBuf + rowStart[a];
+        for ( int b = 0; b < nd; ++b ) {
+          const int64_t k   = static_cast< int64_t >( b ) * nd + a;
+          double*       dst = row + off0[k];
+#pragma omp atomic
+          *dst += block[k];
+        }
       }
     }
   }
 
   void reduce( double* csr_data )
   {
-    const int nT = nThreads;
+    const int nT = nBuffers;
 #pragma omp parallel for schedule( static ) num_threads( nThreads )
     for ( int i = 0; i < nnz; ++i ) {
       double s = 0.0;
@@ -467,9 +565,10 @@ struct CSRDirectAssembler {
   }
 
   // Bytes held by the map plus the private buffers -- the figure to compare against the VIJ array.
+  // Scales with nBuffers, not nThreads, which is the whole point of setNumBuffers.
   int64_t memoryBytes() const
   {
-    return static_cast< int64_t >( offsets.size() ) * 2 + static_cast< int64_t >( nThreads ) * nnz * 8
+    return static_cast< int64_t >( offsets.size() ) * 2 + static_cast< int64_t >( nBuffers ) * nnz * 8
            + static_cast< int64_t >( entityRows.size() ) * 4;
   }
 };

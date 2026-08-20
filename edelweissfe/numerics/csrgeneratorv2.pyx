@@ -112,6 +112,7 @@ cdef extern from "_csrcore.h":
         int nDof
 
         void update(const double* V_data, double* csr_data) nogil
+        long memoryBytes()
 
     cdef cppclass CSRDirectAssembler nogil:
         CSRDirectAssembler(const int* indptr, const int* indices, int nnz, int nDof,
@@ -122,7 +123,9 @@ cdef extern from "_csrcore.h":
         void beginAssembly() nogil
         void scatterBlock(int tid, int entity, const double* block) nogil
         void reduce(double* csr_data) nogil
+        void setNumBuffers(int n) except +
         long memoryBytes()
+        int nBuffers
 
 cdef class CSRGenerator:
     """
@@ -187,6 +190,24 @@ cdef class CSRGenerator:
         # AliasedCSRMatrix's docstring.
         self.csrMatrix._locked = True
 
+    @property
+    def memoryBytes(self):
+        """Bytes held by the CSR pattern, the gather map and the CSR data array.
+
+        The counterpart to :attr:`DirectCSRAssembler.memoryBytes`, on the same basis -- what the
+        object owns. The dominant term is the gather map's ``gather_sources``, one int32 per COO
+        pair, which is what the direct path replaces with a uint16 offset per pair.
+
+        Neither figure counts the VIJ value array or the ``I``/``J`` index arrays: those belong to
+        the DofManager, and ``I``/``J`` are needed by both paths.
+        """
+        return self.core.memoryBytes() + 8 * <long> self.core.nnz
+
+    @property
+    def nnz(self):
+        """Number of stored entries in the CSR pattern."""
+        return self.core.nnz
+
     def updateInPlace(self, double[:] V):
         """
         Update the values of the CSR matrix in-place based on the input vector V.
@@ -249,9 +270,10 @@ cdef class DirectCSRAssembler:
     paths cannot drift apart -- and :meth:`assembleFromVIJ` exists so the addressing can be checked
     against ``CSRGenerator.updateCSR`` on real models rather than argued about.
 
-    Reduction is privatised, not atomic: measured 1.57-2.13x faster than atomics at 4-16 threads on
-    this problem's contention, and it keeps the summation order fixed so results stay reproducible.
-    The private buffers cost ``nThreads * nnz * 8`` bytes.
+    Reduction defaults to one private CSR copy per thread -- no synchronisation and a fixed summation
+    order, so results are bit-reproducible, at ``nThreads * nnz * 8`` bytes. :meth:`setNumBuffers`
+    trades that memory for atomics; see the header's design note for why the earlier "atomics are
+    1.57-2.13x slower" figure does not settle the question.
 
     Parameters
     ----------
@@ -297,6 +319,24 @@ cdef class DirectCSRAssembler:
     def memoryBytes(self):
         """Bytes held by the offset map plus the private buffers."""
         return self.asm_.memoryBytes()
+
+    @property
+    def numBuffers(self):
+        """How many private CSR copies are currently held. Equal to ``numThreads`` unless changed."""
+        return self.asm_.nBuffers
+
+    def setNumBuffers(self, int n):
+        """Set how many private CSR copies to keep, reallocating them.
+
+        ``n == numThreads`` is the default: one copy per thread, no synchronisation, fixed summation
+        order and therefore bit-reproducible results. Any smaller ``n`` makes threads share a copy
+        and synchronise the scatter with atomics, saving ``(numThreads - n) * nnz * 8`` bytes at the
+        cost of reproducibility -- ``n == 1`` is the fully atomic case. Values are clamped to
+        ``[1, numThreads]``.
+
+        Not to be called during an assembly: it releases and reallocates the buffers.
+        """
+        self.asm_.setNumBuffers(n)
 
     def assembleFromVIJ(self, double[::1] V):
         """Scatter a VIJ value array into CSR through the map, and return the CSR matrix.
