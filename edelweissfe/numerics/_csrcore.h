@@ -259,3 +259,223 @@ public:
     }
   }
 };
+
+
+// ---------------------------------------------------------------------------------------------
+// Direct-to-CSR assembly.
+//
+// CSRCore stages values in a VIJ array of length sizeVIJ and then *gathers* duplicates into CSR.
+// That staging array is the dominant memory cost of the meshfree assembly (12.15 GB at 43k DOF,
+// alongside I, J and gather_sources), and it exists only because assembly and reduction are
+// separated in time.
+//
+// This assembler removes it by *scattering* instead: each entry knows its CSR slot directly, as
+// indptr[row] + offset, where offset is the position of its column within that row. Rows are
+// ~1700-2200 long for RKPM stencils (set by the support radius, not by the DOF count), so the
+// offset fits in uint16 -- half the width of the int32 gather index it replaces, and it makes the
+// value array unnecessary entirely.
+//
+// Reduction is privatised rather than atomic. Measured on a 708M-op scatter at this problem's
+// contention: privatised beats atomics by 2.13x / 1.94x / 1.57x at 4 / 8 / 16 threads, and unlike
+// atomics it keeps the summation order fixed, so results stay reproducible. The cost is
+// nThreads * nnz * 8 bytes of private buffer, which is still less than the VIJ array it replaces
+// at practical thread counts -- but it grows with thread count, so at very high counts the
+// trade-off reverses.
+struct CSRDirectAssembler {
+  const int*            indptr;      // borrowed from the shared pattern
+  const int*            indices;     // borrowed
+  int                   nnz  = 0;
+  int                   nDof = 0;
+  int64_t               nPairs = 0;
+  int                   nThreads = 1;
+  std::vector< uint16_t > offsets;   // within-row offset per entry; the whole map
+  std::vector< std::vector< double > > priv;
+
+  // Builds the map against an existing pattern, so there is exactly one definition of what the
+  // CSR pattern is and the two assembly paths cannot drift apart.
+  CSRDirectAssembler( const int* indptr_,
+                      const int* indices_,
+                      int        nnz_,
+                      int        nDof_,
+                      const int* I,
+                      const int* J,
+                      int64_t    nPairs_,
+                      int        nThreads_ )
+    : indptr( indptr_ ), indices( indices_ ), nnz( nnz_ ), nDof( nDof_ ), nPairs( nPairs_ ),
+      nThreads( nThreads_ > 0 ? nThreads_ : 1 )
+  {
+    offsets.resize( nPairs );
+    int64_t tooWide = 0;
+
+#pragma omp parallel for schedule( static ) reduction( + : tooWide )
+    for ( int64_t k = 0; k < nPairs; ++k ) {
+      const int  r     = I[k];
+      const int  start = indptr[r];
+      const int  end   = indptr[r + 1];
+      const int* found = std::lower_bound( indices + start, indices + end, J[k] );
+      if ( found == indices + end || *found != J[k] ) {
+        tooWide += 1;   // reported as a build failure below; no entry may be unmapped
+        offsets[k] = 0;
+        continue;
+      }
+      const int64_t off = found - ( indices + start );
+      if ( off > std::numeric_limits< uint16_t >::max() ) {
+        tooWide += 1;
+        offsets[k] = 0;
+        continue;
+      }
+      offsets[k] = static_cast< uint16_t >( off );
+    }
+
+    if ( tooWide > 0 )
+      throw std::runtime_error( "CSRDirectAssembler: entry unmapped, or within-row offset exceeds "
+                                "the 16-bit range (row longer than 65535); a uint32 offset variant "
+                                "is required for this pattern." );
+
+    priv.resize( this->nThreads );
+    for ( int t = 0; t < this->nThreads; ++t )
+      priv[t].assign( nnz, 0.0 );
+  }
+
+  // Scatter a whole VIJ value array through the map. This is the equivalence path used to validate
+  // the addressing against CSRCore::update; the fused path hands each entity's block straight in.
+  void assembleFromVIJ( const double* V, const int* I, double* csr_data )
+  {
+#pragma omp parallel num_threads( nThreads )
+    {
+      const int tid = omp_get_thread_num();
+      double*   my  = priv[tid].data();
+      std::fill( my, my + nnz, 0.0 );
+
+#pragma omp for schedule( static )
+      for ( int64_t k = 0; k < nPairs; ++k )
+        my[indptr[I[k]] + offsets[k]] += V[k];
+    }
+
+    const int nT = nThreads;
+#pragma omp parallel for schedule( static ) num_threads( nThreads )
+    for ( int i = 0; i < nnz; ++i ) {
+      double s = 0.0;
+      for ( int t = 0; t < nT; ++t )
+        s += priv[t][i];
+      csr_data[i] = s;
+    }
+  }
+
+  // ---- fused path -------------------------------------------------------------------------
+  //
+  // beginAssembly() / scatterBlock() per entity / reduce(). The entity writes its dense nDof x nDof
+  // block into a small thread-local scratch buffer -- which stays in cache -- and scatterBlock
+  // pushes it straight into that thread's private CSR copy. No sizeVIJ-sized value array is ever
+  // materialized, which is the entire point: at 43k DOF that array alone is 12.15 GB.
+  //
+  // Registration gives each entity its slice of the map. rowsOfEntity is derived from I: for local
+  // row a, every pair (a, b) shares the same global row, so the row is I[mapStart + a * nDofE] and
+  // only nDofE values per entity need keeping rather than nDofE^2.
+  std::vector< int64_t > entityMapStart;   // into offsets
+  std::vector< int64_t > entityDofStart;   // into entityRows
+  std::vector< int >     entityNDof;
+  std::vector< int >     entityRows;       // global row per local row, concatenated
+  std::vector< std::vector< int > > rowStartScratch;   // per thread, size maxNDof
+
+  void registerEntities( const int64_t* mapStarts, const int* nDofs, int nEntities, const int* I )
+  {
+    entityMapStart.assign( mapStarts, mapStarts + nEntities );
+    entityNDof.assign( nDofs, nDofs + nEntities );
+    entityDofStart.resize( nEntities );
+    int64_t total = 0;
+    for ( int e = 0; e < nEntities; ++e ) {
+      entityDofStart[e] = total;
+      total += nDofs[e];
+    }
+    entityRows.resize( total );
+    // The entity block is stored COLUMN-major: initializeVIJContribution writes
+    // I[k] = idcs[k % nDof] and J[k] = idcs[k / nDof], so the row index varies fastest and the
+    // first nDof entries of I are exactly the entity's global row list.
+#pragma omp parallel for schedule( static )
+    for ( int e = 0; e < nEntities; ++e ) {
+      const int64_t ms = entityMapStart[e];
+      const int     nd = entityNDof[e];
+      for ( int a = 0; a < nd; ++a )
+        entityRows[entityDofStart[e] + a] = I[ms + a];
+    }
+
+    int maxNDof = 0;
+    for ( int e = 0; e < nEntities; ++e )
+      maxNDof = std::max( maxNDof, nDofs[e] );
+    rowStartScratch.assign( nThreads, std::vector< int >( maxNDof, 0 ) );
+  }
+
+  void beginAssembly()
+  {
+#pragma omp parallel num_threads( nThreads )
+    {
+      double* my = priv[omp_get_thread_num()].data();
+      std::fill( my, my + nnz, 0.0 );
+    }
+  }
+
+  // Called from inside the entity loop, once per entity, by the thread that computed the block.
+  // Race-free by construction: each thread owns its private CSR copy.
+  void scatterBlock( int tid, int entity, const double* block ) noexcept
+  {
+    double* __restrict my = priv[tid].data();
+    const int64_t ms = entityMapStart[entity];
+    const int64_t ds = entityDofStart[entity];
+    const int     nd = entityNDof[entity];
+
+    // indptr[row] for each local row, resolved once per entity into a small cache-resident array:
+    // the block is column-major, so the row index varies along the inner loop and the lookup cannot
+    // be hoisted out of it directly.
+    int* __restrict rowStart = rowStartScratch[tid].data();
+    for ( int a = 0; a < nd; ++a )
+      rowStart[a] = indptr[entityRows[ds + a]];
+
+    // Traverse by ROW even though the block is column-major. The alternative -- following the
+    // block's own column-major order -- makes the inner loop write into nDof *different* CSR rows
+    // (~375 cache lines, revisited every column), which measured no faster than the gather it is
+    // meant to replace. Iterating rows outer confines all writes of an inner loop to a single CSR
+    // row (~8-16 kB, cache-resident once touched); the price is a stride-nDof read of the block and
+    // of the offsets, both of which are small enough to stay in cache (1.12 MB and 281 kB at
+    // nDof = 375).
+    // Traverse by ROW, even though the block is stored column-major.
+    //
+    // A/B measured on a 478M-op assembly (15,120 DOF, block resident, single thread):
+    //   row-outer     1562 ms   <- this
+    //   column-major  1873 ms   (sequential reads, but writes spread over nDof CSR rows)
+    // Row-outer confines the writes of each inner loop to a single CSR row and pays a stride-nDof
+    // read of the block and the offsets instead; both are small enough to stay in cache
+    // (1.12 MB and 281 kB at nDof = 375), whereas the scattered writes are not.
+    //
+    // For reference the gather it replaces takes 1866 ms with 16 threads, because it must
+    // random-access the 3.83 GB VIJ value array while this random-accesses only the ~164 MB CSR
+    // array -- a ~23x smaller working set, which is where the advantage actually comes from.
+    const uint16_t* off0 = offsets.data() + ms;
+    for ( int a = 0; a < nd; ++a ) {
+      double* __restrict row = my + rowStart[a];
+      for ( int b = 0; b < nd; ++b ) {
+        const int64_t k = static_cast< int64_t >( b ) * nd + a;
+        row[off0[k]] += block[k];
+      }
+    }
+  }
+
+  void reduce( double* csr_data )
+  {
+    const int nT = nThreads;
+#pragma omp parallel for schedule( static ) num_threads( nThreads )
+    for ( int i = 0; i < nnz; ++i ) {
+      double s = 0.0;
+      for ( int t = 0; t < nT; ++t )
+        s += priv[t][i];
+      csr_data[i] = s;
+    }
+  }
+
+  // Bytes held by the map plus the private buffers -- the figure to compare against the VIJ array.
+  int64_t memoryBytes() const
+  {
+    return static_cast< int64_t >( offsets.size() ) * 2 + static_cast< int64_t >( nThreads ) * nnz * 8
+           + static_cast< int64_t >( entityRows.size() ) * 4;
+  }
+};
