@@ -211,9 +211,12 @@ Recognised keys, all optional:
     * - ``dumpOnDegradationDir`` / ``dumpOnDegradationThreshold`` / ``dumpOnDegradationMaxDumps`` / ``dumpOnDegradationContextSolves``
       - ``None`` (off)
       - Diagnostic capture: when set, write the raw ``(A, b)`` system, its field-block layout, and (optionally) a rolling window of the preceding solves' own state, to disk for any solve whose outer-iteration count exceeds ``dumpOnDegradationThreshold`` — up to a process-wide cap of ``dumpOnDegradationMaxDumps`` — so a pathological live-run system can be captured for offline diagnosis without knowing in advance which solve will misbehave. Off by default; negligible cost when unused.
+    * - ``hierarchyDropTol``
+      - ``0.0`` (off)
+      - Build each field's AMG hierarchy from a *sparsified* copy of its diagonal block: drop off-diagonal :math:`a_{ij}` where :math:`|a_{ij}| < \text{tol}\cdot\sqrt{|a_{ii}| |a_{jj}|}`. Only the preconditioner is sparsified — the operator the Krylov method applies, and hence the residual it drives to zero, is untouched — so this cannot change the converged solution beyond the outer tolerance, only the number of iterations needed to reach it. The criterion is scale-invariant and symmetric in :math:`(i,j)`, so a symmetric block stays symmetric as smoothed aggregation and the Chebyshev smoother require; the diagonal is always kept, so no row can be emptied. Worth up to **1.81x on the linear solve** on operators that store many numerically negligible entries — meshfree RKPM discretisations are the motivating case, where ~1643 entries are stored per row while the median off-diagonal is 1.29e-06 of the diagonal. Off by default because the useful range is operator-dependent; see the EdelweissMeshfree documentation's "Choosing a linear solver" page for a measured sweep and the recommended starting value.
     * - ``etaMin`` / ``etaMax`` / ``ewGamma`` / ``ewAlpha``
       - see the ``inexactnewton`` table above
-      - The same Eisenstat–Walker forcing-tolerance scheme, applied to the outer Krylov solve's own stopping tolerance.
+      - The same Eisenstat–Walker forcing-tolerance scheme, applied to the outer Krylov solve's own stopping tolerance. **Note that passing** ``outerTol`` **bypasses this scheme entirely** — the outer tolerance is then fixed at that value on every solve and these keys have no effect.
     * - ``verbosity``
       - ``"warning"``
       - Log level (``"debug"``/``"info"``/``"warning"``/``"error"``) for this solver's own diagnostic output.
