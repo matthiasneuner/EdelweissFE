@@ -277,6 +277,25 @@ class BlockAMGSolver(LinearSolver):
         topology map computed on first need (via :func:`edelweissfe.numerics.p1topology.buildP1Map` on
         ``self._model``) and cached for this instance's lifetime. Ignored for a field also present in
         ``p1Maps`` (that field's map is already known; nothing to compute).
+    hierarchyDropTol
+        Build the AMG hierarchies from a *sparsified* copy of each diagonal block: drop off-diagonal
+        ``a_ij`` where ``|a_ij| < hierarchyDropTol * sqrt(|a_ii| |a_jj|)``. Zero (the default) keeps the
+        block as-is.
+
+        Why this exists. The RKPM operators this solver is used on store ~1643 entries per row at 43,350
+        DOF (3.79% dense) while the *median* off-diagonal is **1.29e-06 of the diagonal** -- numerically
+        far sparser than structurally. Smoothed aggregation then has to weigh 1643 candidates per row
+        where a handful matter, and the Galerkin product carries the rest down to every coarse level.
+        Measured on such a matrix: ``1e-6`` keeps 50.8% of the entries, ``1e-4`` keeps 29.6%, ``1e-3``
+        keeps 17.4%, and no row loses all of its off-diagonals even at ``1e-2``.
+
+        Only the *preconditioner* is sparsified; the operator the Krylov method applies, and therefore
+        the residual it drives to zero, is the unmodified matrix. So this cannot change the converged
+        solution beyond the outer tolerance -- it can only change how many iterations reaching it takes.
+
+        The criterion is scale-invariant and, for a symmetric matrix, symmetric in ``(i, j)``, so the
+        sparsified block stays symmetric -- which smoothed aggregation and the Chebyshev smoother both
+        assume. Verified: zero asymmetric mask entries at 1e-6, 1e-4 and 1e-2.
     etaMin, etaMax
         Clamp on the Eisenstat--Walker forcing tolerance (ignored if ``outerTol`` is given). ``etaMax``
         is also the tolerance used whenever there is no residual history to base a ratio on (the first
@@ -375,6 +394,7 @@ class BlockAMGSolver(LinearSolver):
         lgmresResetOnNewIncrement: bool = False,
         sweeps: int = 1,
         symmetric: bool = True,
+        hierarchyDropTol: float = 0.0,
         fieldPreconds: dict = None,
         useRigidBodyNullspace: bool = True,
         p1Maps: dict = None,
@@ -409,6 +429,7 @@ class BlockAMGSolver(LinearSolver):
         self._useRigidBodyNullspace = useRigidBodyNullspace
         self._p1Maps = p1Maps or {}
         self._p1FieldNamesRequested = set(p1FieldNames or [])
+        self._hierarchyDropTol = hierarchyDropTol
         self._etaMin = etaMin
         self._etaMax = etaMax
         self._ewGamma = ewGamma
@@ -483,6 +504,28 @@ class BlockAMGSolver(LinearSolver):
             self._journal.message(message, _IDENTIFICATION, level=_JOURNAL_LEVEL[level])
         else:
             print(message, flush=True)
+
+    def _dropSmallEntries(self, block):
+        """Return `block` with off-diagonals below the relative drop tolerance removed.
+
+        Runs only on a hierarchy refresh, not on every solve, so a few array passes over nnz are cheap
+        against the hierarchy build they feed. The diagonal is always kept, so no row can be emptied.
+        """
+        tau = self._hierarchyDropTol
+        diagonal = np.abs(block.diagonal())
+        coo = block.tocoo()
+        scale = np.sqrt(diagonal[coo.row] * diagonal[coo.col])
+        keep = (coo.row == coo.col) | (np.abs(coo.data) >= tau * scale)
+        dropped = sp.coo_matrix(
+            (coo.data[keep], (coo.row[keep], coo.col[keep])), shape=block.shape
+        ).tocsr()
+        self._log(
+            "info",
+            "blockamg: hierarchy drop tol {:.0e}: nnz {:,} -> {:,} ({:.1f}%)".format(
+                tau, block.nnz, dropped.nnz, 100.0 * dropped.nnz / max(block.nnz, 1)
+            ),
+        )
+        return dropped
 
     def _forcingTolerance(self, residualNorm: float, newIncrement: bool) -> float:
         """The Eisenstat--Walker "choice 2" forcing tolerance for this solve, clamped and safeguarded.
@@ -827,6 +870,8 @@ class BlockAMGSolver(LinearSolver):
                 # One AMG hierarchy per field, built fresh. A vector field gets its translations as the
                 # near null-space; a scalar field the default constant.
                 diagBlocks = [As[sl, :][:, sl].tocsr() for sl in slices]
+                if self._hierarchyDropTol > 0.0:
+                    diagBlocks = [self._dropSmallEntries(block) for block in diagBlocks]
                 preconditioners = []
                 for i, block in enumerate(blocks):
                     isVectorField = block.dimension > 1
