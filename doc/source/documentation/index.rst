@@ -15,6 +15,7 @@ Documentation
    constraints
    contacttheory
    dofmanager
+   assembly
    fieldoutputmanager
    fields
    elements
