@@ -296,6 +296,18 @@ class BlockAMGSolver(LinearSolver):
         The criterion is scale-invariant and, for a symmetric matrix, symmetric in ``(i, j)``, so the
         sparsified block stays symmetric -- which smoothed aggregation and the Chebyshev smoother both
         assume. Verified: zero asymmetric mask entries at 1e-6, 1e-4 and 1e-2.
+    hierarchyDropLumping
+        When dropping entries (see ``hierarchyDropTol``), add each discarded off-diagonal onto its row's
+        diagonal instead of discarding it outright. This preserves row sums exactly, so
+        ``A_filtered @ 1 == A @ 1`` and the constant near-null-space vector survives filtering -- which
+        is what the AMG literature's "filtered matrix" construction does, and the reason it is preferred
+        over plain truncation.
+
+        Note the caveat for elasticity: off-diagonals are typically negative, so lumping *reduces* the
+        diagonal and therefore weakens diagonal dominance. Whether that helps or hurts is a property of
+        the operator, which is why this is a separate switch rather than folded into
+        ``hierarchyDropTol``. Defaults to ``False``, i.e. plain truncation, which is what the published
+        measurements for this solver used.
     etaMin, etaMax
         Clamp on the Eisenstat--Walker forcing tolerance (ignored if ``outerTol`` is given). ``etaMax``
         is also the tolerance used whenever there is no residual history to base a ratio on (the first
@@ -395,6 +407,7 @@ class BlockAMGSolver(LinearSolver):
         sweeps: int = 1,
         symmetric: bool = True,
         hierarchyDropTol: float = 0.0,
+        hierarchyDropLumping: bool = False,
         fieldPreconds: dict = None,
         useRigidBodyNullspace: bool = True,
         p1Maps: dict = None,
@@ -430,6 +443,7 @@ class BlockAMGSolver(LinearSolver):
         self._p1Maps = p1Maps or {}
         self._p1FieldNamesRequested = set(p1FieldNames or [])
         self._hierarchyDropTol = hierarchyDropTol
+        self._hierarchyDropLumping = hierarchyDropLumping
         self._etaMin = etaMin
         self._etaMax = etaMax
         self._ewGamma = ewGamma
@@ -519,10 +533,22 @@ class BlockAMGSolver(LinearSolver):
         dropped = sp.coo_matrix(
             (coo.data[keep], (coo.row[keep], coo.col[keep])), shape=block.shape
         ).tocsr()
+
+        lumped = ""
+        if self._hierarchyDropLumping:
+            # Row-sum-preserving filtering: the discarded content of each row goes onto its diagonal, so
+            # A_filtered @ 1 == A @ 1 exactly and the constant vector is unaffected by filtering. The
+            # diagonal is always kept, so this does not change the sparsity pattern.
+            discardedRowSums = np.bincount(
+                coo.row[~keep], weights=coo.data[~keep], minlength=block.shape[0]
+            )
+            dropped = (dropped + sp.diags(discardedRowSums, format="csr")).tocsr()
+            lumped = ", lumped onto the diagonal"
+
         self._log(
             "info",
-            "blockamg: hierarchy drop tol {:.0e}: nnz {:,} -> {:,} ({:.1f}%)".format(
-                tau, block.nnz, dropped.nnz, 100.0 * dropped.nnz / max(block.nnz, 1)
+            "blockamg: hierarchy drop tol {:.0e}: nnz {:,} -> {:,} ({:.1f}%){:}".format(
+                tau, block.nnz, dropped.nnz, 100.0 * dropped.nnz / max(block.nnz, 1), lumped
             ),
         )
         return dropped
