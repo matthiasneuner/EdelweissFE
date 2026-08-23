@@ -1,0 +1,35 @@
+====================================================================================================
+solve #658 rows=374059 outerIters(live)=229 eta=3.00e-04
+  -- full-system production replay, varying displacement Chebyshev degree --
+    [degree=5 (baseline)                   ] outerIters= 238 trueRes=9.39e-06 time=  36.23s
+    [degree=7                              ] outerIters= 221 trueRes=9.08e-06 time=  40.62s
+    [degree=9                              ] outerIters= 226 trueRes=8.33e-06 time=  48.52s
+    [degree=11                             ] outerIters= 134 trueRes=7.05e-06 time=  34.57s
+    [degree=15                             ] outerIters= 112 trueRes=1.30e-05 time=  36.54s
+    [degree=21                             ] outerIters=  81 trueRes=1.02e-05 time=  35.43s
+
+====================================================================================================
+solve #694 rows=379515 outerIters(live)=126 eta=3.00e-04
+  -- full-system production replay, varying displacement Chebyshev degree --
+    [degree=5 (baseline)                   ] outerIters= 178 trueRes=6.92e-06 time=  28.32s
+    [degree=7                              ] outerIters= 141 trueRes=3.04e-06 time=  27.50s
+    [degree=9                              ] outerIters= 127 trueRes=9.69e-06 time=  29.08s
+    [degree=11                             ] outerIters=  92 trueRes=9.50e-06 time=  25.19s
+    [degree=15                             ] outerIters=  70 trueRes=1.03e-05 time=  24.85s
+    [degree=21                             ] outerIters=  60 trueRes=1.20e-05 time=  26.97s
+
+====================================================================================================
+solve #1773 rows=446571 outerIters(live)=111 eta=1.80e-06
+  -- full-system production replay, varying displacement Chebyshev degree --
+    [degree=5 (baseline)                   ] outerIters= 128 trueRes=3.70e-08 time=  28.81s
+    [degree=7                              ] outerIters= 110 trueRes=4.04e-08 time=  30.40s
+    [degree=9                              ] outerIters=  94 trueRes=4.82e-08 time=  30.55s
+    [degree=11                             ] outerIters=  90 trueRes=3.80e-08 time=  33.48s
+    [degree=15                             ] outerIters=  71 trueRes=4.92e-08 time=  33.83s
+    [degree=21                             ] outerIters=  59 trueRes=4.41e-08 time=  37.05s
+
+=== summary: outerIters / time(s) by degree, full-system replay ===
+     solve           deg=5           deg=7           deg=9          deg=11          deg=15          deg=21
+       658       238/36.2s       221/40.6s       226/48.5s       134/34.6s       112/36.5s        81/35.4s
+       694       178/28.3s       141/27.5s       127/29.1s        92/25.2s        70/24.8s        60/27.0s
+      1773       128/28.8s       110/30.4s        94/30.6s        90/33.5s        71/33.8s        59/37.1s

@@ -58,9 +58,9 @@ What it does per solve
 #. **Build one AMG hierarchy per field** (AMGCL, built once per solve via ``build`` and applied many
    times via ``applyPreconditioner`` -- the pattern churns between Newton iterations, so the hierarchy
    cannot be reused *across* solves, but it is reused across the outer GMRES iterations *within* a
-   solve). A vector field (nodal dimension > 1, e.g. displacement) is given its rigid-body
-   *translations* as the near null-space -- one per component, from the DOF layout alone; a scalar
-   field takes the default constant.
+   solve). A vector field (nodal dimension > 1, e.g. displacement) is given its full rigid-body basis
+   (translations and rotations, §25/§26) as the near null-space when node coordinates are available,
+   translations alone otherwise; a scalar field takes the default constant.
 #. **Precondition GMRES** with a block Gauss-Seidel sweep over the fields, each field's correction
    coming from one AMG V-cycle on its block, the couplings folded in between fields.
 
@@ -71,12 +71,21 @@ direct solver cannot reach; the iteration count would come down with a stronger 
 (a nonsymmetric-aware library such as MueLu). See the handoff document, section 13.
 """
 
+import collections
+import json
+import os
+import time
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, gmres
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.linsolve.base import FieldBlock, LinearSolver
+from edelweissfe.linsolve.blockamg.nullspace import (
+    rigidBodyNullspace,
+    translationNullspace,
+)
 
 # Ordered low-to-high; index comparison decides whether a message at a given level should print.
 # "warning": only abnormal conditions (excessive outer iterations, unmet true-residual tolerance,
@@ -108,11 +117,22 @@ _IDENTIFICATION = "BlockAMGSolver"
 # Both are available as an opt-in via fieldPreconds, e.g.
 # {"displacement": {**_DEFAULT_VECTOR_PRECOND, "backendPrecision": "float"}} or
 # {"displacement": {**_DEFAULT_VECTOR_PRECOND, "backendBlockSize": 3}}.
+# power_iters=300 (was 50, §26): AMGCL's Chebyshev smoother estimates the operator's spectral radius
+# via power iteration whose start vector is seeded per-OpenMP-thread by thread id
+# (amgcl/backend/builtin.hpp) -- deterministic for a given thread count, but a different vector at a
+# different thread count, so the estimate itself (and the smoother's damping quality) was thread-count
+# dependent. At 50 iterations the estimate can be badly under-converged on a hard operator at some
+# thread counts (measured: 1460 vs 43 outer iterations, same matrix, only OMP_NUM_THREADS differing,
+# on a solve where the true spectral radius -- verified independently via ARPACK -- barely moves
+# between Newton iterations). 300 iterations converge the estimate close enough that it stops
+# depending on thread count; measured 2.68x faster in aggregate on 10 captured degraded systems at
+# production's real 16 threads (811s -> 302s), with no observed downside on systems that were already
+# fine. See PERF_LINSOLVE_INVESTIGATION.md §26.
 _DEFAULT_VECTOR_PRECOND = {
     "backendPrecision": "double",
     "backendBlockSize": 1,
     "coarsening": {"type": "smoothed_aggregation", "aggr": {"eps_strong": 0.01}},
-    "relax": {"type": "chebyshev", "degree": 5, "power_iters": 50, "lower": 0.01},
+    "relax": {"type": "chebyshev", "degree": 5, "power_iters": 300, "lower": 0.01},
     "npre": 1,
     "npost": 1,
 }
@@ -127,10 +147,12 @@ _DEFAULT_SCALAR_PRECOND = {
 class BlockAMGSolver(LinearSolver):
     """Field-split block-AMG preconditioned GMRES. Callable as ``(A, b) -> x``.
 
-    The block structure is not configured here -- it is supplied by the nonlinear solver through
-    :meth:`~edelweissfe.linsolve.base.LinearSolver.setFieldStructure`. A field's
-    near null-space is decided from its nodal dimension: a vector field (dimension > 1) gets its
-    per-component rigid-body translations, a scalar field the default constant.
+    The block structure is not configured here -- it is derived by the base class from the model and
+    DOF manager the nonlinear solver hands over via
+    :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel` (§27). A field's near null-space is
+    decided from its nodal dimension: a vector field (dimension > 1) gets its full rigid-body basis
+    (translations and rotations, §25/§26) when node coordinates are available, translations alone
+    otherwise; a scalar field takes the default constant.
 
     Stateful across calls in two independent ways (both driven by ``||b||`` alone -- this solver, like
     :mod:`~edelweissfe.linsolve.inexactnewton.inexactnewton`, sees only ``(A, b)`` per call and
@@ -214,6 +236,18 @@ class BlockAMGSolver(LinearSolver):
     fieldPreconds
         Optional mapping of field name to an AMGCL preconditioner parameter tree, overriding the
         dimension-based default for that field.
+    useRigidBodyNullspace
+        ``True`` (the default, §25/§26) builds a vector field's near null-space as the full rigid-body
+        basis -- translations *and* rotations -- once nodal coordinates for that field are available
+        via ``self._model`` (set by :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`, §27),
+        instead of translations alone. Measured ~28-31% fewer isolated per-field outer iterations on
+        two real captured systems, robust to both thread count and the Chebyshev ``power_iters``
+        setting (unlike translations-only, which is sensitive to both) -- rotations were the missing
+        ingredient the original translations-only near-null-space experiments (§11, §13) never tried.
+        Falls back to translations-only automatically for any field whose coordinates are unavailable
+        (e.g. an offline probe that only ever calls the lower-level ``setFieldStructure``, with no
+        model to read coordinates from) -- never a hard requirement. Set ``False`` to force
+        translations-only unconditionally, matching this solver's behaviour before §26.
     p1Maps
         Optional mapping of field name to a ``(isCorner, edgeEndpoints)`` P1 topology map (§22.1,
         :func:`edelweissfe.numerics.p1topology.buildP1Map`), injected directly. A vector field named
@@ -221,15 +255,15 @@ class BlockAMGSolver(LinearSolver):
         instead of the single-level AMGCL default -- the map's presence *is* the opt-in, matching
         ``fieldPreconds``'s own by-presence convention. This is the offline-probe construction path
         (the map is known before the solver exists); for a live run built from a ``linsolverConfigFile``,
-        use ``p1FieldNames`` instead -- the actual topology arrays are not known until the nonlinear
-        solver builds the model's field structure, well after this constructor runs.
+        use ``p1FieldNames`` instead -- the actual topology is computed lazily, once, the first time
+        one of those fields' hierarchies is built (§27: from ``self._model``, set by ``setModel``,
+        rather than pushed in by the nonlinear solver ahead of time).
     p1FieldNames
-        Optional list of vector field names to use p-multigrid for, once their topology map arrives via
-        :meth:`setP1Maps` (§22.5's NIST plumbing: the nonlinear solver computes every vector field's map
-        unconditionally, alongside :meth:`setFieldStructure`, and pushes all of them here regardless of
-        which solver is in use -- this list is what filters that down to the ones actually requested).
-        Ignored for a field also present in ``p1Maps`` (that field's map is already known; nothing to
-        wait for).
+        Optional list of vector field names to use p-multigrid for. A field named here gets its P1
+        topology map computed on first need (§27, via
+        :func:`~edelweissfe.numerics.p1topology.buildP1Map` on ``self._model``) and cached for this
+        instance's lifetime. Ignored for a field also present in ``p1Maps`` (that field's map is
+        already known; nothing to compute).
     etaMin, etaMax
         Clamp on the Eisenstat--Walker forcing tolerance (ignored if ``outerTol`` is given). ``etaMax``
         is also the tolerance used whenever there is no residual history to base a ratio on (the first
@@ -266,7 +300,55 @@ class BlockAMGSolver(LinearSolver):
     warnOuterIterationsThreshold
         A solve needing more outer GMRES iterations than this triggers a ``"warning"``-level message
         (a preconditioner-quality red flag), even when ``verbosity="silent"`` is not set to suppress it.
+    dumpOnDegradationDir
+        If set, write the raw ``(A, b)`` of every solve whose outer-iteration count exceeds
+        ``dumpOnDegradationThreshold`` to this directory (created if missing), for offline diagnosis
+        of *why* the preconditioner degraded (PERF_LINSOLVE_INVESTIGATION.md §25, Phase 9.2/9.3) --
+        unlike :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`, which dumps by a
+        fixed ordinal decided *before* the solve runs, this decides by the solve's own outcome, so it
+        is the mechanism for capturing pathological systems (e.g. a late-increment, heavily damaged
+        Jacobian) without knowing in advance which solve ordinal that will be. ``None`` (the default)
+        disables this entirely -- it costs nothing when off. Dumped alongside each ``(A, b)`` pair is
+        the field-block layout (name, DOF range, nodal dimension) active for that solve, needed to
+        replay it through this same block preconditioner offline without a live model.
+    dumpOnDegradationThreshold
+        The outer-iteration count above which a solve's system is dumped. ``None`` (the default) reuses
+        ``warnOuterIterationsThreshold``, so a dump and its corresponding warning message fire on
+        exactly the same solves.
+    dumpOnDegradationMaxDumps
+        A process-wide ceiling on the number of degradation dumps written (across every
+        ``BlockAMGSolver`` instance in this process, e.g. one per analysis step) -- a disk-space guard
+        in the same spirit as :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`'s
+        ``maxDumps``, since a run that degrades badly could otherwise trigger the condition on every
+        remaining solve. Counts every individual ``(A, b)`` pair written, including the ones
+        ``dumpOnDegradationContextSolves`` adds -- a trigger with a full context window can spend
+        several units of this budget at once.
+    dumpOnDegradationContextSolves
+        How many of the solves immediately *preceding* a degraded one to also dump (``0``, the
+        default, dumps only the triggering solve itself, matching the original behaviour). A single
+        ``(A, b)`` snapshot cannot distinguish "this operator is intrinsically hard" from "this
+        solve's own state -- a reused, now-stale AMG hierarchy, or (with ``lgmresAlwaysReset=False``)
+        a carried-over Krylov subspace -- degraded independently of the operator", because both look
+        identical from the matrix alone; §25 Phase 9's own diagnosis hit exactly this wall (a fresh
+        solver instance replaying the dumped matrix alone converged in a fraction of the live
+        iteration count). Capturing the preceding sequence lets an offline replay feed a *persistent*
+        solver instance the same solves in the same order, reproducing whatever cross-solve state the
+        live run had at the triggering solve, instead of only ever seeing what a cold start would do.
+        Every dumped solve (trigger or context) also records ``mustRefresh``/``patternChanged``/
+        ``newIncrement``/``previousOuterIters`` in the manifest, so the hierarchy-staleness question
+        can often be answered directly from the manifest without needing a replay at all.
     """
+
+    #: Degradation dumps written across every instance in this process, so
+    #: ``dumpOnDegradationMaxDumps`` is a genuine process-wide ceiling -- the same reasoning as
+    #: :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`'s ``_totalDumpsWritten``.
+    _degradationDumpsWritten = 0
+
+    #: How many instances have been created in this process (one nonlinear solver may build a fresh
+    #: ``BlockAMGSolver`` per analysis step), so dumps from different instances get distinct filenames
+    #: -- same reasoning as :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`'s
+    #: ``_instancesCreated``.
+    _instancesCreated = 0
 
     def __init__(
         self,
@@ -282,6 +364,7 @@ class BlockAMGSolver(LinearSolver):
         sweeps: int = 1,
         symmetric: bool = True,
         fieldPreconds: dict = None,
+        useRigidBodyNullspace: bool = True,
         p1Maps: dict = None,
         p1FieldNames: list = None,
         etaMin: float = 1.0e-6,
@@ -293,6 +376,10 @@ class BlockAMGSolver(LinearSolver):
         trueResidualMaxContinuations: int = 2,
         verbosity: str = "warning",
         warnOuterIterationsThreshold: int = 100,
+        dumpOnDegradationDir: str = None,
+        dumpOnDegradationThreshold: int = None,
+        dumpOnDegradationMaxDumps: int = 10,
+        dumpOnDegradationContextSolves: int = 0,
     ):
         self._outerTol = outerTol
         self._outerRestart = outerRestart
@@ -307,6 +394,7 @@ class BlockAMGSolver(LinearSolver):
         self._sweeps = sweeps
         self._symmetric = symmetric
         self._fieldPreconds = fieldPreconds or {}
+        self._useRigidBodyNullspace = useRigidBodyNullspace
         self._p1Maps = p1Maps or {}
         self._p1FieldNamesRequested = set(p1FieldNames or [])
         self._etaMin = etaMin
@@ -320,6 +408,27 @@ class BlockAMGSolver(LinearSolver):
             raise ValueError("verbosity must be one of {:}, got {:!r}".format(_VERBOSITY_LEVELS, verbosity))
         self._verbosityIndex = _VERBOSITY_LEVELS.index(verbosity)
         self._warnOuterIterationsThreshold = warnOuterIterationsThreshold
+
+        self._dumpOnDegradationDir = dumpOnDegradationDir
+        self._dumpOnDegradationThreshold = (
+            warnOuterIterationsThreshold if dumpOnDegradationThreshold is None else dumpOnDegradationThreshold
+        )
+        self._dumpOnDegradationMaxDumps = dumpOnDegradationMaxDumps
+        self._dumpOnDegradationContextSolves = dumpOnDegradationContextSolves
+        if self._dumpOnDegradationDir is not None:
+            os.makedirs(self._dumpOnDegradationDir, exist_ok=True)
+        # Rolling window of the last dumpOnDegradationContextSolves solves (each entry: solveCount, A,
+        # b, blocks, mustRefresh, patternChanged, newIncrement, previousOuterIters), oldest first --
+        # only populated when dumpOnDegradationDir is set, so this costs nothing otherwise. Bounded by
+        # maxlen, so memory is O(contextSolves) regardless of run length.
+        self._recentSolveHistory = collections.deque(maxlen=max(self._dumpOnDegradationContextSolves, 0))
+        # solveCounts already written to disk this run, so an overlapping context window on a second
+        # nearby trigger never dumps (or double-counts against dumpOnDegradationMaxDumps) the same
+        # solve twice.
+        self._dumpedSolveCounts = set()
+
+        self._instanceOrdinal = BlockAMGSolver._instancesCreated
+        BlockAMGSolver._instancesCreated += 1
 
         self._solveCount = 0
         self._fieldsAnnounced = None
@@ -384,39 +493,43 @@ class BlockAMGSolver(LinearSolver):
 
         return min(self._etaMax, max(self._etaMin, eta))
 
-    @property
-    def requestedP1FieldNames(self) -> frozenset:
-        """Overrides :meth:`~edelweissfe.linsolve.base.LinearSolver.requestedP1FieldNames` -- the
-        vector field names constructed with ``p1FieldNames``, still waiting for their actual topology
-        map via :meth:`setP1Maps`. Fields already supplied directly via the constructor's ``p1Maps``
-        (the offline-probe path, which never goes through the nonlinear solver's query in the first
-        place) are not included here -- there is nothing left to wait for.
+    def _getNodeCoordinates(self, fieldName: str) -> "np.ndarray | None":
+        """This field's node coordinates, node-major, or ``None`` if unavailable (§27).
+
+        Reads directly from ``self._model`` (set by :meth:`~edelweissfe.linsolve.base.LinearSolver.
+        setModel`) rather than a value pushed in ahead of time -- there is no live-run scenario where
+        this is unavailable when it matters (``setModel`` is called on every rebuild, same as
+        ``setFieldStructure`` always was), so the only real callers of the ``None`` path are offline
+        probes driving this solver directly via the lower-level :meth:`setFieldStructure`, or
+        ``useRigidBodyNullspace=False``.
         """
-        return frozenset(self._p1FieldNamesRequested)
+        if self._model is None:
+            return None
+        field = self._model.nodeFields.get(fieldName)
+        if field is None:
+            return None
+        return np.array([node.coordinates for node in field.nodes], dtype=float)
 
-    def setFieldStructure(self, fields: list) -> None:
-        """Receive the ordered field blocks of the DOF vector (in DOF order).
+    def _getP1Map(self, fieldName: str):
+        """This field's P1 corner/midside topology map (§22.1), computed lazily on first need and
+        cached for the lifetime of this instance (never refreshed even across AMR -- matching this
+        opt-in p-multigrid path's original behaviour, unvalidated for a mesh that changes after the
+        map was built and not a focus of this refactor).
 
-        Overrides :meth:`~edelweissfe.linsolve.base.LinearSolver.setFieldStructure`'s no-op default --
-        this is the one solver in the registry that actually needs the field-block structure, to
-        split the equation system per field.
+        Returns the map directly supplied via the constructor's ``p1Maps`` (the offline-probe path)
+        unchanged; otherwise computes it via
+        :func:`~edelweissfe.numerics.p1topology.buildP1Map` from ``self._model`` (set by
+        :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`) the first time this field is asked
+        for and ``self._model`` is available.
         """
-        self._fieldStructure = list(fields)
+        if fieldName not in self._p1Maps and self._model is not None:
+            from edelweissfe.numerics.p1topology import buildP1Map
 
-    def setP1Maps(self, p1Maps: dict) -> None:
-        """Receive every vector field's P1 topology map (§22.1); use the ones this instance was
-        constructed with ``p1FieldNames`` to request.
-
-        Overrides :meth:`~edelweissfe.linsolve.base.LinearSolver.setP1Maps`'s no-op default (§22.5's
-        NIST plumbing). Called by the nonlinear solver alongside :meth:`setFieldStructure`, with every
-        vector field's map regardless of which ones (if any) this instance actually wants -- only
-        ``p1FieldNames`` filters that down. A field already supplied via the constructor's ``p1Maps``
-        is not overwritten here (that path is for offline probes that already know the map; nothing to
-        wait for).
-        """
-        for name in self._p1FieldNamesRequested:
-            if name not in self._p1Maps and name in p1Maps:
-                self._p1Maps[name] = p1Maps[name]
+            isCorner, edgeEndpoints, p1Warnings = buildP1Map(self._model, fieldName)
+            self._p1Maps[fieldName] = (isCorner, edgeEndpoints)
+            for warning in p1Warnings:
+                self._log("warning", warning)
+        return self._p1Maps.get(fieldName)
 
     def _resolveBlocks(self, n: int) -> list:
         """The field blocks tiling ``[0, n)``, in DOF order, with any trailing DOFs not covered by a
@@ -424,8 +537,9 @@ class BlockAMGSolver(LinearSolver):
 
         if self._fieldStructure is None:
             raise RuntimeError(
-                "blockamg: field structure not set. It is pushed in by the nonlinear solver via "
-                "setFieldStructure(); this solver must be driven by one that does so."
+                "blockamg: field structure not set. It is derived from setModel() (or, at the lower "
+                "level, setFieldStructure()); this solver must be driven by a caller that calls one of "
+                "those."
             )
         blocks = sorted(self._fieldStructure, key=lambda field: field.start)
         cursor = 0
@@ -443,21 +557,146 @@ class BlockAMGSolver(LinearSolver):
             raise ValueError("blockamg: field blocks cover {:} dofs, but the matrix is {:}x{:}".format(cursor, n, n))
         return blocks
 
-    def _translationNullspace(self, block: FieldBlock, blockDinv: np.ndarray) -> np.ndarray:
-        """The rigid-body translations of a vector field, transformed for the scaled operator.
+    # translationNullspace/rigidBodyNullspace live in edelweissfe.linsolve.blockamg.nullspace (§27) --
+    # pure functions of a field's block layout, equilibration scaling, and (for the richer basis) node
+    # coordinates, with no BlockAMGSolver-instance state, so there is nothing to keep here as a method.
 
-        Translations are 1 on each of the ``dimension`` components (node-major). The near null-space of
-        the scaled block :math:`D^{-1/2} A D^{-1/2}` is :math:`D^{1/2}` times that of :math:`A`, i.e.
-        the raw translations divided by ``blockDinv``.
+    def _dumpOneSystem(
+        self,
+        solveCount: int,
+        A: sp.csr_matrix,
+        b: np.ndarray,
+        blocks: list,
+        role: str,
+        triggerSolveCount: int,
+        stateFields: dict,
+    ) -> None:
+        """Write one raw ``(A, b)`` pair, plus its field-block layout and solver-state bookkeeping, to
+        ``dumpOnDegradationDir`` -- see the class docstring's ``dumpOnDegradationDir``/
+        ``dumpOnDegradationContextSolves`` entries. Used both for the solve that actually crossed the
+        threshold (``role="trigger"``) and for the preceding solves ``dumpOnDegradationContextSolves``
+        adds (``role="context"``) -- both are plain ``(A, b)`` snapshots on disk, distinguished only by
+        the manifest record, so either can be replayed the same way offline.
+
+        ``A``/``b`` are the raw system as handed to :meth:`__call__` (before equilibration), matching
+        :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`'s own dump format so the
+        same offline tooling can read either.
         """
-        size = block.stop - block.start
-        components = block.dimension
-        B = np.zeros((size, components))
-        rows = np.arange(size)
-        B[rows, rows % components] = 1.0
-        return B / blockDinv[:, None]
+        stem = "{:02d}_{:05d}".format(self._instanceOrdinal, solveCount)
+        matrixPath = os.path.join(self._dumpOnDegradationDir, "A_{:}.npz".format(stem))
+        rhsPath = os.path.join(self._dumpOnDegradationDir, "b_{:}.npy".format(stem))
+
+        # Uncompressed, same reasoning as MatrixDumpSolver: these systems are large, and compression
+        # would spend more time than the degraded solve being captured.
+        sp.save_npz(matrixPath, A, compressed=False)
+        np.save(rhsPath, np.asarray(b))
+
+        record = {
+            "solveCount": solveCount,
+            "role": role,
+            "triggerSolveCount": triggerSolveCount,
+            "contextOffset": triggerSolveCount - solveCount,
+            "rows": int(A.shape[0]),
+            "nnz": int(A.nnz),
+            "matrixFile": os.path.basename(matrixPath),
+            "rhsFile": os.path.basename(rhsPath),
+            "blocks": [
+                {"name": block.name, "start": block.start, "stop": block.stop, "dimension": block.dimension}
+                for block in blocks
+            ],
+            **stateFields,
+        }
+
+        manifestPath = os.path.join(self._dumpOnDegradationDir, "manifest.jsonl")
+        with open(manifestPath, "a") as manifestFile:
+            manifestFile.write(json.dumps(record) + "\n")
+
+        self._dumpedSolveCounts.add(solveCount)
+        BlockAMGSolver._degradationDumpsWritten += 1
+
+        self._log(
+            "warning",
+            "blockamg: dumped {:} solve #{:} (of trigger #{:}) to {:}; {:} of {:} degradation dumps "
+            "used".format(
+                role,
+                solveCount,
+                triggerSolveCount,
+                os.path.basename(matrixPath),
+                BlockAMGSolver._degradationDumpsWritten,
+                self._dumpOnDegradationMaxDumps,
+            ),
+        )
+
+    def _dumpDegradedSystem(
+        self,
+        A: sp.csr_matrix,
+        b: np.ndarray,
+        blocks: list,
+        outerIters: int,
+        trueResidual: float,
+        eta: float,
+        continuations: int,
+        info: int,
+        mustRefresh: bool,
+        patternChanged: bool,
+        newIncrement: bool,
+        previousOuterIters,
+    ) -> None:
+        """Dump the triggering solve itself, then as much of its context window
+        (``dumpOnDegradationContextSolves`` preceding solves, from :attr:`_recentSolveHistory`) as the
+        remaining ``dumpOnDegradationMaxDumps`` budget allows, oldest first.
+        """
+        triggerSolveCount = self._solveCount
+        if triggerSolveCount not in self._dumpedSolveCounts and (
+            BlockAMGSolver._degradationDumpsWritten < self._dumpOnDegradationMaxDumps
+        ):
+            self._dumpOneSystem(
+                triggerSolveCount,
+                A,
+                b,
+                blocks,
+                role="trigger",
+                triggerSolveCount=triggerSolveCount,
+                stateFields={
+                    "outerIters": outerIters,
+                    "trueResidual": trueResidual,
+                    "eta": eta,
+                    "continuations": continuations,
+                    "info": info,
+                    "mustRefresh": mustRefresh,
+                    "patternChanged": patternChanged,
+                    "newIncrement": newIncrement,
+                    "previousOuterIters": previousOuterIters,
+                },
+            )
+
+        for entry in self._recentSolveHistory:
+            if BlockAMGSolver._degradationDumpsWritten >= self._dumpOnDegradationMaxDumps:
+                break
+            if entry["solveCount"] in self._dumpedSolveCounts:
+                continue
+            self._dumpOneSystem(
+                entry["solveCount"],
+                entry["A"],
+                entry["b"],
+                entry["blocks"],
+                role="context",
+                triggerSolveCount=triggerSolveCount,
+                stateFields={
+                    "outerIters": entry["outerIters"],
+                    "trueResidual": entry["trueResidual"],
+                    "eta": entry["eta"],
+                    "continuations": entry["continuations"],
+                    "info": entry["info"],
+                    "mustRefresh": entry["mustRefresh"],
+                    "patternChanged": entry["patternChanged"],
+                    "newIncrement": entry["newIncrement"],
+                    "previousOuterIters": entry["previousOuterIters"],
+                },
+            )
 
     def __call__(self, A, b):
+        solveStartTime = time.time()
         from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLMatrix, PyAMGCLSolver
 
         self._solveCount += 1
@@ -560,13 +799,20 @@ class BlockAMGSolver(LinearSolver):
                 preconditioners = []
                 for i, block in enumerate(blocks):
                     isVectorField = block.dimension > 1
-                    if isVectorField and block.name in self._p1Maps:
-                        # p-two-grid (§22): the map's presence for this field is the opt-in.
+                    p1Map = None
+                    if isVectorField and (block.name in self._p1Maps or block.name in self._p1FieldNamesRequested):
+                        # p-two-grid (§22): opted in via the constructor's p1Maps (offline-probe path)
+                        # or p1FieldNames (live path, §27: computed lazily here from self._model --
+                        # set by setModel -- on first need, instead of waiting for a push from the
+                        # driver).
+                        with performancetiming.timeit("blockamg: p1 topology"):
+                            p1Map = self._getP1Map(block.name)
+                    if p1Map is not None:
                         from edelweissfe.linsolve.blockamg.ptwogrid import (
                             PTwoGridPreconditioner,
                         )
 
-                        isCorner, edgeEndpoints = self._p1Maps[block.name]
+                        isCorner, edgeEndpoints = p1Map
                         solver = PTwoGridPreconditioner(isCorner, edgeEndpoints)
                         solver.build(diagBlocks[i], dinv[slices[i]])
                         preconditioners.append(solver)
@@ -587,11 +833,32 @@ class BlockAMGSolver(LinearSolver):
                         }
                     )
                     # set_nullspace() is unsupported (and always raises) on a block backend -- AMGCL's
-                    # own near-null-space path is unimplemented for block value types (§20.1). This is
-                    # an accepted, measured non-loss: rigid-body translations do not help on this
-                    # operator anyway (§11, §13).
+                    # own near-null-space path is unimplemented for block value types (§20.1);
+                    # untouched by the §25/§26 rigid-body change below since backendBlockSize > 1 stays
+                    # opt-in.
                     if isVectorField and backendBlockSize == 1:
-                        solver.set_nullspace(self._translationNullspace(block, dinv[slices[i]]))
+                        with performancetiming.timeit("blockamg: nullspace construction"):
+                            # §27: coordinates come from self._model (set by setModel), read fresh
+                            # every rebuild rather than pushed in ahead of time.
+                            coords = self._getNodeCoordinates(block.name)
+                            if coords is not None:
+                                # Full rigid-body basis (translations + rotations, §25/§26): measured
+                                # ~28-31% fewer isolated outer iterations than translations alone on
+                                # two real captured systems, and robust to both thread count and
+                                # power_iters where translations-only is sensitive to both.
+                                nullspace = rigidBodyNullspace(block, coords, dinv[slices[i]])
+                            else:
+                                # Coordinates never arrived (useRigidBodyNullspace=False, or an offline
+                                # probe driving this solver directly via the lower-level
+                                # setFieldStructure, with no model to read coordinates from) -- fall
+                                # back to translations-only. §11/§13's old "translations don't help"
+                                # verdict was measured against a Gauss-Seidel smoother that (pre-§26)
+                                # diverged outright on this operator, not the Chebyshev smoother
+                                # actually shipped -- under Chebyshev, translations alone are still a
+                                # real improvement over no null-space at all, just not the further
+                                # ~30% the full rigid-body basis measures.
+                                nullspace = translationNullspace(block, dinv[slices[i]])
+                        solver.set_nullspace(nullspace)
                     solver.build(diagBlocks[i])
                     preconditioners.append(solver)
                 self._preconditioners = preconditioners
@@ -744,6 +1011,7 @@ class BlockAMGSolver(LinearSolver):
                     ),
                 )
 
+        previousOuterIters = self._lastOuterIters
         if self._lastOuterIters is not None and outerIters > self._hierarchyStalenessFactor * self._lastOuterIters:
             self._refreshNext = True
         self._lastOuterIters = outerIters
@@ -751,15 +1019,17 @@ class BlockAMGSolver(LinearSolver):
         self._lastResidualNorm = residualNorm
         self._lastEta = eta
 
+        solveElapsedTime = time.time() - solveStartTime
         self._log(
             "info",
-            "blockamg: solve #{:<4d} {:7s} {:3d}it eta={:.1e} res={:.1e} cont={:}".format(
+            "blockamg: solve #{:<4d} {:7s} {:3d}it eta={:.1e} res={:.1e} cont={:} time={:7.3f}s".format(
                 self._solveCount,
                 "REFRESH" if mustRefresh else "reuse",
                 outerIters,
                 eta,
                 trueResidual,
                 continuations,
+                solveElapsedTime,
             ),
         )
         if outerIters > self._warnOuterIterationsThreshold:
@@ -769,6 +1039,46 @@ class BlockAMGSolver(LinearSolver):
                 "possible preconditioner degradation".format(
                     self._solveCount, outerIters, self._warnOuterIterationsThreshold
                 ),
+            )
+        if (
+            self._dumpOnDegradationDir is not None
+            and outerIters > self._dumpOnDegradationThreshold
+            and BlockAMGSolver._degradationDumpsWritten < self._dumpOnDegradationMaxDumps
+        ):
+            self._dumpDegradedSystem(
+                A,
+                b,
+                blocks,
+                outerIters,
+                trueResidual,
+                eta,
+                continuations,
+                info,
+                mustRefresh,
+                patternChanged,
+                newIncrement,
+                previousOuterIters,
+            )
+        # Recorded *after* the dump above, so a trigger's own context window (from
+        # _recentSolveHistory) never includes itself -- only solves strictly preceding it. Guarded on
+        # dumpOnDegradationContextSolves so a run with the feature off never holds onto extra matrices.
+        if self._dumpOnDegradationDir is not None and self._dumpOnDegradationContextSolves > 0:
+            self._recentSolveHistory.append(
+                {
+                    "solveCount": self._solveCount,
+                    "A": A,
+                    "b": b,
+                    "blocks": blocks,
+                    "outerIters": outerIters,
+                    "trueResidual": trueResidual,
+                    "eta": eta,
+                    "continuations": continuations,
+                    "info": info,
+                    "mustRefresh": mustRefresh,
+                    "patternChanged": patternChanged,
+                    "newIncrement": newIncrement,
+                    "previousOuterIters": previousOuterIters,
+                }
             )
         if trueResidual > eta:
             self._log(

@@ -30,13 +30,25 @@
 all of them uniformly instead of special-casing per capability.
 
 Every ``linsolve/<name>/__init__.py``'s ``createSolver(opts)`` factory returns an instance of a
-:class:`LinearSolver` subclass, callable as ``(A, b) -> x``. Two setters -- :meth:`LinearSolver.setJournal`
-and :meth:`LinearSolver.setFieldStructure` -- are part of that base contract with safe no-op-ish
-defaults, so a caller can call either on *any* registered solver unconditionally, whether or not that
-particular solver actually uses the information. This replaces an earlier design where field-structure
-awareness was an isolated, ``isinstance``-checked opt-in mixin (only ``blockamg`` had it) -- adding a
-second, parallel mixin for Journal awareness would have meant every new cross-cutting capability grows
-its own special case at every call site. One base, grown as needed, avoids that.
+:class:`LinearSolver` subclass, callable as ``(A, b) -> x``. :meth:`LinearSolver.setJournal` and
+:meth:`LinearSolver.setModel` are part of that base contract with safe defaults, so a caller can call
+either on *any* registered solver unconditionally, whether or not that particular solver actually uses
+the information -- a solver that needs more than the default overrides it; everything else inherits a
+default that does nothing harmful.
+
+§27 collapsed what used to be a growing pile of individual, per-capability setters
+(``setFieldStructure``, then ``requestedP1FieldNames``/``setP1Maps`` for §22's p-multigrid, then
+``requestedNodeCoordinateFieldNames``/``setNodeCoordinates`` for §26's rigid-body near null-space) into
+one: :meth:`setModel`, which simply hands a solver the live :class:`~edelweissfe.models.femodel.FEModel`
+and :class:`~edelweissfe.numerics.dofmanager.DofManager` it is solving for. Every one of those
+capabilities turned out to be derivable from those two objects alone (field layout from the
+``DofManager``, node coordinates and element topology from the ``FEModel``), so a solver that wants
+more than the base class's default field-structure bookkeeping (e.g. ``blockamg`` building a P1
+topology map or reading node coordinates) can simply keep the references and compute whatever it needs
+lazily, on its own schedule -- the driver no longer has to know in advance what any given solver might
+want, query it, and push the answer back before every solve. :meth:`setFieldStructure` remains as a
+lower-level escape hatch for callers that know the field-block layout directly but have no full model
+to hand over (e.g. an offline probe script replaying a captured system).
 """
 
 from dataclasses import dataclass
@@ -67,14 +79,15 @@ class FieldBlock:
 class LinearSolver:
     """Common base for every ``linsolver`` registry entry. Callable as ``(A, b) -> x``.
 
-    Subclasses implement :meth:`__call__`. :meth:`setJournal` and :meth:`setFieldStructure` have safe
-    defaults here (store-and-ignore, and a plain no-op respectively) so the nonlinear solver can call
-    both on any solver without asking first which ones care -- a solver that needs one overrides it;
-    everything else inherits a default that does nothing harmful.
+    Subclasses implement :meth:`__call__`. :meth:`setJournal`, :meth:`setModel` and
+    :meth:`setFieldStructure` have safe defaults here so the nonlinear solver can call any of them on
+    any solver without asking first which ones care.
     """
 
     _journal = None
     _fieldStructure: "list[FieldBlock] | None" = None
+    _model = None
+    _dofManager = None
 
     def setJournal(self, journal) -> None:
         """Receive the shared :class:`~edelweissfe.journal.journal.Journal` instance.
@@ -84,39 +97,51 @@ class LinearSolver:
         """
         self._journal = journal
 
+    def setModel(self, model, dofManager) -> None:
+        """Receive the live model and DOF manager this solver is being asked to solve for (§27).
+
+        Called by the nonlinear solver whenever the equation system is (re)built -- i.e. on the first
+        solve and again after any AMR/connectivity change, exactly the points where
+        :meth:`setFieldStructure` used to be called directly. The default implementation derives and
+        stores the per-field DOF-block structure (name, DOF range, nodal dimension) any field-split
+        solver needs -- equivalent to calling :meth:`setFieldStructure` with those blocks -- and keeps
+        ``model``/``dofManager`` themselves on ``self._model``/``self._dofManager`` for a solver that
+        wants to go further (e.g. ``blockamg`` reading node coordinates for a rigid-body near
+        null-space, or a P1 topology map for p-multigrid) without the driver having to know about it.
+
+        A solver overriding this should normally call ``super().setModel(model, dofManager)`` first to
+        get the field-structure bookkeeping for free, then do whatever else it needs.
+
+        Parameters
+        ----------
+        model
+            The live :class:`~edelweissfe.models.femodel.FEModel`.
+        dofManager
+            The live :class:`~edelweissfe.numerics.dofmanager.DofManager` describing the current
+            equation system's layout.
+        """
+        self._model = model
+        self._dofManager = dofManager
+        self._fieldStructure = [
+            FieldBlock(fieldName, fieldIndices.start, fieldIndices.stop, model.nodeFields[fieldName].dimension)
+            for fieldName, fieldIndices in dofManager.idcsOfFieldsInDofVector.items()
+        ]
+
     def setFieldStructure(self, fields: "list[FieldBlock]") -> None:
-        """Receive the ordered field blocks of the DOF vector (in DOF order).
+        """Receive the ordered field blocks of the DOF vector directly (in DOF order), bypassing
+        :meth:`setModel`.
+
+        An escape hatch for a caller that knows the field-block layout but has no full
+        ``FEModel``/``DofManager`` to hand over -- e.g. an offline probe script driving a solver
+        directly on a captured ``(A, b)`` system. A live run goes through :meth:`setModel` instead,
+        whose default implementation computes exactly this and stores it the same way; a solver that
+        only ever needs the field-block structure (not the model/dofManager references themselves)
+        does not need to care which path supplied it.
 
         Default no-op -- only field-split solvers (e.g. ``blockamg``) need this; every other solver
         simply ignores the call.
         """
-
-    requestedP1FieldNames: frozenset = frozenset()
-    """Vector field names this solver actually wants a P1 topology map for (§22.1), queried by the
-    nonlinear solver *before* computing anything, via this attribute -- unlike
-    :meth:`setFieldStructure`, computing a P1 map is not always safe to run unconditionally: it hard-
-    errors on an element topology it cannot classify (found the hard way -- an unrelated model using a
-    rigid-body-contact discretization crashed once this was briefly made unconditional for every
-    solver). Default empty -- most solvers never need this and the nonlinear solver skips the
-    computation entirely when this is empty, rather than computing it and hoping it happens to
-    succeed on a model that never asked for it.
-    """
-
-    def setP1Maps(self, p1Maps: dict) -> None:
-        """Receive the P1 corner/midside topology map (§22.1,
-        :func:`edelweissfe.numerics.p1topology.buildP1Map`) for every field named in
-        :attr:`requestedP1FieldNames`, computed by the nonlinear solver alongside
-        :meth:`setFieldStructure`.
-
-        Default no-op -- only a solver that has populated :attr:`requestedP1FieldNames` (e.g.
-        ``blockamg``'s ``p1FieldNames`` option) ever has this called with a non-empty ``p1Maps``;
-        every other solver simply ignores the call.
-
-        Parameters
-        ----------
-        p1Maps
-            Every vector field's map, keyed by field name: ``{fieldName: (isCorner, edgeEndpoints)}``.
-        """
+        self._fieldStructure = list(fields)
 
     def __call__(self, A, b):
         raise NotImplementedError

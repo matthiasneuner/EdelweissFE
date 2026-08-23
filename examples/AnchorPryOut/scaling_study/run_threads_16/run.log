@@ -1,0 +1,497 @@
++--------------------------------------------------------------------------------------------------+
+ Setting up finite element model                                                             feCore
+   generated 1944 contact facet element(s) from surface 'concrete_top' into      surfaceElementG...
+   element set 'concrete_top_facets'
+   generated 660 contact facet element(s) from surface 'concrete_to_mortar' into surfaceElementG...
+   element set 'concrete_to_mortar_facets'
+   generated 396 contact facet element(s) from surface 'plate_bottom' into       surfaceElementG...
+   element set 'plate_bottom_facets'
+   generated 396 contact facet element(s) from surface 'plate_top' into element  surfaceElementG...
+   set 'plate_top_facets'
+   generated 896 contact facet element(s) from surface 'mortar_to_concrete' into surfaceElementG...
+   element set 'mortar_to_concrete_facets'
+   generated 896 contact facet element(s) from surface 'mortar_to_anchor' into   surfaceElementG...
+   element set 'mortar_to_anchor_facets'
+   generated 560 contact facet element(s) from surface 'anchor_to_mortar' into   surfaceElementG...
+   element set 'anchor_to_mortar_facets'
+   generated 448 contact facet element(s) from surface 'anchor_to_plate' into    surfaceElementG...
+   element set 'anchor_to_plate_facets'
+   generated 192 contact facet element(s) from surface 'plate_to_anchor' into    surfaceElementG...
+   element set 'plate_to_anchor_facets'
+   generated 108 contact facet element(s) from surface 'washer_bottom' into      surfaceElementG...
+   element set 'washer_bottom_facets'
+   generated 108 contact facet element(s) from surface 'washer_to_nut' into      surfaceElementG...
+   element set 'washer_to_nut_facets'
+   generated 70 contact facet element(s) from surface 'nut_to_washer' into       surfaceElementG...
+   element set 'nut_to_washer_facets'
+   generated 196 contact facet element(s) from surface 'nut_to_anchor' into      surfaceElementG...
+   element set 'nut_to_anchor_facets'
+   generated 392 contact facet element(s) from surface 'anchor_to_nut' into      surfaceElementG...
+   element set 'anchor_to_nut_facets'
+   Activating fields on nodes from Elements and Constraints                                 FEModel
+   Bundling fields on nodes to NodeFields                                                   FEModel
+   Assembling ScalarVariables                                                               FEModel
+ +------------------------------------+------------------------------------+                 feCore
+ |Model setup time                    |    4.3568s                         |                 feCore
+ +------------------------------------+------------------------------------+                 feCore
+ Finite element model with spatial dimension 3 has                               PrettyModelSummary
+  nodes:              56881                                                      PrettyModelSummary
+  node sets:          30                                                         PrettyModelSummary
+   [ALLNODES, left, right, back, bottom, z_symm_concrete, z_symm_steel,          PrettyModelSummary
+   plate_left_loading, z_symm_concrete_free, z_symm_steel_free, all,             PrettyModelSummary
+   concrete_top_nodes, concrete_to_mortar_nodes, plate_bottom_nodes,             PrettyModelSummary
+   plate_top_nodes, mortar_to_concrete_nodes, mortar_to_anchor_nodes,            PrettyModelSummary
+   anchor_to_mortar_nodes, anchor_to_plate_nodes, plate_to_anchor_nodes,         PrettyModelSummary
+   washer_bottom_nodes, washer_to_nut_nodes, nut_to_washer_nodes,                PrettyModelSummary
+   nut_to_anchor_nodes, anchor_to_nut_nodes, tieNutToAnchor_tied,                PrettyModelSummary
+   tieNutToWasher_tied, tieWasherToPlate_tied, tieAnchorToMortar_tied,           PrettyModelSummary
+   tieMortarToConcrete_tied]                                                     PrettyModelSummary
+  node fields:        2                                                          PrettyModelSummary
+   [displacement (56881), nonlocal damage (50824)]                               PrettyModelSummary
+  elements:           22441                                                      PrettyModelSummary
+  element sets:       43                                                         PrettyModelSummary
+   [concrete, anchor, plate, mortar, washer, nut, concrete_top_S2,               PrettyModelSummary
+   concrete_top_S3, concrete_to_mortar_S1, concrete_to_mortar_S4,                PrettyModelSummary
+   plate_bottom_S1, plate_bottom_S5, plate_top_S2, plate_top_S3,                 PrettyModelSummary
+   mortar_to_concrete_S3, mortar_to_anchor_S5, anchor_to_mortar_S3,              PrettyModelSummary
+   anchor_to_mortar_S4, anchor_to_plate_S3, anchor_to_plate_S4,                  PrettyModelSummary
+   plate_to_anchor_S1, plate_to_anchor_S4, washer_bottom_S2,                     PrettyModelSummary
+   washer_to_nut_S1, nut_to_washer_S2, nut_to_anchor_S3,                         PrettyModelSummary
+   anchor_to_nut_S3, anchor_to_nut_S4, all, concrete_top_facets,                 PrettyModelSummary
+   concrete_to_mortar_facets, plate_bottom_facets, plate_top_facets,             PrettyModelSummary
+   mortar_to_concrete_facets, mortar_to_anchor_facets,                           PrettyModelSummary
+   anchor_to_mortar_facets, anchor_to_plate_facets,                              PrettyModelSummary
+   plate_to_anchor_facets, washer_bottom_facets, washer_to_nut_facets,           PrettyModelSummary
+   nut_to_washer_facets, nut_to_anchor_facets, anchor_to_nut_facets]             PrettyModelSummary
+  constraints:        2                                                          PrettyModelSummary
+  materials:          5                                                          PrettyModelSummary
+   [gcdp, steelAnchor, steelPlate, steelFastener, mortar]                        PrettyModelSummary
++--------------------------------------------------------------------------------------------------+
+   Updating option linsolver=blockamg                                                   NISTPSolver
+   Updating option linsolverConfigFile=blockamg.json                                    NISTPSolver
+   StepAction definitions:                                                              StepManager
+     Creating "fixLeft" [nset=left, field=displacement, 1=0.0, 2=0.0,                   StepManager
+                        3=0.0, 4=None, 5=None, 6=None, components=None,                 StepManager
+                        analyticalfield=None, f(t)=None]                                StepManager
+     Creating "fixRight" [nset=right, field=displacement, 1=0.0, 2=0.0,                 StepManager
+                         3=0.0, 4=None, 5=None, 6=None, components=None,                StepManager
+                         analyticalfield=None, f(t)=None]                               StepManager
+     Creating "fixBack" [nset=back, field=displacement, 1=0.0, 2=0.0,                   StepManager
+                        3=0.0, 4=None, 5=None, 6=None, components=None,                 StepManager
+                        analyticalfield=None, f(t)=None]                                StepManager
+     Creating "fixBottom" [nset=bottom, field=displacement, 1=0.0, 2=0.0,               StepManager
+                          3=0.0, 4=None, 5=None, 6=None, components=None,               StepManager
+                          analyticalfield=None, f(t)=None]                              StepManager
+     Creating "zSymmConcrete" [nset=z_symm_concrete_free,                               StepManager
+                              field=displacement, 3=0.0, 1=None, 2=None,                StepManager
+                              4=None, 5=None, 6=None, components=None,                  StepManager
+                              analyticalfield=None, f(t)=None]                          StepManager
+     Creating "zSymmSteel" [nset=z_symm_steel_free, field=displacement,                 StepManager
+                           3=0.0, 1=None, 2=None, 4=None, 5=None, 6=None,               StepManager
+                           components=None, analyticalfield=None,                       StepManager
+                           f(t)=None]                                                   StepManager
+     Creating "plateXFix" [nset=plate_left_loading, field=displacement,                 StepManager
+                          1=0.0, 2=None, 3=None, 4=None, 5=None, 6=None,                StepManager
+                          components=None, analyticalfield=None, f(t)=None]             StepManager
+   Using 16 threads                                                                     NISTPSolver
+   Activating fields on nodes from Elements and Constraints                                 FEModel
+   Resizing NodeFields                                                                      FEModel
+   Assembling ScalarVariables                                                               FEModel
+   generated 5940 contact facet element(s) from surface 'concrete_to_mortar' intosurfaceElementG...
+   element set 'concrete_to_mortar_facets'
+   40 slave node(s) are already slaves of another multi-point constraint (e.g.   tieMortarToConc...
+   hanging nodes); their redundant tie records were dropped
+ AMR ModelModifier: marked 110, refined -> active elements 11176 -> 14036, 1208         hadaptivity
+ hanging nodes
+   generated 2424 contact facet element(s) from surface 'concrete_top' into      surfaceElementG...
+   element set 'concrete_top_facets'
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 0: 0.000000, 0.000000; time   0.000000 to   0.000000                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #1 true residual 1.00e+00 still exceeds requested           BlockAMGSolver
+ eta=3.00e-04 after 2 continuation(s) -- did not fully converge
+      1.86e-27✓   0.00e+00✓    0.00e+00✓   0.00e+00✓                                    NISTPSolver
+   Converged in 1 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 0.0                                                                Monitor
+   Monitor (U_loading): 0.0                                                                 Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 1: 1.000000, 1.000000; time   0.000000 to   1.000000                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #2 true residual 1.00e+00 still exceeds requested           BlockAMGSolver
+ eta=3.00e-04 after 2 continuation(s) -- did not fully converge
+      1.86e-27✓   0.00e+00✓    0.00e+00✓   0.00e+00✓                                    NISTPSolver
+   Converged in 1 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 0.0                                                                Monitor
+   Monitor (U_loading): 0.0                                                                 Monitor
+ +--------------------------------------+---------------+------+-------------+          NISTPSolver
+ | function                             | acc. runtime  | call | time/call   |
+ +--------------------------------------+---------------+------+-------------+
+ | AMR                                  |   18.59087 s  | 2    |    9.29544  |
+ |                                      |               |      | s           |
+ |  marking filter                      |     0.00006 s | 1    |    0.00006  |
+ |                                      |               |      | s           |
+ |  refine & balance                    |     4.68685 s | 1    |    4.68685  |
+ |                                      |               |      | s           |
+ |  hanging nodes                       |     3.27128 s | 1    |    3.27128  |
+ |                                      |               |      | s           |
+ |  materialize                         |    10.15197 s | 1    |   10.15197  |
+ |                                      |               |      | s           |
+ |   elements & state transfer          |      9.71552  | 1    |    9.71552  |
+ |                                      | s             |      | s           |
+ |   sets & fields sync                 |      0.05005  | 1    |    0.05005  |
+ |                                      | s             |      | s           |
+ |   fields resize & restore            |      0.30918  | 1    |    0.30918  |
+ |                                      | s             |      | s           |
+ |  notify observers                    |     0.47209 s | 1    |    0.47209  |
+ |                                      |               |      | s           |
+ | elements                             |    4.26198 s  | 4    |    1.06549  |
+ |                                      |               |      | s           |
+ | assemble loads                       |    0.00004 s  | 4    |    0.00001  |
+ |                                      |               |      | s           |
+ |  distributed loads                   |     0.00001 s | 4    |    0.00000  |
+ |                                      |               |      | s           |
+ |  body forces                         |     0.00000 s | 4    |    0.00000  |
+ |                                      |               |      | s           |
+ | assemble constraints                 |    0.07302 s  | 4    |    0.01826  |
+ |                                      |               |      | s           |
+ | mpc transform residual               |    0.00250 s  | 4    |    0.00063  |
+ |                                      |               |      | s           |
+ | dirichlet R                          |    0.00020 s  | 2    |    0.00010  |
+ |                                      |               |      | s           |
+ | assemble stiffness CSR               |    0.12598 s  | 2    |    0.06299  |
+ |                                      |               |      | s           |
+ | mpc transform system matrix          |    2.07280 s  | 2    |    1.03640  |
+ |                                      |               |      | s           |
+ | dirichlet K on CSR                   |    0.04874 s  | 2    |    0.02437  |
+ |                                      |               |      | s           |
+ | linear solve                         |    2.76679 s  | 2    |    1.38339  |
+ |                                      |               |      | s           |
+ |  blockamg: equilibration             |     0.70148 s | 2    |    0.35074  |
+ |                                      |               |      | s           |
+ |  blockamg: threaded operator build   |     0.02098 s | 2    |    0.01049  |
+ |                                      |               |      | s           |
+ |  blockamg: off-diagonal split        |     0.24337 s | 2    |    0.12168  |
+ |                                      |               |      | s           |
+ |  blockamg: hierarchy build           |     1.67453 s | 1    |    1.67453  |
+ |                                      |               |      | s           |
+ |  blockamg: outer GMRES               |     0.03689 s | 2    |    0.01845  |
+ |                                      |               |      | s           |
+ |  blockamg: true-residual             |     0.06983 s | 2    |    0.03492  |
+ | continuations                        |               |      | s           |
+ | convergence check                    |    0.00103 s  | 2    |    0.00051  |
+ |                                      |               |      | s           |
+ +--------------------------------------+---------------+------+-------------+
+ +------------------------------------+------------------------------------+                 feCore
+ |Step computation time               |   43.4874s                         |                 feCore
+ +------------------------------------+------------------------------------+                 feCore
+   StepAction definitions:                                                              StepManager
+     Creating "theSolver" [extrapolation=linear,                                        StepManager
+                          useamgclmpccondensation=True]                                 StepManager
+   Updating option extrapolation=linear                                                 NISTPSolver
+   Updating option useAmgclMPCCondensation=True                                         NISTPSolver
+     Updating "fixLeft" [nset=left, field=displacement, 1=0.0, 2=0.0,                   StepManager
+                        3=0.0, 4=None, 5=None, 6=None, components=None,                 StepManager
+                        analyticalfield=None, f(t)=None]                                StepManager
+     Updating "fixRight" [nset=right, field=displacement, 1=0.0, 2=0.0,                 StepManager
+                         3=0.0, 4=None, 5=None, 6=None, components=None,                StepManager
+                         analyticalfield=None, f(t)=None]                               StepManager
+     Updating "fixBack" [nset=back, field=displacement, 1=0.0, 2=0.0,                   StepManager
+                        3=0.0, 4=None, 5=None, 6=None, components=None,                 StepManager
+                        analyticalfield=None, f(t)=None]                                StepManager
+     Updating "fixBottom" [nset=bottom, field=displacement, 1=0.0, 2=0.0,               StepManager
+                          3=0.0, 4=None, 5=None, 6=None, components=None,               StepManager
+                          analyticalfield=None, f(t)=None]                              StepManager
+     Updating "zSymmConcrete" [nset=z_symm_concrete_free,                               StepManager
+                              field=displacement, 3=0.0, 1=None, 2=None,                StepManager
+                              4=None, 5=None, 6=None, components=None,                  StepManager
+                              analyticalfield=None, f(t)=None]                          StepManager
+     Updating "zSymmSteel" [nset=z_symm_steel_free, field=displacement,                 StepManager
+                           3=0.0, 1=None, 2=None, 4=None, 5=None, 6=None,               StepManager
+                           components=None, analyticalfield=None,                       StepManager
+                           f(t)=None]                                                   StepManager
+     Updating "plateXFix" [nset=plate_left_loading, field=displacement,                 StepManager
+                          1=5.0, 2=None, 3=None, 4=None, 5=None, 6=None,                StepManager
+                          components=None, analyticalfield=None, f(t)=None]             StepManager
+   Using 16 threads                                                                     NISTPSolver
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 0: 0.000000, 0.000000; time   1.000000 to   1.000000                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #1 true residual 1.00e+00 still exceeds requested           BlockAMGSolver
+ eta=3.00e-04 after 2 continuation(s) -- did not fully converge
+      1.86e-27✓   0.00e+00✓    0.00e+00✓   0.00e+00✓                                    NISTPSolver
+   Converged in 1 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 0.0                                                                Monitor
+   Monitor (U_loading): 0.0                                                                 Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 1: 0.005000, 0.005000; time   1.000000 to   1.005000                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #2 needed 125 outer GMRES iterations (> threshold 100)      BlockAMGSolver
+ -- possible preconditioner degradation
+   GCDPModel::computeStress: Return mapping failed: std::exception                      NISTPSolver
+     Cutback to increment size 0.0025                                            AdaptiveTimeSte...
++--------------------------------------------------------------------------------------------------+
+   increment 1: 0.002500, 0.002500; time   1.000000 to   1.002500                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #3 needed 125 outer GMRES iterations (> threshold 100)      BlockAMGSolver
+ -- possible preconditioner degradation
+   GCDPModel::computeStress: Return mapping failed: std::exception                      NISTPSolver
+     Cutback to increment size 0.00125                                           AdaptiveTimeSte...
++--------------------------------------------------------------------------------------------------+
+   increment 1: 0.001250, 0.001250; time   1.000000 to   1.001250                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #4 needed 125 outer GMRES iterations (> threshold 100)      BlockAMGSolver
+ -- possible preconditioner degradation
+   GCDPModel::computeStress: Return mapping failed: std::exception                      NISTPSolver
+     Cutback to increment size 0.000625                                          AdaptiveTimeSte...
++--------------------------------------------------------------------------------------------------+
+   increment 1: 0.000625, 0.000625; time   1.000000 to   1.000625                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #5 needed 125 outer GMRES iterations (> threshold 100)      BlockAMGSolver
+ -- possible preconditioner degradation
+      6.85e-01    3.20e-03     0.00e+00✓   0.00e+00✓                                    NISTPSolver
+      8.01e-02    1.96e-04     0.00e+00✓   0.00e+00✓                                    NISTPSolver
+      1.84e-03    2.98e-05     0.00e+00✓   0.00e+00✓                                    NISTPSolver
+      1.06e-06    7.16e-07     0.00e+00✓   0.00e+00✓                                    NISTPSolver
+      4.35e-09✓   4.18e-10✓    0.00e+00✓   0.00e+00✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 226.6765770145503                                                  Monitor
+   Monitor (U_loading): 0.0031249999999986245                                               Monitor
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 2: 0.000625, 0.001250; time   1.000625 to   1.001250                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #10 needed 109 outer GMRES iterations (> threshold 100)     BlockAMGSolver
+ -- possible preconditioner degradation
+      3.17e+00    3.15e-03     5.25e-05    0.00e+00✓                                    NISTPSolver
+      4.93e-01    1.84e-04     9.70e-05    6.97e-05                                     NISTPSolver
+      6.55e-02    8.04e-05     1.61e-05    3.57e-05                                     NISTPSolver
+      1.26e-03    4.33e-06     3.32e-06    1.88e-06                                     NISTPSolver
+      1.08e-06    2.33e-08✓    6.19e-12✓   5.83e-07                                     NISTPSolver
+      2.33e-09✓   1.28e-11✓    7.39e-13✓   3.08e-12✓                                    NISTPSolver
+   Converged in 6 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 450.4544215876772                                                  Monitor
+   Monitor (U_loading): 0.006249999999748248                                                Monitor
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 3: 0.000625, 0.001875; time   1.001250 to   1.001875                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+ blockamg: WARNING solve #16 needed 113 outer GMRES iterations (> threshold 100)     BlockAMGSolver
+ -- possible preconditioner degradation
+      8.27e+00    3.14e-03     1.72e-04    7.34e-15✓                                    NISTPSolver
+      3.23e+01    8.97e-04     8.40e-04    3.80e-04                                     NISTPSolver
+      2.27e+00    5.90e-04     4.28e-05    1.05e-04                                     NISTPSolver
+      3.73e-02    3.70e-05     5.53e-06    6.31e-06                                     NISTPSolver
+      3.02e-04    5.18e-07     4.51e-10✓   4.53e-07                                     NISTPSolver
+      4.90e-08✓   5.19e-09✓    6.28e-13✓   6.59e-10✓                                    NISTPSolver
+   Converged in 6 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 658.7717583335315                                                  Monitor
+   Monitor (U_loading): 0.009374999999428577                                                Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 4: 0.000688, 0.002563; time   1.001875 to   1.002563                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      4.29e+00    0.00e+00✓    1.29e-04    0.00e+00✓                                    NISTPSolver
+      2.60e+00    1.93e-04     8.92e-05    8.04e-05                                     NISTPSolver
+      1.21e-01    4.34e-05     1.72e-05    1.27e-05                                     NISTPSolver
+      1.47e-02    6.53e-06     4.27e-06    2.26e-06                                     NISTPSolver
+      3.27e-04    9.70e-07     4.65e-06    3.90e-07                                     NISTPSolver
+      3.09e-07    1.24e-08✓    3.35e-12✓   2.06e-07                                     NISTPSolver
+      4.51e-10✓   1.08e-11✓    3.99e-13✓   1.04e-12✓                                    NISTPSolver
+   Converged in 6 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 877.1054024831205                                                  Monitor
+   Monitor (U_loading): 0.012812499999428578                                                Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 5: 0.000756, 0.003319; time   1.002563 to   1.003319                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      3.94e+00    0.00e+00✓    1.19e-04    0.00e+00✓                                    NISTPSolver
+      1.26e+00    1.70e-04     5.41e-05    5.18e-05                                     NISTPSolver
+      6.27e-02    2.29e-05     1.39e-05    9.26e-06                                     NISTPSolver
+      7.63e-03    2.27e-06     4.64e-06    1.49e-06                                     NISTPSolver
+      9.19e-05    4.17e-07     1.18e-10✓   2.02e-07                                     NISTPSolver
+      1.83e-08✓   4.69e-09✓    4.11e-13✓   6.26e-10✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 1109.0837559159334                                                 Monitor
+   Monitor (U_loading): 0.016593749999428583                                                Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 6: 0.000832, 0.004151; time   1.003319 to   1.004151                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      2.45e+00    0.00e+00✓    1.17e-04    0.00e+00✓                                    NISTPSolver
+      5.13e-01    2.00e-04     4.32e-05    4.25e-05                                     NISTPSolver
+      4.92e-02    6.15e-05     2.02e-05    6.62e-06                                     NISTPSolver
+      2.25e-03    2.21e-06     4.47e-06    1.99e-06                                     NISTPSolver
+      5.62e-06    5.21e-08✓    7.24e-12✓   3.21e-07                                     NISTPSolver
+      1.77e-09✓   1.16e-10✓    3.75e-13✓   9.25e-12✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 1357.3171812939547                                                 Monitor
+   Monitor (U_loading): 0.02075312499942858                                                 Monitor
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 7: 0.000915, 0.005066; time   1.004151 to   1.005066                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      1.25e+01    4.67e-03     3.38e-04    1.26e-14✓                                    NISTPSolver
+      1.39e+01    9.84e-04     4.81e-04    5.24e-04                                     NISTPSolver
+      3.17e+00    8.63e-04     9.69e-05    1.14e-04                                     NISTPSolver
+      2.36e-01    8.42e-05     1.24e-05    7.50e-06                                     NISTPSolver
+      3.75e-02    2.87e-05     1.70e-05    4.34e-06                                     NISTPSolver
+      6.50e-03    3.01e-06     3.81e-06    7.03e-07                                     NISTPSolver
+      1.21e-04    1.47e-07     8.39e-12✓   1.65e-07                                     NISTPSolver
+      8.71e-09✓   2.58e-09✓    2.62e-13✓   3.55e-10✓                                    NISTPSolver
+   Converged in 8 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 1623.8961620558764                                                 Monitor
+   Monitor (U_loading): 0.02532843747470565                                                 Monitor
++--------------------------------------------------------------------------------------------------+
+   increment 8: 0.001007, 0.006072; time   1.005066 to   1.006072                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      1.90e+00    0.00e+00✓    9.98e-05    0.00e+00✓                                    NISTPSolver
+      7.63e-01    1.42e-04     5.61e-05    3.05e-05                                     NISTPSolver
+      2.92e-02    1.27e-05     1.55e-05    7.84e-06                                     NISTPSolver
+      6.85e-04    1.24e-06     7.35e-06    1.08e-06                                     NISTPSolver
+      6.26e-07    2.81e-08✓    7.78e-12✓   3.25e-07                                     NISTPSolver
+      1.98e-09✓   1.72e-11✓    5.40e-13✓   1.39e-12✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 1911.3180536805692                                                 Monitor
+   Monitor (U_loading): 0.030361281224705657                                                Monitor
+ Creating monolithic equation system                                                    NISTPSolver
+ total size of eq. system: 280155                                                       NISTPSolver
+   field 'displacement': 214659 dofs, [0, 214659)                                       NISTPSolver
+   field 'nonlocal damage': 65496 dofs, [214659, 280155)                                NISTPSolver
++--------------------------------------------------------------------------------------------------+
+ eliminating 16556 slave DOF(s) via multi-point constraints                             NISTPSolver
++--------------------------------------------------------------------------------------------------+
+   increment 9: 0.001107, 0.007179; time   1.006072 to   1.007179                       NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      1.49e+01    5.58e-03     4.50e-04    6.79e-15✓                                    NISTPSolver
+      1.30e+01    1.50e-03     4.64e-04    6.79e-04                                     NISTPSolver
+      5.18e+00    4.48e-04     1.17e-04    1.30e-04                                     NISTPSolver
+      2.94e-01    1.15e-04     1.79e-05    1.51e-05                                     NISTPSolver
+      1.44e-01    2.89e-05     9.58e-06    4.50e-06                                     NISTPSolver
+      1.46e-02    1.43e-05     3.96e-06    1.65e-06                                     NISTPSolver
+      6.59e-05    8.62e-07     7.62e-10✓   1.60e-07                                     NISTPSolver
+      3.28e-08✓   3.83e-09✓    1.77e-12✓   4.18e-10✓                                    NISTPSolver
+   Converged in 8 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 2221.719339824055                                                  Monitor
+   Monitor (U_loading): 0.035897409352887266                                                Monitor
+   AMR ModelModifier: 2 element(s) marked, deferring refinement until 10                hadaptivity
+   accumulate
++--------------------------------------------------------------------------------------------------+
+   increment 10: 0.001218, 0.008397; time   1.007179 to   1.008397                      NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      5.84e+00    0.00e+00✓    4.78e-04    0.00e+00✓                                    NISTPSolver
+      2.12e-01    9.59e-05     6.99e-04    2.56e-05                                     NISTPSolver
+      1.50e-02    8.37e-06     2.09e-05    8.56e-06                                     NISTPSolver
+      4.20e-04    2.15e-06     3.89e-06    1.18e-06                                     NISTPSolver
+      2.43e-07    2.30e-08✓    3.34e-12✓   1.88e-07                                     NISTPSolver
+      2.07e-09✓   5.28e-12✓    3.39e-13✓   1.40e-12✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 2556.793307014554                                                  Monitor
+   Monitor (U_loading): 0.041987150290387264                                                Monitor
+   AMR ModelModifier: 6 element(s) marked, deferring refinement until 10                hadaptivity
+   accumulate
++--------------------------------------------------------------------------------------------------+
+   increment 11: 0.001340, 0.009737; time   1.008397 to   1.009737                      NISTPSolver
+           displacement            nonlocal damage                                      NISTPSolver
+      ||R||∞      ||ddU||∞     ||R||∞      ||ddU||∞                                     NISTPSolver
+      3.79e+00    0.00e+00✓    1.10e-03    0.00e+00✓                                    NISTPSolver
+      5.59e-01    1.01e-04     3.24e-04    2.81e-05                                     NISTPSolver
+      1.30e-02    1.01e-05     1.97e-05    5.88e-06                                     NISTPSolver
+      3.80e-04    7.56e-07     4.98e-06    1.42e-06                                     NISTPSolver
+      9.87e-07    1.52e-08✓    3.25e-12✓   2.81e-07                                     NISTPSolver
+      5.20e-10✓   1.58e-11✓    4.86e-13✓   1.31e-12✓                                    NISTPSolver
+   Converged in 5 iteration(s)                                                          NISTPSolver
+   Monitor (RF_loading): 2917.864956253074                                                  Monitor
+   Monitor (U_loading): 0.04868586532163728                                                 Monitor
+ > > > Reached maximum number of increments                                AdaptiveTimeStepper < < <
+ > > > Incrementation failed                                                      NISTPSolver < < <
+ +---------------------------------------+--------------+------+-------------+          NISTPSolver
+ | function                              | acc. runtime | call | time/call   |
+ +---------------------------------------+--------------+------+-------------+
+ | AMR                                   |    0.41475 s | 15   |    0.02765  |
+ |                                       |              |      | s           |
+ |  marking filter                       |     0.00158  | 9    |    0.00018  |
+ |                                       | s            |      | s           |
+ | elements                              |   96.88486 s | 83   |    1.16729  |
+ |                                       |              |      | s           |
+ | assemble loads                        |    0.00070 s | 80   |    0.00001  |
+ |                                       |              |      | s           |
+ |  distributed loads                    |     0.00010  | 80   |    0.00000  |
+ |                                       | s            |      | s           |
+ |  body forces                          |     0.00007  | 80   |    0.00000  |
+ |                                       | s            |      | s           |
+ | assemble constraints                  |    1.49444 s | 80   |    0.01868  |
+ |                                       |              |      | s           |
+ | mpc transform residual                |    0.04567 s | 80   |    0.00057  |
+ |                                       |              |      | s           |
+ | dirichlet R                           |    0.00157 s | 15   |    0.00010  |
+ |                                       |              |      | s           |
+ | assemble stiffness CSR                |    4.22597 s | 68   |    0.06215  |
+ |                                       |              |      | s           |
+ | mpc transform system matrix           |   32.09157 s | 68   |    0.47193  |
+ |                                       |              |      | s           |
+ | dirichlet K on CSR                    |    2.73330 s | 68   |    0.04020  |
+ |                                       |              |      | s           |
+ | linear solve                          |  592.93194 s | 68   |    8.71959  |
+ |                                       |              |      | s           |
+ |  blockamg: equilibration              |    30.81696  | 68   |    0.45319  |
+ |                                       | s            |      | s           |
+ |  blockamg: threaded operator build    |     0.89834  | 68   |    0.01321  |
+ |                                       | s            |      | s           |
+ |  blockamg: off-diagonal split         |    12.22351  | 68   |    0.17976  |
+ |                                       | s            |      | s           |
+ |  blockamg: hierarchy build            |   112.38188  | 65   |    1.72895  |
+ |                                       | s            |      | s           |
+ |  blockamg: outer GMRES                |   231.67197  | 68   |    3.40694  |
+ |                                       | s            |      | s           |
+ |  blockamg: true-residual              |   204.70197  | 68   |    3.01032  |
+ | continuations                         | s            |      | s           |
+ | convergence check                     |    0.03638 s | 71   |    0.00051  |
+ |                                       |              |      | s           |
+ +---------------------------------------+--------------+------+-------------+
+ +------------------------------------+------------------------------------+                 feCore
+ |Step computation time               |  838.5455s                         |                 feCore
+ +------------------------------------+------------------------------------+                 feCore
+
+ > > > Simulation failed                                                               feCore < < <
+ |Job computation time                |  882.0329s                         |                 feCore
+ +------------------------------------+------------------------------------+                 feCore

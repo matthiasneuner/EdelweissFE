@@ -1,0 +1,6 @@
+{
+  "outerSolver": "amgcl_lgmres",
+  "sweeps": 1,
+  "symmetric": true,
+  "lgmresAlwaysReset": true
+}

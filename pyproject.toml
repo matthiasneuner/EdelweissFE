@@ -20,6 +20,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["edelweissfe*"]
 
 [project.scripts]
 edelweissfe = "edelweissfe._cli._edelweissfe:main"

@@ -39,7 +39,6 @@ from scipy.sparse import csr_matrix
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.linsolve import getDefaultLinSolver, getLinSolverByName
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
-from edelweissfe.linsolve.base import FieldBlock
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.csrgeneratorv2 import CSRGenerator
 from edelweissfe.numerics.dofmanager import DofManager, DofVector, VIJSystemMatrix
@@ -302,30 +301,24 @@ class NIST(NonlinearSolverBase):
 
                     self.journal.printSeperationLine()
 
-                    # Hand every linear solver the block structure it needs but the (A, b) interface
-                    # cannot carry: each field's DOF range and its nodal dimension (from which a
-                    # field-split solver decides the near null-space -- translations for a vector
-                    # field, a constant for a scalar one). Unconditional -- LinearSolver.setFieldStructure
-                    # defaults to a no-op, so ordinary solvers simply ignore this; re-pushed here on
-                    # every (re)build so it tracks the mesh across AMR.
-                    fieldBlocks = [
-                        FieldBlock(
-                            fieldName,
-                            fieldIndices.start,
-                            fieldIndices.stop,
-                            model.nodeFields[fieldName].dimension,
-                        )
-                        for fieldName, fieldIndices in self.theDofManager.idcsOfFieldsInDofVector.items()
-                    ]
-                    self.linSolver.setFieldStructure(fieldBlocks)
+                    # Hand every linear solver the live model and DOF manager (§27) -- the one
+                    # interface point a solver needs to derive whatever it wants beyond the plain
+                    # (A, b) call: field layout (the base class's own default already does this, for
+                    # any field-split solver), node coordinates (e.g. blockamg's rigid-body near
+                    # null-space, §25/§26), element topology (e.g. blockamg's P1 map for p-multigrid,
+                    # §22), or anything a future solver needs that nothing here has to know about in
+                    # advance. Unconditional -- LinearSolver.setModel's default derives and stores the
+                    # field-block structure and does nothing else, so ordinary solvers pay nothing;
+                    # re-pushed here on every (re)build so it tracks the mesh across AMR.
+                    self.linSolver.setModel(model, self.theDofManager)
 
                     # Optional one-time dump of nodal coordinates aligned with the DOF vector, for
-                    # offline preconditioner experiments that need geometry (e.g. the rigid body modes
-                    # a block-AMG solver wants as the elasticity near null-space). The condensed system
-                    # keeps the DofManager ordering (MPC transform is size-preserving), so a field's
-                    # node coordinates in `field.nodes` order line up 1:1 with its DOF slice. Gated by
-                    # an environment variable so it never runs in production; overwrites on every
-                    # (re)build so the file reflects the current mesh after any AMR.
+                    # offline preconditioner experiments that need geometry (e.g. replaying a captured
+                    # system through a solver driven directly, outside a live model). The condensed
+                    # system keeps the DofManager ordering (MPC transform is size-preserving), so a
+                    # field's node coordinates in `field.nodes` order line up 1:1 with its DOF slice.
+                    # Gated by an environment variable so it never runs in production; overwrites on
+                    # every (re)build so the file reflects the current mesh after any AMR.
                     coordinateDumpDir = os.environ.get("EDELWEISS_DUMP_COORDS")
                     if coordinateDumpDir:
                         os.makedirs(coordinateDumpDir, exist_ok=True)
@@ -345,43 +338,26 @@ class NIST(NonlinearSolverBase):
                             0,
                         )
 
-                    # The corner/midside topology of every vector field (§22.1, the p-multigrid
-                    # enabler): the classification a P1 restriction operator needs (identity on
-                    # corners, 1/2-1/2 on each exclusive midside from its two edge-endpoint corners),
-                    # in the same field-node order the coords dump above already uses. Scalar fields
-                    # (e.g. nonlocal damage) have no P1-vs-quadratic story of their own and are
-                    # skipped.
-                    #
-                    # NOT computed unconditionally, unlike setFieldStructure -- found the hard way
-                    # (a previously-passing test regressed): buildP1Map hard-errors on an element
-                    # topology it cannot classify (by design, §22.1 -- "never silently pick a
-                    # heuristic"), and an unrelated model using a rigid-body-contact discretization
-                    # crashed once this ran for every solver regardless of need. Only computed for a
-                    # field the linear solver actually asked for via requestedP1FieldNames (§22.5's
-                    # NIST plumbing: query first, then push, rather than push-and-hope), or
-                    # unconditionally for every vector field when EDELWEISS_DUMP_P1MAP is set (an
-                    # explicit, opt-in diagnostic dump -- accepting that risk is the whole point of
-                    # asking for it by name).
+                    # Optional dump of the corner/midside topology of every vector field (§22.1, the
+                    # p-multigrid enabler): the classification a P1 restriction operator needs
+                    # (identity on corners, 1/2-1/2 on each exclusive midside from its two
+                    # edge-endpoint corners), in the same field-node order the coords dump above
+                    # already uses. Scalar fields (e.g. nonlocal damage) have no P1-vs-quadratic story
+                    # of their own and are skipped. Gated by an environment variable, same reasoning as
+                    # the coordinate dump above -- a solver wanting a P1 map for its own use (e.g.
+                    # blockamg's p1FieldNames option) now computes it lazily itself, from the model
+                    # reference setModel already gave it above, rather than needing it pushed here.
                     p1MapDumpDir = os.environ.get("EDELWEISS_DUMP_P1MAP")
-                    requestedP1FieldNames = self.linSolver.requestedP1FieldNames
-                    p1MapsForSolver = {}
-                    p1MapData = {}
-                    if p1MapDumpDir or requestedP1FieldNames:
+                    if p1MapDumpDir:
+                        p1MapData = {}
                         for fieldName, field in model.nodeFields.items():
                             if field.dimension <= 1:
                                 continue
-                            if not p1MapDumpDir and fieldName not in requestedP1FieldNames:
-                                continue
                             isCorner, edgeEndpoints, p1Warnings = buildP1Map(model, fieldName)
-                            p1MapsForSolver[fieldName] = (isCorner, edgeEndpoints)
-                            if p1MapDumpDir:
-                                p1MapData[fieldName + "_isCorner"] = isCorner
-                                p1MapData[fieldName + "_edgeEndpoints"] = edgeEndpoints
+                            p1MapData[fieldName + "_isCorner"] = isCorner
+                            p1MapData[fieldName + "_edgeEndpoints"] = edgeEndpoints
                             for w in p1Warnings:
                                 self.journal.message(w, self.identification, 1)
-                        if requestedP1FieldNames:
-                            self.linSolver.setP1Maps(p1MapsForSolver)
-                    if p1MapDumpDir:
                         os.makedirs(p1MapDumpDir, exist_ok=True)
                         np.savez(os.path.join(p1MapDumpDir, "p1map.npz"), **p1MapData)
                         self.journal.message(

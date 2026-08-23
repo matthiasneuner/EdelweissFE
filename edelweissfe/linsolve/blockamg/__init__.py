@@ -76,9 +76,21 @@ def createSolver(opts) -> Callable:
         ``warnOuterIterationsThreshold``
             Outer-iteration count past which a solve prints a ``"warning"``-level message even at the
             default verbosity.
+        ``dumpOnDegradationDir``, ``dumpOnDegradationThreshold``, ``dumpOnDegradationMaxDumps``,
+        ``dumpOnDegradationContextSolves``
+            Capture the raw ``(A, b)`` and field-block layout of solves that degrade (outer-iteration
+            count past a threshold), plus optionally a window of preceding solves and per-solve
+            solver-state bookkeeping, for offline diagnosis -- see
+            :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`. ``dumpOnDegradationDir``
+            unset (the default) disables this entirely.
         ``fieldPreconds``
             Optional mapping of field name (e.g. ``"displacement"``) to an AMGCL preconditioner
             parameter tree, overriding the dimension-based default for that field.
+        ``useRigidBodyNullspace``
+            ``True`` (default) builds a vector field's near null-space as the full rigid-body basis
+            (translations + rotations) once nodal coordinates arrive, instead of translations alone --
+            see :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`. Set ``False`` to force
+            translations-only unconditionally.
         ``p1FieldNames``
             Optional list of vector field names (e.g. ``["displacement"]``) to precondition with
             p-multigrid (§22) instead of the single-level AMGCL default -- the actual topology map is
@@ -113,6 +125,7 @@ def createSolver(opts) -> Callable:
         ("lgmresResetOnNewIncrement", bool),
         ("sweeps", int),
         ("symmetric", bool),
+        ("useRigidBodyNullspace", bool),
         ("etaMin", float),
         ("etaMax", float),
         ("ewGamma", float),
@@ -122,6 +135,10 @@ def createSolver(opts) -> Callable:
         ("trueResidualMaxContinuations", int),
         ("verbosity", str),
         ("warnOuterIterationsThreshold", int),
+        ("dumpOnDegradationDir", str),
+        ("dumpOnDegradationThreshold", int),
+        ("dumpOnDegradationMaxDumps", int),
+        ("dumpOnDegradationContextSolves", int),
     ):
         if key in optionMap:
             kwargs[key] = cast(optionMap[key])

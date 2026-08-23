@@ -14,10 +14,17 @@ consult it for *why*, not to re-derive *what*.
 | **p-two-grid** (`p1Maps`/`p1FieldNames`) | Swaps the per-field preconditioner for a genuine two-grid V-cycle (needs a corner/edge-midside topology map) | Opt-in, **parked at parity** (§22 series, §23.5) | ~1.01–1.04× vs. shipped, *combined with* the threaded SpMV above — not a real margin, not worth more tuning right now | opt-in via `p1FieldNames` in `blockamg.json`, never shipped as default |
 | **`lgmres`** | Swaps scipy's outer `gmres` loop for AMGCL's own native C++ GMRES variant (Loose GMRES's own intra-call restart-cycle augmentation, not cross-Newton-iteration recycling — see below) | **Shipped default** (§23.10) | Live-gated at 8/16/32 threads: trajectory-identical to the prior default, no NaN (after the `lgmresAlwaysReset=True` fix), **1.01×/1.07×/2.18×** faster than the old scipy default at 8/16/32 threads respectively — scipy's own orchestration anti-scales past one NUMA node on this 2-socket hardware, lgmres does not | default; `outerSolver="scipy"` kept as a fallback |
 | **MPC condensation via AMGCL** (§24) | Threads `T^T K T + C` (multi-point-constraint condensation, on every solve of any model with hanging-node/tie MPCs) via AMGCL's OpenMP-threaded `product()`/`sum()` instead of single-threaded scipy CSR | Opt-in, live-gate-verified at 16 threads only | **2.4–2.6× faster** than the plain expression offline; **7.3% faster end-to-end** live, on top of the already-shipped `lgmres` default | opt-in via `useAmgclMPCCondensation` (NIST solver option) |
+| **`dumpOnDegradation`** (§25) | Capture the raw `(A, b)`, field-block layout, and (opt-in) a preceding-solve context window + solver-state flags for any solve whose outer-iteration count exceeds a threshold | **Shipped**, off by default | Found the §26 root cause from 9 real captured systems | `dumpOnDegradationDir`/`Threshold`/`MaxDumps`/`ContextSolves` (`blockamg` options) |
+| **`power_iters=300`** (was 50, §26) | Fixes a thread-count-dependent AMGCL Chebyshev spectral-radius estimate (power iteration seeded per-OpenMP-thread by thread id — deterministic per thread count, not across runs, but a different, sometimes badly-under-converged, estimate at different thread counts) | **Shipped default** | **2.68× aggregate** (811s→302s) on 10 captured degraded systems at production's real 16 threads; the single worst case dropped 1460→43 outer iterations | default; `fieldPreconds` override still available |
+| **`-march=native` for the `amgcl` extension** (§26) | Compile the AMGCL/GMRES C++ hot path with the host's full native instruction set instead of the conda-baseline `-march=nocona` | **Rejected on both machines tested** | Xeon (Skylake-SP, AVX-512): **~40% slower** (AVX-512 package-wide downclock erratum). AMD Threadripper (AVX2/FMA, no AVX-512): **still ~8% slower** (memory-bandwidth-bound workload, wider vectors don't pay off) | not set; `setup.py`'s `amgcl` extension deliberately omits `*arch_flags`, unlike its sibling extensions |
+| **Rigid-body near null-space** (§27) | Full 6-mode basis (3 translations + 3 rotations, standard elasticity AMG practice) for a vector field's per-field AMG hierarchy, instead of translations alone | **Shipped default** (`useRigidBodyNullspace=True`) | **~28–31% fewer** isolated per-field outer iterations on two real captured systems; robust to both thread count and `power_iters` where translations-only is sensitive to both | default when node coordinates are available (always, on a live run); `useRigidBodyNullspace=False` to opt out |
+| **Unified `setModel` solver interface** (§27) | One `LinearSolver.setModel(model, dofManager)` entry point replaces the growing pile of per-capability setters (`setFieldStructure` alone, then `requestedP1FieldNames`/`setP1Maps`, then `requestedNodeCoordinateFieldNames`/`setNodeCoordinates`) | **Shipped** | Driver-side wiring in `nonlinearimplicitstatic.py` shrank from ~100 lines to one call; `blockamg` now pulls coordinates/P1 maps lazily from the model reference instead of waiting for a push | `edelweissfe/linsolve/base.py` |
+| **p-multigrid gets the §26/§27 fixes too** (§28) | `ptwogrid.py`'s coarse AMGCL solve and fine Chebyshev smoother had the *same* `power_iters=50` bug and the *same* translations-only near null-space, entirely independently of `blockamg`'s own fix (a field using p-multigrid never reaches `blockamg`'s null-space code at all) | **Shipped** (the fixes); p-multigrid itself stays opt-in, parked | Numerically verified no-op in the translations-only case (bit-for-bit); not yet live-re-validated against the historical "parity" verdict, which predates both fixes | `p1FieldNames`/`p1Maps` (`blockamg` options), unchanged |
 
 **Net effect on what actually runs today, with zero config changes: `blockamg` is ~1.15× faster
-live than a year ago, on the same default it always shipped.** Everything else in the table is
-measured and recorded, sitting behind an opt-in flag nobody has to touch.
+live than a year ago from Phase 8 alone (§23), and a further ~2.68× faster on the class of severely
+degraded solves §25/§26 found and fixed — on the same default it always shipped.** Everything else
+in the table is measured and recorded, sitting behind an opt-in flag nobody has to touch.
 
 ---
 
@@ -4631,3 +4638,366 @@ not ported. Net: two condensation strategies (plain, default; AMGCL, opt-in pend
 instead of three, −214 lines. Full test suites re-run clean after the removal (same two
 pre-existing, unrelated failures as before: `MeshPlot`/missing LaTeX, `NodeToDeformableSurfaceContactPullOut`
 which does not use MPC constraints at all).
+
+---
+
+## 25. Phase 9 — `dumpOnDegradation`: capturing pathological live-run systems for offline diagnosis
+
+**Trigger.** A live production run of the AnchorPryOut pryout model (this document's own reference
+model, §2) started needing 230–2400 outer GMRES iterations per solve once damage localized past
+roughly increment 90–165, vs. the well-behaved ~100–150-or-fewer iterations of earlier increments —
+a live, real-world instance of exactly the "possible preconditioner degradation" class of problem
+this whole document has been chasing, but never previously captured for offline analysis.
+
+**Mechanism (`edelweissfe/linsolve/blockamg/blockamg.py`).** `dumpOnDegradationDir`/
+`dumpOnDegradationThreshold`/`dumpOnDegradationMaxDumps`: write the raw `(A, b)` (before
+equilibration) plus the field-block layout to disk for any solve whose outer-iteration count
+exceeds a threshold, capped at a process-wide maximum. Unlike
+`edelweissfe/linsolve/matrixdump/matrixdump.py`'s `MatrixDumpSolver` (dumps by a fixed ordinal
+decided *before* the solve runs), this decides by the solve's own *outcome* — the only way to
+capture a pathological system without knowing its solve ordinal in advance.
+`dumpOnDegradationContextSolves` extends this to a rolling window of the *preceding* N solves too
+(each carrying `mustRefresh`/`patternChanged`/`newIncrement`/`previousOuterIters` state flags in the
+manifest), added specifically so a future stateful-artifact hypothesis (see §26) could be tested by
+replaying an actual sequence through a persistent solver instance — built but not yet exercised in
+anger, since §26 found the real mechanism was thread-count, not cross-solve state, before this
+capability was needed.
+
+**Offline probe (`edelweissfe/linsolve/blockamg/diagnose_degradation.py`, new, untracked-by-design
+like `benchmark_linsolve.py`).** Four tests per dump: (1) a cheap `‖B−Bᵀ‖/‖B‖` non-symmetry proxy
+per diagonal block; (2) isolated per-field AMG quality — the field's own diagonal block solved
+alone, ignoring the coupling; (3) exact block-Gauss-Seidel via **MKL PARDISO** (not SciPy's serial
+`splu` — tried first, found far too slow for a 250k+-dof block to serve as a diagnostic at all,
+never mind a fast one) in place of each field's AMG preconditioner; (4) a **fresh production
+replay** — a brand-new `BlockAMGSolver`, production's exact configuration, handed the dumped
+`(A, b)` as its only solve. Test 4 is the decisive one for what follows.
+
+**Collection.** `threshold=100` first caught only early-run transient noise (a model settling into
+its load path, 109–125 iterations, unrelated to the reported degradation) — raised to `150`.
+`maxDumps=10`, live AnchorPryOut run on `xeon` at 16 threads: **10 real degraded systems** captured
+(solves #394–#841 in that run's own numbering, rows 338,971–379,691 as AMR grew the mesh,
+`outerIters` 162–1460) over several hours of wall time. This dataset is what §26's root-cause work
+and compile-flags/PARDISO comparisons below are measured on.
+
+---
+
+## 26. Root cause found: AMGCL's Chebyshev spectral-radius estimate is thread-count-dependent
+
+### 26.1 The wrong turn first, because the failure mode is worth not repeating
+
+The first hypothesis (mine): inexact block-Gauss-Seidel relaxation, amplified by the displacement
+block's severe measured non-symmetry (`‖B−Bᵀ‖/‖B‖ = 1.41`), was the cause. An adversarial review
+(a fresh agent, given the same dumps and told to be skeptical) refuted this cleanly: the 1.41
+non-symmetry figure is a **constant, exactly `√2` on every single dump regardless of that solve's
+own iteration count** — a Dirichlet-elimination storage artifact this document's own §17 A1 had
+*already* identified and retired once (masked/Dirichlet-free asymmetry is ~0.5%, not 141%). I had
+resurrected an already-debunked number. The review's own replacement hypothesis — a fresh test-4
+replay of solve #394 converged in 43 iterations at 4 threads, not 1460, so the live 1460 must be a
+*stateful* artifact (a stale reused hierarchy or Krylov-subspace carry-over) — turned out to be
+*also* incomplete: re-running the identical test-4 replay at 16 threads (production's actual thread
+count) reproduced **1460 exactly**, on every one of all 10 dumps (`freshReplayIters == prodIters`,
+10/10). A truly stateless, freshly-built instance reproducing the bad behavior every time rules out
+staleness outright. The one variable that actually mattered — thread count — had been changed
+between the two rounds of testing without either of us realizing it was the operative variable.
+
+### 26.2 The actual mechanism, proven
+
+`amgcl/backend/builtin.hpp`'s `spectral_radius<false>` (the power-iteration spectral-radius
+estimator AMGCL's Chebyshev relaxation uses, `power_iters=50` in this codebase's default config)
+seeds its starting vector like this, inside an OpenMP parallel region:
+
+```cpp
+#pragma omp parallel
+{
+    int tid = omp_get_thread_num();
+    std::mt19937 rng(tid);                 // seeded by thread ID, not an entropy source
+    ...
+    #pragma omp for nowait
+    for (ptrdiff_t i = 0; i < n; ++i)
+        b0[i] = rnd(rng);                  // each thread fills its own chunk
+}
+```
+
+The seed is the thread ID itself — for 16 threads it is *always* exactly `{0, ..., 15}`, every run,
+forever; `std::mt19937` is fully deterministic given its seed. This is not stochastic across runs
+(re-running at a fixed thread count reproduces the identical result every time, proven
+experimentally); it is a deterministic function *of thread count*, since a different thread count
+partitions the vector across a different number of independent, fixed streams. The randomization
+itself is legitimate, standard practice (protects against a *fixed* deterministic start vector
+happening to be pathologically orthogonal to the dominant eigenvector for some specific operator);
+the bug is that the per-thread streams were never combined with an actual entropy source (e.g.
+`base_seed + tid`), so the intended protection against *operator*-specific blind spots was
+accidentally traded for a new blind spot indexed by *thread count* instead.
+
+**Evidence chain (all on the real captured dumps, not a toy problem):**
+1. **Hierarchy structure is byte-identical** at 4 vs. 16 threads (`report()`: same 2 levels, same
+   unknown counts, same nnz, same operator complexity) — rules out order-dependent parallel
+   aggregation as an alternative explanation.
+2. **Build/apply thread-count split is decisive**: build@4threads + apply@16threads → 26 isolated
+   iterations; build@16threads + apply@4threads → 124. The blowup tracks *build* thread count only
+   — a pure **setup-time** (hierarchy build) phenomenon, not a V-cycle application one.
+3. **Two independent config changes both close the gap** on solve #394: `power_iters=500` (converge
+   the estimate, so the start vector stops mattering) → 26 @ both 4 and 16 threads; `higher=2.0`
+   (safety margin on the assumed-too-low upper eigenvalue bound) → 30 @ both.
+4. **Independent, ARPACK-based cross-check**: the *true* spectral radius of the displacement block
+   (via `scipy.sparse.linalg.eigs`, `k=1, which="LM"`), computed across all 10 dumps, is stable at
+   **6.999–7.413** — barely moves, even as `outerIters` swings 162–1460 and the mesh grows under
+   AMR. The physical quantity is nearly constant; AMGCL's cheap 50-iteration estimate of it is what
+   swings wildly with thread count.
+
+### 26.3 The fix, and what it does and doesn't fix
+
+`power_iters` raised from 50 to **300** in `_DEFAULT_VECTOR_PRECOND`
+(`edelweissfe/linsolve/blockamg/blockamg.py`) — chosen over `higher=2.0` specifically because
+`higher` is a blunt multiplicative margin that helps when the estimate is too low but *actively
+hurts* an already-fine estimate (measured: `higher=2.0` made solve #625 **worse**, 165→207 outer
+iterations); `power_iters` lets the estimate converge properly regardless of thread count instead.
+
+Tested on all 10 captured systems, at production's real 16 threads: **9 of 10 improve
+substantially** (most 1.8–2.6×, the worst outlier 1460→43, a 34× improvement). **One solve (#625)
+is essentially unmoved by every fix tried** — baseline 165, `higher=2.0`→207 (worse), a plain
+4-thread rerun→158, `power_iters=300`→163 — a second, distinct, **still-unexplained** mechanism.
+Not investigated further this round; a genuine open item, not forgotten.
+
+**Wall-clock, not just iteration count**: total linear-solve time across the 10 dumps, production's
+exact config, 16 threads: **811.1s (baseline) → 302.3s (`power_iters=300`) — 2.68× aggregate.**
+
+### 26.4 Compile-flags investigation — `-march=native` rejected on both machines tested
+
+Found while investigating: `setup.py`'s `amgcl` extension was missing `*arch_flags`
+(`-march=native`), unlike its sibling extensions (`marmotelement`, `csrgeneratorv2`, `dirichlet`) —
+initially assumed to be a straightforward missed optimization. It is not:
+
+- **`xeon` (Intel Xeon Gold 6140, Skylake-SP, AVX-512 hardware)**: `-march=native` resolves to
+  `skylake-avx512`. Measured: baseline config 811.1s → **1133.8s (+40%)**; `power_iters=300` config
+  302.3s → **412.1s (+36%)**. Identical iteration trajectories either way (verified solve-by-solve)
+  — a pure codegen/clock-speed effect, not a numerics one. Consistent with this CPU generation's
+  well-documented package-wide downclock under sustained AVX-512 (512-bit vector) instruction use.
+- **`taylor@threadripper-64` (AMD Threadripper, AVX2+FMA, *no* AVX-512 hardware)**: no downclock
+  mechanism should apply here at all. Measured anyway: baseline (c++20, no arch flags) 405.2s →
+  `-march=native` (AVX2+FMA codegen, verified via `objdump`) **438.9s (+8%)**, on a bounded
+  10-increment/69-solve `test_scaling.inp` run. Again identical iteration trajectories (verified) —
+  still a pure speed effect. Working explanation: AMGCL's core operations (SpMV, relaxation sweeps)
+  are memory-bandwidth-bound with irregular gather/scatter access patterns, not compute-bound, so
+  wider vectors don't help and cost a little via codegen/scheduling overhead.
+
+**Conclusion: `-march=native` is not recommended for the `amgcl` extension on either machine
+tested.** `setup.py` deliberately omits `*arch_flags` for this one extension, with a comment
+explaining why. **Each machine's `setup.py` is independently tuned — do not blindly sync it across
+machines.** `threadripper-64` in particular has its own, separate, pre-existing local modifications
+(a `-std=c++11`→`c++20` bump for this same extension, kept; unrelated `klu` extension flags; a
+`pyproject.toml` packaging fix, `include = ["edelweissfe*"]`, genuinely needed there and absent
+locally) from work this document's own history did not originate — checked via `git diff` and
+`REVIEW_AND_RECOMMENDATIONS.md` before touching anything, per the standing rule: always check for
+uncommitted changes on a remote machine before overwriting.
+
+### 26.5 PARDISO comparison — an honest scale caveat
+
+Same 10 systems, full monolithic direct solve (`PardisoSolver`, single-shot factorize+solve): total
+**238.7s**, remarkably uniform (20–25s per solve, every time, true residuals ~1e-14, zero
+degradation of any kind — these ~340–380k-dof systems are still comfortably within direct-
+factorization reach). **Even after the `power_iters` fix, `blockamg` (302.3s) is still ~27% slower
+than plain PARDISO** at this problem size. This does not undercut `blockamg`'s reason to exist — its
+whole point is O(n) memory scaling toward the 1M+-dof regime where PARDISO's fill-in becomes
+infeasible, not raw speed at 340k dof where PARDISO still fits comfortably — but it is worth being
+direct about: at the scale this specific AnchorPryOut model actually runs at today, PARDISO remains
+the faster choice, fix or no fix. The value of §26.3's fix is making `blockamg` viable/competitive
+as a stepping stone toward the scale where it becomes *necessary*, not beating PARDISO here and now.
+
+---
+
+## 27. Rigid-body near null-space (rotations, not just translations) + the unified `setModel` interface
+
+### 27.1 §11/§13's "translations don't help" verdict was measured against the wrong smoother
+
+Standard AMG practice for 3D elasticity uses the *full* 6-dimensional rigid-body mode space (3
+translations + 3 rotations) as smoothed aggregation's near null-space, not translations alone.
+`blockamg.py`'s `_translationNullspace` (as it was before this round) only ever built the 3
+translations — §11/§13's historical experiments were "translations, with or without a coupled-block
+constant," never the full 6-mode basis, because building rotation modes needs node coordinates,
+which nothing exposed to the solver at the time.
+
+That historical verdict does not hold up: §11/§13 measured against a **Gauss-Seidel** smoother that
+(pre-§26) diverged outright on this operator — under a broken smoother, 3-mode vs. 6-mode near
+null-space quality barely mattered, so the two looked identical. Under the *actual shipped*
+Chebyshev smoother, they are not identical at all.
+
+**Two independent corroborations, worth recording because neither was prompted by this document's
+own reasoning**: (a) a separate code review conducted independently on `threadripper-64`
+(`REVIEW_AND_RECOMMENDATIONS.md`, not authored as part of this investigation) arrived at the
+identical "add the 3 rotational rigid-body modes" recommendation, unprompted; (b) a controlled
+synthetic-cantilever test (clean, single-field, no contact/damage coupling) found a dramatic 4–9×
+improvement before any real-data test was attempted.
+
+**Validated on real production matrices**, with coordinate alignment rigorously checked (not
+assumed) via a matrix-adjacency graph-distance test — matrix-coupled node pairs must be
+geometrically close relative to the domain's bounding-box diagonal; a coincidental mesh-size match
+without genuine DOF-order alignment would show random, domain-spanning distances instead
+(`fracEdgesFar` was 0.0006–0.0008 on the systems actually used, i.e. essentially zero, i.e. a
+confirmed real match). Two solves from a **separate, fresh reproduction run** of AnchorPryOut
+(`EDELWEISS_DUMP_COORDS`-enabled, its *own* solve numbering starting from 1 — not the same
+solve-numbering series as §25/§26's #394–#841 dataset, which was captured before coordinate dumping
+existed and has no coordinates to test against):
+
+| solve | production outer iters | none | translations (old default) | **rbm6 (new default)** |
+|---|---|---|---|---|
+| #2 | 126 | 167 | 59 | **41** (−31%) |
+| #6 | 54 (post-remesh, different sparsity pattern) | 82 | 40 | **29** (−28%) |
+
+Consistent ~28–31% reduction, bit-identical across `power_iters=50` vs. `300` — **RBM6 is orthogonal
+to the §26 fix, not additive with it and not redundant either**: it improves a structurally
+different thing (the quality of smoothed aggregation's coarsening itself) than `power_iters` does
+(the accuracy of the spectral-radius estimate feeding the Chebyshev smoother).
+
+**Not yet directly confirmed on the specific severely-degraded systems (#394/#625) that motivated
+this whole investigation** — doing so would need a fresh `EDELWEISS_DUMP_COORDS`-enabled capture
+reaching those exact AMR mesh states, an expensive (many-hour) live run, deliberately not chased
+down given two independent real-data confirmations already in hand. Treat "RBM6 helps on the severe
+cases too" as a well-supported expectation, not a proven fact, until someone does this.
+
+### 27.2 Implementation
+
+New module `edelweissfe/linsolve/blockamg/nullspace.py`: `translationNullspace`/`rigidBodyNullspace`,
+pure functions with no `BlockAMGSolver`-instance state (mirroring `ptwogrid.py`'s precedent for
+other blockamg auxiliary pieces). 3 translations + 3 rotations for a 3D field (6 modes); 2
+translations + 1 in-plane rotation for a 2D field (3 modes) — rotations are the classic
+infinitesimal rigid-rotation displacement fields about the field's coordinate centroid. Timed via
+`performancetiming.timeit("blockamg: nullspace construction")`, nested under the existing
+`"blockamg: hierarchy build"` timing block — confirmed via direct measurement to cost microseconds,
+negligible next to the hierarchy build itself, but now actually *measured* on every run rather than
+just assumed cheap. `BlockAMGSolver(useRigidBodyNullspace=True)` (the new default) prefers RBM6
+whenever node coordinates are available, falling back to translations-only automatically otherwise
+(e.g. an offline probe using the low-level `setFieldStructure` escape hatch below, with no model to
+read coordinates from); `useRigidBodyNullspace=False` forces translations-only unconditionally,
+matching this solver's behaviour before this round.
+
+### 27.3 The unified `setModel` interface
+
+Replaced the growing pile of per-capability setters (`setFieldStructure` alone, then
+`requestedP1FieldNames`/`setP1Maps` for §22's p-multigrid, then this round's own first-draft
+`requestedNodeCoordinateFieldNames`/`setNodeCoordinates` for the rigid-body null-space) with one:
+`LinearSolver.setModel(model, dofManager)` (`edelweissfe/linsolve/base.py`). Its default
+implementation derives and stores the per-field DOF-block structure (equivalent to the old
+unconditional `setFieldStructure` call every solver already got) *and* keeps `model`/`dofManager`
+references for a solver that wants to go further — `blockamg` reads node coordinates and computes a
+P1 topology map (§22, now lazily via a new `_getP1Map` helper, on first need, cached for the
+instance's lifetime — replacing the old query-then-push `requestedP1FieldNames`/`setP1Maps` dance)
+directly from `self._model`, exactly when building each field's hierarchy, without the driver
+needing to know in advance what any given solver might want. `setFieldStructure` remains as a
+documented low-level escape hatch for a caller with field-block layout but no full model (e.g.
+`diagnose_degradation.py`'s "fresh production replay" test — which therefore still only ever gets
+translations-only, a known, accepted limitation of that one offline test, not a live-path issue).
+
+`nonlinearimplicitstatic.py`'s driver-side wiring shrank from ~100 lines of query-then-push
+plumbing (separate blocks for field structure, coordinates, and P1 maps, each with its own
+gating logic) to one unconditional call: `self.linSolver.setModel(model, self.theDofManager)`,
+made at the exact point the equation system is (re)built (same trigger as the old
+`setFieldStructure` call — first solve, and again after any AMR/connectivity change).
+`EDELWEISS_DUMP_COORDS`/`EDELWEISS_DUMP_P1MAP` (the standalone offline-diagnostic dumps-to-disk,
+unrelated to solver wiring) are untouched, just simplified since they no longer need to coordinate
+with a solver's own query.
+
+**Why a post-construction setter, not a constructor argument** (asked and worth recording): the
+`DofManager` is *replaced*, not mutated, on every AMR/connectivity change
+(`self.theDofManager = DofManager(...)`, `nonlinearimplicitstatic.py`) — and that can happen many
+times within the lifetime of *one* linear-solver instance (one instance is built per analysis step,
+not per rebuild). A constructor-time reference would go stale the moment the mesh first changed. The
+solver itself is also built by a generic, config-only registry factory
+(`getLinSolverByName`/`createSolver(opts)`) that never sees the model at all — mirroring exactly why
+`setJournal` is already a post-construction setter, not a constructor argument, for the same reason.
+
+**Validation**: local `edelweiss-only` suite (all pass except the same two pre-existing, already-
+documented-in-this-file unrelated failures — `MeshPlot`/missing LaTeX, `NodeToDeformableSurfaceContactPullOut`
+— independently reconfirmed via `git stash` to fail identically on the unmodified baseline); spot-
+checked `marmot` tests (`VonMises`, `CDP`, `ADVonMises`, `IndirectDisplacementControl`); several `AMR_*`
+tests including a two-field case (`AMR_TwoFieldGC3D20R`), exercising the exact mesh-rebuild path
+`setModel` needs to get right; the `blockamg` regression test. All re-verified on `xeon` and
+`threadripper-64` after sync (`MeshPlot` also fails on `xeon`, additionally for a pre-existing,
+environment-specific reason there — LaTeX is not installed on that machine at all).
+
+---
+
+## 28. Extending §26/§27's fixes to p-multigrid (`ptwogrid.py`) — same bugs, not yet live-re-validated
+
+**Question raised**: does p-multigrid (§22, opt-in via `p1FieldNames`) combine with the new
+rigid-body null-space? **Answer: no, not before this round.** A field opted into p-multigrid takes
+the `PTwoGridPreconditioner` path entirely inside `blockamg.py`'s hierarchy-build loop and
+`continue`s before ever reaching §27's rigid-body null-space code — the two paths were completely
+independent.
+
+`PTwoGridPreconditioner` already had its *own*, separate, translations-only near null-space for its
+internal coarse (P1 corner-node) AMGCL solve (§22.2-bis R1), never touched by §27's work. More
+importantly: `_DEFAULT_COARSE_PRECOND` (the coarse solve's own Chebyshev config) **and**
+`_buildChebyshevSmoother` (the fine smoother) both defaulted to **`power_iters=50`** — the *exact
+same* thread-id-seeded-RNG bug found in §26, in a module completely independent of `blockamg.py`
+and never touched during that investigation.
+
+**Implication**: p-multigrid's own historical verdict — "parked at parity, not a real margin" (the
+§22 series, §23.5) — was measured *before* either the §26 `power_iters` bug or the §27 rigid-body
+finding was known. This is structurally the same situation as §11/§13's now-retracted "translations
+don't help" verdict: a real possibility that "parity" was an artifact of testing a preconditioner
+quietly handicapped by the same root causes, not p-multigrid's actual ceiling.
+
+**Fix implemented, on `xeon` (not yet live-re-validated — see below)**:
+- `power_iters` 50 → 300 in both `_DEFAULT_COARSE_PRECOND` and `_buildChebyshevSmoother`'s default,
+  mirroring §26.3 exactly (same bug, same fix, not independently re-tuned at this specific value).
+- `PTwoGridPreconditioner.build()` gained an optional `coords` parameter. When given (and
+  `useRigidBodyNullspace` is enabled), the coarse solve's near null-space is built as the full
+  rigid-body basis restricted to the corner-node subset (`coords[cornerNodeRows]`) instead of
+  translations-only — the same two-step "build the full coarse-DOF null-space, then restrict to the
+  free columns" shape §27's own construction uses, just applied to a synthetic corner-node
+  `FieldBlock` instead of the full field. `blockamg.py`'s call site passes
+  `self._getNodeCoordinates(block.name)` (or `None` if `useRigidBodyNullspace` is disabled),
+  mirroring the non-p1Map path's own fallback exactly.
+
+**Verification**: the refactored translations-only construction was checked **numerically
+bit-for-bit identical** to the old inline code (max abs diff `0.0`) — a pure refactor, no behavior
+change, whenever coordinates are unavailable. The RBM6 path was smoke-tested on a real (if
+synthetic-geometry) quad8 P1 topology map — `tests/test_p1topology.py`'s own `test_quad8_isolated_element`
+fixture, extended with reference-element node coordinates — and builds/applies cleanly, no NaN,
+producing a genuinely different (valid) preconditioner output than the translations-only path.
+Registered regression test (`CantileverBeamQuad4BlockAMG`) and the `p1topology` pytest suite both
+pass, locally and on `xeon`.
+
+**Not yet done — the natural next step for whoever picks this up**: no registered test exercises
+`p1FieldNames`/`p1Maps` at all (confirmed via `grep -rl "p1FieldNames\|p1Maps" testfiles/` — empty
+result); p-multigrid remains untested by the standard suite, only by this round's own throwaway
+smoke tests. **A live re-run of the p-multigrid-vs-shipped-default comparison, with both fixes now
+in place, has not been done.** This is what would actually resettle the "parity" verdict —
+everything above is a well-motivated, numerically-verified-correct fix, not yet evidence that it
+changes the historical conclusion.
+
+---
+
+## 29. What remains for the next session
+
+- **§26's `power_iters=300` and §27's `useRigidBodyNullspace=True` are now the shipped defaults**,
+  live on `xeon` and `threadripper-64` (both machines' `setup.py` reverted to conservative compile
+  flags per §26.4 — no `-march=native` for the `amgcl` extension). A live AnchorPryOut run on `xeon`
+  with both new defaults reached increment 167 after 9h21m with **zero** `dumpOnDegradation` hits
+  (threshold 150) — well past where the original run's first degradation appeared (~increment
+  90–99) — a strong, but not yet complete, confirmation signal (the run was still in progress, not
+  finished, last checked).
+- **Solve #625's resistance to every fix tried (§26.3) is still unexplained.** Baseline 165 iters;
+  unmoved (158–207) by `higher=2.0`, a 4-thread rerun, or `power_iters=300`. A genuine second
+  mechanism, distinct from the thread-count bug, not yet investigated.
+- **RBM6 is not yet directly confirmed on the severely-degraded #394/#625-class systems** — only on
+  two milder solves (§27.1). Would need a fresh `EDELWEISS_DUMP_COORDS`-enabled capture reaching
+  those exact AMR mesh states.
+- **p-multigrid's fixes (§28) are implemented and unit-verified, not live-re-validated.** The
+  natural next experiment: re-run the p-multigrid-vs-shipped-default comparison with both §26/§28
+  fixes in place, to see whether the "parity" verdict changes.
+- **`REVIEW_AND_RECOMMENDATIONS.md`** (found on `threadripper-64`, independent of this document's
+  own history — see §26.4) flags several items not yet investigated by this document: the `A.nnz`-
+  based pattern-change heuristic's false-negative risk (two different patterns can share a nonzero
+  count), heap allocations inside the AMGCL C++ wrapper's per-Krylov-step hot loop, OpenMP/OpenBLAS
+  thread oversubscription in run scripts, and unhandled linear-solver-non-convergence propagation
+  into the Newton loop (a non-converged GMRES result is currently used as-is, only logged as a
+  warning). Worth a deliberate read-through and triage, not yet done.
+- **Compile-flags scope was narrowed to the `amgcl` extension specifically** (§26.4) — `marmotelement`
+  and other extensions' existing `-march=native` were never re-tested this round (element-evaluation
+  cost was explicitly ruled out of scope early on, being cheap relative to the linear solve).
+- **`setup.py` is machine-specific — never blindly sync it.** `xeon`: `-std=c++11`, no arch flags.
+  `threadripper-64`: `-std=c++20` (its own prior local change, kept), no arch flags, plus unrelated
+  `klu` extension flags and a `pyproject.toml` packaging fix not present locally. Local: `-std=c++11`,
+  no arch flags (matches `xeon`).

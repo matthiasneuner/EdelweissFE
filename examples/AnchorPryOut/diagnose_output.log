@@ -1,0 +1,98 @@
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+=== manifest summary (10 dumps) ===
+solveCount     rows outerIters  prevIters        eta       newIncrement     growth
+       658   374059        229         53    3.0e-04                  1      +4.3x
+       677   374059        121         77    3.0e-04                  0      +1.6x
+       694   379515        126         57    3.0e-04                  0      +2.2x
+       835   384155        107         55    3.0e-04                  0      +1.9x
+       978   393547        103         49    1.0e-06                  0      +2.1x
+       981   393547        109         71    3.0e-04                  0      +1.5x
+      1361   408011        104         53    1.0e-06                  0      +2.0x
+      1370   408011        103         39    1.0e-06                  0      +2.6x
+      1773   446571        111         50    1.8e-06                  0      +2.2x
+      1777   446571        114         55    1.1e-06                  0      +2.1x
+
+====================================================================================================
+solve #658 rows=374059 outerIters(live)=229 eta=3.00e-04 newIncrement=True
+  -- block structure --
+    displacement                           {'n': 285087, 'nnz': 38980817, 'nnzPerRow': 136.73305692648208, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 82527.60412012305}
+    nonlocal damage                        {'n': 88972, 'nnz': 4618100, 'nnzPerRow': 51.90509373735557, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 466.2889907967105}
+    coupling displacement -> nonlocal damage {'nnz': 12723505, 'frob': 175.15583144305003}
+    coupling nonlocal damage -> displacement {'nnz': 4651083, 'frob': 2.6030189786022824}
+  -- isolated-field AMG quality (random rhs, eta=1e-8, no coupling) --
+    [displacement, production params       ] iters= 180 info=0 trueRes=9.65e-09 build=  1.62s solve= 25.56s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, production (untuned) params   ] iters=  43 info=0 trueRes=4.90e-09 build=  0.69s solve=  0.71s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +power_iters=300,lower=0.01   ] iters=  27 info=0 trueRes=4.63e-09 build=  0.79s solve=  0.39s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +eps_strong=0.01 too          ] iters=  27 info=0 trueRes=4.39e-09 build=  0.16s solve=  0.38s
+  -- full-system production replay at fixed eta (translations-only nullspace: no coords offline) --
+    [baseline (current defaults)           ] outerIters= 238 trueRes=9.39e-06 time= 143.69s
+    [damage field tuned like displacement  ] outerIters= 239 trueRes=8.33e-06 time= 142.61s
+    [sweeps=2 (baseline precond)           ] outerIters= 238 trueRes=9.39e-06 time= 282.54s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+
+====================================================================================================
+solve #694 rows=379515 outerIters(live)=126 eta=3.00e-04 newIncrement=False
+  -- block structure --
+    displacement                           {'n': 289179, 'nnz': 39550999, 'nnzPerRow': 136.76995563301622, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 82547.84898056954}
+    nonlocal damage                        {'n': 90336, 'nnz': 4683012, 'nnzPerRow': 51.839930924548355, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 468.73388643650736}
+    coupling displacement -> nonlocal damage {'nnz': 12374646, 'frob': 184.12073520539462}
+    coupling nonlocal damage -> displacement {'nnz': 4614756, 'frob': 2.4811892044705273}
+  -- isolated-field AMG quality (random rhs, eta=1e-8, no coupling) --
+    [displacement, production params       ] iters= 164 info=0 trueRes=8.39e-09 build=  1.99s solve= 22.71s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, production (untuned) params   ] iters=  43 info=0 trueRes=4.87e-09 build=  0.73s solve=  0.79s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +power_iters=300,lower=0.01   ] iters=  27 info=0 trueRes=4.59e-09 build=  0.83s solve=  0.41s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +eps_strong=0.01 too          ] iters=  27 info=0 trueRes=4.35e-09 build=  0.21s solve=  0.37s
+  -- full-system production replay at fixed eta (translations-only nullspace: no coords offline) --
+    [baseline (current defaults)           ] outerIters= 178 trueRes=6.92e-06 time= 132.04s
+    [damage field tuned like displacement  ] outerIters= 179 trueRes=3.89e-06 time=  42.86s
+    [sweeps=2 (baseline precond)           ] outerIters= 178 trueRes=6.92e-06 time= 249.78s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+
+====================================================================================================
+solve #1773 rows=446571 outerIters(live)=111 eta=1.80e-06 newIncrement=False
+  -- block structure --
+    displacement                           {'n': 339471, 'nnz': 47299897, 'nnzPerRow': 139.33413163421912, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 82632.29311720945}
+    nonlocal damage                        {'n': 107100, 'nnz': 5555643, 'nnzPerRow': 51.87341736694678, 'diagMin': 0.9999999999999997, 'diagMax': 1.0000000000000004, 'diagMedian': 1.0, 'fracBelow1em3Max': 0.0, 'fracBelow1em6Max': 0.0, 'frob': 498.989727356062}
+    coupling displacement -> nonlocal damage {'nnz': 15234189, 'frob': 251.15657980966765}
+    coupling nonlocal damage -> displacement {'nnz': 6715626, 'frob': 3.9192352728342787}
+  -- isolated-field AMG quality (random rhs, eta=1e-8, no coupling) --
+    [displacement, production params       ] iters= 116 info=0 trueRes=7.52e-09 build=  3.35s solve= 21.54s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, production (untuned) params   ] iters=  42 info=0 trueRes=6.71e-09 build=  1.30s solve=  0.88s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +power_iters=300,lower=0.01   ] iters=  27 info=0 trueRes=4.21e-09 build=  1.43s solve=  0.53s
+AMGCL WARNING: unknown parameter backendPrecision
+AMGCL WARNING: unknown parameter backendBlockSize
+    [damage, +eps_strong=0.01 too          ] iters=  27 info=0 trueRes=4.03e-09 build=  0.24s solve=  0.46s
+  -- full-system production replay at fixed eta (translations-only nullspace: no coords offline) --
+    [baseline (current defaults)           ] outerIters= 128 trueRes=3.70e-08 time= 136.71s
+    [damage field tuned like displacement  ] outerIters= 128 trueRes=3.92e-08 time=  36.28s
+    [sweeps=2 (baseline precond)           ] outerIters= 128 trueRes=3.71e-08 time= 159.84s
+
+====================================================================================================
+PARDISO-exact block-Gauss-Seidel ceiling test on solve #658
+      factorized 285087 x 285087 block in 9.92s
+      factorized 88972 x 88972 block in 1.35s
+    [PARDISO-exact block-GS ceiling        ] outerIters=   3 info=0 trueRes=9.83e-05 time=   4.01s
+
+=== summary: production replay outerIters, baseline vs. damage-field-tuned vs. sweeps=2 ===
+  solve #658: baseline=238  tuned=239  sweeps=2=238
+  solve #694: baseline=178  tuned=179  sweeps=2=178
+  solve #1773: baseline=128  tuned=128  sweeps=2=128

@@ -214,7 +214,7 @@ extensions += [
         sources=["edelweissfe/linsolve/amgcl/amgcl.pyx"],
         include_dirs=[numpy.get_include(), join(default_install_prefix, "include"), "."],
         language="c++",
-        extra_compile_args=["-std=c++11", "-fopenmp", "-O3"],
+        extra_compile_args=["-std=c++20", "-fopenmp", "-O3"],
         extra_link_args=["-fopenmp"],
     )
 ]
@@ -244,6 +244,8 @@ extensions += [
         ],
         language="c",
         extra_compile_args=[
+            "-O3",
+            *arch_flags,
             "-fopenmp",
             "-Wno-maybe-uninitialized",
         ],

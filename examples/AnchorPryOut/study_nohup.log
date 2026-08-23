@@ -1,0 +1,19 @@
+==========================================================================
+Starting Thread Scaling Study for AnchorPryOut (Step 2, max 10 increments)
+Threads to test: [16, 32]
+==========================================================================
+
+---> Running with OMP_NUM_THREADS = 16 ...
+     Finished in 888.43 seconds (Status: SUCCESS)
+
+---> Running with OMP_NUM_THREADS = 32 ...
+     Finished in 817.75 seconds (Status: SUCCESS)
+
+==========================================================================
+Thread Scaling Results Summary
+==========================================================================
+Threads    | Total Time (s)   | Speedup (vs 4T)    | Efficiency (%)   | Status
+--------------------------------------------------------------------------------
+16         | 888.43           | 1.00               | 25.0             | SUCCESS
+32         | 817.75           | 1.09               | 13.6             | SUCCESS
+==========================================================================
