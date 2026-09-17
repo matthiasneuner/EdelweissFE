@@ -150,6 +150,11 @@ class DofManager:
         )
         self.idcsOfHigherOrderEntitiesInDofVector = self.idcsOfElementsInDofVector | self.idcsOfConstraintsInDofVector
 
+        #: Which optional structures this manager carries, so that refreshConstraintIndices() keeps
+        #: exactly those consistent.
+        self._hasAccumulatedNodalFluxes = initializeAccumulatedNodalFluxesFieldwise
+        self._hasVIJPattern = initializeVIJPattern
+
         if initializeAccumulatedNodalFluxesFieldwise:
             self.nAccumulatedNodalFluxesFieldwise = self._computeAccumulatedNodalFluxesFieldWise(self.fields)
 
@@ -196,6 +201,42 @@ class DofManager:
         self.idcsOfFieldsOnNodeSetsInDofVector = self._locateFieldsOnNodeSetsInDofVector(nodeSets)
         self.idcsOfElementsInDofVector = self._locateNodeCouplingEntitiesInDofVector(elements)
         self.idcsOfConstraintsInDofVector = self._locateConstraintsInDofVector(constraints)
+
+    def refreshConstraintIndices(self, constraints: list):
+        """Re-locate the constraints' degrees of freedom after their connectivity changed.
+
+        A contact search re-assigns which nodes a constraint couples. That changes the constraints'
+        DOF footprints and nothing else: no node, field, scalar variable or element is touched, so
+        the DOF numbering and every element's indices stay valid, and only the constraint-derived
+        bookkeeping is recomputed -- by the same methods, in the same order, as the constructor
+        computed it. A full :class:`DofManager` for the anchor pry-out (90 195 elements) costs
+        2.4 s; this costs the constraints' share of it.
+
+        The merged entity mapping is rebuilt as a new dict object on purpose: consumers cache
+        plans keyed on its identity (the scatter template, the explicit solver's gather plan),
+        and a mapping mutated in place would leave those plans silently stale.
+
+        Parameters
+        ----------
+        constraints
+            The constraints, with their current connectivity.
+        """
+
+        (
+            self.accumulatedConstraintNDof,
+            self._accumulatedConstraintVIJSize,
+            self._nAccumulatedNodalFluxesFieldwiseFromConstraints,
+            self.largestNumberOfConstraintNDof,
+        ) = self._gatherConstraintsInformation(constraints)
+        self.idcsOfConstraintsInDofVector = self._locateConstraintsInDofVector(constraints)
+        self.idcsOfHigherOrderEntitiesInDofVector = self.idcsOfElementsInDofVector | self.idcsOfConstraintsInDofVector
+
+        if self._hasAccumulatedNodalFluxes:
+            self.nAccumulatedNodalFluxesFieldwise = self._computeAccumulatedNodalFluxesFieldWise(self.fields)
+
+        if self._hasVIJPattern:
+            self._sizeVIJ = self._accumulatedElementVIJSize + self._accumulatedConstraintVIJSize
+            self.I, self.J, self.idcsOfHigherOrderEntitiesInVIJ = self._initializeVIJPattern()
 
     def _reserveSpaceForNodeFields(
         self,

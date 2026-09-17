@@ -299,6 +299,31 @@ class ExplicitSystem:
     criticalTimeStep: float
 
 
+@dataclass
+class _ReusableExplicitOperators:
+    """The lumped operators of an explicit system, and what they are a function of.
+
+    A contact search that changes which nodes a constraint couples changes the constraints' DOF
+    footprints and nothing else: no node, field, element or multi-point constraint is touched, so
+    the lumped mass, its inverse, the mass-proportional damping rate and the multi-point-constraint
+    transformation are exactly what they were. :meth:`NED.buildEquationSystem` keeps them here
+    across such a rebuild instead of assembling them again -- on the anchor pry-out that assembly
+    and the MPC build it feeds were 1.4 s of a 3.8 s rebuild, every 500 increments.
+
+    The fingerprints record what the operators depend on; :meth:`NED._operatorsReusable` refuses
+    the reuse when any of them no longer holds, and a full build follows.
+    """
+
+    elementKeys: frozenset
+    multiPointConstraintKeys: frozenset
+    nDof: int
+    lumpedMass: np.ndarray
+    rawLumpedMass: np.ndarray
+    inverseLumpedMass: np.ndarray
+    dampingRate: np.ndarray
+    mpcTransformation: object
+
+
 class NED(NonlinearSolverBase):
     """This is the Nonlinear Explicit Dynamic -- solver.
 
@@ -361,6 +386,9 @@ class NED(NonlinearSolverBase):
         #: reported no damping, which is what makes the one damped update rule below reduce
         #: exactly to the undamped central difference there.
         self._dampingRate = None
+        #: The lumped operators of the current equation system, kept across a rebuild that a
+        #: constraint's connectivity asked for; see _ReusableExplicitOperators.
+        self._reusableOperators = None
         self._warnedAboutMissingInternalEnergy = False
         self._warnedAboutMissingExternalWork = False
         #: Summed relative drift of each lumped quantity (mass, first-order viscosity,
@@ -1384,13 +1412,47 @@ class NED(NonlinearSolverBase):
 
         return any([constraint.updateConnectivity(model) for constraint in self._dynamicConnectivityConstraints])
 
+    def _operatorsReusable(self, model: FEModel, stepActions: dict) -> bool:
+        """Whether the kept lumped operators still describe this model, so that a rebuild may keep
+        them and re-locate the constraints alone.
+
+        True only while everything the operators are a function of is unchanged: the element set,
+        the multi-point constraints, the DOF count -- and no step action that changes material
+        properties mid-step, since the inertia and the damping are assembled from the materials.
+        A topology change never gets here: it passes no ``previous`` system and builds afresh.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        stepActions
+            The step's actions.
+
+        Returns
+        -------
+        bool
+            Whether the kept operators may be reused.
+        """
+
+        cache = self._reusableOperators
+        if cache is None:
+            return False
+        if stepActions["changematerialproperty"]:
+            return False
+        return (
+            cache.nDof == self.theDofManager.nDof
+            and model.elements.keys() == cache.elementKeys
+            and model.multiPointConstraints.keys() == cache.multiPointConstraintKeys
+        )
+
     @performancetiming.timeit("build equation system")
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
         """Build the equation system and everything sized by it.
 
         Called once before the increment loop, and again from inside it whenever a constraint reports
         that its DOF footprint changed -- one method for both, so the path every model takes and the
-        path only a contact model takes cannot drift apart.
+        path only a contact model takes cannot drift apart. On that second path the DofManager is refreshed rather than
+        rebuilt and the lumped operators are reused; see :class:`_ReusableExplicitOperators`.
 
         Parameters
         ----------
@@ -1416,14 +1478,33 @@ class NED(NonlinearSolverBase):
         isRebuild = previous is not None
         verbosity = 2 if isRebuild else 0
 
-        self.journal.message("Creating monolithic equation system", self.identification, verbosity)
-        self.theDofManager = DofManager(
-            model.nodeFields.values(),
-            model.scalarVariables.values(),
-            model.elements.values(),
-            model.constraints.values(),
-            model.nodeSets.values(),
-        )
+        # A rebuild asked for by a constraint's connectivity changes the constraints' DOF footprints
+        # and nothing else, so the DofManager is refreshed rather than rebuilt -- its node numbering,
+        # element indices and DOF count are what they were -- and the lumped operators are kept; see
+        # _ReusableExplicitOperators. Anything else builds from scratch.
+        reuseOperators = isRebuild and self._operatorsReusable(model, step.actions)
+
+        if reuseOperators:
+            self.journal.message(
+                "Constraint connectivity changed: re-locating the constraints' degrees of freedom, "
+                "reusing the lumped operators",
+                self.identification,
+                verbosity,
+            )
+            self.theDofManager.refreshConstraintIndices(model.constraints.values())
+        else:
+            self.journal.message("Creating monolithic equation system", self.identification, verbosity)
+            # Neither the sparse-matrix (VIJ) pattern nor the index-to-node map is read by an explicit
+            # solver -- there is no system matrix -- and each costs a pass over every element.
+            self.theDofManager = DofManager(
+                model.nodeFields.values(),
+                model.scalarVariables.values(),
+                model.elements.values(),
+                model.constraints.values(),
+                model.nodeSets.values(),
+                initializeVIJPattern=False,
+                determiningIndexToHostObjectMapping=False,
+            )
         self.journal.message(
             "total size of eq. system: {:}".format(self.theDofManager.nDof),
             self.identification,
@@ -1437,146 +1518,173 @@ class NED(NonlinearSolverBase):
         # so far, applied as each block is constructed or re-declared; there is nothing to reset or
         # re-fetch here.
 
-        self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
-        self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
-
-        # The constraint force buffers and their index plans belong to the DofManager that was just
-        # (re)built: a refinement changes both a constraint's DOF count and where its DOFs sit, and
-        # a stale plan would scatter forces to the wrong degrees of freedom silently.
+        # The constraint force buffers and their index plans belong to the constraint indices that
+        # were just (re)located: a refinement or a contact search changes both a constraint's DOF
+        # count and where its DOFs sit, and a stale plan would scatter forces to the wrong degrees
+        # of freedom silently.
         self._constraintForcePlans = {}
-
-        # initialize mass and damping matrices
-        M = self.theDofManager.constructDofVector()  # initialize lumped mass matrix
-        Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
         U = self.theDofManager.constructDofVector()  # initialize displacement vector
         dU = self.theDofManager.constructDofVector()  # initialize displacement vector
         V = self.theDofManager.constructDofVector()  # initilize velocity vector
         P = self.theDofManager.constructDofVector()  # initialize reaction vector
 
-        M[:] = 0.0
-        for el in model.elements.values():
-            Me = np.zeros(el.nDof)
-            el.computeLumpedInertia(Me)
-            M[el] += Me
+        if reuseOperators:
+            # The same numbers the assembly below produced last time, in vectors that carry the
+            # refreshed entity mapping.
+            cache = self._reusableOperators
+            self.mpcTransformation = cache.mpcTransformation
+            M = self.theDofManager.constructDofVector()
+            M[:] = cache.lumpedMass
+            Minv = self.theDofManager.constructDofVector()
+            Minv[:] = cache.inverseLumpedMass
+            self._rawLumpedMass = self.theDofManager.constructDofVector()
+            self._rawLumpedMass[:] = cache.rawLumpedMass
+            self._dampingRate = self.theDofManager.constructDofVector()
+            self._dampingRate[:] = cache.dampingRate
+            self._lumpedMass = M
+        else:
+            self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
+            self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
 
-        # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
-        # always (whether or not that field also has an inertia -- see computeLumpedInertia()
-        # above, the SECOND-derivative coefficient).
-        damping = self.theDofManager.constructDofVector()
-        damping[:] = 0.0
-        for el in model.elements.values():
-            Ce = np.zeros(el.nDof)
-            el.computeLumpedDamping(Ce)
-            damping[el] += Ce
+            # initialize mass and damping matrices
+            M = self.theDofManager.constructDofVector()  # initialize lumped mass matrix
+            Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
-        # Checked here, because the inertia check below never sees it at a second-order DOF: there
-        # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
-        # negative rate amplifies the transient the damping exists to remove, and alpha*dt/2 = -1
-        # makes the update's denominator exactly zero. Both are silent.
-        if not np.all(np.isfinite(damping)) or np.any(damping < 0.0):
-            raise ValueError(
-                "The assembled lumped damping is not a valid dissipation: {:} of {:} entries are "
-                "negative and {:} are not finite (smallest: {:e}). A damping coefficient enters the "
-                "second-order update as the rate C/M, where a negative value amplifies instead of "
-                "damping, and a first-order field divides by it directly.".format(
-                    int(np.count_nonzero(np.asarray(damping) < 0.0)),
-                    damping.shape[0],
-                    int(np.count_nonzero(~np.isfinite(np.asarray(damping)))),
-                    np.nanmin(damping),
+            M[:] = 0.0
+            for el in model.elements.values():
+                Me = np.zeros(el.nDof)
+                el.computeLumpedInertia(Me)
+                M[el] += Me
+
+            # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
+            # always (whether or not that field also has an inertia -- see computeLumpedInertia()
+            # above, the SECOND-derivative coefficient).
+            damping = self.theDofManager.constructDofVector()
+            damping[:] = 0.0
+            for el in model.elements.values():
+                Ce = np.zeros(el.nDof)
+                el.computeLumpedDamping(Ce)
+                damping[el] += Ce
+
+            # Checked here, because the inertia check below never sees it at a second-order DOF: there
+            # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
+            # negative rate amplifies the transient the damping exists to remove, and alpha*dt/2 = -1
+            # makes the update's denominator exactly zero. Both are silent.
+            if not np.all(np.isfinite(damping)) or np.any(damping < 0.0):
+                raise ValueError(
+                    "The assembled lumped damping is not a valid dissipation: {:} of {:} entries are "
+                    "negative and {:} are not finite (smallest: {:e}). A damping coefficient enters the "
+                    "second-order update as the rate C/M, where a negative value amplifies instead of "
+                    "damping, and a first-order field divides by it directly.".format(
+                        int(np.count_nonzero(np.asarray(damping) < 0.0)),
+                        damping.shape[0],
+                        int(np.count_nonzero(~np.isfinite(np.asarray(damping)))),
+                        np.nanmin(damping),
+                    )
                 )
+
+            # Which time derivative each field carries, read off the two vectors just assembled. An
+            # inertia is what a central-difference update divides by, so a field with one is second
+            # order and a field without one is not; no deck answer that disagreed could be honoured.
+            self.firstOrderFields, self.secondOrderFields = self._classifyFieldsByScheme(M, damping)
+
+            self.ids_1st = self._dofIndicesOfFields(self.firstOrderFields)
+            self.ids_2nd = self._dofIndicesOfFields(self.secondOrderFields)
+
+            self.journal.message(
+                "Time integration, derived from the assembled operators: central difference for {:}; "
+                "forward Euler for {:}".format(
+                    ", ".join(self.secondOrderFields) or "(no field)",
+                    ", ".join(self.firstOrderFields) or "(no field)",
+                ),
+                self.identification,
+                verbosity,
             )
 
-        # Which time derivative each field carries, read off the two vectors just assembled. An
-        # inertia is what a central-difference update divides by, so a field with one is second
-        # order and a field without one is not; no deck answer that disagreed could be honoured.
-        self.firstOrderFields, self.secondOrderFields = self._classifyFieldsByScheme(M, damping)
+            self._checkDerivedSchemeAgainstTheDeck()
 
-        self.ids_1st = self._dofIndicesOfFields(self.firstOrderFields)
-        self.ids_2nd = self._dofIndicesOfFields(self.secondOrderFields)
-
-        self.journal.message(
-            "Time integration, derived from the assembled operators: central difference for {:}; "
-            "forward Euler for {:}".format(
-                ", ".join(self.secondOrderFields) or "(no field)",
-                ", ".join(self.firstOrderFields) or "(no field)",
-            ),
-            self.identification,
-            verbosity,
-        )
-
-        self._checkDerivedSchemeAgainstTheDeck()
-
-        # Which second-order fields may be summed into a linear momentum and which into the energy
-        # balance. The assembled inertia cannot say -- a density, a rotational inertia and a
-        # micro-inertia are all just positive numbers -- and it is a fact about the field rather
-        # than about this analysis, so it comes from the registry. See phenomena.inertiaKind.
-        self.linearMomentumFields = [f for f in self.secondOrderFields if carriesLinearMomentum(f)]
-        self.nonMechanicalSecondOrderFields = [f for f in self.secondOrderFields if not carriesKineticEnergy(f)]
-        self.ids_mechanicalEnergy = self._dofIndicesOfFields(
-            [f for f in self.secondOrderFields if carriesKineticEnergy(f)]
-        )
-
-        # A first-order field integrates by forward Euler, C * rate = P, and needs the damping
-        # computeLumpedDamping() reports here, not the (correctly zero) inertia. From here on this
-        # vector is "the divisor", whichever of the two coefficients a degree of freedom's scheme
-        # actually divides by.
-        M[self.ids_1st] = damping[self.ids_1st]
-
-        # Kept before folding, so the kinetic energy diagnostic accounts for the true velocities of
-        # all nodes (including tied slaves) rather than master-placed folded mass.
-        self._rawLumpedMass = M.copy()
-
-        # compute inverses
-        if np.any(M == 0.0):
-            raise ValueError(
-                "Zero found in the vector the increment divides by, at {:} of {:} degrees of freedom. "
-                "Every FIELD is covered by the classification above, which refuses a field carrying "
-                "neither coefficient, so what is left here are degrees of freedom belonging to no field "
-                "-- scalar variables, which this solver has no equation of motion for.".format(
-                    int(np.count_nonzero(np.asarray(M) == 0.0)), M.shape[0]
-                )
+            # Which second-order fields may be summed into a linear momentum and which into the energy
+            # balance. The assembled inertia cannot say -- a density, a rotational inertia and a
+            # micro-inertia are all just positive numbers -- and it is a fact about the field rather
+            # than about this analysis, so it comes from the registry. See phenomena.inertiaKind.
+            self.linearMomentumFields = [f for f in self.secondOrderFields if carriesLinearMomentum(f)]
+            self.nonMechanicalSecondOrderFields = [f for f in self.secondOrderFields if not carriesKineticEnergy(f)]
+            self.ids_mechanicalEnergy = self._dofIndicesOfFields(
+                [f for f in self.secondOrderFields if carriesKineticEnergy(f)]
             )
 
-        # A negative lumped mass is the classical failure mode of row-summing a quadratic element's
-        # consistent mass matrix, and it is worse than a zero one: the update stays finite, the run
-        # continues, and those degrees of freedom integrate backwards in time. The quadratic elements
-        # here blend the linear shape functions in precisely to avoid it, which is exactly why this
-        # is worth stating rather than trusting.
-        if np.any(M < 0.0):
-            raise ValueError(
-                "Negative coefficient found in {:} of {:} entries of the vector the increment "
-                "divides by (smallest: {:e}). It is a lumped inertia at a second-order degree of "
-                "freedom and a damping at a first-order one; either way a negative value makes the "
-                "explicit update integrate backwards in time there.".format(
-                    int(np.count_nonzero(M < 0.0)), M.shape[0], M.min()
+            # A first-order field integrates by forward Euler, C * rate = P, and needs the damping
+            # computeLumpedDamping() reports here, not the (correctly zero) inertia. From here on this
+            # vector is "the divisor", whichever of the two coefficients a degree of freedom's scheme
+            # actually divides by.
+            M[self.ids_1st] = damping[self.ids_1st]
+
+            # Kept before folding, so the kinetic energy diagnostic accounts for the true velocities of
+            # all nodes (including tied slaves) rather than master-placed folded mass.
+            self._rawLumpedMass = M.copy()
+
+            # compute inverses
+            if np.any(M == 0.0):
+                raise ValueError(
+                    "Zero found in the vector the increment divides by, at {:} of {:} degrees of freedom. "
+                    "Every FIELD is covered by the classification above, which refuses a field carrying "
+                    "neither coefficient, so what is left here are degrees of freedom belonging to no field "
+                    "-- scalar variables, which this solver has no equation of motion for.".format(
+                        int(np.count_nonzero(np.asarray(M) == 0.0)), M.shape[0]
+                    )
                 )
+
+            # A negative lumped mass is the classical failure mode of row-summing a quadratic element's
+            # consistent mass matrix, and it is worse than a zero one: the update stays finite, the run
+            # continues, and those degrees of freedom integrate backwards in time. The quadratic elements
+            # here blend the linear shape functions in precisely to avoid it, which is exactly why this
+            # is worth stating rather than trusting.
+            if np.any(M < 0.0):
+                raise ValueError(
+                    "Negative coefficient found in {:} of {:} entries of the vector the increment "
+                    "divides by (smallest: {:e}). It is a lumped inertia at a second-order degree of "
+                    "freedom and a damping at a first-order one; either way a negative value makes the "
+                    "explicit update integrate backwards in time there.".format(
+                        int(np.count_nonzero(M < 0.0)), M.shape[0], M.min()
+                    )
+                )
+
+            # Slave DOFs of multi-point constraints carry no own inertia: their mass is folded onto
+            # their masters (row-sum lumping of T^T M T, mass-conserving), their Minv stays zero, and
+            # their kinematics are assigned directly from the masters each increment.
+            if self.mpcTransformation is not None:
+                self.mpcTransformation.foldLumpedMass(M)
+                # Folded with the same operator as the inertia it is divided by, so the ratio below is
+                # the damping rate of the FOLDED system. Slaves of one material cancel exactly; slaves
+                # of several blend by inertia, which is what the folded equation of motion has.
+                self.mpcTransformation.foldLumpedMass(damping)
+
+            Minv[M != 0.0] = 1.0 / M[M != 0.0]
+
+            # Mass-proportional damping rate alpha = C / M, wherever an inertia is divided by and a
+            # damping was assembled alongside it. Slave DOFs fold to zero inertia and integrate nothing,
+            # so they stay at zero rather than dividing by it, and a DOF whose elements reported no
+            # damping keeps the zero that makes the update exactly the undamped one. Second-order DOFs
+            # only: a first-order one had its inertia overwritten with its damping, so C/M would be 1.0.
+            self._dampingRate = self.theDofManager.constructDofVector()
+            self._dampingRate[:] = 0.0
+            integrating = self.ids_2nd[M[self.ids_2nd] > 0.0]
+            self._dampingRate[integrating] = damping[integrating] / M[integrating]
+
+            # kept (instead of 1/Minv) for the kinetic energy: slave DOFs have Minv = 0
+            self._lumpedMass = M
+
+            self._reusableOperators = _ReusableExplicitOperators(
+                elementKeys=frozenset(model.elements.keys()),
+                multiPointConstraintKeys=frozenset(model.multiPointConstraints.keys()),
+                nDof=self.theDofManager.nDof,
+                lumpedMass=np.array(M),
+                rawLumpedMass=np.array(self._rawLumpedMass),
+                inverseLumpedMass=np.array(Minv),
+                dampingRate=np.array(self._dampingRate),
+                mpcTransformation=self.mpcTransformation,
             )
-
-        # Slave DOFs of multi-point constraints carry no own inertia: their mass is folded onto
-        # their masters (row-sum lumping of T^T M T, mass-conserving), their Minv stays zero, and
-        # their kinematics are assigned directly from the masters each increment.
-        if self.mpcTransformation is not None:
-            self.mpcTransformation.foldLumpedMass(M)
-            # Folded with the same operator as the inertia it is divided by, so the ratio below is
-            # the damping rate of the FOLDED system. Slaves of one material cancel exactly; slaves
-            # of several blend by inertia, which is what the folded equation of motion has.
-            self.mpcTransformation.foldLumpedMass(damping)
-
-        Minv[M != 0.0] = 1.0 / M[M != 0.0]
-
-        # Mass-proportional damping rate alpha = C / M, wherever an inertia is divided by and a
-        # damping was assembled alongside it. Slave DOFs fold to zero inertia and integrate nothing,
-        # so they stay at zero rather than dividing by it, and a DOF whose elements reported no
-        # damping keeps the zero that makes the update exactly the undamped one. Second-order DOFs
-        # only: a first-order one had its inertia overwritten with its damping, so C/M would be 1.0.
-        self._dampingRate = self.theDofManager.constructDofVector()
-        self._dampingRate[:] = 0.0
-        integrating = self.ids_2nd[M[self.ids_2nd] > 0.0]
-        self._dampingRate[integrating] = damping[integrating] / M[integrating]
-
-        # kept (instead of 1/Minv) for the kinetic energy: slave DOFs have Minv = 0
-        self._lumpedMass = M
 
         if not isRebuild:
             for fieldName, field in model.nodeFields.items():
