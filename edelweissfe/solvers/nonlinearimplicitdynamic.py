@@ -199,9 +199,9 @@ from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.fieldoutput import FieldOutputController
 from edelweissfe.utils.schema import schemaField
 
-#: Relative asymmetry above which an assembled consistent mass is rejected. It is the sum of
-#: element matrices :math:`\int \rho N^T N`, each symmetric by construction, so any asymmetry
-#: beyond round-off means an element wrote something that is not a mass matrix into its slot.
+#: Relative asymmetry above which an element's consistent mass is rejected. An element mass
+#: :math:`\int \rho N^T N` is symmetric by construction, so any asymmetry beyond round-off means the
+#: element wrote something that is not a mass matrix into its slot.
 _MASS_SYMMETRY_TOLERANCE = 1e-10
 
 #: An increment shorter than this fraction of the time elapsed in the step is the round-off
@@ -647,9 +647,10 @@ class NonlinearImplicitDynamic(NIST):
         # d(A_np)/d(dU) and d(V_np)/d(dU), the factors the mass and the damping enter the tangent
         # with. dT is fixed within the increment, so these two terms are too: formed once here
         # rather than scaled and added as two full-length value vectors on every Newton iteration.
-        dynamicStiffness = (1.0 / (beta * dT * dT)) * np.asarray(system.Mvij) + (gamma / (beta * dT)) * np.asarray(
-            system.Cvij
-        )
+        # Formed in place: one VIJ-length vector instead of three alive at once, which at a few
+        # hundred million entries is gigabytes.
+        dynamicStiffness = np.multiply(np.asarray(system.Mvij), 1.0 / (beta * dT * dT))
+        dynamicStiffness += np.multiply(np.asarray(system.Cvij), gamma / (beta * dT))
 
         self._currentIncrement = _NewmarkIncrement(
             system=system,
@@ -1161,8 +1162,8 @@ class NonlinearImplicitDynamic(NIST):
         Raises
         ------
         ValueError
-            If the assembled mass is not finite, not symmetric, or leaves a dynamic degree of
-            freedom without any mass.
+            If an element's mass is not symmetric, the assembled mass or damping is not finite,
+            the damping is negative, or the mass leaves a dynamic degree of freedom without any mass.
         """
 
         Mvij = self.theDofManager.constructVIJSystemMatrix()
@@ -1183,6 +1184,17 @@ class NonlinearImplicitDynamic(NIST):
                     )
                 ) from error
 
+            # Checked per element, on the element's own block: a non-symmetric mass converges and
+            # gives a wrong response silently. Checked on the assembled matrix instead, it would
+            # cost a transposed copy of the whole mass -- gigabytes on a large model.
+            Me = np.asarray(Mvij[el]).reshape(el.nDof, el.nDof)
+            massScale = np.max(np.abs(Me))
+            if massScale > 0.0 and np.max(np.abs(Me - Me.T)) > _MASS_SYMMETRY_TOLERANCE * massScale:
+                raise ValueError(
+                    "The consistent mass of element {:} ({:}) is not symmetric; it wrote something that is "
+                    "not a mass matrix.".format(el.elNumber, type(el).__name__)
+                )
+
             Ce = np.zeros(el.nDof)
             el.computeLumpedDamping(Ce)
             if np.any(Ce):
@@ -1200,20 +1212,13 @@ class NonlinearImplicitDynamic(NIST):
         Mvij[~couplesDynamicOnly] = 0.0
         Cvij[~couplesDynamicOnly] = 0.0
 
-        if not np.all(np.isfinite(Mvij)) or not np.all(np.isfinite(Cvij)):
-            raise ValueError("The assembled consistent mass or damping contains non-finite entries.")
-
         M = coo_matrix((np.asarray(Mvij), (I, J)), shape=(nDof, nDof)).tocsr()
         C = coo_matrix((np.asarray(Cvij), (I, J)), shape=(nDof, nDof)).tocsr()
 
-        massScale = float(np.max(np.abs(M.data))) if M.nnz else 0.0
-        antisymmetricPart = M - M.T
-        asymmetry = float(np.max(np.abs(antisymmetricPart.data))) if antisymmetricPart.nnz else 0.0
-        if massScale > 0.0 and asymmetry > _MASS_SYMMETRY_TOLERANCE * massScale:
-            raise ValueError(
-                "The assembled consistent mass is not symmetric (largest asymmetry {:e} against entries "
-                "up to {:e}); an element wrote something that is not a mass matrix.".format(asymmetry, massScale)
-            )
+        # Checked on the summed CSR values, not on the VIJ vectors they were summed from: a
+        # non-finite entry survives the summation, and the CSR arrays are the shorter ones.
+        if not np.all(np.isfinite(M.data)) or not np.all(np.isfinite(C.data)):
+            raise ValueError("The assembled consistent mass or damping contains non-finite entries.")
 
         if np.any(np.asarray(C.data) < 0.0):
             raise ValueError("The assembled damping has negative entries; a damping must dissipate.")
