@@ -127,6 +127,17 @@ checkpoint carries the acceleration, and recomputing it would replace a consiste
 that agrees only to solver tolerance. Switch it off with ``computeInitialAcceleration=False`` to
 continue a step from whatever acceleration was carried over.
 
+The equation is solved in its reduced form, on the free dynamic degrees of freedom only --
+:math:`\\boldsymbol{M}_{ff} \\ddot{\\boldsymbol{u}}_f = \\boldsymbol{R}_f`, prescribed degrees of freedom at zero
+acceleration, quasi-static fields without an equation, multi-point constraints condensed as in the
+Newton solves -- by conjugate gradients preconditioned with the diagonal of the mass, to a relative
+residual of 1e-14; a solve that does not get there raises instead of continuing with an unconverged
+acceleration. See :meth:`NonlinearImplicitDynamic._computeInitialAcceleration`. (Before, the full
+system with unit rows on the quasi-static and prescribed degrees of freedom went to the step's
+linear solver; that operator is neither symmetric nor well scaled, and an AMG solver configured for
+the tangent stopped far short of convergence on it -- a relative residual of 1e-1 on the
+edge-breakout decks -- which showed as an acceleration spike after every refinement.)
+
 **State and restart.** Velocity and acceleration are ordinary node-field entries, ``V`` and ``A``,
 written after every converged increment alongside the parent's ``U``/``P``/``dU`` -- the same
 mechanism the explicit solver uses for its velocity. That makes them part of every checkpoint the
@@ -182,6 +193,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, diags
+from scipy.sparse.linalg import cg
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesLinearMomentum
@@ -1276,19 +1288,100 @@ class NonlinearImplicitDynamic(NIST):
                     0,
                 )
 
+    #: Relative residual :math:`\\|M_{ff} a_f - R_f\\| / \\|R_f\\|` the initial acceleration is solved to.
+    _MASS_SOLVE_TOLERANCE = 1e-14
+
+    def _solveWithMassMatrix(self, Mff: csr_matrix, Rf: np.ndarray) -> np.ndarray:
+        """Solve :math:`M_{ff} a_f = R_f` by conjugate gradients, preconditioned by the diagonal
+        of :math:`M_{ff}`, and check the result.
+
+        Parameters
+        ----------
+        Mff
+            The mass matrix on the free dynamic degrees of freedom (symmetric positive definite).
+        Rf
+            The right-hand side on the same degrees of freedom.
+
+        Returns
+        -------
+        np.ndarray
+            The acceleration on the free dynamic degrees of freedom.
+
+        Raises
+        ------
+        RuntimeError
+            If the solve does not reach :attr:`_MASS_SOLVE_TOLERANCE` -- an unconverged initial
+            acceleration would be carried into every following increment, so it is never used.
+        """
+
+        if Rf.size == 0 or not np.any(Rf):
+            return np.zeros(Rf.size)
+
+        iterations = [0]
+
+        def countIteration(_):
+            iterations[0] += 1
+
+        diagonalPreconditioner = diags(1.0 / Mff.diagonal())
+        af, _ = cg(
+            Mff,
+            Rf,
+            rtol=self._MASS_SOLVE_TOLERANCE,
+            atol=0.0,
+            M=diagonalPreconditioner,
+            maxiter=1000,
+            callback=countIteration,
+        )
+
+        # Checked on the true residual, not on CG's own (preconditioned, recursively updated) one.
+        relativeResidual = float(np.linalg.norm(Mff @ af - Rf) / np.linalg.norm(Rf))
+        if not relativeResidual <= 10 * self._MASS_SOLVE_TOLERANCE:
+            raise RuntimeError(
+                "{:}: the initial acceleration did not converge -- conjugate gradients on the mass matrix "
+                "reached a relative residual of {:e} after {:} iterations (required: {:e}).".format(
+                    self.identification, relativeResidual, iterations[0], self._MASS_SOLVE_TOLERANCE
+                )
+            )
+        self.journal.message(
+            "initial acceleration: {:} free dynamic dofs, {:} CG iterations, relative residual {:.1e}".format(
+                Rf.size, iterations[0], relativeResidual
+            ),
+            self.identification,
+            2,
+        )
+        return af
+
     @performancetiming.timeit("initial acceleration")
     def _computeInitialAcceleration(
         self, system: _NewmarkSystem, U_n: DofVector, stepActions: dict, model: FEModel, timeStep: TimeStep
     ):
         """Compute the acceleration from equilibrium at the start of an increment, and commit it.
 
-        Solves :math:`M a_0 = P_\\mathrm{ext}(t_0) - P_\\mathrm{int}(u_0) - C v_0` on the dynamic,
-        free degrees of freedom. The loads are evaluated with a synthetic time step at the start of
-        the increment passed in (zero step-progress increment and zero time increment -- an ``f(t)``
-        amplitude at that instant), the elements with a zero displacement increment, which leaves
-        their state untouched. Prescribed degrees of freedom get a zero acceleration; degrees of
-        freedom this solver does not integrate get a unit diagonal and a zero right-hand side so the
-        system stays regular there.
+        Equilibrium at :math:`t_0` reads :math:`M a_0 = R` with
+        :math:`R = P_\\mathrm{ext}(t_0) - P_\\mathrm{int}(u_0) - C v_0`. It is solved in its textbook
+        reduced form, on the free dynamic degrees of freedom :math:`f` only:
+
+        .. math::
+
+            M_{ff} \\, a_f = R_f - M_{fp} \\, a_p , \\qquad a_p = 0 .
+
+        * The prescribed (Dirichlet) degrees of freedom :math:`p` get a zero acceleration: their
+          history is a displacement, and its second time derivative is not known here.
+        * Degrees of freedom this solver keeps quasi-static get no acceleration equation at all.
+        * Multi-point constraints (hanging nodes, ties) are condensed exactly as in the Newton
+          solves, :math:`T^T M T` and :math:`T^T R`, so :math:`f` holds only independent degrees of
+          freedom; the slaves then receive their masters' interpolated acceleration.
+
+        :math:`M_{ff}` is symmetric positive definite, and a consistent mass scaled by its diagonal
+        has a condition number independent of the element size, so conjugate gradients with the
+        diagonal as preconditioner converge in a few dozen iterations -- see
+        :meth:`_solveWithMassMatrix`. The step's own linear solver is not used: it is configured
+        for the effective tangent, not for a mass matrix.
+
+        The loads are evaluated with a synthetic time step at the start of the increment passed in
+        (zero step-progress increment and zero time increment -- an ``f(t)`` amplitude at that
+        instant), the elements with a zero displacement increment, which leaves their state
+        untouched.
 
         Called on the first increment of a cold-started step, where :math:`t_0` is the step's own
         start, and on the increment after a topology change, where it is that increment's start and
@@ -1337,22 +1430,24 @@ class NonlinearImplicitDynamic(NIST):
         R[:] = PExt
         R -= P
         R -= system.C @ np.asarray(system.V)
+        M = system.M
 
-        nDof = self.theDofManager.nDof
-        isStatic = np.ones(nDof, dtype=bool)
-        isStatic[system.dynamicDofs] = False
-        R[isStatic] = 0.0
-        MEff = (system.M + diags(isStatic.astype(float), format="csr")).tocsr()
-
+        # Condensed exactly as in the Newton solves; T^T M T has zero slave rows and columns but for
+        # the constraint rows, which the free set below leaves out anyway.
+        isFree = np.zeros(self.theDofManager.nDof, dtype=bool)
+        isFree[system.dynamicDofs] = True
         if self.mpcTransformation is not None:
-            R[:] = self.mpcTransformation.transformResidual(R, dU0)
-            MEff = self.mpcTransformation.transformSystemMatrix(MEff)
-
+            R = self.mpcTransformation.transformResidual(np.asarray(R), dU0)
+            M = self.mpcTransformation.transformSystemMatrix(M)
+            isFree[self.mpcTransformation.slaveDofIndices] = False
         for dirichlet in dirichlets:
-            R[dirichlet.constrainedDofIndices] = 0.0
-        MEff = self.applyDirichletToStiffness(MEff, dirichlets)
+            isFree[dirichlet.constrainedDofIndices] = False
 
-        A0 = self.linearSolve(MEff, R)
+        free = np.flatnonzero(isFree)
+        A0 = np.zeros(self.theDofManager.nDof)
+        A0[free] = self._solveWithMassMatrix(M[free][:, free], np.asarray(R)[free])
+        if self.mpcTransformation is not None:
+            self.mpcTransformation.applySlaveKinematics(A0)
 
         system.A[:] = 0.0
         system.A[system.dynamicDofs] = A0[system.dynamicDofs]
