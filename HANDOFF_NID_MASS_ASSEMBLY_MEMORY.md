@@ -208,3 +208,54 @@ RSS peak 32.0 GiB at 3460 s (22 increments incl. cutbacks), against 56 GB on LEO
 
 ### No fix committed
 Nothing was proven, so nothing was changed. A weakref test would pass today: old systems are collected.
+
+## Phase 5 (2026-09-27): blockamg vs pardiso across a live refinement on c1_100. Localised, not fixed.
+
+Probe: `~/nidmem/solveprobe.py` logs RSS plus glibc `mallinfo2` (heap in use / mmapped / free in arenas) around every
+linear solve and every equation-system rebuild. Runs are in `~/nidmem/sp_amg` (fresh run, with a checkpoint written
+every increment) and `rs_amg` / `rs_pardiso` (both resumed from `sp_amg/restart_1.h5`, the checkpoint written just
+before the first live refinement).
+
+### Result 1: the step is live large arrays created at the rebuild, not solver memory and not fragmentation
+Fresh blockamg run, first live refinement (451,582 dof):
+
+| stage | RSS | glibc heap in use | mmapped (large arrays) |
+|---|---|---|---|
+| before, steady | 14.3 GiB | 2.09 GiB | 10.82 GiB |
+| right after `_updateNewmarkSystem`, before any solve | 17.7 GiB | 2.15 GiB | 13.99 GiB |
+| after solves 70-76, steady | 16.6 GiB | 2.11 GiB | 12.90-12.94 GiB |
+
+- The +2.1 GiB that stays is **entirely mmapped**: live allocations above the mmap threshold, i.e. numpy arrays of about VIJ size.
+- The glibc heap and the free memory inside the arenas are flat, so this is not fragmentation.
+- It is present **before the first linear solve** after the rebuild. Resumed blockamg run: 10.87 GiB before the rebuild, 12.96 GiB right after it.
+- Therefore **blockamg/AMGCL is not the source**. The Phase-4 attribution ("at the first linear solve") came from coarser logging.
+- Earlier weakref probes showed the old DofManager, CSR generator matrix, `_NewmarkSystem` and `Mvij` are collected. So the lingering ~2.1 GiB is some other VIJ-sized array that survives from the old equation system and was not tracked.
+- Candidates:
+  - the old K `VIJSystemMatrix` / U / dU vectors held by the `NIST.solveStep` frame;
+  - the old MPC transformation (`self.mpcTransformation`, whose SpGEMM results with `useAmgclMPCCondensation`);
+  - `_dirichletIndicesCache`;
+  - the element-to-VIJ scatter maps.
+- Next step: weakref/`gc.get_referrers` on those, at one rebuild, on this checkpoint.
+
+### Result 2: pardiso A/B incomplete
+- The pardiso resume reached only its 6th solve before the budget ran out: 55-74 s per solve, and pardiso alone sits at 32.5-33 GiB.
+- That was still within the checkpointed increment, before the refinement. **No verdict for pardiso across the rebuild.**
+- It is less needed now, since the step is already present before any solve.
+
+### Result 3: why the first solve after every refinement "does not converge" -- a real accuracy bug
+- The failing solve is the **initial-acceleration solve** `MEff a0 = R` (`_computeInitialAcceleration`), not a Newton solve.
+  - c1_100: solve #69, ‖r‖ = 16 against η = 3e-4 after 150 outer iterations.
+  - c1_50: ‖r‖ = 13, and 6.7e-4 at the step start.
+- The unconverged a0 is the acceleration spike seen in Phase 3: max|A| 69 -> 7.2e3 (c1_50), ||a0||∞ = 1.06e4 (c1_100).
+- **The Phase-3 A/B used this unconverged solve as its "consistent" reference, so that verdict needs redoing.**
+- Cause, measured on the hanging-node AMR test (`~/nidmem/meffprobe.py`). `MEff` is:
+  - **non-symmetric**: Dirichlet row replacement leaves the columns (max asymmetry 0.75);
+  - **badly scaled**: unit diagonal rows for static and Dirichlet dofs next to mass entries of 1e-6 to 1e-5;
+  - **indefinite in its symmetric part**: min eigenvalue -0.79 against diagonal entries down to 3e-6.
+- An AMG hierarchy (with a rigid-body near-null space) built for that operator cannot converge it. CG or BiCGSTAB with a Jacobi preconditioner also failed on it (tried, reverted; 4 AMR tests failed).
+- Proposed fix (not small, not done):
+  1. Form MEff so that it stays symmetric positive definite: symmetric Dirichlet elimination, and the static and Dirichlet rows set to a mass-scaled diagonal instead of 1.
+  2. Then solve it with CG plus a Jacobi preconditioner, with a loud "did not converge" error, instead of the tangent's linear solver.
+  3. Then redo the Phase-3 initial-acceleration A/B.
+
+### Nothing committed on `fix/nid-blockamg-rebuild-memory` except this handoff
