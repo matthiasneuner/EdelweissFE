@@ -1,0 +1,49 @@
+** Newmark-beta implicit dynamics (NID): the initial acceleration on a mesh with hanging nodes, under
+** a load present at t = 0 -- the path NIDLiveAMR, a displacement-driven bar whose mass is 1e-7 of
+** its stiffness, leaves invisible in the displacements.
+**
+** Two C3D20R elements, fixed at x = 0, lateral displacements suppressed. The left element is refined
+** once at the start (initialOnly), so its 2:1 interface to the right element carries hanging-node
+** multi-point constraints. A suddenly applied end load (f(t) = 1) then gives a nonzero equilibrium
+** acceleration at t = 0, solved on the free dynamic dofs with the slaves condensed. Density and
+** stiffness are of the same order, so that acceleration enters the displacements visibly.
+
+*material, name=LinearElastic, id=bar
+**E      nu   density
+100.0,   0.0, 1.0
+
+*section, name=section1, material=bar, type=solid
+gen_all
+
+*job, name=nidInitialAccelerationAmrJob, domain=3d
+*solver, solver=NID, name=theSolver
+newmarkBeta=0.25
+newmarkGamma=0.5
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =2
+nY      =1
+nZ      =1
+lX      =2.0
+lY      =1.0
+lZ      =1.0
+elType  =C3D20R
+
+*modelModifier, type=hAdaptivity, name=amrInitial
+>>marker, type=nodeSet, nSet=gen_left, initialOnly=True
+refineElSet=gen_all
+maxLevel=1
+
+*fieldOutput
+>>perNode, elSet=gen_all, field=displacement, result=U, name=displacement
+>>perNode, nSet=gen_right, field=displacement, result=A, name=tipA, f(x)='np.mean(x[:,0])', saveHistory=True
+
+*output, type=monitor, name=monitor
+fieldOutput=tipA
+
+*step, solver=theSolver
+stepLength=1.0, startInc=0.1, maxInc=0.1, minInc=1e-6, maxNumInc=10, maxIter=25
+>>options, name=theSolver, extrapolation=off
+>>dirichlet, name=fixedEnd, nSet=gen_left, field=displacement, 1=0.0, 2=0.0, 3=0.0
+>>dirichlet, name=lateral, nSet=all, field=displacement, 2=0.0, 3=0.0
+>>nodeforces, name=endLoad, nSet=gen_right, field=displacement, 1=1.0, f(t)='1'

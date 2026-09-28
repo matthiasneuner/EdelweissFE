@@ -1,6 +1,6 @@
 # NID initial acceleration: reduced, converged mass solve (2026-09-27/28, xeon)
 
-Branch `fix/nid-initial-acceleration` (off origin/next_v26.11 8e63e8e9), fix commit **ce0d8e89**, pushed to `mn`, no PR.
+Branch `fix/nid-initial-acceleration` (off origin/next_v26.11 8e63e8e9), fix commit **e42849c9** (reworded from ce0d8e89), pushed to `mn`, no PR.
 It is independent of `fix/nid-mass-assembly-memory` / PR #177, whose HANDOFF (Phase 5) found the bug.
 
 ## Bug
@@ -37,7 +37,7 @@ About 14 iterations per decade, and no growth with refinement.
 Setup: same compiled extensions, OMP=8, MKL_CBWR=AUTO,STRICT, `--create` into copies.
 - **All 144 cases that produce a U.ref are bitwise identical, including NID, NIDParallel and NIDLiveAMR. No U.ref was regenerated.**
 - 11 cases produce no U.ref on either side. 2 fail on both sides on matplotlib usetex (known on xeon): IndirectDisplacementControl, OutputManagers.
-- Correction to the ce0d8e89 commit message: its "NID/NIDParallel 1.4e-17, NIDLiveAMR 1.6e-13" came from a comparison against a base copy whose `csrgeneratorv2` extension was stale (built from the pre-8e63e8e9 source). With identical extensions the three NID testfiles are bitwise identical.
+- The first version of the fix commit claimed "NID/NIDParallel 1.4e-17, NIDLiveAMR 1.6e-13". That came from a base copy whose `csrgeneratorv2` extension was stale (built from the pre-8e63e8e9 source); the message is corrected in e42849c9.
 
 ## A/B on c1_50: first live refinement at increment 11, then increments 11-13 (runs `~/nidmem/aba_*`)
 
@@ -58,3 +58,22 @@ Before the fix, the unconverged consistent solve gave: KE 1.014, max|A| 7.2e3, R
 - **Open:**
   - The acceleration spike after refinement belongs to the AMR state transfer (see the state-transfer PRs), not to NID.
   - The +6.9 % RF error of the old unconverged solve means earlier NID+AMR results on blockamg decks carry that error for a few increments after each refinement.
+
+## Do the NID testfiles reach the new solve? (2026-09-28 check)
+Probe: `~/nidmem/accprobe.py`. On each side it prints `edelweissfe.__file__` and the loaded `csrgeneratorv2` .so:
+`~/nidmem/fe_accbase/...` for base, `EdelweissFE-nidacc/...` for the branch, with identical compiled extensions.
+
+| testfile | calls of `_computeInitialAcceleration` | a0 | base solver | branch solver |
+|---|---|---|---|---|
+| NID, NIDParallel | 1, at t = 0 | max\|a0\| 0.3948 (nonzero) | PARDISO | CG, 4 free dofs, 1 iteration, relres 9.9e-17 |
+| NIDLiveAMR | 2: at t = 0, and after the refinement at t = 0.1 | t = 0: exactly 0 (at rest, no load). t = 0.1: max\|a0\| 0.72 | PARDISO | CG, 487 free dofs, 55 iterations, relres 1.7e-15 |
+
+- The new path is reached with a nonzero a0 in all three testfiles, and NIDLiveAMR's refinement solve does run.
+- a0 differs from base at rounding level only: NID 1.7e-16 (1 ulp), NIDLiveAMR 4.1e-13 of 0.72. The old path was a direct PARDISO solve on these small systems, so it was accurate there.
+- **Why U.ref is still bitwise identical:** the stored U is the final displacement, and in these decks inertia is tiny against stiffness. NIDLiveAMR is displacement-driven, with ρ/E = 1e-7. A 4e-13 change in a0 moves the equilibrium displacement by about (ρ/E)·δa ~ 1e-20, below one ulp of U (about 4e-19).
+- **New testfile `NIDInitialAccelerationAMR`:** two C3D20R elements, the left one refined at the start (13 hanging-node slave dofs), a sudden end load, and ρ ~ E. Here a0 enters U visibly.
+  - a0: max 259; branch vs base differs by 6.8e-13 (2.6e-15 relative). CG took 19 iterations on 59 free dofs.
+  - U: branch vs base differs by 2.8e-16 of 0.126, in 69 of 279 entries. That is CG rounding: the old PARDISO solve was accurate here too.
+  - Its U.ref was created with the branch.
+- **Where the old solve was actually wrong:** only with an iterative tangent solver (blockamg on the edge-breakout decks), as tabulated above. No small testfile reproduces that without blockamg.
+- The fix commit message was reworded (now **e42849c9**; the tree is unchanged, force-pushed): the earlier ΔU figures came from a stale-extension comparison.
