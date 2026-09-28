@@ -70,10 +70,10 @@ Probe: `~/nidmem/accprobe.py`. On each side it prints `edelweissfe.__file__` and
 
 - The new path is reached with a nonzero a0 in all three testfiles, and NIDLiveAMR's refinement solve does run.
 - a0 differs from base at rounding level only: NID 1.7e-16 (1 ulp), NIDLiveAMR 4.1e-13 of 0.72. The old path was a direct PARDISO solve on these small systems, so it was accurate there.
-- **Why U.ref is still bitwise identical:** the stored U is the final displacement, and in these decks inertia is tiny against stiffness. NIDLiveAMR is displacement-driven, with ρ/E = 1e-7. A 4e-13 change in a0 moves the equilibrium displacement by about (ρ/E)·δa ~ 1e-20, below one ulp of U (about 4e-19).
+- **Why U.ref is still bitwise identical:** in NIDLiveAMR (displacement-driven, ρ/E = 1e-7) a 4e-13 change in a0 moves U by about (ρ/E)·δa ~ 1e-20, below one ulp of U (about 4e-19). In NID the change is 3 ulp on the 4 free x-dofs (0.3948); measured, it is absorbed in the rounding of the first increment's residual and leaves U bitwise. That is observed, not derived.
 - **New testfile `NIDInitialAccelerationAMR`:** two C3D20R elements, the left one refined at the start (13 hanging-node slave dofs), a sudden end load, and ρ ~ E. Here a0 enters U visibly.
   - a0: max 259; branch vs base differs by 6.8e-13 (2.6e-15 relative). CG took 19 iterations on 59 free dofs.
   - U: branch vs base differs by 2.8e-16 of 0.126, in 69 of 279 entries. That is CG rounding: the old PARDISO solve was accurate here too.
   - Its U.ref was created with the branch.
 - **Where the old solve was actually wrong:** only with an iterative tangent solver (blockamg on the edge-breakout decks), as tabulated above. No small testfile reproduces that without blockamg.
-- The fix commit message was reworded (now **e42849c9**; the tree is unchanged, force-pushed): the earlier ΔU figures came from a stale-extension comparison.
+- The fix commit message was reworded (reworded twice; see `git log`; the tree is unchanged, force-pushed): the earlier ΔU figures came from a stale-extension comparison.
