@@ -48,22 +48,41 @@
 30000.0,    0.2,        9.3,        28,         33,         2.2,      0.85,       0.08,
 **Bh        Ch          Dh          As          epsF,       lDamage     m           maxDmg
 0.003,      2.0,        0.000001,   1,         0.0130,     2,          1.00,       0.99,
-**drvdvMthd dTThrshHold viscosity   density     nonlocalViscosity
-0,          1e-12,      0,          3e-7,       1e-5
+**drvdvMthd dTThrshHold viscosity   density     nonlocalViscosity  microInertia
+0,          1e-12,      0,          3e-7,       3e-4,              2.25e-8
+**
+** HYPERBOLIC NONLOCAL FIELD (idx 20 nonlocal viscosity eta, idx 21 micro-inertia m_k), as in the
+** production hef70 explicit runs (LEO4 8526221, LEO5 u6mm/rigidblock): eta = 3e-4 s and
+** m_k = eta^2/4 = 2.25e-8 s^2. With m_k > 0 the nonlocal damage field is integrated by central
+** difference instead of forward Euler, so its stable increment falls off with h instead of h^2
+** (#134). Carried over UNCHANGED, not rescaled for this mesh, because neither value depends on it:
+**  - m_k = eta^2/4 is the critically damped pairing of the homogeneous mode; Marmot rejects
+**    m_k > eta^2/4. It depends on eta alone, and larger m_k only raises the nonlocal limit.
+**  - The mesh enters only through the nonlocal stable increment, ~ sqrt(m_k) * h / l, and that limit
+**    does not bind here: the solver reports the same dt as with eta = 1e-5 (the steel governs).
+**  - eta is a relaxation TIME: the nonlocal field lags the local one by ~eta. Against this deck's
+**    stepLength = 0.1 s that is 0.3 % of the ramp (0.03 % in production, stepLength = 1 s).
+**
+** The DENSITY is NOT the production value (4.8e-6, x2000 at stepLength 1 s): the mass scaling goes
+** with the loading time, and this deck ramps in 0.1 s with x100 on every material (see
+** steps_explicit.inc). Both keep the ramp many elastic wave transits long.
 
-*material, name=LinearElastic, id=steelAnchor
-**E       nu   density (x100, mass scaled)
-200000.0, 0.3, 7.85e-7
+** STEEL: perfectly plastic von Mises, fy = 1080 MPa (high-strength anchor rod), as in production.
+** It was LinearElastic; the anchor bends at the concrete surface, and an elastic rod carries
+** whatever the concrete asks of it.
+*material, name=VonMises, id=steelAnchor
+**E       nu   fy      HLin deltaYield delta density (x100, mass scaled)
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0,  7.85e-7
 
-*material, name=LinearElastic, id=steelPlate
-**E       nu   density (x100, mass scaled)
-200000.0, 0.3, 7.85e-7
+*material, name=VonMises, id=steelPlate
+**E       nu   fy      HLin deltaYield delta density (x100, mass scaled)
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0,  7.85e-7
 
 ** washer + nut fixture: kept as its own material id (matching the source model's intent of
 ** varying fastener stiffness independently), currently identical to the other steel parts
-*material, name=LinearElastic, id=steelFastener
-**E       nu   density (x100, mass scaled)
-200000.0, 0.3, 7.85e-7
+*material, name=VonMises, id=steelFastener
+**E       nu   fy      HLin deltaYield delta density (x100, mass scaled)
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0,  7.85e-7
 
 ** 3. Mortar bond layer: Abaqus models this with COH3D8 cohesive elements, response=TRACTION
 **    SEPARATION, an elastic-only (no debonding) traction law, and a cylindrical stack direction.
@@ -81,3 +100,35 @@
 *material, name=LinearElastic, id=mortar
 **E     nu   density (x100, mass scaled)
 5000.0, 0.2, 2.2e-7
+
+**=================================================================================================
+** ARTIFICIAL BULK VISCOSITY (explicit only), as in production
+**=================================================================================================
+** Central difference is non-dissipative; without damping the reaction rings from the first element
+** that cracks through. b1 = 0.06 (linear, Landshoff) and b2 = 1.2 (quadratic, von Neumann-Richtmyer,
+** compression only) are the Abaqus/Explicit defaults, on every element set. The viscous stress is
+** added to the integrated stress only, never stored, and does not touch the constitutive law.
+**
+** On the concrete the linear term is degraded with damage as (c/c_0)^2.0: inside a cracked element it
+** is a crack-OPENING resistance that never relaxes, and undegraded it added +27..55 % to the
+** fracture energy of a GCDP bar, all of it generated inside the damaged band.
+*elementProperty, elSet=concrete, propertyName=bulk viscosity
+0.06, 1.2
+
+*elementProperty, elSet=concrete, propertyName=bulk viscosity damage degradation
+2.0
+
+*elementProperty, elSet=anchor, propertyName=bulk viscosity
+0.06, 1.2
+
+*elementProperty, elSet=plate, propertyName=bulk viscosity
+0.06, 1.2
+
+*elementProperty, elSet=washer, propertyName=bulk viscosity
+0.06, 1.2
+
+*elementProperty, elSet=nut, propertyName=bulk viscosity
+0.06, 1.2
+
+*elementProperty, elSet=mortar, propertyName=bulk viscosity
+0.06, 1.2

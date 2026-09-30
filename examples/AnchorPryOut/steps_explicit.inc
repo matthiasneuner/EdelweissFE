@@ -3,11 +3,14 @@
 **=================================================================================================
 *solver, solver=NEDParallel, name=theSolver
 ** The time-integration scheme of every field is DERIVED from the assembled inertia and damping
-** (#134); the two lines below only ASSERT the expected outcome and abort the step if it differs.
+** (#134); the line below only ASSERTS the expected outcome and abort the step if it differs.
 ** The pre-#134 controls second-order-fields/first-order-fields were removed and now fail with
 ** "Invalid option".
-expect-second-order-fields=displacement
-expect-first-order-fields=nonlocal damage
+** Both fields are second order: GCDP's micro-inertia m_k (material property 21, materials_explicit.inc)
+** gives the nonlocal damage field an inertia, so it is integrated by central difference (hyperbolic).
+** Without m_k it would be forward Euler (parabolic), and this assertion is what catches a deck that
+** loses m_k -- the property is optional and silently defaults to zero.
+expect-second-order-fields="displacement, nonlocal damage"
 ** COURANT NUMBER: 0.1, and this is the expensive decision in this file -- READ THIS BEFORE RAISING IT.
 **
 ** The solver's critical time step is l / c, which is a LINEAR-element formula: it is the stable
