@@ -50,16 +50,22 @@
 **drvdvMthd dTThrshHold viscosity   density
 0,          1e-12,      1e-6,       3e-9,
 
-*material, name=LinearElastic, id=steelAnchor
-200000.0, 0.3
+** STEEL: perfectly plastic von Mises, fy = 1080 MPa, identical to materials_explicit.inc (there
+** with a density). The GCDP nonlocal viscosity / micro-inertia and the bulk viscosity of the
+** explicit variant are rate terms and have no meaning for a static solve, so they are absent here.
+*material, name=VonMises, id=steelAnchor
+**E       nu   fy      HLin deltaYield delta
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0
 
-*material, name=LinearElastic, id=steelPlate
-200000.0, 0.3
+*material, name=VonMises, id=steelPlate
+**E       nu   fy      HLin deltaYield delta
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0
 
 ** washer + nut fixture: kept as its own material id (matching the source model's intent of
 ** varying fastener stiffness independently), currently identical to the other steel parts
-*material, name=LinearElastic, id=steelFastener
-200000.0, 0.3
+*material, name=VonMises, id=steelFastener
+**E       nu   fy      HLin deltaYield delta
+200000.0, 0.3, 1080.0, 0.0, 0.0,       0.0
 
 ** 3. Mortar bond layer: Abaqus models this with COH3D8 cohesive elements, response=TRACTION
 **    SEPARATION, an elastic-only (no debonding) traction law, and a cylindrical stack direction.
