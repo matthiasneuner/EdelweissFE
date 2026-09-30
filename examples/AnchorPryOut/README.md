@@ -54,7 +54,7 @@ your run is set up correctly:
 
 ```
 AMR ModelModifier: marked 110, refined -> active elements 11176 -> 11946, 1124 hanging nodes
-eliminating 8804 slave DOF(s) via multi-point constraints
+eliminating 11004 slave DOF(s) via multi-point constraints
 ```
 
 ## How the files fit together
@@ -95,8 +95,23 @@ equal displacement rather than at equal cost.
 | predictor | **`extrapolation=off`** | — | the linear predictor overshoots through contact-status flips and localizing damage. Measured on this exact model: ON gave a cutback spiral (three >100-iteration solves in one increment); OFF ran 230 increments past where ON died |
 | amplitude | linear in step progress | **quintic smoothstep** | the plate must start from rest with zero velocity *and* zero acceleration, or the first increment shocks the structure. Harmless under statics |
 | courant number | — | **0.1**, not the 0.8 default | `l/c` is a linear-element formula and a quadratic element's highest eigenfrequency is several times what it predicts |
+| bulk viscosity | — | **b1 = 0.06, b2 = 1.2** on every element set, linear term degraded with damage (exponent 2.0) on the concrete | central difference dissipates nothing, so without it the reaction rings from the first element that cracks through. Undegraded, the linear term resists crack opening forever and inflates the fracture energy |
+| nonlocal field | — (static) | **hyperbolic**: `eta = 3e-4`, `m_k = eta^2/4 = 2.25e-8` | `m_k > 0` integrates the nonlocal damage by central difference, whose stable increment scales with h, not h². `m_k = eta^2/4` depends on `eta` alone, not on the mesh |
 | AMR marker | `alphaP >= 1` | `alphaP >= 1` | deliberately identical, so the comparison is not confounded. `alphaP` is monotone; a stress threshold carries the full wave content and, with no coarsening anywhere in the code, ratchets towards refining everything |
 | `splitFactor` | 2 | 2 | 3 is free implicitly and **not** free explicitly — it takes the refined concrete below the anchor's stable increment. 2 is what makes the meshes match |
+
+## Production settings
+
+Steel, contact and damping follow the production explicit runs of the hef = 70 mm pry-out (ring
+mesh, LEO4/LEO5, 2026-09), in both variants wherever they apply:
+
+- **steel**: perfectly plastic von Mises, fy = 1080 MPa, instead of linear elastic;
+- **contact penalty**: 1e4 instead of 1e5 on both GPTS pairs;
+- **explicit only**: the bulk viscosity and the hyperbolic nonlocal field of the table above.
+
+Those runs use a different mesh and a different time scale (stepLength 1 s, densities ×2000). The
+values above do not depend on the mesh; the densities do depend on the time scale, so this example
+keeps its own ×100 over 0.1 s. `materials_explicit.inc` gives the reasoning next to each value.
 
 ## The reference result
 
@@ -115,7 +130,7 @@ all.
 - `maxLevel=2` lets `alphaP` refine the borehole layer that the initial marker already refined. It
   is not free for the explicit variant: refined concrete reaches ~0.62 mm, where it starts competing
   with the anchor's 1.25 mm elements for the stable increment.
-- The Duvaut-Lions viscosity is `0` here. `AnchorPryOutCoarse` uses `1e-6` implicitly, and what the
+- The Duvaut-Lions viscosity (GCDP property 18, not the nonlocal viscosity) is `0` explicitly. `AnchorPryOutCoarse` uses `1e-6` implicitly, and what the
   right value is for a softening run at this scale is genuinely open.
 - `report-performance=True` is set on the explicit variant. It prints the cost structure per
   reporting interval, which is how you see a refinement or a contact search becoming expensive while
