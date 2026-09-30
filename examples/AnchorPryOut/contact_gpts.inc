@@ -12,14 +12,18 @@
 ** obstruction (patch test: force and flatness exact to machine precision, corner nodal force equal
 ** to the analytic -4pA/12).
 **
-** penalty, sliding and type are UNCHANGED from v14, so the constitutive and kinematic setup is
+** PENALTY 1e4 (was 1e5), as in every production pry-out run: 1e5 N/mm^3 is far stiffer than the
+** bearing it models, and contact raises the highest frequency of the explicit system. Shared by
+** both variants, so the implicit one sees the same interface compliance.
+**
+** sliding and type are UNCHANGED from v14, so the constitutive and kinematic setup is
 ** identical and the two runs are directly comparable. nQuadraturePoints=3 is the default and is the
 ** rule that integrates a quadratic face's shape functions exactly over a facet.
 **
 ** plate/concrete bearing surface: Abaqus SMALL SLIDING -> sliding=small
 *constraint, name=contactPlateConcrete, type=surfaceToDeformableSurfacePenalty
-slaveSurface=plate_bottom_facets, masterSurface=concrete_top_facets, penalty=1e5, sliding=small, type=quadratic, nQuadraturePoints=3
+slaveSurface=plate_bottom_facets, masterSurface=concrete_top_facets, penalty=1e4, sliding=small, type=quadratic, nQuadraturePoints=3
 
 ** anchor shaft / plate hole
 *constraint, name=contactShaftHole, type=surfaceToDeformableSurfacePenalty
-slaveSurface=anchor_to_plate_facets, masterSurface=plate_to_anchor_facets, penalty=1e5, sliding=small, type=quadratic, nQuadraturePoints=3
+slaveSurface=anchor_to_plate_facets, masterSurface=plate_to_anchor_facets, penalty=1e4, sliding=small, type=quadratic, nQuadraturePoints=3
