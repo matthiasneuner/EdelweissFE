@@ -28,38 +28,61 @@
 # Created on Mon Sep 24 13:52:01 2018
 
 # @author: matthias
-"""
-Parallel implementation of the NED solver.
+"""The nonlinear explicit dynamic solver, with the element loop on several threads.
+
+:class:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED` with one difference: its element loop
+runs on ``OMP_NUM_THREADS`` threads (with the GIL disabled; see
+:doc:`/documentation/parallelization`). The loop is the same one -- the same chunks, the same
+assembly in element order -- so the result is bit-identical to ``NED``.
 """
 
-
-import edelweissfe.utils.performancetiming as performancetiming
-from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.parallelizationutilities import (
     getNumberOfThreads,
+    isFreeThreadingSupported,
     reportThreadAvailability,
 )
-from edelweissfe.solvers.base.parallelelementcomputation import (
-    computeElementsInParallelForExplicit,
-)
 from edelweissfe.solvers.nonlinearexplicitdynamic import NED
-from edelweissfe.timesteppers.timestep import TimeStep
 
 
 class NEDParallel(NED):
+    """The nonlinear explicit dynamic solver, with the element loop on several threads.
+
+    Parameters
+    ----------
+    jobInfo
+        A dictionary containing the job information.
+    journal
+        The journal instance for logging.
+    """
+
     identification = "NEDPSolver"
 
     def beginStep(self, step, model, fieldOutputController, outputmanagers):
+        """Report the threads available, then start the step; see :meth:`NED.beginStep`.
+
+        Parameters
+        ----------
+        step
+            The step to solve.
+        model
+            The model tree.
+        fieldOutputController
+            The field output controller.
+        outputmanagers
+            The output managers.
+        """
+
         reportThreadAvailability(getNumberOfThreads(), self.journal, self.identification)
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
-    @performancetiming.timeit("elements")
-    def computeElements(
-        self,
-        elements: list,
-        U_np: DofVector,
-        dU: DofVector,
-        P: DofVector,
-        timeStep: TimeStep,
-    ) -> DofVector:
-        return computeElementsInParallelForExplicit(elements, U_np, dU, P, timeStep)
+    def elementLoopThreads(self) -> int:
+        """The number of threads the element loop runs on: ``OMP_NUM_THREADS``, if the interpreter
+        runs without the GIL, one otherwise.
+
+        Returns
+        -------
+        int
+            The number of threads.
+        """
+
+        return getNumberOfThreads() if isFreeThreadingSupported() else 1

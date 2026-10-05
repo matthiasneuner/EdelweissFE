@@ -412,6 +412,31 @@ class MultiPointConstraintTransformation:
 
         return self._T.T @ P
 
+    def foldExplicitForceOperator(self, dofs: slice | np.ndarray) -> csr_matrix:
+        """The rows and columns of :math:`T^T` belonging to the given degrees of freedom, as the
+        operator :meth:`foldExplicitForce` applies there.
+
+        Folding a vector known only at ``dofs`` -- one process' subdomain -- is then a product of
+        the size of the subdomain rather than of the model. It is exact wherever every slave of a
+        master in ``dofs`` is in ``dofs`` as well, and the same bits as the full product: each row
+        keeps its entries in the same order, and the dropped columns carry nothing.
+
+        Parameters
+        ----------
+        dofs
+            ``slice(None)`` for all of them, or sorted degree-of-freedom indices.
+
+        Returns
+        -------
+        csr_matrix
+            The restricted operator, with canonically sorted indices.
+        """
+
+        TTranspose = self._T.T.tocsr()
+        restricted = TTranspose[dofs][:, dofs].tocsr()
+        restricted.sort_indices()
+        return restricted
+
     def applySlaveKinematics(self, V: np.ndarray):
         """Assign the slave DOFs their master-interpolated values (in place):
         :math:`V_s = \\sum_a N_a \\, V_{m_a}`. Used on the velocity vector in explicit dynamics;

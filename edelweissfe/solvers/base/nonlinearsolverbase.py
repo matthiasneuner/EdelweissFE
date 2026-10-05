@@ -189,10 +189,46 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         topologyChanged = model.topology.update(step) if offerModelModifiers else False
         meshDependentsRefreshed = model.topology.refreshMeshDependents()
-        constraintConnectivityChanged = any(
-            [constraint.updateConnectivity(model) for constraint in model.constraints.values()]
-        )
+        constraintConnectivityChanged = self.updateConnectivityOf(model, model.constraints)
         return TopologyUpdate(topologyChanged, meshDependentsRefreshed, constraintConnectivityChanged)
+
+    def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
+        """Let the given constraints update their connectivity, in the order given.
+
+        A materialized list rather than ``any()`` over a generator, which would stop at the first
+        constraint reporting a change and leave the later ones unchanged.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        constraints
+            The constraints, by name.
+
+        Returns
+        -------
+        bool
+            Whether any constraint's DOF footprint changed.
+        """
+
+        return any([constraint.updateConnectivity(model) for constraint in constraints.values()])
+
+    def elementsLoadedHere(self, elements) -> list:
+        """Those of the given elements -- the elements of a distributed load or a body force -- whose
+        load this solver assembles: all of them, unless the solver computes only a part of the model.
+
+        Parameters
+        ----------
+        elements
+            An iterable of elements of the model.
+
+        Returns
+        -------
+        list
+            Those elements, in the order given.
+        """
+
+        return elements
 
     @performancetiming.timeit("distributed loads")
     def computeDistributedLoads(
@@ -231,7 +267,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         for dLoad in distributedLoads:
             load = dLoad.getCurrentLoad(timeStep)
             for faceID, elementSet in dLoad.surface.items():
-                for el in elementSet:
+                for el in self.elementsLoadedHere(elementSet):
                     Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
                     Pe = np.zeros(el.nDof)
 
@@ -277,7 +313,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         for bForce in bodyForces:
             force = bForce.getCurrentLoad(timeStep)
-            for el in bForce.elementSet:
+            for el in self.elementsLoadedHere(bForce.elementSet):
                 Pe = np.zeros(el.nDof)
                 Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
 
