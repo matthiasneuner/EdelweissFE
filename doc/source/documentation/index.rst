@@ -31,6 +31,7 @@ Documentation
    adaptivitytheory
    output
    parallelization
+   domaindecomposition
    phenomena
    plotter
    points

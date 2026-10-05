@@ -64,6 +64,11 @@ The topology update comes before the proposal, because a refinement may lower th
 increment of an explicit analysis. An increment retried after a cutback starts from the same
 accepted state, so the model modifiers are not asked again: they decide once per accepted state.
 
+A domain-decomposed run (``NEDMPI``, see :doc:`domaindecomposition`) keeps the same loop: before the
+output of an output increment, every process receives the state of every element and constraint
+from the process computing it, so the checkpoint rank 0 writes is that of the whole model, and the
+same restart data that resumes a run is what keeps the copies of the model current.
+
 Restoring a checkpoint
 ----------------------
 

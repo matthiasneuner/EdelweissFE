@@ -122,6 +122,21 @@ momentum and kinetic energy in that case.
 
 .. pprint:: solver:NED
 
+The part of the model computed in a process
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The increment of ``NED`` is written for a process that may compute only a part of the model. That
+is one object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`, which
+says which elements, constraints and degrees of freedom are computed here, and how a partial
+result -- a nodal force at a degree of freedom shared with another part, an energy -- becomes a
+result of the whole model. ``NED`` and ``NEDParallel`` compute the whole model, the
+:class:`~edelweissfe.solvers.base.modelpartition.WholeModel`, for which all of that is trivial;
+``NEDMPI`` computes a :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` in each process
+(:doc:`domaindecomposition`).
+
+.. automodule:: edelweissfe.solvers.base.modelpartition
+   :members:
+
 Rebuilding the equation system during a step
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -160,3 +175,13 @@ the update runs on whole vectors instead of indexed subsets, and gives the same 
    :members:
 
 .. pprint:: solver:NEDParallel
+
+``NEDMPI`` - Nonlinear Explicit Dynamic (domain-decomposed over MPI processes)
+------------------------------------------------------------------------------
+
+See :doc:`domaindecomposition` for how the model is decomposed, and how to run a job.
+
+.. automodule:: edelweissfe.solvers.nonlinearexplicitdynamicmpi
+   :members:
+
+.. pprint:: solver:NEDMPI

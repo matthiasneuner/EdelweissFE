@@ -13,6 +13,9 @@ However, it is RECOMMENDED to enforce a fixed number of threads by running
 
 This ensures that the same number of threads ``XX`` is employed both in EdelweissFE as well as in the underlying Intel MKL (e.g., if the PARDISO linear solver is used).
 
+The explicit dynamic solver can also be distributed over MPI processes, on one node or several;
+see :doc:`domaindecomposition`.
+
 .. _parallelization_thread_pinning:
 
 Do not set ``OMP_PROC_BIND`` or ``OMP_PLACES``
@@ -52,10 +55,13 @@ instead of computing. The loop looks parallel and does not scale.
 
 The explicit element loop therefore gives each chunk of elements buffers of its own -- the gathered
 solution and increment, and a force buffer the elements write into -- and places the finished chunk
-into the shared scatter buffer in a single indexed assignment. Per element, nothing shared is
-touched. The positions each chunk writes to are precomputed once, in
-:func:`~edelweissfe.solvers.base.parallelelementcomputation._chunkedGatherPlan`, and reused for as
-long as the mesh and the degree-of-freedom layout stay the same.
+into one shared buffer of element contributions in a single assignment. Per element, nothing shared
+is touched. The positions each chunk reads and writes are precomputed once, in
+:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`, and reused for as long as
+the mesh, the degree-of-freedom layout and the part of the model computed in the process stay the
+same. The contributions are then summed into the force vector in element order, so the result does
+not depend on the number of threads: ``NED``, ``NEDParallel`` and each process of ``NEDMPI`` run this
+same loop, ``NED`` on one thread.
 
 This is worth keeping in mind when adding a parallel loop of your own: prefer giving each task its
 own buffer and merging once, over having every task write into one shared object as it goes.
