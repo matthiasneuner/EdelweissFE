@@ -969,7 +969,11 @@ class NED(NonlinearSolverBase):
         # millions of increments, and it is a serial Python loop over every element,
         # constraint and multi-point constraint in the model.
         with performancetiming.timeit("accept state"):
-            model.advanceToTime(timeStep.totalTime)
+            model.advanceToTime(
+                timeStep.totalTime,
+                elements=self.partition.elements,
+                constraints=self.partition.constraints,
+            )
 
         if self.isOutputIncrement(timeStep):
             # The output that follows reads the whole model, and so does a checkpoint written with
@@ -982,6 +986,25 @@ class NED(NonlinearSolverBase):
             loop = self._incrementPlan.elementLoop
             if self.partition.rebalance(loop.plan, loop.costs, loop.nMeasuredIncrements):
                 self._incrementPlan = self._planIncrement(model)
+
+    def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
+        """Write the output of an accepted increment; see
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.writeIncrementOutput`.
+
+        The model was synchronized for it in :meth:`acceptIncrement`. A conditional stop is decided
+        by an output manager, and a failure to write may happen in one part of the model only; both
+        are agreed on by every part, so that all of them leave the step the same way.
+
+        Parameters
+        ----------
+        fieldOutputController
+            The field output controller.
+        outputManagers
+            The output managers, restart checkpoint writers last.
+        """
+
+        with performancetiming.timeit("finalize output"), self.partition.agreedOnByAllParts("Writing the output"):
+            super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def endStep(self, step, model: FEModel):
         """Report the step's performance timing.

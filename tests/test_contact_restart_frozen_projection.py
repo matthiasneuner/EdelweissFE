@@ -219,6 +219,32 @@ def test_foreign_or_missing_projection_is_refused(resumedContact):
             constraint.setRestartData(data)
 
 
+@pytest.mark.parametrize(
+    "constraintType",
+    ["nodeToDeformableSurfacePenalty", "surfaceToDeformableSurfacePenalty", "surfaceToDiscreteRigidBodyPenalty"],
+)
+def test_a_copy_restored_from_another_copy_becomes_that_copy(constraintType, tmp_path):
+    """What the state synchronization of a domain-decomposed run relies on: a copy of a constraint
+    that is handed the restart data of the copy that searched (its owner) holds the owner's state
+    afterwards -- the same restart data, the same coupled nodes -- however far its own search lags
+    behind. A checkpoint written from it is then the owner's."""
+
+    owner = _run(tmp_path, "searched", constraintType, 200).constraints["contact"]
+    copy = _run(tmp_path, "early", constraintType, 3).constraints["contact"]
+    assert [node.label for node in copy.nodes] != [node.label for node in owner.nodes] or not all(
+        np.array_equal(owner.getRestartData()[key], values) for key, values in copy.getRestartData().items()
+    ), "the copy must lag behind the owner for this test to say anything"
+
+    copy.setRestartData(owner.getRestartData())
+
+    ownerData, copyData = owner.getRestartData(), copy.getRestartData()
+    assert copyData.keys() == ownerData.keys()
+    for key, values in ownerData.items():
+        assert np.array_equal(copyData[key], values), key
+    assert [node.label for node in copy.nodes] == [node.label for node in owner.nodes]
+    assert copy.nDof == owner.nDof
+
+
 _LIVE_REFINEMENT = """
 *modelModifier, type=hAdaptivity, name=amr
 >>marker, type=elementSet, elSet=upper_all, initialOnly=False

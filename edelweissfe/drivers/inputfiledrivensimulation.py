@@ -39,6 +39,10 @@ from time import time as getCurrentTime
 from edelweissfe.config.configurator import loadConfiguration, updateConfiguration
 from edelweissfe.config.phenomena import carriesLinearMomentum, domainMapping
 from edelweissfe.config.solvers import getSolverByName
+from edelweissfe.domaindecomposition.mpienvironment import (
+    isRootProcess,
+    numberOfProcesses,
+)
 from edelweissfe.helpers.inputfilehelpers import (
     createFieldOutputFromInputFile,
     createOutputManagersFromInputFile,
@@ -90,7 +94,12 @@ def finiteElementSimulation(
 
     identification = "feCore"
 
-    journal = Journal(verbose=verbose)
+    # Started by an MPI launcher, every process runs this function on the same input, and each
+    # builds the complete model; a domain-decomposed solver then has each compute a subdomain of it.
+    # Only rank 0 reports and writes output -- the others would write the same files concurrently.
+    writesOutput = isRootProcess()
+
+    journal = Journal(verbose=verbose and writesOutput)
 
     job = inputfile["job"][0]
     jobName = job["name"]
@@ -184,10 +193,14 @@ def finiteElementSimulation(
     stepManager = createStepManagerFromInputFile(inputfile)
     fieldOutputController = createFieldOutputFromInputFile(inputfile, model, journal)
     model.fieldOutputController = fieldOutputController
+    if not writesOutput:
+        fieldOutputController.disableFileExport()
     fieldOutputController.initializeJob()
 
-    outputManagers = createOutputManagersFromInputFile(
-        inputfile, jobName, model, fieldOutputController, journal, plotter
+    outputManagers = (
+        createOutputManagersFromInputFile(inputfile, jobName, model, fieldOutputController, journal, plotter)
+        if writesOutput
+        else []
     )
     for outputManager in outputManagers:
         outputManager.initializeJob()
@@ -225,6 +238,15 @@ def finiteElementSimulation(
                     # before the interrupted job wrote this checkpoint, and the state its step
                     # actions carried over is restored with the resumed step.
                     continue
+            # Checked per step, against the solver the step actually uses: an unused default solver
+            # is no reason to refuse the job.
+            if numberOfProcesses() > 1 and not type(step.solver).supportsDomainDecomposition:
+                raise StepFailed(
+                    "This job runs on {:} MPI processes, but step {:}'s solver {:} computes the whole "
+                    "model in each of them. Use a domain-decomposed solver (NEDMPI), or run without an "
+                    "MPI launcher.".format(numberOfProcesses(), step.number, step.solver.identification)
+                )
+
             resumeFrom = None
             if step.number == resumeStepNumber:
                 resumeFrom, resumeStepNumber = resumeCheckpoint, None
@@ -287,9 +309,10 @@ def finiteElementSimulation(
         for manager in outputManagers:
             manager.finalizeJob()
 
-        plotter.finalize()
-        if not suppressPlots:
-            plotter.show()
+        if writesOutput:
+            plotter.finalize()
+            if not suppressPlots:
+                plotter.show()
 
         if resumeCheckpoint is not None:
             resumeCheckpoint.close()

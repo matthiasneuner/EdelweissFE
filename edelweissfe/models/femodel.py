@@ -407,7 +407,7 @@ class FEModel:
         self._prepareElements(journal)
         self.topology.recordSetupFingerprint()
 
-    def advanceToTime(self, time: float):
+    def advanceToTime(self, time: float, elements: dict = None, constraints: dict = None):
         """Accept the current state of the model and sub instances, and
         set the new time.
 
@@ -415,23 +415,32 @@ class FEModel:
         ----------
         time
             The new time.
+        elements
+            The elements whose computed state is accepted, by number; all elements of the model if
+            omitted. A domain-decomposed solver passes the elements of its own subdomain: the others
+            were not computed in this process, and accepting them would overwrite the state they
+            were last synchronized to with a stale trial state.
+        constraints
+            The constraints whose state is accepted, by name; all constraints of the model if
+            omitted. Restricted for the same reason as ``elements``: a frictional contact promotes
+            its current tangential force to its history here.
         """
 
         self.time = time
 
-        self._acceptElementStates()
+        self._acceptElementStates(self.elements if elements is None else elements)
 
         # Left serial deliberately. Measured on the 337 471-dof explicit anchor pry-out model, where
         # the element loop below costs 19.09 ms per call: these two together cost 0.015 ms, i.e. less
         # than a tenth of a percent of it. There is nothing here to parallelize.
-        for constraint in self.constraints.values():
+        for constraint in (self.constraints if constraints is None else constraints).values():
             constraint.acceptLastState()
 
         for mpc in self.multiPointConstraints.values():
             mpc.acceptLastState()
 
-    def _acceptElementStates(self):
-        """Let every element accept its computed state, across the available threads.
+    def _acceptElementStates(self, elements: dict):
+        """Let every given element accept its computed state, across the available threads.
 
         An element's ``acceptLastState`` touches only that element's own state buffers -- for a
         Marmot element it is the single ``self._stateVars[:] = self._stateVarsTemp`` copy -- so the
@@ -443,9 +452,13 @@ class FEModel:
         dynamics calls it on every one of millions of increments: on the anchor pry-out model it was
         15.6 % of the whole step, the single largest cost outside the element kernels themselves, and
         every millisecond of it was serial Python holding 31 of 32 threads idle.
+
+        Parameters
+        ----------
+        elements
+            The elements whose state is accepted, by number.
         """
 
-        elements = self.elements
         numThreads = getNumberOfThreads() if isFreeThreadingSupported() else 1
 
         if numThreads == 1 or len(elements) < numThreads:

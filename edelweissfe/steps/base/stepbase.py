@@ -232,9 +232,7 @@ class StepBase(ABC):
                     isRetry = False
 
                     if solver.isOutputIncrement(timeStep):
-                        fieldOutputController.finalizeIncrement()
-                        for manager in outputManagers:
-                            manager.finalizeIncrement(statusInfoDict=solver.incrementStatus)
+                        solver.writeIncrementOutput(fieldOutputController, outputManagers)
 
             except ReachedMaxIncrements:
                 pass

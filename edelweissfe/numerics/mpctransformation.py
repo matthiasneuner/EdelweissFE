@@ -232,6 +232,23 @@ class MultiPointConstraintTransformation:
         self._TTranspose = None
         self._amgclSpgemmHelper = None
 
+    def slaveMasterDofPairs(self) -> tuple[np.ndarray, np.ndarray]:
+        """Every dependency of the condensation, as pairs of a slave DOF and one of its masters.
+
+        After chained records are flattened, so a master is always an independent DOF. A domain
+        decomposition reads this to keep a slave and all of its masters in the set of DOFs one
+        process integrates: folding a slave's force onto its masters, and interpolating its velocity
+        from them, are only correct where all of them are.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            The slave DOF and the master DOF of each dependency, of equal length.
+        """
+
+        W = self._W.tocoo()
+        return self.slaveDofIndices[W.row], W.col.astype(int)
+
     @property
     def nEliminatedDof(self) -> int:
         """The number of slave DOFs eliminated from the equation system."""

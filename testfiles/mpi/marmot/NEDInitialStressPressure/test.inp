@@ -1,0 +1,31 @@
+** Explicit plane-strain column: a one-time geostatic initial stress (>>setinitialconditions) and a ramped
+** pressure on the top surface. Under NEDMPI the initial condition reaches elements a process does not
+** compute, and the pressure loads elements of neighbouring subdomains. U.ref is the serial (NEDParallel) solution.
+*modelGenerator, generator=planeRectQuad, name=gen
+l=50
+h=150
+nX=10
+nY=30
+elType=CPE4
+
+*material, name=linearElastic, id=le
+210000, 0.3, 7.8e-9
+
+*section, name=section1, thickness=1.0, material=le, type=plane
+all
+
+*job, name=geoNED, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=50
+
+*fieldOutput
+>>perNode, name=dispTop, nSet=gen_top, field=displacement, result=U, f(x)='np.mean(x[:,1])', saveHistory=True
+>>perElement, elSet=all, result=stress, name=S22, quadraturePoint=1, f(x)='x[:,1]'
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=600, maxIter=25, stepLength=1e-3
+>>dirichlet, name=left,   nSet=gen_left,   field=displacement, 1=0.0,
+>>dirichlet, name=right,  nSet=gen_right,   field=displacement, 1=0.0
+>>dirichlet, name=bottom, nSet=gen_bottom,   field=displacement, 2=0.0,
+>>setinitialconditions, elSet=all, property='geostatic stress', values='-1.0,150.0,-0.5,0.0,1.0,1.0'
+>>distributedload, name=dlTop, surface=gen_top, magnitude=10, f(t)=t, type=pressure

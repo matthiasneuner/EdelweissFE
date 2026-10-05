@@ -86,6 +86,11 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
     #: ModelModifierBase.actsOnlyAtSimulationStart and NED.validateModelCapabilities.
     supportsModelModifiers = False
 
+    #: Whether this solver computes one subdomain of the model in each of several MPI processes.
+    #: A solver that does not would, started by an MPI launcher, have every process compute the
+    #: whole model and write the same output files; the driver refuses that.
+    supportsDomainDecomposition = False
+
     #: The active multi-point-constraint (hanging node / tie) condensation, if any -- None
     #: whenever there are no multi-point constraints in the model. Lets
     #: applyDirichletToStiffness tell an MPC-transformed (fresh, disposable) system matrix
@@ -525,6 +530,23 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         """
 
         return True
+
+    def writeIncrementOutput(self, fieldOutputController, outputManagers: list):
+        """Write the output of an accepted increment: the field outputs, then the output managers in
+        the order given -- the restart checkpoints last. Called by the increment loop whenever
+        :meth:`isOutputIncrement`.
+
+        Parameters
+        ----------
+        fieldOutputController
+            The field output controller.
+        outputManagers
+            The output managers, restart checkpoint writers last.
+        """
+
+        fieldOutputController.finalizeIncrement()
+        for manager in outputManagers:
+            manager.finalizeIncrement(statusInfoDict=self.incrementStatus)
 
     @abstractmethod
     def endStep(self, step, model: FEModel):

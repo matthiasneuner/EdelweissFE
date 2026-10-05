@@ -305,6 +305,15 @@ class _FieldOutputBase:
 
         return np.asarray(self.result)
 
+    def disableFileExport(self):
+        """Stop this field output from writing its ``.csv`` export; its results are still recorded.
+
+        For the processes of a domain-decomposed run other than rank 0, which compute the same field
+        outputs and must not write the same file concurrently.
+        """
+
+        self.export = None
+
     def writeLastResult(self):
         """Update file output.
 
@@ -974,6 +983,13 @@ class FieldOutputController:
     def initializeJob(self):
         for fieldOutput in self.fieldOutputs.values():
             fieldOutput.initializeJob()
+
+    def disableFileExport(self):
+        """Stop every field output from writing its ``.csv`` export; see
+        :meth:`_FieldOutputBase.disableFileExport`."""
+
+        for fieldOutput in self.fieldOutputs.values():
+            fieldOutput.disableFileExport()
 
     def finalizeIncrement(
         self,

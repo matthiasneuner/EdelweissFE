@@ -38,12 +38,21 @@ from timeit import default_timer as timer
 
 import matplotlib
 import numpy as np
-from rich import print
+from rich import print as richPrint
 
+from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 matplotlib.use("Agg")
+
+
+def print(*args, **kwargs):
+    """Report on rank 0 only: under an MPI launcher every process runs every test, and each reaches
+    the same verdict."""
+
+    if isRootProcess():
+        richPrint(*args, **kwargs)
 
 
 def main():
@@ -140,7 +149,8 @@ def main():
                 os.chdir("..")
             else:
                 print("")
-                np.savetxt(referenceSolutionFile, U)
+                if isRootProcess():
+                    np.savetxt(referenceSolutionFile, U)
 
         except (NotImplementedError, ModuleNotFoundError) as e:
             print("Test {:50} [grey]SKIPPED[/]: ".format(directory) + str(e))

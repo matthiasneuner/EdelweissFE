@@ -43,7 +43,8 @@ increment is the same in both cases; what differs is captured by one object, a
 
 :class:`WholeModel`, the partition of a solver running in a single process, computes everything
 here: its sums are the values themselves, its forces are complete as assembled, and it has nothing
-to synchronize. A domain-decomposed solver implements it by the subdomain of each of its processes.
+to synchronize. The domain-decomposed implementation is
+:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain`.
 """
 
 from abc import ABC, abstractmethod
