@@ -73,7 +73,11 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
     * **generators that do more than describe the mesh** (see
       :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`): code
       running on element objects while the mesh is described (``executePythonCode``, ``cubit``),
-      or contact facets and rigid bodies made by every process itself.
+      or contact facets and rigid bodies made by every process itself;
+    * **generators run after the keywords** (``executeAfterManualGeneration=True``): they may describe
+      elements after the mesh was partitioned, which no process would compute;
+    * **expression field outputs over an element set** (``>>fromExpression, elSet=``): the expression
+      reads the element objects of the whole set itself, which cannot be gathered.
 
     Parameters
     ----------
@@ -99,6 +103,20 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
         reason = getGeneratorClass(definition["generator"]).wholeModelReason
         if reason is not None:
             reasons.append("generator {:} ({:}) {:}".format(definition["name"], definition["generator"], reason))
+        if definition.get("executeAfterManualGeneration", False):
+            reasons.append(
+                "generator {:} ({:}) runs after the mesh is partitioned (executeAfterManualGeneration)".format(
+                    definition["name"], definition["generator"]
+                )
+            )
+    for definition in inputfile["fieldOutput"]:
+        for fieldOutput in definition["moduleoptions"].get("fromExpression", []):
+            if fieldOutput["elSet"]:
+                reasons.append(
+                    "expression field output {:} reads the elements of element set {:}".format(
+                        fieldOutput["name"], fieldOutput["elSet"]
+                    )
+                )
     return reasons
 
 

@@ -78,7 +78,11 @@ there is none:
   (``surfaceElementGenerator``) and the discrete rigid body generator make elements in every process
   themselves. Every generator says so through
   :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`; a generator
-  that does not say it only describes the mesh is assumed to need the whole model.
+  that does not say it only describes the mesh is assumed to need the whole model;
+* a **generator run after the keywords** (``executeAfterManualGeneration=True``): it may describe
+  elements after the mesh was partitioned, which no process would compute;
+* an **expression field output over an element set** (``>>fromExpression, elSet=``): the expression
+  reads the element objects of the whole set itself, which cannot be gathered.
 
 Moving these readers to gathers of their own -- refinement on replicated mesh data with owner-local
 elements, contact through surface-sized exchanges -- removes them from the rule one by one.
@@ -266,11 +270,11 @@ restart checkpoint                      before the output of an output increment
                                         checkpoint and releases them
 ======================================  =================================================================
 
-Still guarded, and refused loudly on a distributed model: an expression field output over an element
-set (``>>fromExpression, elSet=``, which reads the elements themselves), the mesh plot,
-``meshDataToFile``, the element set marker, adaptive refinement, ``surfaceSnap`` and the P1 topology
-classification. None of them can run in a distributed job today that the fallback rule did not
-already send to the whole model, except the first three, which fail at their setup.
+Still guarded, and refused loudly on a partial model: an expression field output over an element
+set (``>>fromExpression, elSet=``, which the fallback rule already sends to the whole model), the
+mesh plot and ``meshDataToFile`` (which fail at their setup), the element set marker, adaptive
+refinement, ``surfaceSnap`` and the P1 topology classification (which only exist with a model
+modifier, and so with the whole model).
 
 The gathers of the field outputs happen inside the output step that every process agrees on: each
 process reaches them in the same order, before anything that runs in one process only (the output

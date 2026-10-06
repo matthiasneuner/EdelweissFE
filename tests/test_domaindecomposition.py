@@ -305,12 +305,18 @@ def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
 >>marker, type=elementSet, elSet=gen_all
 *modelGenerator, generator=executePythonCode, name=code
 print("hello")
+*modelGenerator, generator=boxGen, name=late, executeAfterManualGeneration=True
+nX=1
+*fieldOutput
+>>fromExpression, name=fromElements, elSet=gen_all, expression='np.zeros(len(model.elementSets["gen_all"]))'
 """
     )
     reasons = reasonsForTheWholeModel(parseInputFile(str(deck)))
-    assert len(reasons) == 2
+    assert len(reasons) == 4
     assert "model modifier amr (hAdaptivity)" in reasons[0]
     assert "generator code (executePythonCode)" in reasons[1]
+    assert "generator late (boxGen) runs after the mesh is partitioned" in reasons[2]
+    assert "expression field output fromElements reads the elements of element set gen_all" in reasons[3]
 
 
 def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
