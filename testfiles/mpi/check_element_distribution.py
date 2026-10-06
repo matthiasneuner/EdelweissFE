@@ -38,7 +38,7 @@ from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulatio
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 #: The test cases expected to run distributed; every other test case is expected to hold the whole
-#: model (it has contact, a tie, or contact facets).
+#: model (NEDWholeModel, by a reason of the rule).
 EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NED",
     "edelweiss-only/NEDContact",

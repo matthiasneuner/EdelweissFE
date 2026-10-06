@@ -74,22 +74,31 @@ there is none:
   so through :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.wholeModelReason`;
   one that does not say it reads only the mesh is assumed to need the whole model. Adaptive
   refinement (``hAdaptivity``) reads only the mesh and runs distributed (see `Adaptive refinement`_);
-* a **constraint** (``*constraint`` -- contact, ties, and the like): each is evaluated whole by one
-  process, searches its whole surface, and may couple nodes of any subdomain;
+* a **constraint not known to read only what every process holds** (``*constraint``): every
+  constraint says so through
+  :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`. Ties
+  (``tie``) and penalty contact (``surfaceToDeformableSurfacePenalty``,
+  ``nodeToDeformableSurfacePenalty``, ``surfaceToDiscreteRigidBodyPenalty``) run distributed (see
+  `Contact, ties and rigid bodies`_); the other constraint types read only nodes, node sets and
+  rigid bodies as well, but are not yet verified by a distributed test case and keep their reason;
 * a **generator that does more than describe the mesh**: ``executePythonCode`` and ``cubit`` act on
-  element objects while the mesh is being described, the contact-facet generator
-  (``surfaceElementGenerator``) and the discrete rigid body generator make elements in every process
-  themselves. Every generator says so through
+  element objects while the mesh is being described. Every generator says so through
   :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`; a generator
-  that does not say it only describes the mesh is assumed to need the whole model;
-* a **generator run after the keywords** (``executeAfterManualGeneration=True``): it may describe
-  elements after the mesh was partitioned, which no process would compute;
+  that does not say it only describes the mesh is assumed to need the whole model. The contact-facet
+  generator (``surfaceElementGenerator``) and the discrete rigid body generator are not among them:
+  they read the mesh and make elements of their own in every process;
+* a **generator run after the keywords** (``executeAfterManualGeneration=True``) **that describes
+  elements of the mesh**
+  (:attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.describesElementsOfMesh`): it
+  would describe elements after the mesh was partitioned, which no process would compute. The
+  facet and rigid body generators, which describe none, may run late;
 * an **expression field output over an element set** (``>>fromExpression, elSet=``): the expression
   reads the element objects of the whole set itself, which cannot be gathered.
 
-Moving these readers to gathers of their own removes them from the rule one by one: adaptive
-refinement on replicated mesh data with owner-local elements is done; contact through surface-sized
-exchanges is next.
+Moving these readers to gathers of their own removed them from the rule one by one: adaptive
+refinement on replicated mesh data with owner-local elements, then contact and ties, which read
+only replicated, surface-sized data. ``testfiles/mpi/edelweiss-only/NEDWholeModel`` keeps the
+fallback itself under test.
 
 What a distributed process creates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -102,7 +111,9 @@ mesh is described and before the elements are made
 
 * the elements it **computes** -- its part of the partition; and
 * every element carrying a **load** -- on the surface of a distributed load, or in the element set
-  of a body load, of any step -- that shares a node with one of its own elements.
+  of a body load, of any step -- that shares a node with one of its own elements; and
+* every **element made by its owner** -- the contact facets and the point masses of rigid bodies
+  (see `Contact, ties and rigid bodies`_).
 
 The second kind exists for its loads only: a load is not exchanged between processes, each process
 adds the loads at the degrees of freedom it integrates itself, in the order of the load's elements,
@@ -154,10 +165,9 @@ make a distributed model possible:
   processes needs (see `Load balancing`_).
 
 Contact facets and the point masses of rigid bodies are made by their owners in every process; they
-are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), and the
-facets are cut from the surface as described in the mesh, not from element objects. A refinement
-adds its children to the mesh and creates them from it. Both happen in models that hold the whole
-model on every process.
+are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), with
+the element of the mesh they lie on, and the facets are cut from the surface as described in the
+mesh, not from element objects. A refinement adds its children to the mesh and creates them from it.
 
 Subdomains, interface, ownership
 --------------------------------
@@ -167,7 +177,11 @@ The elements are partitioned by `METIS <https://github.com/KarypisLab/METIS>`_
 mesh -- elements adjacent when they share a face, or an edge in 2D -- is split into parts of balanced
 weight, minimising the total communication volume. The partition is computed on the mesh -- element
 numbers, connectivity, and the size of each element type -- not on element objects, on rank 0, and
-broadcast. The constraints are dealt out by name, one process each.
+broadcast. The elements made by their owners are not given to METIS: each is computed by the process
+of the element it lies on -- a facet by that of the solid element whose face it tiles, so that its
+degrees of freedom are already in that subdomain -- or by rank 0 if it lies on none, as a point mass
+(:func:`~edelweissfe.domaindecomposition.partitioning.processOfElementMadeByOwner`). The constraints
+are dealt out by name, one process each.
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
 degrees of freedom. A degree of freedom touched by several processes lies on their *interface*. Each
@@ -302,6 +316,49 @@ check is due only on an output increment, the start of a step follows the end of
 checkpoint -- and it is asserted rather than assumed: before every topology update the nodes and
 fields every constraint couples are compared across processes
 (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+
+Contact, ties and rigid bodies
+------------------------------
+
+A constraint is surface-sized: it couples the nodes of one or two surfaces, or of a surface and a
+rigid body. It is evaluated whole, by one process (dealt out by name), and runs distributed because
+nothing it reads is an element object of the solid mesh:
+
+======================================  =================================================================
+What a constraint reads                 Where it comes from in a distributed model
+======================================  =================================================================
+contact facets of its surfaces          made by every process, from the surface as described in the mesh
+                                        (``surfaceElementGenerator``); the whole facet set is in every
+                                        process, and a constraint reads it through
+                                        :meth:`~edelweissfe.models.femodel.FEModel.wholeElementSet`, which
+                                        refuses a partial set; a facet's parent face (for the
+                                        surface-to-surface quadrature) is stamped on the facet itself
+nodes, their coordinates and fields     every process holds every node; the solution at every node is
+                                        current in every process before a search (see
+                                        `Where the whole model is read`_)
+rigid bodies                            made by every process (``discreteRigidBodyGenerator``), with the
+                                        point mass of the reference node; its surface follows the
+                                        reference node, moved from the complete solution in every process
+the degrees of freedom it couples       global numbers, the same in every process
+======================================  =================================================================
+
+A tie also moves (snaps) slave nodes when it is constructed: every process constructs every
+constraint and so moves its nodes identically, before any element is initialized; an element created
+later -- after a migration, or as the child of a refinement -- is made from the moved nodes.
+
+Where a tie couples nodes of several subdomains, the multi-point-constraint closure (see
+`Subdomains, interface, ownership`_) makes the process integrating any of its degrees of freedom
+integrate the whole group; the forces at those degrees of freedom are completed by degree of freedom,
+whichever element objects a process holds. A refinement of a contact or tie surface retiles it with
+new facets, made by every process and computed by the process of the child element they lie on, and
+the constraint projects onto them afresh. A restart checkpoint carries the constraint states as
+before: they are synchronized from their owners before every output.
+
+What it costs: the constraint owners evaluate their constraints while the others wait. On the c1_150
+edge-breakout model (five penalty contacts, five ties, 8 processes of 4 threads) the largest contact
+(the support under the slab, surface to rigid body) costs its process about 7 ms of a 90 ms increment,
+the others 0.5--1 ms, and sharing the constraint forces about 3 ms. Partitioning a contact by its
+slave points is not done.
 
 Adaptive refinement
 -------------------
@@ -517,8 +574,9 @@ Limitations
 -----------
 
 * Memory: a distributed process holds its own elements, but every process holds the whole mesh,
-  every node with its fields, and global-length vectors. Jobs under the fallback rule hold the whole
-  model on every process.
+  every node with its fields, global-length vectors, and every contact facet and rigid body. Jobs
+  under the fallback rule hold the whole model on every process (c1_150 at 8 processes: 7.6 GB per
+  process with the whole model, 2.55 GB distributed).
 * A migration rebuilds the equation system of every process, which costs about what building it
   at the start does (2.2 s on a 192 000-element block at 8 processes, plus 0.3--0.6 s to move the
   elements); the gain check above weighs that cost.
@@ -527,7 +585,9 @@ Limitations
   is computed by every process on the whole mesh, and the mirror is held by every process: about
   4.7 KB of Python objects per root element (110 MB for 24 000 GC3D20R elements, 334 MB for the
   c1_150 model).
-* A constraint is evaluated whole, by one process; a single large contact constraint is not split.
+* A constraint is evaluated whole, by one process, while the others wait; a single large contact
+  constraint is not split (see `Contact, ties and rigid bodies`_). Constraint types other than ties and
+  penalty contact still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
 
 Package reference

@@ -59,11 +59,16 @@ and its checkpoints the element states, from the processes computing them.
 A contact search itself -- at a contact update and at a topology check -- runs on the process that
 evaluates the constraint only, since nothing but that evaluation reads its outcome.
 
-**Adaptive refinement.** Because every process holds the complete, synchronized model at a
-topology check, every process runs the same refinement on the same data and arrives at the same
-refined model -- checked, not assumed: the degree-of-freedom layout is compared across all processes
-after every build. The refined model is then partitioned afresh. Nothing migrates, because every
-process already holds every element.
+**Adaptive refinement.** Every process holds the whole mesh and the current solution at a topology
+check, so every process runs the same refinement on the same data and arrives at the same refined
+mesh -- checked, not assumed: the degree-of-freedom layout is compared across all processes after
+every build. The children of a refined element are created by the process computing it, which
+transfers the parent's state to them; the subdomains are then rebalanced if that pays.
+
+**Contact and ties.** A constraint reads the contact facets of its surfaces, the nodes and the rigid
+bodies, which every process holds whole -- the facets and the point masses of rigid bodies are made
+by every process -- so a model with contact or ties is distributed like any other; each constraint
+is evaluated by one process.
 
 **Output.** Only rank 0 creates output managers and writes files; the others are silent. A restart
 checkpoint is written after the output synchronization, so the copy of the model rank 0 writes it
@@ -116,11 +121,13 @@ communication, each in an override of a method of ``NED``:
   contact search, a topology update, writing the output -- is agreed on by all of them
   (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`).
 
-**Limits of this prototype.** Every process holds the whole mesh, every node and global-length
-vectors; a model with refinement, constraints or contact holds every element in every process, so
-that its memory per process does not shrink with the number of processes, and a refinement costs
-every process what it costs a serial run. Constraints are evaluated whole, each by one process. An exception outside the steps agreed on by all processes, and an interrupt of any
-process, abort all of them.
+**Limits of this prototype.** Every process holds the whole mesh, every node, every contact facet
+and global-length vectors; a model under the whole-model rule
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`) holds every
+element in every process, so that its memory per process does not shrink with the number of
+processes. The topology of a refinement costs every process what it costs a serial run. Constraints
+are evaluated whole, each by one process, while the others wait. An exception outside the steps
+agreed on by all processes, and an interrupt of any process, abort all of them.
 
 Run with, for example::
 

@@ -39,13 +39,14 @@ in place of the whole model -- and carries out every exchange between the proces
 
 Which elements a process *creates* is decided once per job (:mod:`.distributedelements`): a
 **distributed** model is partitioned before its elements exist, and each process creates only its
-own elements (and the loaded elements touching them), so that the memory of the elements falls with
-the number of processes; whole-model readers gather what they read. A model with something that
-still reads or changes the whole model during a run -- adaptive refinement, contact and other
-constraints, some generators -- holds the **whole model on every process** instead: at a topology
-change every process first receives the current state of the parts it did not compute
-(:mod:`.statesynchronization`), then runs the same, deterministic refinement on the same data, and
-the model is partitioned afresh (:mod:`.partitioning`).
+own elements (and the loaded elements touching them; contact facets and the point masses of rigid
+bodies, which are surface-sized, are made by every process), so that the memory of the elements
+falls with the number of processes; whole-model readers gather what they read, and adaptive
+refinement and contact read the mesh, the nodes and the facets, which every process holds whole. A
+model with something that still reads or changes the element objects of the whole model during a
+run -- some model modifiers, constraints and generators -- holds the **whole model on every
+process** instead: every process then keeps the state of the parts it does not compute current
+(:mod:`.statesynchronization`).
 
 Nothing here is imported by a serial run except :mod:`.mpienvironment`, which decides whether the
 process was started by an MPI launcher, and :mod:`.distributedelements`, which then asks it; only
