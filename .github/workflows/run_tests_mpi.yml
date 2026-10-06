@@ -5,6 +5,8 @@
 #   2. bit-identity: the serial run on this runner writes fresh references (--create, in a copy), and the
 #      runs over several processes must reproduce them exactly (--tolerance 0). The committed U.ref files
 #      cannot serve here, since results differ between machines in the last bits.
+# And per process count, which way each test case held its model -- distributed, or the whole model in every
+# process -- since both give the same result (testfiles/mpi/check_element_distribution.py).
 #
 # MPI is not part of conda-lock.yml: it is optional at run time (mpi4py is imported only under an MPI
 # launcher), openmpi does not exist for win-64, and adding it would re-lock and re-version the edelweissfe-dev
@@ -92,4 +94,7 @@ jobs:
               $mpirun -n $processes "$runTests" "$committed/$suite"
               $mpirun -n $processes "$runTests" "$fresh/$suite" --tolerance 0
             done
+          done
+          for processes in 2 3; do
+            $mpirun -n $processes python testfiles/mpi/check_element_distribution.py
           done

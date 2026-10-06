@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Check how each test case of ``testfiles/mpi`` held its model when it ran over several MPI processes.
+
+A test case either runs **distributed** -- each process creates only the elements it computes -- or
+with the **whole model** in every process, by the rule of
+:func:`edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel`. Both give the
+same result, so comparing results cannot tell which one ran; this script runs every test case (in a
+copy) and checks, from the model each process ends with, that it ran in the mode expected below:
+
+* distributed: some process created fewer elements than the mesh has, and every element of the
+  mesh was computed by exactly one process;
+* whole model: every process created every element.
+
+Run it under the MPI launcher, from anywhere::
+
+    mpirun -n 2 python testfiles/mpi/check_element_distribution.py
+
+It prints one line per test case and exits with 1 if any test case ran in an unexpected mode.
+"""
+
+import contextlib
+import io
+import os
+import shutil
+import sys
+import tempfile
+
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+#: The test cases expected to run distributed; every other test case is expected to hold the whole
+#: model (it has contact, a tie, adaptive refinement, or contact facets).
+EXPECTED_DISTRIBUTED = {
+    "edelweiss-only/NED",
+    "marmot/GCDPNEDExplicit",
+    "marmot/GCDPNEDExplicitHyperbolic",
+    "marmot/NED",
+    "marmot/NEDInitialStressPressure",
+    "marmot/NEDParallel",
+    "marmot/NEDRestartDistributed1Write",
+    "marmot/NEDRestartDistributed2Resume",
+}
+
+
+def modeOf(model, communicator) -> str:
+    """The mode a model was held in, from the elements every process created."""
+
+    created = communicator.allgather(set(model.elements))
+    computed = communicator.allgather(
+        [element.elNumber for element in model.elementDistribution.elementsReportedHere(model.elements.values())]
+    )
+    meshElements = set(model.mesh.elements)
+    if all(elements == meshElements for elements in created):
+        return "whole model"
+    everyElementComputedOnce = sorted(number for numbers in computed for number in numbers) == sorted(meshElements)
+    return "distributed" if everyElementComputedOnce else "inconsistent"
+
+
+def main() -> int:
+    communicator = worldCommunicator()
+    if communicator is None:
+        print("run this under an MPI launcher, with more than one process")
+        return 1
+    rank = communicator.Get_rank()
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    cases = sorted(
+        "{:}/{:}".format(suite, case)
+        for suite in ("edelweiss-only", "marmot")
+        for case in os.listdir(os.path.join(here, suite))
+        if os.path.isfile(os.path.join(here, suite, case, "test.inp"))
+    )
+
+    workDirectory = communicator.bcast(tempfile.mkdtemp() if rank == 0 else None, root=0)
+    if rank == 0:
+        for suite in ("edelweiss-only", "marmot"):
+            shutil.copytree(os.path.join(here, suite), os.path.join(workDirectory, suite))
+    communicator.Barrier()
+
+    failures = 0
+    for case in cases:
+        os.chdir(os.path.join(workDirectory, case))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+        except NotImplementedError as exception:
+            # e.g. a private Marmot material missing from this build
+            if rank == 0:
+                print("{:<50} SKIPPED ({:})".format(case, exception))
+            continue
+        mode = modeOf(model, communicator)
+        expected = "distributed" if case in EXPECTED_DISTRIBUTED else "whole model"
+        if rank == 0:
+            print("{:<50} {:<12} {:}".format(case, mode, "OK" if mode == expected else "EXPECTED " + expected))
+        failures += mode != expected
+
+    communicator.Barrier()
+    if rank == 0:
+        shutil.rmtree(workDirectory)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
