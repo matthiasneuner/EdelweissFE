@@ -212,9 +212,9 @@ class FEModel:
         :class:`~edelweissfe.sets.elementset.ElementSet` of the elements created here, and each surface
         an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
 
-        Calling it again is harmless: elements already decided on are kept, and sets and surfaces that
-        already exist are updated in place (references held to them stay valid), so a mesh described
-        in several steps can be made in several steps.
+        Calling it again is harmless: elements already created are kept (the predicate is asked again
+        for the others), and sets and surfaces that already exist are updated in place (references
+        held to them stay valid), so a mesh described in several steps can be made in several steps.
 
         Parameters
         ----------
