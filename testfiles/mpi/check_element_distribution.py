@@ -41,6 +41,12 @@ from edelweissfe.utils.inputfileparser import parseInputFile
 #: model (it has contact, a tie, or contact facets).
 EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NED",
+    "edelweiss-only/NEDContact",
+    "edelweiss-only/NEDRestart1Write",
+    "edelweiss-only/NEDRestart2Resume",
+    "edelweiss-only/NEDSurfaceContact",
+    "edelweiss-only/NEDSurfaceToDiscreteRigidBodyContact",
+    "edelweiss-only/TieNED",
     "marmot/GCDPNEDExplicit",
     "marmot/GCDPNEDExplicitAMR",
     "marmot/GCDPNEDExplicitHyperbolic",

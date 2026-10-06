@@ -47,6 +47,7 @@ of :mod:`.mpienvironment`, and a serial run gets the serial distribution.
 
 import numpy as np
 
+from edelweissfe.config.constraints import getConstraintClass
 from edelweissfe.config.generators import getGeneratorClass
 from edelweissfe.config.modelmodifiers import getModelModifierClass
 from edelweissfe.config.stepactions import stepActionFactory
@@ -76,14 +77,23 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
       e.g. the surface snap; adaptive refinement (``hAdaptivity``) is not among them: it reads the
       mesh, which every process holds whole, and creates the children of a refined element where
       the parent is computed;
-    * **constraints** -- contact, ties and the like -- are evaluated whole by one process, search the
-      whole surface, and may couple nodes of any subdomain;
+    * **constraints not known to read only what every process holds** (see
+      :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`). A
+      constraint is evaluated whole by one process, but it reads no element object of the solid
+      mesh: contact and ties read the contact facets of their surfaces, the nodes and the rigid
+      bodies, which every process holds whole (a facet and the point mass of a rigid body are made
+      by every process itself, see :meth:`DistributedElements.placeElementMadeByOwner`). Ties,
+      surface-to-surface, node-to-surface and surface-to-rigid-body contact are verified so; the
+      other constraint types still name a reason;
     * **generators that do more than describe the mesh** (see
       :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`): code
-      running on element objects while the mesh is described (``executePythonCode``, ``cubit``),
-      or contact facets and rigid bodies made by every process itself;
-    * **generators run after the keywords** (``executeAfterManualGeneration=True``): they may describe
-      elements after the mesh was partitioned, which no process would compute;
+      running on element objects while the mesh is described (``executePythonCode``, ``cubit``);
+      contact facets and rigid bodies are not among them;
+    * **generators run after the keywords** (``executeAfterManualGeneration=True``) **that describe
+      elements of the mesh** (see
+      :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.describesElementsOfMesh`):
+      they would describe elements after the mesh was partitioned, which no process would compute;
+      one that makes only elements of its own (contact facets, a rigid body) may run late;
     * **expression field outputs over an element set** (``>>fromExpression, elSet=``): the expression
       reads the element objects of the whole set itself, which cannot be gathered.
 
@@ -104,14 +114,18 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
         if reason is not None:
             reasons.append("model modifier {:} ({:}) {:}".format(definition["name"], definition["type"], reason))
     for definition in inputfile["constraint"]:
-        reasons.append(
-            "constraint {:} ({:}) is evaluated whole by one process".format(definition["name"], definition["type"])
-        )
-    for definition in inputfile["modelGenerator"]:
-        reason = getGeneratorClass(definition["generator"]).wholeModelReason
+        reason = getConstraintClass(definition["type"]).wholeModelReason
         if reason is not None:
-            reasons.append("generator {:} ({:}) {:}".format(definition["name"], definition["generator"], reason))
-        if definition.get("executeAfterManualGeneration", False):
+            reasons.append("constraint {:} ({:}) {:}".format(definition["name"], definition["type"], reason))
+    for definition in inputfile["modelGenerator"]:
+        generatorClass = getGeneratorClass(definition["generator"])
+        if generatorClass.wholeModelReason is not None:
+            reasons.append(
+                "generator {:} ({:}) {:}".format(
+                    definition["name"], definition["generator"], generatorClass.wholeModelReason
+                )
+            )
+        if definition.get("executeAfterManualGeneration", False) and generatorClass.describesElementsOfMesh:
             reasons.append(
                 "generator {:} ({:}) runs after the mesh is partitioned (executeAfterManualGeneration)".format(
                     definition["name"], definition["generator"]
