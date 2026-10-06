@@ -47,7 +47,13 @@ A model can be built the same way from Python:
         model.createElementsOfMesh(everyElement)
 
 The predicate of :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` decides which
-elements a process creates; see :ref:`domaindecomposition_mesh_to_elements` for why that matters.
+elements a process creates. When a model is built from an input file, it is the model's
+:attr:`~edelweissfe.models.femodel.FEModel.elementDistribution` that answers -- every element, unless
+a domain-decomposed run distributes the elements over its processes; see
+:ref:`domaindecomposition_mesh_to_elements`.
+
+.. automodule:: edelweissfe.models.elementdistribution
+   :members:
 
 The Abaqus-like keywords
 ------------------------

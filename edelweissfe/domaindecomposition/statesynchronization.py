@@ -32,7 +32,10 @@ A process computes, and so keeps current, only the states of its own elements an
 states of all others in its copy of the model are those of the last synchronization. Whatever reads
 the whole model -- the field outputs, the output managers, a marker deciding a refinement, the
 state transfer carrying the history of a refined element onto its children -- therefore needs a
-synchronization first: every process sends the states it owns to every other.
+synchronization first: every process sends the states it owns to every other. That is for a model
+held whole on every process; a distributed model holds no element it would have to synchronize, and
+synchronizes its constraints only (see
+:mod:`edelweissfe.domaindecomposition.elementdistribution`).
 
 It uses the interface the restart checkpoints use (``getStateVars``/``setStateVars`` on elements,
 ``getRestartData``/``setRestartData`` on constraints): whatever a checkpoint must carry to resume a

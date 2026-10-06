@@ -44,16 +44,67 @@ threads each:
 Only rank 0 reports progress and writes output. An error is reported by every process that sees
 it.
 
-The model in every process
---------------------------
+Which process creates which element
+-----------------------------------
 
-Every process reads the same input file and builds the complete model: every node, element, set,
-constraint and field. What differs between processes is only which part of it each one *computes*.
-The elements are ordinary elements -- they know nothing of the decomposition.
+Every process reads the same input file and builds the same mesh, nodes, node sets and definitions
+(materials, sections, constraints, steps). The element objects -- with their materials and states,
+most of a model's memory -- are created in one of two ways, decided once per job, in one place
+(:func:`~edelweissfe.domaindecomposition.elementdistribution.elementDistributionOfThisJob`), and
+reported once on rank 0:
 
-This is what makes adaptive refinement tractable (see below), and it is the main limitation: the
-memory each process needs does not shrink as processes are added, and a refinement costs every
-process what it costs a serial run.
+* **Distributed** -- ``Distributed model: each of the N processes creates only the elements it
+  computes``. The mesh is partitioned *before* any element exists, and each process creates the
+  elements of its own subdomain, plus the few others described below. The memory of the elements is
+  divided among the processes.
+* **The whole model on every process** -- ``Whole model on every process because: ...``. Every
+  process creates every element, as a serial run does, and keeps the states of the elements other
+  processes compute current by synchronizing them whenever the whole model is read. This is the
+  fallback for what still reads, or changes, the whole model during a run.
+
+The fallback rule
+~~~~~~~~~~~~~~~~~
+
+:func:`~edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel` reads the input
+file and names every reason to hold the whole model on every process; the job is distributed only if
+there is none:
+
+* a **model modifier** (``*modelModifier`` -- adaptive refinement above all): it changes the mesh
+  during the run, and its topology logic, marker and state transfer read the whole mesh;
+* a **constraint** (``*constraint`` -- contact, ties, and the like): each is evaluated whole by one
+  process, searches its whole surface, and may couple nodes of any subdomain;
+* a **generator that does more than describe the mesh**: ``executePythonCode`` and ``cubit`` act on
+  element objects while the mesh is being described, the contact-facet generator
+  (``surfaceElementGenerator``) and the discrete rigid body generator make elements in every process
+  themselves. Every generator says so through
+  :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`; a generator
+  that does not say it only describes the mesh is assumed to need the whole model.
+
+Moving these readers to gathers of their own -- refinement on replicated mesh data with owner-local
+elements, contact through surface-sized exchanges -- removes them from the rule one by one.
+
+What a distributed process creates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements` partitions the mesh
+with the same function and the same weights the subdomain uses
+(:func:`~edelweissfe.domaindecomposition.partitioning.partitionElementsOfMesh`), right after the
+mesh is described and before the elements are made
+(:func:`~edelweissfe.helpers.inputfilehelpers.fillFEModelFromInputFile`). A process then creates
+
+* the elements it **computes** -- its part of the partition; and
+* every element carrying a **load** -- on the surface of a distributed load, or in the element set
+  of a body load, of any step -- that shares a node with one of its own elements.
+
+The second kind exists for its loads only: a load is not exchanged between processes, each process
+adds the loads at the degrees of freedom it integrates itself, in the order of the load's elements,
+which is what keeps the result bit-identical to a serial run (see `An increment`_). Such an element
+is neither computed nor reported by the process. A subdomain reaching a loaded element in another way
+-- through a multi-point constraint, say -- would miss its load, and is refused
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`). An
+element described after the partition, which no process would compute, is refused as well.
+
+The subdomain of the solver adopts this partition instead of computing its own.
 
 .. _domaindecomposition_mesh_to_elements:
 
@@ -64,40 +115,39 @@ Every model is built in two stages (see :doc:`mesh`): the input file and the mes
 *describe* the mesh as data -- ``model.mesh``, a :class:`~edelweissfe.models.mesh.Mesh` with every
 element's number, type, provider and node labels, the element sets as lists of element numbers and
 the surfaces by their element sets -- and the element objects are then *made* from it by
-:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`, for every element a predicate
-``isCreatedHere(number)`` accepts. The mesh, the nodes, the node sets and every definition (materials,
-sections, constraints) are the same in every process. Today every process creates every element; the
-predicate is where a process will create only the elements it computes, so that the memory of the
-elements -- most of a model's memory -- is divided among the processes instead of replicated.
-
-Three properties make that possible, and hold already:
+:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`, for every element the model's
+:class:`~edelweissfe.models.elementdistribution.ElementDistribution` creates here. Four properties
+make a distributed model possible:
 
 * **The layout of the degrees of freedom follows from the mesh.** Which fields an element has at
   which node depends on its type only, so the fields at the nodes are activated from the mesh, not
   from element objects (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). The global numbering of the
   degrees of freedom is therefore the same in every process *by construction*, whichever elements it
-  created.
+  created. Vectors stay global-length: a process holds the solution at every node, and receives it
+  from the owners of the degrees of freedom whenever the whole model is read.
 * **An element set is the part of the set created here.** Each
   :class:`~edelweissfe.sets.elementset.ElementSet` of the model holds the created elements of its set
   in the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
-  A partial set read as if it were whole would give silently wrong results, so every reader that needs
-  the whole set says so: :meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete` (field
-  outputs over element sets, the Ensight output, the element set marker) or, for the whole model,
-  :meth:`~edelweissfe.models.femodel.FEModel.requireCompleteMesh` (restart checkpoints, the Ensight
-  output, the mesh plot, ``meshDataToFile``, adaptive refinement). These checks cost nothing and
-  never fail while every element is created; they turn every reader not yet converted into a loud
-  error instead of a wrong result.
+  The nodes of a set (``extractNodeSet``) are taken from the mesh where only part of it was created,
+  and so are the same in every process.
+* **Whole-model readers gather, or refuse.** A reader that needs every element of a set or of the
+  model either goes through the gather path of the element distribution (see `Where the whole model is
+  read`_), or says that it needs the whole set
+  (:meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete`) or the whole model
+  (:meth:`~edelweissfe.models.femodel.FEModel.requireCompleteMesh`) and fails loudly on a distributed
+  model, instead of giving a silently partial result.
 * **An element can be created at any time, anywhere.** An element is completely described by the
   mesh, its section (assigned through its sets) and its state vector, so
   :meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`,
   :meth:`~edelweissfe.sections.base.sectionbase.Section.assignSectionToElement` and
   ``setStateVars`` recreate it in another process -- which is what moving an element between
-  processes needs.
+  processes needs (see `Load balancing`_).
 
 Contact facets and the point masses of rigid bodies are made by their owners in every process; they
 are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), and the
 facets are cut from the surface as described in the mesh, not from element objects. A refinement
-adds its children to the mesh and creates them from it.
+adds its children to the mesh and creates them from it. Both happen in models that hold the whole
+model on every process.
 
 Subdomains, interface, ownership
 --------------------------------
@@ -105,7 +155,8 @@ Subdomains, interface, ownership
 The elements are partitioned by `METIS <https://github.com/KarypisLab/METIS>`_
 (:mod:`~edelweissfe.domaindecomposition.metis`, :func:`METIS_PartMeshDual`): the dual graph of the
 mesh -- elements adjacent when they share a face, or an edge in 2D -- is split into parts of balanced
-weight, minimising the total communication volume. The partition is computed on rank 0 and
+weight, minimising the total communication volume. The partition is computed on the mesh -- element
+numbers, connectivity, and the size of each element type -- not on element objects, on rank 0, and
 broadcast. The constraints are dealt out by name, one process each.
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
@@ -175,17 +226,54 @@ is the minimum over the subdomains.
 Where the whole model is read
 -----------------------------
 
-A process keeps current only what it computes. Field outputs, output managers, the marker of an
-adaptive refinement and the refinement itself, and a contact search all read more than one
-subdomain, and before each of them every process receives the current solution at every degree of
-freedom from its owner, and -- except before a contact search, which reads positions only -- the
-current state of every element and stateful constraint from the process that computed it
-(:mod:`~edelweissfe.domaindecomposition.statesynchronization`). The states travel through the same
-interface restart checkpoints use: whatever a checkpoint must carry to resume a run is what another
-process must receive to continue it.
+A process keeps current only what it computes. Field outputs, output managers, restart checkpoints,
+the marker of an adaptive refinement and the refinement itself, and a contact search all read more
+than one subdomain. Before each of them every process receives the current solution at every degree
+of freedom from its owner (the vectors are global-length in every process). What happens to the
+element states depends on how the model is held.
 
-This synchronization happens every ``output-frequency`` increments, at every
+**The whole model on every process.** Every process receives the current state of every element and
+stateful constraint from the process that computed it -- except before a contact search, which reads
+positions only (:mod:`~edelweissfe.domaindecomposition.statesynchronization`). The states travel
+through the same interface restart checkpoints use: whatever a checkpoint must carry to resume a run
+is what another process must receive to continue it. Every reader then reads the model as a serial
+run does. This synchronization happens every ``output-frequency`` increments, at every
 ``contact-update-frequency`` search, and at the end of a step.
+
+**Distributed.** No element state is synchronized -- a process holds no element it does not compute,
+apart from the loaded elements above, which nothing reads -- and each whole-model reader goes through
+the *gather path* of the element distribution
+(:class:`~edelweissfe.models.elementdistribution.ElementDistribution`, whose serial base answers with
+what is here):
+
+======================================  =================================================================
+Reader                                  How it reads a distributed model
+======================================  =================================================================
+element field output over a set         ``resultsOfWholeSet``: each process collects the results of the
+(``>>perElement``)                      elements of the set it computes, and they are gathered to every
+                                        process, by mesh element number, in set order -- so a field
+                                        output is the same in every process, as without decomposition
+node field output over an element set   the nodes of the whole set, from the mesh; the node fields are
+(``>>perNode, elSet=``)                 global-length
+Ensight                                 rank 0 draws the geometry of a partial set from the mesh
+                                        (``visualizedElementsOf``) and writes the gathered results
+monitor, conditional stop               read field outputs
+restart checkpoint                      before the output of an output increment, every process sends
+                                        the states of the elements it computes to rank 0
+                                        (``gatherStatesForCheckpoint``, only if rank 0 writes
+                                        checkpoints); rank 0 writes them in the format of a serial
+                                        checkpoint and releases them
+======================================  =================================================================
+
+Still guarded, and refused loudly on a distributed model: an expression field output over an element
+set (``>>fromExpression, elSet=``, which reads the elements themselves), the mesh plot,
+``meshDataToFile``, the element set marker, adaptive refinement, ``surfaceSnap`` and the P1 topology
+classification. None of them can run in a distributed job today that the fallback rule did not
+already send to the whole model, except the first three, which fail at their setup.
+
+The gathers of the field outputs happen inside the output step that every process agrees on: each
+process reaches them in the same order, before anything that runs in one process only (the output
+managers of rank 0), so no process can wait for one that already left.
 
 The contact search itself, at a contact update and at a topology check alike, runs on the process
 that evaluates the constraint only: nothing but that evaluation reads its outcome. The constraint
@@ -207,13 +295,14 @@ fields every constraint couples are compared across processes
 Adaptive refinement
 -------------------
 
-Because every process holds the complete, synchronized model at a topology check, every process runs
+Adaptive refinement holds the whole model on every process (see `The fallback rule`_). Because every
+process holds the complete, synchronized model at a topology check, every process runs
 the same refinement -- the same marker on the same field output, the same state transfer from the
 same parent states -- and arrives at the same refined model. That is verified, not assumed: after
-every build of the equation system, a fingerprint of the element numbers, the degrees of freedom of
-every element (its connectivity in the numbering of the layout), the node order of every field, the
-node coordinates and the size of the system is compared across all processes, and the run stops if
-any two differ. The refined model is then partitioned afresh. Nothing migrates, because every process already
+every build of the equation system, a fingerprint of the mesh (element numbers and connectivity),
+the degree of freedom of every node of every field, the node coordinates and the size of the system
+is compared across all processes, and the run stops if any two differ. It is made from the mesh and
+the nodes, which every process holds whole, so it serves a distributed model as well. The refined model is then partitioned afresh. Nothing migrates, because every process already
 holds every element.
 
 Load balancing
@@ -228,20 +317,31 @@ costs as weights whenever the slowest process has fallen more than ``load-balanc
 (default 0.1) behind the mean. The partition then depends on measured timings; the result does not,
 since it does not depend on the partition at all.
 
+A **distributed** model keeps its first partition, and says so once (``Load balancing is off``):
+an element changing process would have to be *migrated* -- created by its new process from the mesh
+(:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`), given its section and element
+properties, and sent its state (``setStateVars``) by the old one, which drops it -- and the
+subdomain's degree-of-freedom indices, lumped operators and loaded elements rebuilt for the new
+elements. That is designed, but not implemented yet. The kernels are not timed then.
+
 Output and restart
 ------------------
 
 Only rank 0 creates output managers. A restart checkpoint is the last output of an output
 increment, written after the synchronization of that output, so rank 0's copy of the model holds
 every element and every constraint as the process computing it left it, and the external work of
-the whole model. It is an ordinary checkpoint of the whole model, so a run can be resumed by
+the whole model. A distributed model gathers the element states to rank 0 for it instead (see
+`Where the whole model is read`_); the file is the same, bit for bit, as a serial run's. It is an ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the
 uninterrupted one does (see :doc:`restart`).
 
 On a resume every process restores the whole model from the checkpoint -- every constraint adopting
 the checkpointed state of its owner -- and so starts from the same model; rank 0 continues with the
-external work of the whole model, the others with none of it.
+external work of the whole model, the others with none of it. A distributed process restores the
+elements it created and skips the others
+(:meth:`~edelweissfe.models.femodel.FEModel.readRestart`); a checkpoint written by a serial run, by
+the whole model on every process, or by a distributed run can be resumed in either way.
 
 Failures
 --------
@@ -259,6 +359,11 @@ of any one of them: the others would otherwise wait forever for the one that sto
 A model with an element that exposes no state (``getStateVars``) is refused on more than one
 process: its state could not be sent to the process writing the output and the checkpoints, nor to
 the one computing it after a repartition.
+
+Which way a job held its model does not show in its result. ``testfiles/mpi/check_element_distribution.py``
+runs every deck of ``testfiles/mpi`` under the launcher and checks, from the elements each process
+created and computed, that it ran distributed or with the whole model as expected; the MPI workflow
+runs it over 2 and 3 processes.
 
 Verifying bit-identity yourself
 -------------------------------
@@ -291,9 +396,11 @@ machines' math libraries do. ``run_tests_edelweissfe testfiles/mpi/edelweiss-onl
 Limitations
 -----------
 
-* Memory: every process holds the complete model; the predicate of
-  :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` accepts every element.
-* Adaptive refinement is computed by every process, in full.
+* Memory: a distributed process holds its own elements, but every process holds the whole mesh,
+  every node with its fields, and global-length vectors. Jobs under the fallback rule hold the whole
+  model on every process.
+* A distributed model is not rebalanced (no migration yet).
+* Adaptive refinement is computed by every process, in full, on the whole model.
 * A constraint is evaluated whole, by one process; a single large contact constraint is not split.
 * Only the explicit dynamic solver is decomposed.
 
@@ -310,6 +417,9 @@ Package reference
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.subdomain
+   :members:
+
+.. automodule:: edelweissfe.domaindecomposition.elementdistribution
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.partitioning

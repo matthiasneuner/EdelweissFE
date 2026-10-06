@@ -28,9 +28,11 @@
 #  ---------------------------------------------------------------------
 """The nonlinear explicit dynamic solver, domain-decomposed over MPI processes.
 
-Started by an MPI launcher, every process reads the same input file and builds the same, complete
-model; this solver then has each of them compute one *subdomain* of it -- the elements METIS
-assigns to it and the constraints dealt to it -- and integrate the degrees of freedom those touch.
+Started by an MPI launcher, every process reads the same input file and builds the same mesh --
+creating either every element, or only those of its own subdomain (see
+:mod:`edelweissfe.domaindecomposition.elementdistribution`); this solver then has each of them
+compute one *subdomain* of it -- the elements METIS assigns to it and the constraints dealt to it --
+and integrate the degrees of freedom those touch.
 An increment is the increment of :class:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED`, with
 two additions. At the interface between subdomains, each process holds only its own elements'
 contributions to the nodal force; the neighbours exchange the individual contributions there, and
@@ -48,9 +50,12 @@ search move a constraint onto nodes another process integrated until then.
 **Where the whole model is read.** Field outputs, output managers, a marker deciding a refinement,
 the refinement itself, and a contact search all read more than one subdomain. Before each of them,
 every process receives the current solution of every degree of freedom, and -- except before a
-contact search, which reads positions only -- the current state of every element and stateful
-constraint (:mod:`edelweissfe.domaindecomposition.statesynchronization`). That happens on the
+contact search, which reads positions only -- the current state of every stateful constraint and,
+where every process holds the whole model, of every element
+(:mod:`edelweissfe.domaindecomposition.statesynchronization`). That happens on the
 ``output-frequency`` cadence, at every ``contact-update-frequency`` search and at the end of a step.
+A distributed model synchronizes no element states: its element field outputs gather their results,
+and its checkpoints the element states, from the processes computing them.
 A contact search itself -- at a contact update and at a topology check -- runs on the process that
 evaluates the constraint only, since nothing but that evaluation reads its outcome.
 
@@ -62,7 +67,8 @@ process already holds every element.
 
 **Output.** Only rank 0 creates output managers and writes files; the others are silent. A restart
 checkpoint is written after the output synchronization, so the copy of the model rank 0 writes it
-from holds every element and constraint as its owner left it: it is an ordinary checkpoint of the
+from holds every element and constraint as its owner left it -- a distributed model gathers the
+element states to rank 0 for it (:meth:`NEDMPI.writeIncrementOutput`): it is an ordinary checkpoint of the
 whole model, and can be resumed by this solver on any number of processes, or by the serial one.
 Every process resumes from it, and so starts from the same model. A conditional stop decided by an
 output manager on rank 0 stops every process.
@@ -80,7 +86,8 @@ and the external work a checkpoint records.
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and on an output
 increment the model is repartitioned with the measured costs whenever the slowest process falls
-more than ``load-balance-tolerance`` behind the mean.
+more than ``load-balance-tolerance`` behind the mean. A distributed model is not repartitioned:
+that would move elements between processes (migration), which is not implemented yet.
 
 **What this solver changes.** The increment of ``NED`` runs over the
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of this process' subdomain, which a
@@ -102,11 +109,10 @@ communication, each in an override of a method of ``NED``:
   contact search, a topology update, writing the output -- is agreed on by all of them
   (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`).
 
-**Limits of this prototype.** Every process holds the complete model -- every element, with its
-material and state, the sets, the degree-of-freedom layout -- so the memory per process does not
-shrink with the number of processes, and a refinement costs every process what it costs a serial
-run. Holding only the elements a process computes is planned. Constraints are evaluated whole, each
-by one process. An exception outside the steps agreed on by all processes, and an interrupt of any
+**Limits of this prototype.** Every process holds the whole mesh, every node and global-length
+vectors; a model with refinement, constraints or contact holds every element in every process, so
+that its memory per process does not shrink with the number of processes, and a refinement costs
+every process what it costs a serial run. Constraints are evaluated whole, each by one process. An exception outside the steps agreed on by all processes, and an interrupt of any
 process, abort all of them.
 
 Run with, for example::

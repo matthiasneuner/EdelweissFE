@@ -28,22 +28,26 @@
 #  ---------------------------------------------------------------------
 """Domain decomposition: computing one model in several MPI processes.
 
-Each process holds the complete model -- every node, element, set and constraint, built from the
-same input file -- and *computes* one subdomain of it: the elements a graph partitioner assigned to
-it, the constraints assigned to it, and the degrees of freedom those touch. A degree of freedom at
-the interface between two subdomains is integrated by both, and its nodal force is completed by
-summing the partial forces of every subdomain touching it (:mod:`.subdomaininterface`).
-A :class:`~.subdomain.Subdomain` decides the subdomain of a process -- as the
+Every process reads the same input file and builds the same mesh, nodes, sets and definitions, and
+*computes* one subdomain of the model: the elements a graph partitioner assigned to it, the
+constraints assigned to it, and the degrees of freedom those touch. A degree of freedom at the
+interface between two subdomains is integrated by both, and its nodal force is completed by summing
+the partial forces of every subdomain touching it (:mod:`.subdomaininterface`). A
+:class:`~.subdomain.Subdomain` decides the subdomain of a process -- as the
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the explicit increment runs over,
 in place of the whole model -- and carries out every exchange between the processes.
 
-Holding the whole model everywhere is what makes adaptive refinement tractable: at a topology change
-every process first receives the current state of the parts it did not compute
+Which elements a process *creates* is decided once per job (:mod:`.elementdistribution`): a
+**distributed** model is partitioned before its elements exist, and each process creates only its
+own elements (and the loaded elements touching them), so that the memory of the elements falls with
+the number of processes; whole-model readers gather what they read. A model with something that
+still reads or changes the whole model during a run -- adaptive refinement, contact and other
+constraints, some generators -- holds the **whole model on every process** instead: at a topology
+change every process first receives the current state of the parts it did not compute
 (:mod:`.statesynchronization`), then runs the same, deterministic refinement on the same data, and
-the model is partitioned afresh (:mod:`.partitioning`). No element ever migrates, because every
-process holds the complete model, every element included. Holding only the elements a process
-computes -- memory that falls with the number of processes -- is planned.
+the model is partitioned afresh (:mod:`.partitioning`).
 
-Nothing here is imported by a serial run; :mod:`.mpienvironment` decides whether the process was
-started by an MPI launcher, and only then imports ``mpi4py``.
+Nothing here is imported by a serial run except :mod:`.mpienvironment`, which decides whether the
+process was started by an MPI launcher, and :mod:`.elementdistribution`, which then asks it; only
+under a launcher is ``mpi4py`` imported.
 """
