@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.wholemodel import IMPLICIT_ONLY
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.sets.nodeset import NodeSet
@@ -128,6 +129,9 @@ class Constraint(ConstraintBase):
 
 
     """
+
+    #: It solves for Lagrange multipliers; see ConstraintBase.wholeModelReason.
+    wholeModelReason = IMPLICIT_ONLY
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = LinearizedRigidBodySchema

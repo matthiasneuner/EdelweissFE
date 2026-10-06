@@ -116,6 +116,10 @@ class Constraint(ConstraintBase, MeshDependent):
         required, see :class:`NodeToRigidSurfacePenaltySchema`.
     """
 
+    #: It reads its node set and the nodes, which every process holds whole; see
+    #: ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToRigidSurfacePenaltySchema
 

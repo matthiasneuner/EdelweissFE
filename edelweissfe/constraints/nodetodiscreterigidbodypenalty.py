@@ -180,6 +180,10 @@ class Constraint(ConstraintBase, MeshDependent):
     Currently only available for spatialdomain = 3D.
     """
 
+    #: It reads its node set, the nodes and the rigid body, which every process holds whole; see
+    #: ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDiscreteRigidBodyPenaltySchema
 

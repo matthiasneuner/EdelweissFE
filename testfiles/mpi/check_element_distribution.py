@@ -42,6 +42,10 @@ from edelweissfe.utils.inputfileparser import parseInputFile
 EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NED",
     "edelweiss-only/NEDContact",
+    "edelweiss-only/NEDDirectionalSpringPenalty",
+    "edelweiss-only/NEDEqualValuePenalty",
+    "edelweiss-only/NEDNodeToDiscreteRigidBodyContact",
+    "edelweiss-only/NEDNodeToRigidSurfacePenalty",
     "edelweiss-only/NEDRestart1Write",
     "edelweiss-only/NEDRestart2Resume",
     "edelweiss-only/NEDSurfaceContact",

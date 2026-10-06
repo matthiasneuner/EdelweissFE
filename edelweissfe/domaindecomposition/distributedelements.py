@@ -83,8 +83,9 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
       mesh: contact and ties read the contact facets of their surfaces, the nodes and the rigid
       bodies, which every process holds whole (a facet and the point mass of a rigid body are made
       by every process itself, see :meth:`DistributedElements.placeElementMadeByOwner`). Ties,
-      surface-to-surface, node-to-surface and surface-to-rigid-body contact are verified so; the
-      other constraint types still name a reason;
+      penalty contact and the other forces-only penalty constraints are verified so; the
+      constraints of the implicit solvers (Lagrange multipliers, indirect load control) still name
+      a reason (:mod:`~edelweissfe.constraints.base.wholemodel`);
     * **generators that do more than describe the mesh** (see
       :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`): code
       running on element objects while the mesh is described (``executePythonCode``, ``cubit``);

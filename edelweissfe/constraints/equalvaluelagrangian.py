@@ -35,6 +35,7 @@ import numpy as np
 
 from edelweissfe.config.phenomena import getFieldSize
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.wholemodel import IMPLICIT_ONLY
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -97,6 +98,9 @@ class Constraint(ConstraintBase, MeshDependent):
         The options this constraint accepts; both are still required, see
         :class:`EqualValueLagrangianSchema`.
     """
+
+    #: It solves for Lagrange multipliers; see ConstraintBase.wholeModelReason.
+    wholeModelReason = IMPLICIT_ONLY
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = EqualValueLagrangianSchema

@@ -124,6 +124,9 @@ class Constraint(ConstraintBase, MeshDependent):
         ``penaltyStiffness`` are still required, see :class:`PenaltyIndirectControlSchema`.
     """
 
+    #: See ConstraintBase.wholeModelReason.
+    wholeModelReason = "controls the load of a quasi-static (implicit) analysis, and has no explicit test case"
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = PenaltyIndirectControlSchema
 

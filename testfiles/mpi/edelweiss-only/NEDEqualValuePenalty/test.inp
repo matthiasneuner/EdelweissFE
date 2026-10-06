@@ -1,0 +1,38 @@
+** Equal-value penalty constraint under the explicit solver (from the serial NIST case
+** marmot/EqualValuePenaltyConstraint): the top edge of a plate is kept at one vertical displacement
+** while its top right corner is pulled. Runs distributed, bit-identical to a serial run.
+*material, name=LinearElastic, id=linearelastic, provider=edelweiss
+30000.0, 0.15, 1.0
+
+*modelGenerator, generator=planeRectQuad, name=gen
+elType=CPE4
+elProvider=edelweiss
+nX=8
+nY=8
+l=100
+h=100
+
+*constraint, type=equalValuePenalty, name=myConstraint
+nSet=gen_top
+field=displacement
+component=1
+penalty=1e4
+
+*section, name=section1, thickness=1.0, material=linearelastic, type=plane
+all
+
+*job, name=nedequalvaluejob, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=50
+
+*fieldOutput
+>>perNode, name=displacement, elSet=all, field=displacement, result=U
+>>perNode, name=RF, nSet=gen_bottom, field=displacement, result=P, f(x)='np.sum(x[:, 1])', saveHistory=True
+
+*output, type=monitor, name=theMonitor
+fieldOutput=RF
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=600, maxIter=25, stepLength=20
+>>dirichlet, name=bottom, nSet=gen_bottom, field=displacement, 1=0.0, 2=0.0
+>>dirichlet, name=load, nSet=gen_rightTop, field=displacement, 1=5.0, 2=5.0

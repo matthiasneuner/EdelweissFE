@@ -1,0 +1,48 @@
+** The DirectionalSpringPenalty constraint under the explicit solver (from the serial NIST case marmot/DirectionalSpringPenaltyConstraint):
+** a block is pulled, then pushed, from its right face; a directional penalty spring holds the left face. Runs distributed,
+** bit-identical to a serial run.
+*material, name=LinearElastic, id=myMaterial, provider=edelweiss
+3000.0, 0.2, 1.0
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =3
+nY      =2
+nZ      =2
+lX      =3
+lY      =1
+lZ      =1
+elProvider =edelweiss
+elType  =C3D8
+
+*section, name=section1, material=myMaterial, type=solid
+all
+
+*job, name=nedpenaltyjob, domain=3d
+*solver, name=theSolver, solver=NEDMPI
+courant-number=0.3
+output-frequency=50
+
+*fieldOutput
+>>perNode, elSet=all, name=displacement, field=displacement, result=U
+>>perNode, name=RF, nSet=gen_right, field=displacement, result=P, f(x)='-np.sum(x[:, 0])', saveHistory=True
+>>perNode, name=Uleft, nSet=gen_left, field=displacement, result=U, f(x)='np.mean(x[:, 0])', saveHistory=True
+
+*output, type=monitor, name=RFMon
+fieldOutput=RF
+fieldOutput=Uleft
+
+*constraint, type=directionalspringpenalty, name=springLeft
+nSet=gen_left
+field=displacement
+component=0
+penalty=1e2
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=300, maxIter=25, stepLength=0.4
+>>dirichlet, name=leftFixed, nSet=gen_bottomLeftFront, field=displacement, 2=0., 3=0.
+>>dirichlet, name=leftRot, nSet=gen_bottomLeftBack, field=displacement, 2=0.
+>>dirichlet, name=right, nSet=gen_right, field=displacement, 1=-0.1
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=300, maxIter=25, stepLength=0.4
+>>dirichlet, name=right, nSet=gen_right, field=displacement, 1=0.2

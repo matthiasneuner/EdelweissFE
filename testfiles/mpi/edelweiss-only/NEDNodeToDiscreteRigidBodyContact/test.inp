@@ -1,0 +1,48 @@
+** Node-to-discrete-rigid-body penalty contact under the explicit solver (from the serial NIST case
+** edelweiss-only/NodeToDiscreteRigidBodyContact): a rigid cylinder is driven into a block. Runs
+** distributed (testfiles/mpi/check_element_distribution.py), bit-identical to a serial run.
+*material, name=LinearElastic, id=linearelastic, provider=edelweiss
+1.8e4, 0.22, 1.0
+
+*job, name=nedrigidbodyjob, domain=3d
+*solver, solver=NEDMPI, name=theSolver
+courant-number=0.8
+output-frequency=50
+contact-update-frequency=10
+
+*modelGenerator, generator=boxGen, name=block
+nX      =6
+nY      =6
+nZ      =2
+lX      =10
+lY      =10
+lZ      =5
+elProvider =edelweiss
+elType  =C3D8
+
+*modelGenerator, generator=discreteRigidBodyGenerator, name=cylinder, executeAfterManualGeneration=True
+filename=rigid_body.exo
+translation='0, -10, -11.0'
+mass=1.0
+inertia="1.0, 1.0, 1.0"
+
+*section, name=section1, material=linearelastic, type=solid
+block_all
+
+*constraint, type=nodeToDiscreteRigidBodyPenalty, name=contact
+nSet=block_back
+rigidBody=cylinder
+penalty=1e4
+
+*fieldOutput
+>>perNode, elSet=block_all, field=displacement, name=displacement, result=U
+>>perNode, nSet=cylinder_rp, field=displacement, name=rpForce, result=P, f(x)='np.sum(x[:, 2])', saveHistory=True
+
+*output, type=monitor, name=rpForceMon
+fieldOutput=rpForce
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=600, maxIter=25, stepLength=2
+>>dirichlet, name=frontFixed, nSet=block_front, field=displacement, 1=0.0, 2=0.0, 3=0.0
+>>dirichlet, name=rpDisp, nSet=cylinder_rp, field=displacement, 1=0.0, 2=0.0, 3=3.00
+>>dirichlet, name=rpRot, nSet=cylinder_rp, field=rotation, 1=0.15, 2=0.0, 3=0.0

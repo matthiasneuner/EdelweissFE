@@ -88,6 +88,10 @@ class Constraint(ConstraintBase, MeshDependent):
         :class:`EqualValuePenaltySchema`.
     """
 
+    #: It reads its node set and the nodes, which every process holds whole; see
+    #: ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = EqualValuePenaltySchema
 

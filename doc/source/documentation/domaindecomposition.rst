@@ -76,11 +76,16 @@ there is none:
   refinement (``hAdaptivity``) reads only the mesh and runs distributed (see `Adaptive refinement`_);
 * a **constraint not known to read only what every process holds** (``*constraint``): every
   constraint says so through
-  :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`. Ties
-  (``tie``) and penalty contact (``surfaceToDeformableSurfacePenalty``,
-  ``nodeToDeformableSurfacePenalty``, ``surfaceToDiscreteRigidBodyPenalty``) run distributed (see
-  `Contact, ties and rigid bodies`_); the other constraint types read only nodes, node sets and
-  rigid bodies as well, but are not yet verified by a distributed test case and keep their reason;
+  :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`
+  (:mod:`~edelweissfe.constraints.base.wholemodel`). Ties (``tie``), penalty contact
+  (``surfaceToDeformableSurfacePenalty``, ``nodeToDeformableSurfacePenalty``,
+  ``surfaceToDiscreteRigidBodyPenalty``, ``nodeToDiscreteRigidBodyPenalty``,
+  ``nodeToRigidSurfacePenalty``) and the other forces-only penalty constraints
+  (``equalValuePenalty``, ``directionalSpringPenalty``) run distributed (see `Contact, ties and
+  rigid bodies`_). The constraints with Lagrange multipliers (``rigidBody``, ``linearizedRigidBody``,
+  ``equalValueLagrangian``) and the indirect load control (``penaltyIndirectControl``) are for the
+  implicit solvers and keep their reason, as does any constraint not verified by a distributed test
+  case;
 * a **generator that does more than describe the mesh**: ``executePythonCode`` and ``cubit`` act on
   element objects while the mesh is being described. Every generator says so through
   :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`; a generator
@@ -334,6 +339,7 @@ contact facets of its surfaces          made by every process, from the surface 
                                         :meth:`~edelweissfe.models.femodel.FEModel.wholeElementSet`, which
                                         refuses a partial set; a facet's parent face (for the
                                         surface-to-surface quadrature) is stamped on the facet itself
+node sets                               every process holds every node set
 nodes, their coordinates and fields     every process holds every node; the solution at every node is
                                         current in every process before a search (see
                                         `Where the whole model is read`_)
@@ -587,8 +593,8 @@ Limitations
   4.7 KB of Python objects per root element (110 MB for 24 000 GC3D20R elements, 334 MB for the
   c1_150 model).
 * A constraint is evaluated whole, by one process, while the others wait; a single large contact
-  constraint is not split (see `Contact, ties and rigid bodies`_). Constraint types other than ties and
-  penalty contact still hold the whole model on every process.
+  constraint is not split (see `Contact, ties and rigid bodies`_). The implicit-only constraint types
+  still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
 
 Package reference
@@ -616,4 +622,7 @@ Package reference
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.statesynchronization
+   :members:
+
+.. automodule:: edelweissfe.constraints.base.wholemodel
    :members:

@@ -325,7 +325,7 @@ nSet=gen_left, referencePoint=gen_leftBottom
     assert len(reasons) == 5
     assert "model modifier snap (surfaceSnap) changes the mesh during the run" in reasons[0]
     assert not any(name in reason for name in ("amr", "constraint tie ", "generator facets ") for reason in reasons)
-    assert "constraint rigid (rigidBody) is not yet known to read only what every process holds" in reasons[1]
+    assert "constraint rigid (rigidBody) introduces scalar variables (Lagrange multipliers)" in reasons[1]
     assert "generator code (executePythonCode)" in reasons[2]
     assert "generator late (boxGen) runs after the mesh is partitioned" in reasons[3]
     assert "expression field output fromElements reads the elements of element set gen_all" in reasons[4]
