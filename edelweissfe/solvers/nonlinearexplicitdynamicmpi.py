@@ -86,8 +86,13 @@ and the external work a checkpoint records.
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and on an output
 increment the model is repartitioned with the measured costs whenever the slowest process falls
-more than ``load-balance-tolerance`` behind the mean. A distributed model is not repartitioned:
-that would move elements between processes (migration), which is not implemented yet.
+more than ``load-balance-tolerance`` behind the mean. A distributed model then moves the elements
+whose process changes (migration: the new process creates them from the mesh and receives their
+state, the old one drops them; see
+:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`), and
+every process builds its equation system again for the elements it now holds, carrying the solution
+over. ``load-balance-costs=elementNumber`` replaces the timings by the element numbers -- a
+deterministic, uneven cost, for tests.
 
 **What this solver changes.** The increment of ``NED`` runs over the
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of this process' subdomain, which a
@@ -102,6 +107,7 @@ communication, each in an override of a method of ``NED``:
 * :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
   the minimum and the sums over all processes;
 * :meth:`NEDMPI.acceptIncrement` synchronizes the model on output increments and rebalances it,
+  rebuilding the equation system if elements moved,
   :meth:`NEDMPI.updateConstraintConnectivity` synchronizes it before a contact search,
   :meth:`NEDMPI.applyStepActionsAtStepEnd` at the end of a step;
 * :meth:`NEDMPI.updateConnectivityOf` runs a contact search on the constraint's process only;
@@ -166,6 +172,16 @@ class NEDMPISchema(NEDSchema):
         default=0.1,
         optionName="load-balance-tolerance",
     )
+    loadBalanceCosts: str | None = schemaField(
+        description=(
+            "What an element is taken to cost when the model is repartitioned: 'measured', the measured "
+            "kernel time; or 'elementNumber', its element number -- a deterministic, deliberately uneven cost, "
+            "for tests that must know when the model is repartitioned and that elements move."
+        ),
+        dtype=str,
+        default="measured",
+        optionName="load-balance-costs",
+    )
 
 
 class NEDMPI(NEDParallel):
@@ -185,7 +201,10 @@ class NEDMPI(NEDParallel):
 
     schema = NEDMPISchema
 
-    SolverSpecificOptions = NED.SolverSpecificOptions | {"load-balance-tolerance": 0.1}
+    SolverSpecificOptions = NED.SolverSpecificOptions | {
+        "load-balance-tolerance": 0.1,
+        "load-balance-costs": "measured",
+    }
 
     def __init__(self, jobInfo, journal, **kwargs):
         super().__init__(jobInfo, journal, **kwargs)
@@ -202,8 +221,10 @@ class NEDMPI(NEDParallel):
         #: How the element forces of the current increment plan are completed at the interface.
         self._interfaceAssembly: InterfaceForceAssembly | None = None
         #: The kernel time of every element of the current increment plan, in plan order, summed
-        #: over :attr:`_nMeasuredIncrements` increments, if the subdomain balances load; else None.
+        #: over :attr:`_nMeasuredIncrements` increments, if the subdomain balances load by measured
+        #: costs; else None.
         self._elementCosts: np.ndarray | None = None
+        #: The increments computed with the current increment plan.
         self._nMeasuredIncrements = 0
         #: The external work of the whole model: :attr:`NED._externalWork` -- here, the work at the
         #: degrees of freedom this process owns -- summed over all processes at the last
@@ -310,9 +331,68 @@ class NEDMPI(NEDParallel):
 
         plan = super().planIncrement(model)
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
-        self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if self.subdomain.measuresElementCosts() else None
+        timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
+        self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if timesKernels else None
         self._nMeasuredIncrements = 0
         return plan
+
+    def _loadBalanceCosts(self) -> str:
+        """The ``load-balance-costs`` option, checked.
+
+        Returns
+        -------
+        str
+            'measured' or 'elementNumber'.
+
+        Raises
+        ------
+        ValueError
+            For any other value.
+        """
+
+        costs = self.options["load-balance-costs"]
+        if costs not in ("measured", "elementNumber"):
+            raise ValueError("load-balance-costs must be 'measured' or 'elementNumber', not '{:}'".format(costs))
+        return costs
+
+    def _elementCostsForRebalancing(self) -> tuple[np.ndarray | None, int]:
+        """The cost of every element of the increment plan, in plan order, and the number of
+        increments it was summed over, as :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`
+        weighs them: the measured kernel times, or the element numbers (``load-balance-costs``).
+
+        Returns
+        -------
+        tuple[np.ndarray | None, int]
+            The costs, None if nothing was measured, and the number of increments.
+        """
+
+        if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
+            numbers = np.array(list(self._incrementPlan.elementPlan.elements.keys()), dtype=float)
+            return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements
+        return self._elementCosts, self._nMeasuredIncrements
+
+    def _operatorsReusable(self, model: FEModel, stepActions: dict) -> bool:
+        """Whether the kept lumped operators may be reused by a rebuild of the equation system; see
+        :meth:`NED._operatorsReusable` -- in every process, or in none. Collective.
+
+        Each process decides from the elements it holds, which a migration changes in some processes
+        only, and a rebuild that reuses them takes another path -- with other exchanges -- than one
+        that does not.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        stepActions
+            The step's actions.
+
+        Returns
+        -------
+        bool
+            Whether every process may reuse them.
+        """
+
+        return not self.subdomain.anyPart(not super()._operatorsReusable(model, stepActions))
 
     def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
@@ -371,8 +451,7 @@ class NEDMPI(NEDParallel):
             psi, contributions = computeElementsForExplicit(
                 self._incrementPlan.elementPlan, U_np, dU, P, timeStep, self._elementCosts
             )
-        if self._elementCosts is not None:
-            self._nMeasuredIncrements += 1
+        self._nMeasuredIncrements += 1
 
         # At a degree of freedom shared with another subdomain, the contributions of that
         # subdomain's elements are still missing.
@@ -510,7 +589,8 @@ class NEDMPI(NEDParallel):
         """Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then make
         the whole model current in every process -- the output that follows reads all of it, and so
         do a checkpoint written with it and the topology check at the start of the next increment --
-        and rebalance the subdomains. Collective.
+        and rebalance the subdomains; if that moved elements between processes, build the equation
+        system again for the elements now held here. Collective.
 
         Parameters
         ----------
@@ -527,11 +607,20 @@ class NEDMPI(NEDParallel):
         if self.isOutputIncrement(timeStep):
             self._synchronizeModel(model, timeStep, includeStates=True)
 
-            # Right after every element state was synchronized, because an element computed by
-            # another process from now on must arrive there with its current state.
-            if self.subdomain.rebalance(self._incrementPlan.elementPlan, self._elementCosts, self._nMeasuredIncrements):
-                self.partition = self.subdomain.partition
-                self._incrementPlan = self.planIncrement(model)
+            # Right after every element state was synchronized -- or, where each process holds
+            # only its own elements, accepted by the process computing it -- because an element
+            # computed by another process from now on must arrive there with its current state.
+            ownershipVersion = model.elementDistribution.ownershipVersion
+            if self.subdomain.rebalance(self._incrementPlan.elementPlan, *self._elementCostsForRebalancing()):
+                if model.elementDistribution.ownershipVersion != ownershipVersion:
+                    # Elements moved between processes: everything indexed by the elements held
+                    # here is built again for them, as after a change of the topology -- the
+                    # degree-of-freedom indices, the subdomain, the lumped operators and the plan --
+                    # carrying the solution, which was just made complete, over.
+                    self._buildSystem(self.buildEquationSystem(model, step, previous=self._system))
+                else:
+                    self.partition = self.subdomain.partition
+                    self._incrementPlan = self.planIncrement(model)
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
         """Write the output of an accepted increment, agreed on by all processes: a conditional stop

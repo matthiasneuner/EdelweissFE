@@ -52,6 +52,7 @@ from scipy.sparse.csgraph import connected_components
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.partitioning import (
     assignConstraints,
+    keepElementsWhereTheyWere,
     partitionElementsOfMesh,
 )
 from edelweissfe.domaindecomposition.statesynchronization import (
@@ -213,8 +214,6 @@ class Subdomain:
         #: definition.
         self.partition = None
 
-        self._reportedFixedPartition = False
-
         #: What the last definition was made for; a rebalance redefines from it.
         self._model = None
         self._dofManager = None
@@ -260,7 +259,7 @@ class Subdomain:
                 self._checkReplicatedLayout(model, dofManager)
 
                 if self._elementOwners is None or model.mesh.elements.keys() != self._partitionedElementKeys:
-                    self._partition(model, measuredCosts=None)
+                    self._partition(model, measuredCosts=None, byMeasuredCosts=False)
 
                 self._constraintOwners = self._constraintOwnersOf(model)
 
@@ -269,43 +268,25 @@ class Subdomain:
             self._defineInterface(model, ownershipChanged=topologyChanged)
 
         self._reportSubdomains(topologyChanged)
-        if self._elementOwners is not None and not self._reportedFixedPartition:
-            self._reportFixedPartition(model)
 
-    def _reportFixedPartition(self, model: FEModel):
-        """Report once that a distributed model keeps its first partition although load balancing is
-        enabled; see :meth:`measuresElementCosts`.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        """
-
-        if self.loadBalanceTolerance and not model.elementDistribution.createsEveryElement:
-            self.journal.message(
-                "Load balancing is off: the elements were created in their processes, and moving them between "
-                "processes (migration) is not implemented yet",
-                self.identification,
-                0,
-            )
-        self._reportedFixedPartition = True
-
-    def _partition(self, model: FEModel, measuredCosts: dict | None):
+    def _partition(self, model: FEModel, measuredCosts: dict | None, byMeasuredCosts: bool):
         """Partition the elements of the mesh, by estimated or by measured cost. Collective.
 
         A model whose processes each created only their own elements was partitioned before its
         elements were created (see
         :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`),
         on the same mesh and by the same estimate: that partition is adopted, since an element can
-        only be computed where it exists.
+        only be computed where it exists. Repartitioned with measured costs, its elements are then
+        moved to their new processes (:meth:`_moveElements`).
 
         Parameters
         ----------
         model
             The model tree.
         measuredCosts
-            The measured cost per increment of elements, by number, on rank 0; None to estimate.
+            The measured cost per increment of elements, by number, on rank 0; None elsewhere.
+        byMeasuredCosts
+            Whether to partition by the measured costs (in every process), or by the estimate.
 
         Raises
         ------
@@ -314,19 +295,55 @@ class Subdomain:
         """
 
         distribution = model.elementDistribution
-        if distribution.createsEveryElement:
+        if not distribution.createsEveryElement and model.mesh.elements.keys() != distribution.owners.keys():
+            raise TopologyError(
+                "the elements of this model were partitioned over the processes before they were created, and "
+                "its mesh cannot change since"
+            )
+
+        if distribution.createsEveryElement or byMeasuredCosts:
             with performancetiming.timeit("partition"):
-                self._elementOwners = partitionElementsOfMesh(
+                owners = partitionElementsOfMesh(
                     model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts
                 )
+                if byMeasuredCosts:
+                    # A repartition of the same elements: those that can stay in their process do.
+                    owners = keepElementsWhereTheyWere(owners, self._elementOwners, self.nProcesses)
+            # The same decision in every process: the partitions are the same everywhere.
+            elementsMove = not distribution.createsEveryElement and owners != self._elementOwners
+            self._elementOwners = owners
+            if elementsMove:
+                self._moveElements(model)
         else:
-            if measuredCosts is not None or model.mesh.elements.keys() != distribution.owners.keys():
-                raise TopologyError(
-                    "the elements of this model were partitioned over the processes before they were created, "
-                    "and cannot be repartitioned"
-                )
             self._elementOwners = distribution.owners
         self._partitionedElementKeys = set(model.mesh.elements.keys())
+
+    @performancetiming.timeit("element migration")
+    def _moveElements(self, model: FEModel):
+        """Move the elements of a distributed model to their processes under the new partition
+        (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
+        and report the migration. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        counts = model.elementDistribution.moveElementsTo(model, self._elementOwners)
+
+        allCounts = self.communicator.gather(counts, root=0)
+        if allCounts is not None:
+            self.journal.message(
+                "Element migration: {:} element(s) changed process; element objects created {:}, dropped {:} "
+                "per process".format(
+                    sum(entry[2] for entry in allCounts),
+                    "/".join(str(entry[0]) for entry in allCounts),
+                    "/".join(str(entry[1]) for entry in allCounts),
+                ),
+                self.identification,
+                1,
+            )
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:
         """The rank of every constraint of the model: the current assignment while the model has the
@@ -976,12 +993,7 @@ class Subdomain:
 
     def measuresElementCosts(self) -> bool:
         """Whether the element kernels are to be timed, for :meth:`rebalance`: whenever load
-        balancing is enabled, and the model can be repartitioned.
-
-        A model whose processes each created only their own elements is not repartitioned: an
-        element changing process would have to be created by its new process and its state sent
-        there (migration), which is not implemented yet. Its first partition is kept, and the
-        subdomain reports that once (:meth:`define`).
+        balancing is enabled.
 
         Returns
         -------
@@ -989,12 +1001,14 @@ class Subdomain:
             Whether to time them.
         """
 
-        return bool(self.loadBalanceTolerance) and self._model.elementDistribution.createsEveryElement
+        return bool(self.loadBalanceTolerance)
 
     def rebalance(self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int) -> bool:
         """Repartition with the measured element costs if the slowest process has fallen more than
-        ``loadBalanceTolerance`` behind the mean. Collective; only when every element state has just
-        been synchronized, since an element changing process must arrive with its current state.
+        ``loadBalanceTolerance`` behind the mean. Collective; only right after an increment was
+        accepted and, where every process holds the whole model, every element state synchronized,
+        since an element changing process must arrive with its current state. A distributed model
+        moves its elements to their new processes (:meth:`_moveElements`).
 
         Parameters
         ----------
@@ -1009,15 +1023,14 @@ class Subdomain:
         -------
         bool
             Whether the partition changed; then everything derived from :attr:`partition` must be
-            derived again.
+            derived again -- and, if elements moved
+            (:attr:`~edelweissfe.models.elementdistribution.ElementDistribution.ownershipVersion`
+            changed), the equation system built for the elements now held here, which defines the
+            subdomain afresh.
         """
 
         tolerance = self.loadBalanceTolerance
         if not tolerance or self.nProcesses == 1 or costs is None or not nIncrements:
-            return False
-        if not self._model.elementDistribution.createsEveryElement:
-            # Repartitioning a distributed model would move elements between processes; see
-            # measuresElementCosts.
             return False
 
         busyTimes = np.array(self.communicator.allgather(float(costs.sum())))
@@ -1034,16 +1047,21 @@ class Subdomain:
                 measuredCosts.update(elementCosts)
 
         self.journal.message(
-            "Load imbalance {:.3f} (slowest process / mean kernel time) exceeds 1 + {:}: repartitioning "
-            "with the measured element costs".format(imbalance, tolerance),
+            "Load imbalance {:.3f} (the costliest process / the mean of all) exceeds 1 + {:}: repartitioning "
+            "with the element costs".format(imbalance, tolerance),
             self.identification,
             1,
         )
 
         model = self._model
-        self._partition(model, measuredCosts)
-        self._adoptOwnership(model)
-        with performancetiming.timeit("subdomain definition"):
-            self._defineInterface(model, ownershipChanged=True)
-        self._reportSubdomains(topologyChanged=True)
+        self._partition(model, measuredCosts, byMeasuredCosts=True)
+        if model.elementDistribution.createsEveryElement:
+            self._adoptOwnership(model)
+            with performancetiming.timeit("subdomain definition"):
+                self._defineInterface(model, ownershipChanged=True)
+            self._reportSubdomains(topologyChanged=True)
+        # Otherwise elements moved between processes, and everything indexed by the elements held
+        # here -- the degree-of-freedom layout of the elements, and with it the subdomain -- is
+        # derived again by the equation system the solver builds for them, which defines the
+        # subdomain (define).
         return True
