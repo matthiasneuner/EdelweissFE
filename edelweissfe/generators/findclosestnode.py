@@ -62,6 +62,9 @@ class Generator(GeneratorBase):
     """Find the node closest to a given spatial position, and store it in an existing or new node
     set."""
 
+    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = FindClosestNodeSchema
 

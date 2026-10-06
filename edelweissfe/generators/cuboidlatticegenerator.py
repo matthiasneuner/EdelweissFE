@@ -118,6 +118,9 @@ class CuboidLatticeGeneratorSchema:
 class Generator(GeneratorBase):
     """A mesh generator for generating cuboid lattice structure."""
 
+    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = CuboidLatticeGeneratorSchema
 

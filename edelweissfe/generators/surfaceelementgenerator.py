@@ -647,6 +647,9 @@ class Generator(GeneratorBase):
     the full background.
     """
 
+    #: See GeneratorBase.wholeModelReason.
+    wholeModelReason = "makes contact facets in every process"
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = SurfaceElementGeneratorSchema
 

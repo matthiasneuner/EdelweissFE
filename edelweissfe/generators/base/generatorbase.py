@@ -82,6 +82,13 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     (e.g. ``executePythonCode``'s raw code lines).
     """
 
+    #: Why this generator needs every element of the model in every process of a domain-decomposed
+    #: run (see :func:`~edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel`),
+    #: or None for a generator that only describes the mesh -- nodes, elements, sets and surfaces --
+    #: and reads no element object. Not None unless a generator says so, since a generator is free
+    #: to read and change the model.
+    wholeModelReason: str | None = "is not known to only describe the mesh"
+
     @classmethod
     def fromGeneratorDefinition(cls, name: str, model: FEModel, journal: Journal, args: list, kwargs: dict) -> FEModel:
         """Create this generator from a parsed ``*modelGenerator`` definition.

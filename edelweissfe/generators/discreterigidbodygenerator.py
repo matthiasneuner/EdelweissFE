@@ -114,6 +114,9 @@ class Generator(GeneratorBase):
     with rigid body kinematics, not with how it is instantiated.
     """
 
+    #: See GeneratorBase.wholeModelReason.
+    wholeModelReason = "makes a rigid body, with its point mass, in every process"
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = DiscreteRigidBodyGeneratorSchema
 

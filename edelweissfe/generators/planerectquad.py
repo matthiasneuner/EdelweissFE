@@ -92,6 +92,9 @@ class PlaneRectQuadSchema:
 class Generator(GeneratorBase):
     """A mesh generator for rectangular geometries and structured quad meshes."""
 
+    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = PlaneRectQuadSchema
 

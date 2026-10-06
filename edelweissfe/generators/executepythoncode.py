@@ -65,6 +65,9 @@ from edelweissfe.models.femodel import FEModel, everyElement
 class Generator(GeneratorBase):
     """Directly execute Python code to create the model tree."""
 
+    #: See GeneratorBase.wholeModelReason.
+    wholeModelReason = "runs code on the element objects while the mesh is described"
+
     #: This generator's datalines are raw code, not a flat option mapping -- there is nothing to
     #: validate/coerce against a schema, so it declares none and overrides
     #: :meth:`fromGeneratorDefinition` instead of relying on the default implementation.

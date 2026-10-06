@@ -78,6 +78,9 @@ class PipegenSchema:
 class Generator(GeneratorBase):
     """A structured hex mesh generator for pipe geometries."""
 
+    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = PipegenSchema
 
