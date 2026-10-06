@@ -15,8 +15,11 @@ The test cases expected to **migrate** -- to rebalance a distributed model, movi
 processes -- are checked further: some element must have been received by another process than the
 one computing it before (counted by the distribution over the run, so that it also counts the
 children of a refinement, which no first partition knew), and no process may still hold an object of
-an element it dropped (the element objects alive in the process, counted by the garbage collector,
-are exactly those of the model).
+an element it dropped (the element objects the test case made that are alive in the process, counted
+by the garbage collector, are exactly those of the model).
+
+In a distributed test case, every element made by its owner on a host element -- a contact facet --
+must be computed by the process computing its host element, also after elements migrated.
 
 Run it under the MPI launcher, from anywhere::
 
@@ -59,6 +62,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDInitialStressPressure",
     "marmot/NEDLiveAMR",
     "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRebalanceTieDistributed",
     "marmot/NEDLiveAMRRecoveryErrorDistributed",
     "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDLiveAMRRestartDistributed2Resume",
@@ -73,6 +77,7 @@ EXPECTED_DISTRIBUTED = {
 #: The test cases expected to move elements between processes (a distributed model rebalanced).
 EXPECTED_MIGRATING = {
     "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRebalanceTieDistributed",
     "marmot/NEDLiveAMRRecoveryErrorDistributed",
     "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDRebalanceDistributed",
@@ -93,15 +98,34 @@ def modeOf(model, communicator) -> str:
     return "distributed" if everyElementComputedOnce else "inconsistent"
 
 
-def migrationOf(model, communicator) -> str:
+def facetsWithTheirHosts(model, communicator) -> str:
+    """Whether every element made by its owner on a host element (a contact facet) is computed by the
+    process computing the host, as the model ends; empty if the model has none."""
+
+    computed = communicator.allgather(
+        [element.elNumber for element in model.elementDistribution.elementsReportedHere(model.elements.values())]
+    )
+    processOf = {number: rank for rank, numbers in enumerate(computed) for number in numbers}
+    hosted = [record for record in model.mesh.elements.values() if record.hostElement is not None]
+    if not hosted:
+        return ""
+    apart = sum(processOf[record.number] != processOf[record.hostElement] for record in hosted)
+    return "{:} facet(s) {:}".format(
+        len(hosted), "with their hosts" if not apart else "{:} APART FROM THEIR HOSTS".format(apart)
+    )
+
+
+def migrationOf(model, communicator, aliveBefore: list) -> str:
     """How many elements of a distributed model moved between the processes over the run, and whether
-    every process holds exactly the element objects of its model."""
+    every process holds exactly the element objects of its model -- counting only objects made by
+    this test case: a model of an earlier test case may still be alive in the process."""
 
     moved = sum(communicator.allgather(model.elementDistribution.nElementsReceived))
 
     gc.collect()
     elementClasses = {type(element) for element in model.elements.values()}
-    alive = sum(type(candidate) in elementClasses for candidate in gc.get_objects())
+    before = {id(candidate) for candidate in aliveBefore}
+    alive = sum(type(candidate) in elementClasses and id(candidate) not in before for candidate in gc.get_objects())
     heldExactly = all(communicator.allgather(alive == len(model.elements)))
     return "{:} moved, {:}".format(moved, "no dropped element alive" if heldExactly else "DROPPED ELEMENTS ALIVE")
 
@@ -130,6 +154,9 @@ def main() -> int:
     failures = 0
     for case in cases:
         os.chdir(os.path.join(workDirectory, case))
+        # Held for the test case, so that no object alive now is freed and its identity reused.
+        gc.collect()
+        aliveBefore = gc.get_objects()
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
@@ -141,20 +168,26 @@ def main() -> int:
         mode = modeOf(model, communicator)
         expected = "distributed" if case in EXPECTED_DISTRIBUTED else "whole model"
         failed = mode != expected
-        migration = ""
+        details = []
+        if mode == "distributed":
+            facets = facetsWithTheirHosts(model, communicator)
+            failed = failed or "APART" in facets
+            details += [facets] if facets else []
         if case in EXPECTED_MIGRATING and not failed:
-            migration = migrationOf(model, communicator)
+            migration = migrationOf(model, communicator, aliveBefore)
             failed = migration.startswith("0 moved") or "ALIVE" in migration
+            details.append(migration)
         if rank == 0:
             print(
                 "{:<50} {:<12} {:}{:}".format(
                     case,
                     mode,
                     "EXPECTED " + expected if mode != expected else "FAILED" if failed else "OK",
-                    " ({:})".format(migration) if migration else "",
+                    " ({:})".format("; ".join(details)) if details else "",
                 )
             )
         failures += failed
+        del aliveBefore
 
     communicator.Barrier()
     if rank == 0:

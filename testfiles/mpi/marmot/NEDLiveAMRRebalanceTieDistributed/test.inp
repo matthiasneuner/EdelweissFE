@@ -1,0 +1,75 @@
+** Elements migrate under a tie: live refinement and load rebalancing of a distributed model whose
+** refined block carries the master side of a tie.
+**
+** NEDLiveAMRRebalanceDistributed with a cap block tied onto the top face of the bar. The bar is
+** refined at the first topology check, which retiles the tie's master surface; the deterministic,
+** uneven cost (load-balance-costs=elementNumber) then repartitions the model, and elements move
+** between the processes. The contact facets are made by every process and computed by the process
+** of their host element: when the host moves, the facet's process follows it
+** (testfiles/mpi/check_element_distribution.py checks both, and that elements moved). Bit-identical
+** to a serial run. Unlike NEDLiveAMRRebalanceDistributed it carries no body load: a load on an
+** element that the tie, and not a shared node, links to a subdomain is refused in a distributed model
+** (Subdomain.bodyLoadsOnSubdomain).
+
+*material, name=LinearElastic, id=linearelastic
+20000.0, 0.2, 2.0e-9
+
+*section, name=section1, material=linearelastic, type=solid
+gen_all
+cap_all
+
+*job, name=nedAmrRebalanceTieJob, domain=3d
+
+*solver, solver=NEDMPI, name=theSolver
+courant-number=0.1
+output-frequency=20
+topology-check-frequency=20
+load-balance-costs=elementNumber
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =6
+nY      =1
+nZ      =1
+lX      =60
+lY      =10
+lZ      =10
+elType  =C3D20R
+
+*modelGenerator, generator=boxGen, name=cap
+nX      =3
+nY      =1
+nZ      =1
+z0      =10
+lX      =60
+lY      =10
+lZ      =5
+elType  =C3D20R
+
+*modelGenerator, generator=surfaceElementGenerator, name=capFacets, executeAfterManualGeneration=True
+surface = cap_back
+name    = capSurf
+
+*modelGenerator, generator=surfaceElementGenerator, name=barFacets, executeAfterManualGeneration=True
+surface = gen_front
+name    = barSurf
+
+*constraint, name=tie, type=tie
+slaveSurface=capSurf_facets, masterSurface=barSurf_facets, adjust=False
+
+*modelModifier, type=hAdaptivity, name=amrLive
+>>marker, type=fieldOutput, fieldOutput=sxx, operator='>=', threshold=0.15
+refineElSet=gen_all
+maxLevel=1
+
+*fieldOutput
+>>perElement, elSet=gen_all, name=sxx, result=stress, quadraturePoint=0:8, f(x)='np.max(np.abs(x[:,:,0]),axis=1)'
+>>perNode, name=Ux, nSet=gen_right, field=displacement, result=U, f(x)='np.mean(x[:,0])', saveHistory=True
+>>perNode, name=RF, nSet=gen_left, field=displacement, result=P, f(x)='np.sum(x[:,0])', saveHistory=True
+
+*output, type=monitor, name=monitor
+fieldOutput=RF
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-14, maxNumInc=120, maxIter=25, stepLength=1e-3
+>>dirichlet, name=fixLeft,  nSet=gen_left,  field=displacement, 1=0, 2=0, 3=0
+>>dirichlet, name=pullRight, nSet=gen_right, field=displacement, 1=0.05
