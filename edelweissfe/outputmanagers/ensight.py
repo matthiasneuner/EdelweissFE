@@ -921,6 +921,8 @@ class OutputManager(OutputManagerBase):
         self._configPart = None
         self._resolveConfigPart()
         self._transientCfg = transient
+        # the geometry and the results cover the whole model
+        self.model.requireCompleteMesh("the Ensight output")
         self._initialMeshSignature = (len(self.model.elements), len(self.model.nodes))
         self._meshSignature = None
         self._buildVariableJobs()
@@ -1298,6 +1300,7 @@ class OutputManager(OutputManagerBase):
         elSetParts = []
         partCounter = firstPartID
         for setName, elSet in elementSets.items():
+            elSet.requireComplete("the Ensight output")
             elSetPart = createUnstructuredPartFromElementSet(setName, elSet, partCounter)
             self.elSetToEnsightPartMappings[setName] = elSetPart
             elSetParts.append(elSetPart)

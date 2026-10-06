@@ -390,6 +390,7 @@ class OutputManager(OutputManagerBase):
         self.plotter = plotter
         self.journal = journal
 
+        model.requireCompleteMesh("the mesh plot")
         self.nodes = model.nodes
         self.elements = model.elements
         self.elSets = model.elementSets

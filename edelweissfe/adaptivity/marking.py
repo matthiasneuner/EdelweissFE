@@ -380,7 +380,9 @@ class ElementSetMarker(MarkerBase):
     def mark(self, model, refineElements, mesh):
         if self.elSetName not in model.elementSets:
             return set()
-        return set(model.elementSets[self.elSetName])
+        elementSet = model.elementSets[self.elSetName]
+        elementSet.requireComplete("the element set marker")
+        return set(elementSet)
 
 
 @dataclass(frozen=True)

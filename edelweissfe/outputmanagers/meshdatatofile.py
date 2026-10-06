@@ -137,6 +137,8 @@ class OutputManager(OutputManagerBase):
             The model dictionary containing the mesh data.
         """
 
+        model.requireCompleteMesh("meshDataToFile")
+
         with open(self.filename, "w+") as f:
             # write nodes
             f.write("*NODE\n")

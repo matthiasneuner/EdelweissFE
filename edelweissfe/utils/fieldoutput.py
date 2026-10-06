@@ -652,6 +652,8 @@ class ElementFieldOutput(_FieldOutputBase):
         fExport_x: Callable = None,
         quadraturePoints: Union[int, slice, list[int]] = 0,
     ):
+        # an element result over a set is a result of the whole set
+        elSet.requireComplete("element field output {:}".format(name))
         self.associatedSet = elSet
         self.resultName = resultName
         self.quadraturePoints = quadraturePoints
