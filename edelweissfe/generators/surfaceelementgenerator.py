@@ -64,7 +64,6 @@ from edelweissfe.elements.contactsurfaceelement import (
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.parentfacegeometry import PARENT_FACE_PARAMETRIC_COORDS
 from edelweissfe.utils.schema import schemaField
@@ -217,6 +216,44 @@ def canonicalParentFace(ensightType: str, faceNumber: int) -> tuple[str, tuple]:
     if len(groups[0]) == 3:
         return "quad4", (groups[0][0], groups[0][1], groups[0][2], groups[1][2])
     return "line2", tuple(groups[0])
+
+
+@dataclass(frozen=True)
+class _SourceElement:
+    """A solid element whose face is tiled with facets, as the facet generator needs it: read from
+    the mesh, so that no element object is needed.
+
+    Parameters
+    ----------
+    elNumber
+        The element number.
+    ensightType
+        The element shape, which selects the face tables.
+    nodes
+        The element's nodes, in its node order.
+    """
+
+    elNumber: int
+    ensightType: str
+    nodes: list
+
+    @classmethod
+    def ofMeshElement(cls, model: FEModel, number: int) -> "_SourceElement":
+        """The source element of the mesh element with the given number.
+
+        Parameters
+        ----------
+        model
+            The model.
+        number
+            The element number.
+        """
+
+        record = model.mesh.elements[number]
+        nodes = model.nodes
+        return cls(
+            number, model.mesh.typeOf(record).ensightType, [nodes[label] for label in record.nodeLabels.tolist()]
+        )
 
 
 def _stampParentFace(facet, sourceElement, faceType: str, canonicalIndices: tuple):
@@ -379,8 +416,15 @@ def buildContactFacets(
             "'facetConsistent' or 'serendipityOptimal'."
         )
 
-    if surfaceName not in model.surfaces:
+    if surfaceName not in model.mesh.surfaces:
         raise ValueError(f"surfaceElementGenerator: surface '{surfaceName}' is not defined.")
+
+    # The source faces are read from the mesh, not from the element objects: the facets are made in
+    # every process, from the whole surface, whichever solid elements the process created.
+    sourceElementsOfFace = {
+        faceNumber: [_SourceElement.ofMeshElement(model, number) for number in numbers]
+        for faceNumber, numbers in model.mesh.elementNumbersOfSurface(surfaceName).items()
+    }
 
     if nodalWeights == "serendipityOptimal" and triangulation != "midside":
         # The corner reduction keeps no midside nodes in the facets, so there would be nothing to
@@ -389,8 +433,8 @@ def buildContactFacets(
         offending = sorted(
             {
                 sourceElement.ensightType
-                for elementSet in model.surfaces[surfaceName].values()
-                for sourceElement in elementSet
+                for sourceElements in sourceElementsOfFace.values()
+                for sourceElement in sourceElements
                 if sourceElement.ensightType in _MIDSIDE_FACE_TABLES
             }
         )
@@ -411,8 +455,8 @@ def buildContactFacets(
         # all non-negative, so there the mismatch is removable exactly and a corner-share
         # reassignment is the wrong instrument for it in the first place.
         unsupported = set()
-        for elementSet in model.surfaces[surfaceName].values():
-            for sourceElement in elementSet:
+        for sourceElements in sourceElementsOfFace.values():
+            for sourceElement in sourceElements:
                 midsideTable = _MIDSIDE_FACE_TABLES.get(sourceElement.ensightType)
                 if midsideTable is None:
                     continue
@@ -432,11 +476,9 @@ def buildContactFacets(
     nodesSetName = f"{prefix}_nodes"
 
     # remove any facets a previous call under this prefix created, so re-running is idempotent
-    for staleFacet in model.elementSets.get(facetsSetName, []):
-        if staleFacet.elNumber in model.elements:
-            model.removeElement(staleFacet.elNumber)
-
-    surfaceDef = model.surfaces[surfaceName]
+    for staleFacetNumber in model.mesh.elementSets.get(facetsSetName, []):
+        if staleFacetNumber in model.mesh.elements:
+            model.removeElement(staleFacetNumber)
 
     # Facet numbers come from the model's monotonic allocator, NOT from max(model.elements)+1. The
     # old expression read the maximum *after* the stale facets above were deleted, so a rebuild
@@ -445,8 +487,8 @@ def buildContactFacets(
     # TopologyPipeline.reserveElementNumbers.
     newElements = {}
 
-    for faceNumber, elementSet in surfaceDef.items():
-        for sourceElement in elementSet:
+    for faceNumber, sourceElements in sourceElementsOfFace.items():
+        for sourceElement in sourceElements:
             faceTable = None
             if triangulation == "midside":
                 faceTable = _MIDSIDE_FACE_TABLES.get(sourceElement.ensightType)
@@ -519,22 +561,21 @@ def buildContactFacets(
     for facetElement in newElements.values():
         model.createElement(facetElement)
 
-    # this function is the one that mutates model.elements outside the mesh modifier (removing the
-    # stale facets above and inserting newElements here), so model.elementSets["all"] must be
-    # resynced here to mirror model.elements -- otherwise "all" keeps dangling references to the
+    # this function is the one that mutates the mesh outside the mesh modifier (removing the
+    # stale facets above and inserting newElements here), so the element set "all" must be
+    # resynced here to mirror the mesh -- otherwise "all" keeps dangling references to the
     # popped stale facets and misses the new ones for the rest of the refinement window.
-    if "all" in model.elementSets:
-        model.elementSets["all"].replaceMembers(list(model.elements.values()))
+    if "all" in model.mesh.elementSets:
+        model.mesh.setElementSet("all", model.mesh.elements.keys())
+        model.resolveElementSetOfMesh("all")
 
-    # stable identity across rebuilds (mutate in place rather than replace under the same key), like
+    # stable identity across rebuilds (resolved in place rather than replaced under the same key), like
     # every other AMR-mutated topological container -- a consumer that merely caches
     # model.elementSets[facetsSetName]/model.nodeSets[nodesSetName] (e.g. a fromExpression
     # FieldOutput reading a contact constraint's per-facet-node result) would otherwise keep
     # referencing the pre-rebuild object and silently go stale/size-mismatched on the next rebuild.
-    if facetsSetName in model.elementSets:
-        model.elementSets[facetsSetName].replaceMembers(list(newElements.values()))
-    else:
-        model.elementSets[facetsSetName] = ElementSet(facetsSetName, list(newElements.values()))
+    model.mesh.setElementSet(facetsSetName, newElements.keys())
+    model.resolveElementSetOfMesh(facetsSetName)
 
     seenNodes = set()
     facetNodesInOrder = []

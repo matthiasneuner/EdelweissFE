@@ -54,7 +54,7 @@ from edelweissfe.elements.displacementelement.element import DisplacementElement
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.generators.surfaceelementgenerator import buildContactFacets
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.femodel import FEModel, everyElement
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType
 from edelweissfe.points.node import Node
@@ -95,8 +95,12 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 model.createElement(element)
                 elements[key] = element
 
-            model.surfaces["masterFace"] = {_YMIN: ElementSet("m", [elements["upper"]])}
-            model.surfaces["slaveFace"] = {_YMAX: ElementSet("s", [elements["lower"]])}
+            model.mesh.setElementSet("m", [elements["upper"].elNumber])
+            model.mesh.addSurface("masterFace", {_YMIN: "m"})
+            model.createElementsOfMesh(everyElement)
+            model.mesh.setElementSet("s", [elements["lower"].elNumber])
+            model.mesh.addSurface("slaveFace", {_YMAX: "s"})
+            model.createElementsOfMesh(everyElement)
 
             masterSetName, _ = buildContactFacets(model, "masterFace", "mst", "midside", nodalWeights, self.journal)
             slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "midside", nodalWeights, self.journal)
@@ -317,8 +321,12 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 model.createElement(element)
                 elements[key] = element
 
-            model.surfaces["masterFace"] = {_YMIN: ElementSet("m", [elements["masterLeft"], elements["masterRight"]])}
-            model.surfaces["slaveFace"] = {_YMAX: ElementSet("s", [elements["slave"]])}
+            model.mesh.setElementSet("m", [elements["masterLeft"].elNumber, elements["masterRight"].elNumber])
+            model.mesh.addSurface("masterFace", {_YMIN: "m"})
+            model.createElementsOfMesh(everyElement)
+            model.mesh.setElementSet("s", [elements["slave"].elNumber])
+            model.mesh.addSurface("slaveFace", {_YMAX: "s"})
+            model.createElementsOfMesh(everyElement)
 
             masterSetName, _ = buildContactFacets(
                 model, "masterFace", "mst", "midside", "facetConsistent", self.journal

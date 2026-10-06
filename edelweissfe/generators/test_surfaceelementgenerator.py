@@ -50,7 +50,7 @@ from edelweissfe.generators.surfaceelementgenerator import (
     canonicalParentFace,
 )
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.femodel import FEModel, everyElement
 from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.utils.facetcontactgeometry import facetNormalAndMeasure
@@ -116,7 +116,9 @@ class TestContactFacetNodalWeights(unittest.TestCase):
             element = DisplacementElement("C3D20", elNumber)
             element.setNodes(nodes)
             model.createElement(element)
-        model.surfaces["theSurface"] = {1: ElementSet("theFace", [element])}
+        model.mesh.setElementSet("theFace", [element.elNumber])
+        model.mesh.addSurface("theSurface", {1: "theFace"})
+        model.createElementsOfMesh(everyElement)
 
         return model
 
@@ -243,7 +245,9 @@ class TestContactFacetNodalWeights(unittest.TestCase):
             element = DisplacementElement("CPE8", elNumber)
             element.setNodes(nodes)
             model.createElement(element)
-        model.surfaces["theSurface"] = {1: ElementSet("theEdge", [element])}
+        model.mesh.setElementSet("theEdge", [element.elNumber])
+        model.mesh.addSurface("theSurface", {1: "theEdge"})
+        model.createElementsOfMesh(everyElement)
 
         return model
 

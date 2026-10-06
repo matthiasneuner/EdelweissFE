@@ -37,7 +37,6 @@ from edelweissfe.adaptivity.hex20topology import Hex20Topology
 from edelweissfe.adaptivity.marking import RefineableElements
 from edelweissfe.adaptivity.refinement import AdaptiveMesh
 from edelweissfe.adaptivity.statetransfer.perstatevar import PerStateVarStateTransfer
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.config.markerlibrary import getMarkerClass
 from edelweissfe.config.registry import RegistryLookupError
 from edelweissfe.config.statetransferstrategies import getStateTransferStrategyClass
@@ -274,6 +273,10 @@ class ModelModifier(ModelModifierBase):
         super().__init__(name, model, journal, *args, **kwargs)
         options = buildSchemaFromOptions(HAdaptivitySchema, kwargs)
 
+        # the octree mirror, the marking and the 2:1 balance work on the whole mesh, and the children
+        # are created where their parents are: every element must exist in this process
+        model.requireCompleteMesh("hAdaptivity")
+
         self._name = name
         self._model = model
         self._journal = journal
@@ -359,7 +362,6 @@ class ModelModifier(ModelModifierBase):
         # type -- a multi-material mesh (e.g. GC3D20R concrete next to C3D20R steel) keeps each
         # element family's field layout and material interface across refinement
         self._elementType = options.elementType
-        self._elementClasses = {}
 
         # bodies of the refineable mesh: node labels are namespaced per body, so coincident nodes of
         # two bodies (a tied interface -- 'adjust' makes it flush by default --, a zero-gap contact
@@ -634,12 +636,6 @@ class ModelModifier(ModelModifierBase):
         self._committedOccasionEids.append(list(markedEids))
         return change
 
-    def _makeElement(self, elementType, elNumber):
-        """Instantiate a child element of the given type, resolving (and caching) its class once per type."""
-        if elementType not in self._elementClasses:
-            self._elementClasses[elementType] = getElementClass(elementType, self._provider)
-        return self._elementClasses[elementType](elementType, elNumber)
-
     def _materialize(self, model: FEModel, records: dict):
         """Turn the refined octree into model elements, nodes, sets and fields.
 
@@ -838,8 +834,9 @@ class ModelModifier(ModelModifierBase):
         e = mesh.elements[eid]
         parentEid = e["parent"]
         parentEl = self._eidToEl[parentEid]
-        child = self._makeElement(self._elementType or parentEl.elType, elNumber)
-        child.setNodes([model.nodes[label] for label in e["conn"]])
+        # the child is described in the mesh and created from it, as every element of the model is
+        model.mesh.addElement(elNumber, self._elementType or parentEl.elType, self._provider, e["conn"])
+        child = model.createElementOfMesh(elNumber)
         self._sectionOf[parentEl].assignSectionToElement(child, model)
         for elementProperty in self._elementPropertiesOf.get(parentEl, ()):
             child.assignProperty(elementProperty.propertyName, elementProperty.values)
@@ -862,7 +859,6 @@ class ModelModifier(ModelModifierBase):
                     if all(v is not None for v in parentVals):
                         newValues[key][node] = N @ np.array(parentVals)
 
-        model.createElement(child)
         self._eidToEl[eid] = child
         self._sectionOf[child] = self._sectionOf[parentEl]
         if parentEl in self._elementPropertiesOf:
@@ -924,6 +920,9 @@ class ModelModifier(ModelModifierBase):
                     if meid in self._eidToEl:
                         byFace[faceID].append(self._eidToEl[meid])
                 model.surfaces[surfaceName].replaceData({f: els for f, els in byFace.items()})
+                model.mesh.setSurfaceElements(
+                    surfaceName, {f: [el.elNumber for el in els] for f, els in byFace.items()}
+                )
 
     def _updateSets(self, model: FEModel, records: dict, newNodes: dict, newChildEids: set, change: ModelChange):
         """Add the new nodes and elements to the node and element sets they belong to."""
@@ -956,7 +955,9 @@ class ModelModifier(ModelModifierBase):
                 # the meantime are filtered out by their label
                 elements += [el for el in self._untrackedOfElementSet[setName] if el.elNumber in model.elements]
                 model.elementSets[setName].replaceMembers(elements)
+                model.mesh.setElementSet(setName, [el.elNumber for el in elements])
         model.elementSets["all"].replaceMembers(list(model.elements.values()))
+        model.mesh.setElementSet("all", model.mesh.elements.keys())
         change.changedElementSets.add("all")
 
     def _resizeNodeFieldsAndWarmStart(self, model: FEModel, oldValues: dict, newValues: dict):
