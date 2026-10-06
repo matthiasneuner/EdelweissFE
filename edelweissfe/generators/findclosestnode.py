@@ -65,6 +65,9 @@ class Generator(GeneratorBase):
     #: It only describes the mesh; see GeneratorBase.wholeModelReason.
     wholeModelReason = None
 
+    #: It describes no element; see GeneratorBase.describesElementsOfMesh.
+    describesElementsOfMesh = False
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = FindClosestNodeSchema
 

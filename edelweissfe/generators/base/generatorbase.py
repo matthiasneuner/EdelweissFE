@@ -89,6 +89,13 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     #: to read and change the model.
     wholeModelReason: str | None = "is not known to only describe the mesh"
 
+    #: Whether this generator may describe elements of the mesh. Those must be described before the
+    #: mesh is partitioned over the processes of a domain-decomposed run, so such a generator may not
+    #: run after the keywords (``executeAfterManualGeneration=True``) there. False for a generator
+    #: that describes none -- that makes only elements of its own, like contact facets or the point
+    #: mass of a rigid body (see :meth:`~edelweissfe.models.femodel.FEModel.createElement`), or none.
+    describesElementsOfMesh: bool = True
+
     @classmethod
     def fromGeneratorDefinition(cls, name: str, model: FEModel, journal: Journal, args: list, kwargs: dict) -> FEModel:
         """Create this generator from a parsed ``*modelGenerator`` definition.

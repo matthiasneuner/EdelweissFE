@@ -114,8 +114,12 @@ class Generator(GeneratorBase):
     with rigid body kinematics, not with how it is instantiated.
     """
 
-    #: See GeneratorBase.wholeModelReason.
-    wholeModelReason = "makes a rigid body, with its point mass, in every process"
+    #: It makes the nodes of a rigid body and its point mass -- an element of its own -- in every
+    #: process; see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
+    #: The point mass is an element of its own; see GeneratorBase.describesElementsOfMesh.
+    describesElementsOfMesh = False
 
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = DiscreteRigidBodyGeneratorSchema

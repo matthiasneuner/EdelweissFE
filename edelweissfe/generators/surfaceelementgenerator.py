@@ -650,8 +650,12 @@ class Generator(GeneratorBase):
     the full background.
     """
 
-    #: See GeneratorBase.wholeModelReason.
-    wholeModelReason = "makes contact facets in every process"
+    #: It reads the mesh, and makes facets -- elements of its own, surface-sized -- in every process;
+    #: see GeneratorBase.wholeModelReason.
+    wholeModelReason = None
+
+    #: The facets are elements of its own; see GeneratorBase.describesElementsOfMesh.
+    describesElementsOfMesh = False
 
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = SurfaceElementGeneratorSchema
