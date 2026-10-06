@@ -435,10 +435,13 @@ increment, written after the synchronization of that output, so rank 0's copy of
 every element and every constraint as the process computing it left it. A distributed model
 gathers the element states to rank 0 for it instead (see `Where the whole model is read`_); the
 file is the same, bit for bit, as a serial run's. That includes the solver's external work: the
-work at the prescribed degrees of freedom of an increment is gathered from their owners and summed
-exactly (:func:`math.fsum`, which does not depend on the order of the terms nor on how they are
-split among processes), so every process accumulates that of the whole model, as a serial run does
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.sumOfWorkAtPrescribedDofs`). It is an
+work at the prescribed degrees of freedom of each increment is summed exactly (:func:`math.fsum`,
+which does not depend on the order of the terms nor on how they are split among processes). Each
+process keeps the products at the degrees of freedom it owns, increment by increment, and they are
+gathered only where the external work is read -- the energy balance, an output increment, the end
+of a step -- and added increment by increment, so every process accumulates that of the whole model,
+as a serial run does, without an exchange every increment
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.settleExternalWork`). It is an
 ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the

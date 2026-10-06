@@ -523,6 +523,11 @@ class NED(NonlinearSolverBase):
         #: Compared against the kinetic energy to detect energy creation; see
         #: _ENERGY_CREATION_TOLERANCE.
         self._externalWork = 0.0
+        #: The work at the prescribed degrees of freedom owned here of every increment since the
+        #: last time the external work was read, in increment order: one array of per-degree-of-
+        #: freedom products per increment, added to :attr:`_externalWork` by
+        #: :meth:`settleExternalWork`.
+        self._pendingWorkAtPrescribedDofs = []
         #: The last completed increment. The central-difference velocity update reads
         #: 0.5 * (dT + dT_prev); None makes the first increment of a cold step the half step that
         #: starts a leapfrog. A resumed step continues from the checkpointed one instead: the
@@ -587,6 +592,7 @@ class NED(NonlinearSolverBase):
         self._stepWallClockTic = perf_counter()
 
         self._externalWork = 0.0
+        self._pendingWorkAtPrescribedDofs = []
         self.prevTimeStep = None
         self._conservationCheck.reset()
         self._warnedAboutMissingInternalEnergy = False
@@ -891,6 +897,25 @@ class NED(NonlinearSolverBase):
                 constraints=self.partition.constraints,
             )
 
+        # the output and a checkpoint written after it read the external work
+        if self.isOutputIncrement(timeStep):
+            self.settleExternalWork()
+
+    def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict):
+        """Bring the external work up to date -- the end of a step reads it, and the output written
+        after -- then let the step actions finish the step.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        stepActions
+            The step actions, by type.
+        """
+
+        self.settleExternalWork()
+        super().applyStepActionsAtStepEnd(model, stepActions)
+
     def endStep(self, step, model: FEModel):
         """Report the step's performance timing.
 
@@ -1013,7 +1038,11 @@ class NED(NonlinearSolverBase):
                 V[dirichlet.constrainedDofIndices] = prescribedVelocity
                 prescribedVelocities.append((dirichlet.constrainedDofIndices, prescribedVelocity))
 
-            self._externalWork -= self.sumOfWorkAtPrescribedDofs(workAtPrescribedDofs)
+            # Added to the external work only where it is read (settleExternalWork), so that a
+            # domain-decomposed run need not gather the products of every increment as it is made.
+            self._pendingWorkAtPrescribedDofs.append(
+                np.concatenate(workAtPrescribedDofs) if workAtPrescribedDofs else np.empty(0)
+            )
 
             # Second-order DOFs: central difference with mass-proportional damping,
             # V = ((1 - h) V + Minv P dt) / (1 + h), h = alpha dt / 2: the rate alpha = C/M enters
@@ -1213,30 +1242,41 @@ class NED(NonlinearSolverBase):
                 1,
             )
 
-    def sumOfWorkAtPrescribedDofs(self, workAtPrescribedDofs: list[np.ndarray]) -> float:
-        """The work done at the prescribed degrees of freedom in one increment: the sum of the
-        products of reaction force and prescribed increment, one per degree of freedom owned here.
+    def settleExternalWork(self):
+        """Add the work at the prescribed degrees of freedom of every increment since the last call to
+        the external work, increment by increment, in increment order. Called where the external
+        work is read: the energy balance, an output increment (and a checkpoint written with it), the
+        end of a step.
 
-        Summed with :func:`math.fsum`, which rounds the exact sum once: the result does not depend on
+        The work of one increment is the sum of one product per prescribed degree of freedom --
+        reaction force times prescribed increment -- summed with :func:`math.fsum`
+        (:meth:`sumsOfWorkAtPrescribedDofs`), which rounds the exact sum once: it does not depend on
         the order of the products, nor on how they are split into parts. That makes the external work
         the same, bit for bit, whether the model is computed whole or split over any number of
-        processes (each contributing the products at the degrees of freedom it owns, see
-        :class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) -- a plain running sum
-        would depend on both, in its last bits.
+        processes, and whenever it is settled.
+        """
+
+        for work in self.sumsOfWorkAtPrescribedDofs(self._pendingWorkAtPrescribedDofs):
+            self._externalWork -= work
+        self._pendingWorkAtPrescribedDofs = []
+
+    def sumsOfWorkAtPrescribedDofs(self, workOfIncrements: list[np.ndarray]) -> list[float]:
+        """The work at the prescribed degrees of freedom of each of the given increments: the exact
+        sum (:func:`math.fsum`) of its products. See :meth:`settleExternalWork`.
 
         Parameters
         ----------
-        workAtPrescribedDofs
-            The products, per Dirichlet condition carrying a kinetic energy, at the degrees of freedom
-            owned here.
+        workOfIncrements
+            Per increment, the products at the prescribed degrees of freedom owned here: here, all of
+            them.
 
         Returns
         -------
-        float
-            The work of the increment.
+        list[float]
+            The work of each increment, in the order given.
         """
 
-        return math.fsum(product for products in workAtPrescribedDofs for product in products.tolist())
+        return [math.fsum(products.tolist()) for products in workOfIncrements]
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of the energy balance: the internal energy, the kinetic energy, the external work,
@@ -1272,6 +1312,7 @@ class NED(NonlinearSolverBase):
             halfSumOfMassTimesSquaredRate(np.arange(V.shape[0])[self.theDofManager.idcsOfFieldsInDofVector[fieldName]])
             for fieldName in self.nonMechanicalSecondOrderFields
         ]
+        self.settleExternalWork()
         return psi, halfSumOfMassTimesSquaredRate(self.ids_mechanicalEnergy), self._externalWork, nonMechanical
 
     @performancetiming.timeit("elements")

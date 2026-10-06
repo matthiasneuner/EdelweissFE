@@ -79,7 +79,7 @@ loads and the constraint forces after them in deck order. A run on any number of
 therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same input -- through
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
 depends on measured timings, changes the speed of a run and never its result. The external work is
-summed exactly (:meth:`sumOfWorkAtPrescribedDofs`), so it, too, and the checkpoints recording it,
+summed exactly (:meth:`sumsOfWorkAtPrescribedDofs`), so it, too, and the checkpoints recording it,
 are bit-identical. Only the kinetic and internal energy of the energy table are formed per
 subdomain and then added, and may differ from a serial run's in their last digits; they enter
 nothing but the table.
@@ -517,29 +517,32 @@ class NEDMPI(NEDParallel):
 
         return self.subdomain.minAcrossParts(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
-    def sumOfWorkAtPrescribedDofs(self, workAtPrescribedDofs: list[np.ndarray]) -> float:
-        """The work done at the prescribed degrees of freedom of the whole model in one increment, the
-        same in every process: the products at the degrees of freedom each process owns are gathered
-        to every process and summed exactly (:func:`math.fsum`), as :meth:`NED.sumOfWorkAtPrescribedDofs`
-        sums them in a serial run -- so the external work is the same, bit for bit, on any number of
-        processes, and every process holds that of the whole model. Collective.
+    def sumsOfWorkAtPrescribedDofs(self, workOfIncrements: list[np.ndarray]) -> list[float]:
+        """The work at the prescribed degrees of freedom of the whole model in each of the given
+        increments, the same in every process: the products at the degrees of freedom each process
+        owns are gathered to every process -- once for all the increments since the external work was
+        last read, not every increment -- and each increment's are summed exactly (:func:`math.fsum`),
+        as :meth:`NED.sumsOfWorkAtPrescribedDofs` sums them in a serial run. So the external work is
+        the same, bit for bit, on any number of processes, and every process holds that of the whole
+        model. Collective: :meth:`NED.settleExternalWork` is called at the same increments in every
+        process.
 
         Parameters
         ----------
-        workAtPrescribedDofs
-            The products, per Dirichlet condition carrying a kinetic energy, at the degrees of freedom
-            owned here.
+        workOfIncrements
+            Per increment, the products at the prescribed degrees of freedom owned here.
 
         Returns
         -------
-        float
-            The work of the increment, of the whole model.
+        list[float]
+            The work of each increment, of the whole model, in the order given.
         """
 
-        ownedHere = [product for products in workAtPrescribedDofs for product in products.tolist()]
-        return math.fsum(
-            product for products in self.subdomain.communicator.allgather(ownedHere) for product in products
-        )
+        gathered = self.subdomain.communicator.allgather(workOfIncrements)
+        return [
+            math.fsum(np.concatenate([ofProcess[increment] for ofProcess in gathered]).tolist())
+            for increment in range(len(workOfIncrements))
+        ]
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.
@@ -547,7 +550,7 @@ class NEDMPI(NEDParallel):
         The internal and kinetic energies are formed per subdomain and then added in rank order, so
         they may differ from a serial run's in their last digits; they enter nothing but the energy
         table. The external work is that of the whole model already
-        (:meth:`sumOfWorkAtPrescribedDofs`).
+        (:meth:`sumsOfWorkAtPrescribedDofs`).
 
         Parameters
         ----------
