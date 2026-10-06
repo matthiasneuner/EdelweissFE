@@ -47,12 +47,10 @@ from dataclasses import dataclass
 import meshio
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
@@ -113,8 +111,6 @@ class Generator(GeneratorBase):
         nY = configuration.nY
         nZ = configuration.nZ
 
-        elementType = getElementClass(configuration.elType, configuration.elProvider)
-
         unitCellMesh = meshio.read(unitCellMeshFile)
 
         nodes = np.array(unitCellMesh.points)
@@ -129,7 +125,7 @@ class Generator(GeneratorBase):
             # store element ids for each block
             block_elements_assignments[i] = list(range(len(all_elements) - len(block.data), len(all_elements)))
             # create an empty element set for each block
-            model.elementSets[f"{name}_block-{i + 1}"] = ElementSet(f"{name}_block-{i + 1}", set())
+            model.mesh.setElementSet(f"{name}_block-{i + 1}", [])
 
         # print information about the unit cell mesh
         journal.message(f"Unit cell mesh has {len(all_nodes)} nodes and {len(all_elements)} elements.", identification)
@@ -148,7 +144,7 @@ class Generator(GeneratorBase):
         lX = x_max - x_min
         lY = y_max - y_min
 
-        # create nodes and elements for the unit cell
+        # create the nodes and describe the elements of the unit cell
         _nodes = []
         for label, node in zip(model.topology.reserveNodeNumbers(len(all_nodes)), all_nodes):
             _node = Node(label, np.array(node))
@@ -160,29 +156,23 @@ class Generator(GeneratorBase):
             elements_per_block = []
             for local_el_id in el_ids:
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                newEl = elementType(configuration.elType, elNumber)
-                nodeList = [_nodes[nid] for nid in all_elements[local_el_id]]
-                newEl.setNodes(nodeList)
-
-                model.createElement(newEl)
+                nodeLabels = [_nodes[nid].label for nid in all_elements[local_el_id]]
+                model.mesh.addElement(elNumber, configuration.elType, configuration.elProvider, nodeLabels)
                 # add element to corresponding element set
-                elements_per_block.append(newEl)
+                elements_per_block.append(elNumber)
                 idx += 1
 
-            # not set(...): ElementSet already deduplicates and keeps the order it is fed, whereas a set
-            # of identity-hashed elements would fix the member order from object addresses instead of the
-            # mesh -- and that order reaches facet/element numbering downstream (see hadaptivity.py).
-            model.elementSets[f"{name}_block-{block_id + 1}"] = ElementSet(
-                f"{name}_block-{block_id + 1}", elements_per_block
-            )
+            # in the order of the mesh -- that order reaches facet/element numbering downstream (see
+            # hadaptivity.py)
+            model.mesh.setElementSet(f"{name}_block-{block_id + 1}", elements_per_block)
 
         # replicate the mesh of the unit cell in x direction
         model = replicateMesh(
             model,
             direction=0,
             nReplications=nX,
-            elementType=elementType,
             elTypeName=configuration.elType,
+            elProvider=configuration.elProvider,
             journal=journal,
         )
 
@@ -191,8 +181,8 @@ class Generator(GeneratorBase):
             model,
             direction=1,
             nReplications=nY,
-            elementType=elementType,
             elTypeName=configuration.elType,
+            elProvider=configuration.elProvider,
             journal=journal,
         )
 
@@ -202,12 +192,10 @@ class Generator(GeneratorBase):
                 model,
                 direction=2,
                 nReplications=nZ,
-                elementType=elementType,
                 elTypeName=configuration.elType,
+                elProvider=configuration.elProvider,
                 journal=journal,
             )
-
-        model._populateNodeFieldVariablesFromElements()
 
         # create node sets for boundary conditions
         nSet_left = set()
@@ -257,18 +245,24 @@ def findInterfaceNodes(nodes, coordIndex, coordValue, idx_offset=0):
 
 
 def replicateMesh(
-    model: FEModel, direction: int, nReplications: int, elementType, elTypeName: str, journal: Journal = None
+    model: FEModel, direction: int, nReplications: int, elTypeName: str, elProvider: str, journal: Journal = None
 ) -> FEModel:
+    """Replicate the mesh described so far ``nReplications`` times along ``direction``, merging the
+    coincident nodes of neighbouring copies. Each element set of the mesh gains the copies of its
+    elements.
 
-    all_elements_to_copy = [[n.label - 1 for n in el.nodes] for el in model.elements.values()]
+    Assumes that the mesh holds only the elements (numbered 1..N) and nodes (labelled 1..M) of the
+    generator calling it.
+    """
+
+    mesh = model.mesh
+    all_elements_to_copy = [[label - 1 for label in record.nodeLabels.tolist()] for record in mesh.elements.values()]
     all_nodes_to_copy = [model.nodes[i + 1].coordinates for i in range(len(model.nodes))]
 
     elements_in_block = {}
     # separate elements according to their blocks
-    for elset_name, elset in model.elementSets.items():
-        elements_in_block[elset_name] = []
-        for el in elset.elements:
-            elements_in_block[elset_name].append(el.elNumber - 1)
+    for elset_name, numbers in mesh.elementSets.items():
+        elements_in_block[elset_name] = [number - 1 for number in numbers]
 
     all_nodes = np.array(all_nodes_to_copy)
 
@@ -330,21 +324,13 @@ def replicateMesh(
                 # recycled, so the dict has gaps, and len()+1 could land on a live element and
                 # silently overwrite it.
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                newEl = elementType(elTypeName, elNumber)
-                nodeList = [model.nodes[nid + 1] for nid in new_el]
-                newEl.setNodes(nodeList)
-                model.createElement(newEl)
-                # Keep the element itself, not a positional guess: element numbers come from the
-                # allocator and are never recycled, so len(model.elements) says nothing about which
+                mesh.addElement(elNumber, elTypeName, elProvider, [nid + 1 for nid in new_el])
+                # Keep the number itself, not a positional guess: element numbers come from the
+                # allocator and are never recycled, so len(mesh.elements) says nothing about which
                 # number this element got (the same reason the creation above no longer uses it).
-                newElements.append(newEl)
+                newElements.append(elNumber)
 
-            # create new element set becaus elsets are immutable -- not set(...): ElementSet already
-            # deduplicates and keeps the order it is fed (see the block-assignment loop above)
-            model.elementSets[elset_name] = ElementSet(
-                elset_name,
-                list(model.elementSets[elset_name].elements) + newElements,
-            )
+            mesh.setElementSet(elset_name, mesh.elementSets[elset_name] + newElements)
 
         # remove nodes that are now internal
         toc_total = time.time()
@@ -352,7 +338,7 @@ def replicateMesh(
         if journal:
             journal.message(f"Replication step {j}/{nReplications - 1} in direction {direction} done.", identification)
             journal.message(f" Total nodes so far: {len(model.nodes)}", identification)
-            journal.message(f" Total elements so far: {len(model.elements)}", identification)
+            journal.message(f" Total elements so far: {len(mesh.elements)}", identification)
             journal.message(
                 f" Total time for replication step: {round(toc_total - tic_total, 2)} seconds", identification
             )

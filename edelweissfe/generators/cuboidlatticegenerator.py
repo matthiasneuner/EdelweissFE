@@ -79,14 +79,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.generators.boxgen import BoxgenSchema
 from edelweissfe.generators.boxgen import Generator as BoxGenerator
 from edelweissfe.generators.microstructuregenerator import replicateMesh
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.sets.elementset import ElementSet
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
@@ -161,8 +160,6 @@ class Generator(GeneratorBase):
         nY = configuration.nY
         nZ = configuration.nZ
 
-        elementType = getElementClass(configuration.elType, configuration.elProvider)
-
         boxmodel = copy.deepcopy(model)
         BoxGenerator(
             name,
@@ -189,12 +186,10 @@ class Generator(GeneratorBase):
         yToDelete = (lStrutY, lY - lStrutY)
         zToDelete = (lStrutZ, lZ - lStrutZ)
 
-        elements = {}
-        nodes = {}
-
-        idx = 1
-        for el in boxmodel.elements.values():
-            nodeCoords = np.array([el.nodes[i].coordinates for i in range(len(el.nodes))])
+        keptElementNodes = []
+        for record in boxmodel.mesh.elements.values():
+            elNodes = [boxmodel.nodes[label] for label in record.nodeLabels.tolist()]
+            nodeCoords = np.array([node.coordinates for node in elNodes])
             xCoords = nodeCoords[:, 0]
             yCoords = nodeCoords[:, 1]
             zCoords = nodeCoords[:, 2]
@@ -212,29 +207,36 @@ class Generator(GeneratorBase):
                     deleteElement = True
 
             if not deleteElement:
-                new = elementType(configuration.elType, idx)
-                new.setNodes([node for node in el.nodes])
-                elements[idx] = new
-                idx += 1
+                keptElementNodes.append(elNodes)
 
+        # keep the nodes used by any remaining element, in node order
+        usedNodes = {id(node) for elNodes in keptElementNodes for node in elNodes}
+        nodes = {}
         idx = 1
         for node in boxmodel.nodes.values():
-            # check if node is used by any remaining element
-            nodeUsed = False
-            for el in elements.values():
-                if node in el.nodes:
-                    nodeUsed = True
-                    break
-            if nodeUsed:
+            if id(node) in usedNodes:
                 nodes[idx] = node
                 idx += 1
 
         model.nodes = nodes
-        # This generator REPLACES the element dict wholesale, with its own 1..N numbering, rather
-        # than creating elements through the model. Tell the allocator about those numbers, so that
-        # everything minted afterwards (contact facets, rigid-body point masses, model modifiers)
-        # cannot collide with them. See TopologyPipeline.adoptSetupElementNumbers.
-        model.elements = elements
+
+        nodel_label_to_index = {node.label: idx for idx, node in enumerate(model.nodes.values())}
+        for node in model.nodes.values():
+            node.label = nodel_label_to_index[node.label] + 1  # re-label nodes to have continuous numbering
+        # The node dict is replaced wholesale: the replications below mint their labels from the
+        # allocator, which must lie above these.
+        model.topology.adoptSetupNodeNumbers()
+
+        # This generator REPLACES the mesh wholesale, with its own 1..N numbering, rather than adding
+        # to it. Tell the allocator about those numbers, so that everything minted afterwards
+        # (contact facets, rigid-body point masses, model modifiers) cannot collide with them. See
+        # TopologyPipeline.adoptSetupElementNumbers.
+        model.mesh = Mesh()
+        model.elements = {}
+        for number, elNodes in enumerate(keptElementNodes, start=1):
+            model.mesh.addElement(
+                number, configuration.elType, configuration.elProvider, [node.label for node in elNodes]
+            )
         model.topology.adoptSetupElementNumbers()
 
         # get unit cell dimensions
@@ -245,45 +247,34 @@ class Generator(GeneratorBase):
         z_min = 0
         z_max = lZ
 
-        elementSets = []
-        elementSets.append(ElementSet("{:}_all".format(name), elements.values()))
-
-        model.elementSets = {es.name: es for es in elementSets}
-
-        nodel_label_to_index = {node.label: idx for idx, node in enumerate(model.nodes.values())}
-        for node in model.nodes.values():
-            node.label = nodel_label_to_index[node.label] + 1  # re-label nodes to have continuous numbering
-        # Same story as the elements above, for the node dict this generator also replaces
-        # wholesale: the replications below mint their labels from the allocator.
-        model.topology.adoptSetupNodeNumbers()
+        model.elementSets = {}
+        model.mesh.setElementSet("{:}_all".format(name), model.mesh.elements.keys())
 
         # replicate the mesh of the unit cell in x direction
         replicateMesh(
             model,
             direction=0,
             nReplications=nX,
-            elementType=elementType,
             elTypeName=configuration.elType,
+            elProvider=configuration.elProvider,
             journal=journal,
         )
         replicateMesh(
             model,
             direction=1,
             nReplications=nY,
-            elementType=elementType,
             elTypeName=configuration.elType,
+            elProvider=configuration.elProvider,
             journal=journal,
         )
         replicateMesh(
             model,
             direction=2,
             nReplications=nZ,
-            elementType=elementType,
             elTypeName=configuration.elType,
+            elProvider=configuration.elProvider,
             journal=journal,
         )
-
-        model._populateNodeFieldVariablesFromElements()
 
         # create node sets for boundary conditions
         nSet_left = set()
