@@ -322,7 +322,7 @@ nX=1
 def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
     from edelweissfe.domaindecomposition.distributedelements import (
         DistributedElements,
-        _loadedSurfacesAndElementSets,
+        _stepActionDefinitions,
     )
     from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
     from edelweissfe.journal.journal import Journal
@@ -332,10 +332,8 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     deck = tmp_path / "test.inp"
     deck.write_text(_DISTRIBUTION_DECK)
     inputFile = parseInputFile(str(deck))
-    assert _loadedSurfacesAndElementSets(inputFile) == ([], ["gen_top"])
-
     model = FEModel(2)
-    distribution = DistributedElements(_SecondOfTwoProcesses(), *_loadedSurfacesAndElementSets(inputFile))
+    distribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
     model.elementDistribution = distribution
     model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
 

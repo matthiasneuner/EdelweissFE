@@ -30,12 +30,38 @@ from abc import abstractmethod
 
 import numpy as np
 
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.stepactions.base.stepactionbase import StepActionBase
 from edelweissfe.timesteppers.timestep import TimeStep
+from edelweissfe.utils.caseinsensitivedict import CaseInsensitiveDict
+from edelweissfe.utils.exceptions import TopologyError
 
 
 class BodyLoadBase(StepActionBase):
+    @classmethod
+    def elementsLoadedByDefinition(cls, definition: dict, mesh: Mesh) -> list[int]:
+        """The elements of the loaded element set (option ``elSet``); see
+        :meth:`StepActionBase.elementsLoadedByDefinition`.
+
+        Parameters
+        ----------
+        definition
+            The parsed option mapping of the body load.
+        mesh
+            The mesh, as described.
+
+        Returns
+        -------
+        list[int]
+            The numbers of the elements of the set.
+        """
+
+        name = CaseInsensitiveDict(definition)["elSet"]
+        if name not in mesh.elementSets:
+            raise TopologyError("body load on element set {:}, which is not in the mesh".format(name))
+        return list(mesh.elementSets[name])
+
     @property
     @abstractmethod
     def elementSet(self) -> ElementSet:

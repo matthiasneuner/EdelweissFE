@@ -33,11 +33,37 @@ from abc import abstractmethod
 
 import numpy as np
 
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.stepactions.base.stepactionbase import StepActionBase
 from edelweissfe.timesteppers.timestep import TimeStep
+from edelweissfe.utils.caseinsensitivedict import CaseInsensitiveDict
+from edelweissfe.utils.exceptions import TopologyError
 
 
 class DistributedLoadBase(StepActionBase):
+    @classmethod
+    def elementsLoadedByDefinition(cls, definition: dict, mesh: Mesh) -> list[int]:
+        """The elements of the loaded surface (option ``surface``); see
+        :meth:`StepActionBase.elementsLoadedByDefinition`.
+
+        Parameters
+        ----------
+        definition
+            The parsed option mapping of the distributed load.
+        mesh
+            The mesh, as described.
+
+        Returns
+        -------
+        list[int]
+            The numbers of the elements of every face of the surface.
+        """
+
+        name = CaseInsensitiveDict(definition)["surface"]
+        if name not in mesh.surfaces:
+            raise TopologyError("distributed load on surface {:}, which is not in the mesh".format(name))
+        return [number for numbers in mesh.elementNumbersOfSurface(name).values() for number in numbers]
+
     @property
     @abstractmethod
     def surface(self) -> dict:

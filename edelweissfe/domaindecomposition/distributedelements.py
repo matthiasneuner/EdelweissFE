@@ -48,6 +48,7 @@ of :mod:`.mpienvironment`, and a serial run gets the serial distribution.
 import numpy as np
 
 from edelweissfe.config.generators import getGeneratorClass
+from edelweissfe.config.stepactions import stepActionFactory
 from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
     worldCommunicator,
@@ -120,9 +121,9 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
     return reasons
 
 
-def _loadedSurfacesAndElementSets(inputfile: dict) -> tuple[list[str], list[str]]:
-    """The surfaces carrying a distributed load and the element sets carrying a body load, in any
-    step of the input file.
+def _stepActionDefinitions(inputfile: dict) -> list[tuple[type, dict]]:
+    """The step action class and parsed definition of every step action of every step of the input
+    file.
 
     Parameters
     ----------
@@ -131,19 +132,16 @@ def _loadedSurfacesAndElementSets(inputfile: dict) -> tuple[list[str], list[str]
 
     Returns
     -------
-    tuple[list[str], list[str]]
-        The names of the loaded surfaces, and of the loaded element sets.
+    list[tuple[type, dict]]
+        ``(stepActionClass, definition)`` pairs, in deck order.
     """
 
-    surfaces, elementSets = [], []
-    for step in inputfile["step"]:
-        # Step actions are named as written in the deck, in any case.
-        for actionType, definitions in step["moduleoptions"].items():
-            if actionType.lower() == "distributedload":
-                surfaces += [definition["surface"] for definition in definitions]
-            elif actionType.lower() == "bodyforce":
-                elementSets += [definition["elset"] for definition in definitions]
-    return surfaces, elementSets
+    return [
+        (stepActionFactory(actionType), definition)
+        for step in inputfile["step"]
+        for actionType, definitions in step["moduleoptions"].items()
+        for definition in definitions
+    ]
 
 
 def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDistribution:
@@ -184,7 +182,7 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
         "DomainDecomposition",
         0,
     )
-    return DistributedElements(worldCommunicator(), *_loadedSurfacesAndElementSets(inputfile))
+    return DistributedElements(worldCommunicator(), _stepActionDefinitions(inputfile))
 
 
 class DistributedElements(ElementDistribution):
@@ -194,19 +192,17 @@ class DistributedElements(ElementDistribution):
     ----------
     communicator
         The communicator of the processes sharing the model.
-    loadedSurfaces
-        The names of the surfaces carrying a distributed load in any step.
-    loadedElementSets
-        The names of the element sets carrying a body load in any step.
+    stepActionDefinitions
+        The class and parsed definition of every step action of the job; those loading elements
+        name them (:meth:`~edelweissfe.stepactions.base.stepactionbase.StepActionBase.elementsLoadedByDefinition`).
     """
 
     createsEveryElement = False
 
-    def __init__(self, communicator, loadedSurfaces: list[str], loadedElementSets: list[str]):
+    def __init__(self, communicator, stepActionDefinitions: list[tuple[type, dict]]):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
-        self._loadedSurfaces = loadedSurfaces
-        self._loadedElementSets = loadedElementSets
+        self._stepActionDefinitions = stepActionDefinitions
 
         #: The rank of every element of the mesh, by number: the process computing it.
         self.owners = None
@@ -241,15 +237,8 @@ class DistributedElements(ElementDistribution):
         nodesOfOwnElements = {label for number in own for label in mesh.elements[number].nodeLabels}
 
         loaded = set()
-        for name in self._loadedSurfaces:
-            if name not in mesh.surfaces:
-                raise TopologyError("distributed load on surface {:}, which is not in the mesh".format(name))
-            for numbers in mesh.elementNumbersOfSurface(name).values():
-                loaded.update(numbers)
-        for name in self._loadedElementSets:
-            if name not in mesh.elementSets:
-                raise TopologyError("body load on element set {:}, which is not in the mesh".format(name))
-            loaded.update(mesh.elementSets[name])
+        for stepActionClass, definition in self._stepActionDefinitions:
+            loaded.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
 
         loadedNeighbours = {
             number for number in loaded - own if not nodesOfOwnElements.isdisjoint(mesh.elements[number].nodeLabels)

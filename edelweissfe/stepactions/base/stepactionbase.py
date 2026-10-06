@@ -32,6 +32,7 @@ import numpy as np
 
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.checkpointedstate import packState, unpackState
 from edelweissfe.utils.fieldoutput import FieldOutputController
@@ -204,6 +205,29 @@ class StepActionBase(OptionSchemaProvider, ABC):
         journal
             The journal object for logging.
         """
+
+    @classmethod
+    def elementsLoadedByDefinition(cls, definition: dict, mesh: Mesh) -> list[int]:
+        """The elements of the mesh on which a step action of this kind, as defined, evaluates a load
+        element by element -- known from its definition alone, before any element exists, so that a
+        domain-decomposed run can create them where the load reaches its subdomain (see
+        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`).
+        None, for a step action that loads no element.
+
+        Parameters
+        ----------
+        definition
+            The parsed option mapping of the step action.
+        mesh
+            The mesh, as described.
+
+        Returns
+        -------
+        list[int]
+            The numbers of the loaded elements.
+        """
+
+        return []
 
     def applyAtStepStart(self, model: FEModel):
         """Is called when a step starts.
