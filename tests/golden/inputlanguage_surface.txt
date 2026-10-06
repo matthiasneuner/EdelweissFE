@@ -561,6 +561,15 @@ refinement) as well as at setup time; the recipe is recorded in ``model.contactF
     [nodalWeights] The per-node contact weighting of the generated facets: 'facetConsistent' (the consistent nodal loads of the flat facet tiling itself) or 'serendipityOptimal' (the resultant-exact, non-negative weighting that minimises the mismatch against a quadratic face's own consistent nodal loads, by reassigning each corner node's share to its two adjacent midside nodes -- the modified shape functions of Puso, Laursen & Solberg, CMAME 2008). Reduces the spurious corner/midside load pattern on hexa20 contact surfaces by a third, at the price of corner nodes ceasing to be contact points -- but NO measured benefit has been demonstrated, because a quadratic face under near-uniform pressure lifts its corner nodes off anyway, which makes their weight moot; see the contact theory documentation. Requires triangulation='midside'; linear element faces are unaffected by this option. (<class 'str'>, default = facetConsistent)
 ===== module documentation: edelweissfe.modelmodifiers.adaptivity.hadaptivity =====
 Dynamic h-adaptivity model modifier for HEX20 hanging-node AMR.
+
+The modifier works on the mesh, not on element objects: its octree mirror, the marking, the 2:1
+balance, the hanging nodes and the numbering of the new nodes and elements are derived from the
+mesh, the nodes and the node fields, which every process of a domain-decomposed run holds whole, so
+every process refines identically. Element objects are touched only where they exist: the child of a
+refined element is created by the process computing its parent
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`), which
+transfers its parent's state to it; every process updates the mesh, the nodes, the sets and the
+surfaces. A serial run creates every child, as the process computing every element.
 [hadaptivity] Dynamic hanging-node h-adaptivity model modifier for HEX20 elements.
   optional arguments
     [moduleOptions] Internal (<class 'dict'>, default = {})
