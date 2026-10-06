@@ -70,16 +70,16 @@ class ElementSet(OrderedSet):
         The unique label for this element set.
     elements
         A list of elements.
-    isComplete
-        False if this process created only some of the elements of the set described in the mesh
-        (``model.mesh.elementSets[name]``).
+    mesh
+        The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name, if the set
+        was resolved from a mesh; :attr:`isComplete` is derived from it.
     """
 
     def __init__(
         self,
         label: str,
         elements,
-        isComplete: bool = True,
+        mesh=None,
     ):
         self.allowedObjectTypes = [BaseElement]
         self.allowedObjectTypes.append(MarmotElementWrapper) if MarmotElementWrapper is not None else None
@@ -91,10 +91,21 @@ class ElementSet(OrderedSet):
 
         super().__init__(label, elements)
         self._nodes = None
-        #: True if this set holds every element of the set described in the mesh; see :meth:`requireComplete`.
-        self.isComplete = isComplete
+        #: The mesh describing this set, or None for a set not resolved from a mesh.
+        self.mesh = mesh
 
         self.elements = self.items
+
+    @property
+    def isComplete(self) -> bool:
+        """True if this set holds every element of its set in the mesh (always, for a set not resolved
+        from a mesh). Derived, not stored, so that no change of the members can leave it stale. Counting
+        suffices, since a set resolved from the mesh holds only elements of its set there."""
+
+        if self.mesh is None:
+            return True
+        numbers = self.mesh.elementSets.get(self.name)
+        return numbers is None or len(self.data) == len(numbers)
 
     def requireComplete(self, reader: str):
         """State that ``reader`` needs every element of this set, not only the part created here.

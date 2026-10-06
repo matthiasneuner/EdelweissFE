@@ -284,3 +284,26 @@ def test_an_element_described_but_never_created_is_refused(tmp_path):
     model.mesh.addElement(5000, "CPE4", "edelweiss", [1, 2, 3, 4])
     with pytest.raises(TopologyError, match="described but never created"):
         model.prepareYourself(Journal(verbose=False))
+
+
+def test_completeness_is_derived_from_the_mesh_and_repeated_making_changes_nothing(tmp_path):
+    part = _buildModel(tmp_path, lambda number: number != 1002)
+    picked = part.elementSets["picked"]
+    assert not picked.isComplete
+
+    # the set follows its members: created later and resolved again, it is whole -- no stale flag
+    with part.topology.changes():
+        part.createElementOfMesh(1002)
+        part.resolveElementSetOfMesh("picked")
+    assert part.elementSets["picked"] is picked and picked.isComplete
+
+    # making the mesh again neither replaces nor touches sets and surfaces that did not change
+    with part.topology.changes():
+        part.createElementsOfMesh(everyElement)
+    assert all(elementSet.isComplete for elementSet in part.elementSets.values())
+    versions = {name: s._version for name, s in part.surfaces.items()}
+    setVersions = {name: s._version for name, s in part.elementSets.items()}
+    with part.topology.changes():
+        part.createElementsOfMesh(everyElement)
+    assert {name: s._version for name, s in part.surfaces.items()} == versions
+    assert {name: s._version for name, s in part.elementSets.items()} == setVersions

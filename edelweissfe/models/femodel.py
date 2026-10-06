@@ -257,15 +257,14 @@ class FEModel:
         numbers = self.mesh.elementSets[name]
         elements = self.elements
         created = [elements[number] for number in numbers if number in elements]
-        isComplete = len(created) == len(numbers)
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSet(name, created, isComplete=isComplete)
+            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh)
         else:
             if list(elementSet) != created:
                 elementSet.replaceMembers(created)
-            elementSet.isComplete = isComplete
+            elementSet.mesh = self.mesh
         return elementSet
 
     def _resolveSurfaceOfMesh(self, name: str):
@@ -286,7 +285,7 @@ class FEModel:
         surface = self.surfaces.get(name)
         if surface is None:
             self.surfaces[name] = EntityBasedSurface(name, faces)
-        elif surface.keys() != faces.keys() or any(surface[face] is not faces[face] for face in faces):
+        elif surface.keys() != faces.keys() or any(list(surface[face]) != list(faces[face]) for face in faces):
             surface.replaceData(faces)
 
     def requireCompleteMesh(self, reader: str):
