@@ -325,12 +325,49 @@ costs as weights whenever the slowest process has fallen more than ``load-balanc
 (default 0.1) behind the mean. The partition then depends on measured timings; the result does not,
 since it does not depend on the partition at all.
 
-A **distributed** model keeps its first partition, and says so once (``Load balancing is off``):
-an element changing process would have to be *migrated* -- created by its new process from the mesh
-(:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`), given its section and element
-properties, and sent its state (``setStateVars``) by the old one, which drops it -- and the
-subdomain's degree-of-freedom indices, lumped operators and loaded elements rebuilt for the new
-elements. That is designed, but not implemented yet. The kernels are not timed then.
+The new parts are numbered so that as many elements as possible keep their process
+(:func:`~edelweissfe.domaindecomposition.partitioning.keepElementsWhereTheyWere`): METIS numbers
+parts arbitrarily, and a renumbered but otherwise similar partition would move almost every element.
+
+Where every process holds the whole model, a repartition changes nothing but which elements each
+process computes. A **distributed** model *migrates* the elements whose process changes
+(:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`).
+An element is completely described by the mesh (its number, type and nodes, which every process
+holds), the replicated definitions (its sections, material -- ``materialParameterFromField``
+included, evaluated at the element's centre -- and element properties) and its state. So, right after
+the increment was accepted, in every process:
+
+1. the process that computed an element until now sends its state (``getStateVars``, the converged
+   state) to the element's new process, all of them in one exchange;
+2. each process drops the element objects it no longer needs, and creates from the mesh those it
+   now needs (:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`) -- its new elements,
+   and the loaded elements touching them (see `The fallback rule`_) -- keeping the elements in mesh
+   order;
+3. the element sets and surfaces are resolved to the elements now held, in place; the new elements
+   receive their sections and element properties as at setup
+   (:meth:`~edelweissfe.models.femodel.FEModel.assignSectionsAndPropertiesToElements`), and every
+   element arriving from another process the state that process sent (``setStateVars``).
+
+Everything indexed by the elements a process holds is then built again, as after a change of the
+topology: the solver rebuilds the equation system for the elements now held, carrying the solution,
+the velocity and the force -- which the output synchronization has just made complete in every
+process -- over, and with it the degree-of-freedom indices of the elements, the subdomain and its
+interface, the loaded elements reaching into it, the lumped inertia and damping (assembled from the
+elements now computed here, completed at the interface in model order, so the same bits as before)
+and the increment plan with its element timing. The field outputs set up their views of the
+element results again for the elements now reported here. A sender keeps no reference to a dropped
+element, so its memory is released. A migrated element is bit for bit the element its previous
+process held -- exactly as a resumed restart's element is -- and every sum is still formed in model
+order, so a run that migrates elements is bit-identical to a serial run too. The journal reports
+every migration (``Element migration: ... element(s) changed process``).
+
+The timed costs make a partition, and so a migration, depend on the machine and its load.
+``load-balance-costs=elementNumber`` weighs every element by its number instead: a deterministic,
+deliberately uneven cost, with which a test knows that elements move, and when.
+``testfiles/mpi/marmot/NEDRebalanceDistributed`` is such a test: at its output increment 20, after
+the material has yielded, elements move between the processes; its result and the checkpoint written
+after the migration equal a serial run's, and ``check_element_distribution.py`` checks that elements
+moved and that no process still holds an element it dropped.
 
 Output and restart
 ------------------
@@ -370,8 +407,9 @@ the one computing it after a repartition.
 
 Which way a job held its model does not show in its result. ``testfiles/mpi/check_element_distribution.py``
 runs every deck of ``testfiles/mpi`` under the launcher and checks, from the elements each process
-created and computed, that it ran distributed or with the whole model as expected; the MPI workflow
-runs it over 2 and 3 processes.
+created and computed, that it ran distributed or with the whole model as expected -- and, for a deck
+expected to migrate, that elements moved and that no dropped element is alive in any process; the MPI
+workflow runs it over 2 and 3 processes.
 
 Verifying bit-identity yourself
 -------------------------------
@@ -407,7 +445,9 @@ Limitations
 * Memory: a distributed process holds its own elements, but every process holds the whole mesh,
   every node with its fields, and global-length vectors. Jobs under the fallback rule hold the whole
   model on every process.
-* A distributed model is not rebalanced (no migration yet).
+* A migration rebuilds the equation system of every process, which costs about what building it
+  at the start does; a model that cannot be balanced within ``load-balance-tolerance`` (fewer
+  elements than processes, say) is repartitioned, and may migrate, on every output increment.
 * Adaptive refinement is computed by every process, in full, on the whole model.
 * A constraint is evaluated whole, by one process; a single large contact constraint is not split.
 * Only the explicit dynamic solver is decomposed.
