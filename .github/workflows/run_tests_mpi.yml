@@ -1,0 +1,95 @@
+# Run the domain-decomposed test cases (testfiles/mpi) over 2 and 3 MPI processes (Linux).
+#
+# Two checks per test case and process count:
+#   1. against the committed U.ref, with the test runner's usual tolerance, like the serial suites;
+#   2. bit-identity: the serial run on this runner writes fresh references (--create, in a copy), and the
+#      runs over several processes must reproduce them exactly (--tolerance 0). The committed U.ref files
+#      cannot serve here, since results differ between machines in the last bits.
+#
+# MPI is not part of conda-lock.yml: it is optional at run time (mpi4py is imported only under an MPI
+# launcher), openmpi does not exist for win-64, and adding it would re-lock and re-version the edelweissfe-dev
+# package for every platform. So this job installs openmpi and mpi4py on top of the locked environment,
+# --freeze-installed, so that no locked package changes. metis (the partitioner) is already locked, as a
+# dependency of suitesparse. The environment cache of setup-locked-env is saved right after the locked
+# environment is created, before this addition, so the other workflows never see it.
+#
+# Decks with private Marmot materials (GCDP*) are reported as SKIPPED, as in run_tests_with_marmot.yml: the
+# material is not in the public Marmot built here, which the element reports as NotImplementedError.
+name: Run tests over MPI processes
+
+on:
+  # Pushes to the long-lived branches only: a branch with an open pull request is tested by the
+  # pull_request event, and testing every push as well would run each workflow twice.
+  push:
+    branches: [master, next_v26.11]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# One thread per process, so that a result does not depend on the runner's core count; free-threaded Python;
+# MKL's conditional numerical reproducibility, for bitwise comparisons.
+env:
+  OMP_NUM_THREADS: 1
+  PYTHON_GIL: "0"
+  MKL_CBWR: AUTO,STRICT
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs exactly what conda-lock.yml pins (conda packages, no solving).
+      - uses: ./.github/actions/setup-locked-env
+
+      - name: Add MPI to the environment
+        shell: bash -leo pipefail {0}
+        run: |
+          micromamba install -y -n edelweissfe -c conda-forge --freeze-installed "openmpi=5.0" "mpi4py=4.1"
+          micromamba list -n edelweissfe | grep -E "^ *(openmpi|mpi4py|metis) "
+
+      # Branch selection, caching and MARMOT_INSTALL_DIR: see .github/actions/build-marmot.
+      - uses: ./.github/actions/build-marmot
+
+      - name: Build EdelweissFE
+        shell: bash -leo pipefail {0}
+        run: |
+          pip install -v --no-deps --no-build-isolation .
+
+      - name: Check the Marmot extension and the MPI environment
+        shell: bash -leo pipefail {0}
+        working-directory: ${{ runner.temp }}
+        run: |
+          # A failed Marmot extension would not fail the build, and its test cases would merely be skipped: import it.
+          python -c "import edelweissfe.elements.marmotelement.element"
+          # Every process must see the others; a serial run under the launcher would compare a serial result.
+          mpirun -n 3 --bind-to none --oversubscribe python -c \
+            "from edelweissfe.domaindecomposition.mpienvironment import numberOfProcesses; assert numberOfProcesses() == 3"
+
+      - name: Run tests over MPI processes
+        shell: bash -leo pipefail {0}
+        run: |
+          # The installed console script, not `python -m ...`: see run_tests_with_marmot.yml. Test cases run in
+          # copies, since they write output and restart files next to their input. --oversubscribe: a runner may
+          # have fewer cores than processes.
+          runTests="$(command -v run_tests_edelweissfe)"
+          mpirun="mpirun --bind-to none --oversubscribe"
+          committed="$RUNNER_TEMP/mpi-committed"
+          fresh="$RUNNER_TEMP/mpi-fresh"
+          rm -rf "$committed" "$fresh"
+          cp -r testfiles/mpi "$committed"
+          cp -r testfiles/mpi "$fresh"
+          for suite in edelweiss-only marmot; do
+            "$runTests" "$committed/$suite"
+            "$runTests" "$fresh/$suite" --create
+            for processes in 2 3; do
+              $mpirun -n $processes "$runTests" "$committed/$suite"
+              $mpirun -n $processes "$runTests" "$fresh/$suite" --tolerance 0
+            done
+          done
