@@ -130,6 +130,7 @@ process' element loop, as for ``NEDParallel``.
 """
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import numpy as np
 from mpi4py import MPI
@@ -360,21 +361,24 @@ class NEDMPI(NEDParallel):
             raise ValueError("load-balance-costs must be 'measured' or 'elementNumber', not '{:}'".format(costs))
         return costs
 
-    def _elementCostsForRebalancing(self) -> tuple[np.ndarray | None, int]:
-        """The cost of every element of the increment plan, in plan order, and the number of
-        increments it was summed over, as :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`
-        weighs them: the measured kernel times, or the element numbers (``load-balance-costs``).
+    def _elementCostsForRebalancing(self) -> tuple[np.ndarray | None, int, int | None]:
+        """What :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance` weighs: the
+        cost of every element of the increment plan, in plan order -- the measured kernel times, or
+        the element numbers (``load-balance-costs``) -- the number of increments it was summed over,
+        and the increments until the next check, to weigh a repartition's gain against its cost
+        (None for element numbers, which are no times).
 
         Returns
         -------
-        tuple[np.ndarray | None, int]
-            The costs, None if nothing was measured, and the number of increments.
+        tuple[np.ndarray | None, int, int | None]
+            The costs, None if nothing was measured; the number of increments; the increments until
+            the next check, or None.
         """
 
         if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
             numbers = np.array(list(self._incrementPlan.elementPlan.elements.keys()), dtype=float)
-            return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements
-        return self._elementCosts, self._nMeasuredIncrements
+            return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements, None
+        return self._elementCosts, self._nMeasuredIncrements, self.options["output-frequency"]
 
     def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
@@ -592,12 +596,14 @@ class NEDMPI(NEDParallel):
             # Right after every element state was synchronized -- or, where each process holds
             # only its own elements, accepted by the process computing it -- because an element
             # computed by another process from now on must arrive there with its current state.
+            startOfRebalancing = perf_counter()
             if self.subdomain.rebalance(self._incrementPlan.elementPlan, *self._elementCostsForRebalancing()):
                 if self.subdomain.elementsMustMove():
                     self._moveElements(model, step)
                 else:
                     self.partition = self.subdomain.partition
                     self._incrementPlan = self.planIncrement(model)
+                self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
 
     def _moveElements(self, model: FEModel, step):
         """Move elements between the processes, after a rebalance changed the partition of a

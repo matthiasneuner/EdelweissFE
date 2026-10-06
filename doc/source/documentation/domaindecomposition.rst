@@ -322,8 +322,14 @@ the start drifts out of balance as damage localizes. Every element kernel is the
 an output increment, as a step of the increment loop of its own right after the synchronization of
 the output, the model is repartitioned with the measured
 costs as weights whenever the slowest process has fallen more than ``load-balance-tolerance``
-(default 0.1) behind the mean. The partition then depends on measured timings; the result does not,
-since it does not depend on the partition at all.
+(default 0.1) behind the mean -- and if that is worth it: the time it is expected to save until
+the next check (the imbalance beyond the tolerance, times the mean time of a process per increment,
+times ``output-frequency``) must exceed what the last repartition cost, measured from deciding it to
+the rebuilt equation system, in the slowest process. The first repartition is always made; a model
+that cannot be balanced better -- fewer elements than processes, say -- is therefore not
+repartitioned again and again. The journal says at level 2 why it did not repartition. The partition
+then depends on measured timings; the result does not, since it does not depend on the partition at
+all.
 
 The new parts are numbered so that as many elements as possible keep their process
 (:func:`~edelweissfe.domaindecomposition.partitioning.keepElementsWhereTheyWere`): METIS numbers
@@ -449,8 +455,9 @@ Limitations
   every node with its fields, and global-length vectors. Jobs under the fallback rule hold the whole
   model on every process.
 * A migration rebuilds the equation system of every process, which costs about what building it
-  at the start does; a model that cannot be balanced within ``load-balance-tolerance`` (fewer
-  elements than processes, say) is repartitioned, and may migrate, on every output increment.
+  at the start does (2.2 s on a 192 000-element block at 8 processes, plus 0.3--0.6 s to move the
+  elements); the gain check above weighs that cost.
+* METIS repartitions from scratch: even a small imbalance can move a fifth of the elements.
 * Adaptive refinement is computed by every process, in full, on the whole model.
 * A constraint is evaluated whole, by one process; a single large contact constraint is not split.
 * Only the explicit dynamic solver is decomposed.

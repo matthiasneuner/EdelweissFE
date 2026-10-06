@@ -188,6 +188,8 @@ class Subdomain:
         self.journal = journal
         self.identification = identification
         self.loadBalanceTolerance = loadBalanceTolerance
+        #: What the last repartition cost, in seconds, in the slowest process; None before the first.
+        self._lastRepartitionCost = None
 
         #: The rank of every element and of every constraint, and the element keys the partition was
         #: made for.
@@ -980,11 +982,21 @@ class Subdomain:
 
         return bool(self.loadBalanceTolerance)
 
-    def rebalance(self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int) -> bool:
+    def rebalance(
+        self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int, incrementsUntilNextCheck: int | None
+    ) -> bool:
         """Repartition with the measured element costs if the costliest process has fallen more than
-        ``loadBalanceTolerance`` behind the mean. Collective; only right after an increment was
-        accepted and, where every process holds the whole model, every element state synchronized,
-        since an element changing process must arrive with its current state.
+        ``loadBalanceTolerance`` behind the mean, and if that is worth it. Collective; only right
+        after an increment was accepted and, where every process holds the whole model, every
+        element state synchronized, since an element changing process must arrive with its current
+        state.
+
+        Worth it means: the time the repartition is expected to save until the next check -- the
+        imbalance beyond the tolerance, times the mean time of a process per increment, times the
+        increments until the next check -- exceeds what the last repartition cost
+        (:meth:`recordRepartitionCost`). The first repartition is always made. This keeps a model
+        that cannot be balanced better -- fewer elements than processes, say -- from repartitioning,
+        and a distributed one from migrating, on every check.
 
         Where every process holds the whole model, the subdomain is defined afresh at once. A
         distributed model has to move its elements to their new processes first
@@ -998,6 +1010,9 @@ class Subdomain:
             The measured kernel time of every element of the plan, in plan order, or None.
         nIncrements
             The increments the costs were measured over.
+        incrementsUntilNextCheck
+            The increments until the next check, for the expected gain; None to repartition
+            whenever the tolerance is exceeded, for costs that are not times (element numbers).
 
         Returns
         -------
@@ -1022,6 +1037,19 @@ class Subdomain:
             )
             return False
 
+        if incrementsUntilNextCheck is not None and self._lastRepartitionCost is not None:
+            expectedGain = (imbalance - 1.0 - tolerance) * busyTimes.mean() / nIncrements * incrementsUntilNextCheck
+            if expectedGain <= self._lastRepartitionCost:
+                self.journal.message(
+                    "Load imbalance {:.3f} exceeds 1 + {:}, but repartitioning would save an expected {:.3g} s until "
+                    "the next check, less than the {:.3g} s the last repartition cost: not repartitioning".format(
+                        imbalance, tolerance, expectedGain, self._lastRepartitionCost
+                    ),
+                    self.identification,
+                    2,
+                )
+                return False
+
         measured = dict(zip(plan.elements.keys(), (costs / nIncrements).tolist()))
         gathered = self.communicator.gather(measured, root=0)
         measuredCosts = None
@@ -1045,6 +1073,19 @@ class Subdomain:
                 self._defineInterface(model, ownershipChanged=True)
             self._reportSubdomains(topologyChanged=True)
         return True
+
+    def recordRepartitionCost(self, seconds: float):
+        """Record what the last repartition cost -- deciding it, partitioning, moving the elements
+        and deriving everything again -- for the next :meth:`rebalance` to weigh against its gain:
+        the longest of all processes, so that every process decides the same. Collective.
+
+        Parameters
+        ----------
+        seconds
+            The wall time of the repartition in this process.
+        """
+
+        self._lastRepartitionCost = self.communicator.allreduce(seconds, op=MPI.MAX)
 
     def elementsMustMove(self) -> bool:
         """Whether the current partition computes elements in processes that do not hold them: after
