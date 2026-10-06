@@ -374,7 +374,16 @@ class NEDMPI(NEDParallel):
 
         return P, psi
 
-    def assembleLoads(self, nodeForces, distributedLoads, bodyForces, U_np, PExt, K, timeStep):
+    def assembleLoads(
+        self,
+        nodeForces: list[StepActionBase],
+        distributedLoads: list[StepActionBase],
+        bodyForces: list[StepActionBase],
+        U_np: DofVector,
+        PExt: DofVector,
+        K: None,
+        timeStep: TimeStep,
+    ) -> tuple[DofVector, None]:
         """Assemble the loads of :meth:`NED.assembleLoads`, those acting on elements restricted to the
         elements reaching into the subdomain; see
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`.
@@ -398,7 +407,7 @@ class NEDMPI(NEDParallel):
 
         Returns
         -------
-        tuple
+        tuple[DofVector, None]
             The updated external load vector, and ``K``.
         """
 
