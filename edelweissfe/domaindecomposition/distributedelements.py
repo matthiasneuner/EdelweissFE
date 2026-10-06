@@ -50,7 +50,6 @@ import numpy as np
 from edelweissfe.config.constraints import getConstraintClass
 from edelweissfe.config.generators import getGeneratorClass
 from edelweissfe.config.modelmodifiers import getModelModifierClass
-from edelweissfe.config.stepactions import stepActionFactory
 from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
     worldCommunicator,
@@ -143,29 +142,6 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
     return reasons
 
 
-def _stepActionDefinitions(inputfile: dict) -> list[tuple[type, dict]]:
-    """The step action class and parsed definition of every step action of every step of the input
-    file.
-
-    Parameters
-    ----------
-    inputfile
-        The parsed input file.
-
-    Returns
-    -------
-    list[tuple[type, dict]]
-        ``(stepActionClass, definition)`` pairs, in deck order.
-    """
-
-    return [
-        (stepActionFactory(actionType), definition)
-        for step in inputfile["step"]
-        for actionType, definitions in step["moduleoptions"].items()
-        for definition in definitions
-    ]
-
-
 def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDistribution:
     """How the processes of this job hold the model; decided once per job, and reported once.
 
@@ -204,7 +180,7 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
         "DomainDecomposition",
         0,
     )
-    return DistributedElements(worldCommunicator(), _stepActionDefinitions(inputfile))
+    return DistributedElements(worldCommunicator())
 
 
 class DistributedElements(ElementDistribution):
@@ -214,24 +190,18 @@ class DistributedElements(ElementDistribution):
     ----------
     communicator
         The communicator of the processes sharing the model.
-    stepActionDefinitions
-        The class and parsed definition of every step action of the job; those loading elements
-        name them (:meth:`~edelweissfe.stepactions.base.stepactionbase.StepActionBase.elementsLoadedByDefinition`).
     """
 
     createsEveryElement = False
 
-    def __init__(self, communicator, stepActionDefinitions: list[tuple[type, dict]]):
+    def __init__(self, communicator):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
-        self._stepActionDefinitions = stepActionDefinitions
 
         #: The rank of every element of the mesh, by number: the process computing it.
         self.owners = None
         #: The numbers of the elements created in this process.
         self._createdHere = set()
-        #: The numbers of the elements carrying a load of some step.
-        self._loadedElements = set()
         #: Changed by every :meth:`moveElementsTo`.
         self.ownershipVersion = 0
         #: How many elements this process received from another one over the run, by
@@ -244,13 +214,11 @@ class DistributedElements(ElementDistribution):
     def decideWhichElementsAreCreatedHere(self, mesh: Mesh, domainSize: int):
         """Partition the mesh, and decide which elements this process creates. Collective.
 
-        A process creates the elements it computes -- its part of the partition -- and, in addition,
-        every element carrying a load (a distributed load on its surface, a body load) that shares a
-        node with one of its own elements. A load is not exchanged between processes: each process
-        adds the loads at the degrees of freedom it integrates itself, in the order of the load's
-        elements, which is what keeps the result bit-identical to a serial run (see
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`).
-        Such an element is created for its loads only: it is neither computed nor reported here.
+        A process creates the elements it computes -- its part of the partition -- and the elements
+        made by their owners (see :meth:`placeElementMadeByOwner`). The loads acting on an element
+        are evaluated where the element is computed, and exchanged like its forces (see
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`), so no
+        process needs an element of another one for its loads.
 
         Parameters
         ----------
@@ -262,32 +230,11 @@ class DistributedElements(ElementDistribution):
 
         self.owners = partitionElementsOfMesh(mesh, self.communicator.Get_size(), domainSize, self.communicator)
 
-        self._loadedElements = self._elementsLoadedIn(mesh)
         self._createdHere = self._elementsCreatedFor(mesh, self.owners)
 
-    def _elementsLoadedIn(self, mesh: Mesh) -> set:
-        """The numbers of the elements of the mesh carrying a load of some step.
-
-        Parameters
-        ----------
-        mesh
-            The mesh.
-
-        Returns
-        -------
-        set
-            The element numbers.
-        """
-
-        loaded = set()
-        for stepActionClass, definition in self._stepActionDefinitions:
-            loaded.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
-        return loaded
-
     def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
-        """The numbers of the elements this process creates under a partition: its own, the loaded
-        elements sharing a node with one of them (see :meth:`decideWhichElementsAreCreatedHere`), and
-        every element made by its owner (see :meth:`placeElementMadeByOwner`).
+        """The numbers of the elements this process creates under a partition: its own, and every
+        element made by its owner (see :meth:`placeElementMadeByOwner`).
 
         Parameters
         ----------
@@ -303,15 +250,8 @@ class DistributedElements(ElementDistribution):
         """
 
         own = {number for number, owner in owners.items() if owner == self.rank}
-        nodesOfOwnElements = {label for number in own for label in mesh.elements[number].nodeLabels}
-
-        loadedNeighbours = {
-            number
-            for number in self._loadedElements - own
-            if not nodesOfOwnElements.isdisjoint(mesh.elements[number].nodeLabels)
-        }
         madeByOwners = {number for number, record in mesh.elements.items() if record.isMadeByOwner}
-        return own | loadedNeighbours | madeByOwners
+        return own | madeByOwners
 
     def moveElementsTo(self, model, owners: dict) -> tuple[int, int, int]:
         """Adopt a new partition: move every element whose process changes to its new process
@@ -324,8 +264,8 @@ class DistributedElements(ElementDistribution):
         1. each process sends the state of every element it computed and no longer computes to the
            element's new process;
         2. each process drops the objects of the elements it no longer needs, and creates those it
-           now needs -- its new elements, and new loaded neighbours
-           (:meth:`decideWhichElementsAreCreatedHere`) -- from the mesh, in mesh order;
+           now needs -- its new elements (:meth:`decideWhichElementsAreCreatedHere`) -- from the
+           mesh, in mesh order;
         3. the element sets and surfaces are resolved to the elements now created here (and, before
            the new elements are created, to those kept), the new
            elements receive their sections and element properties, as at setup, and every element
@@ -450,11 +390,9 @@ class DistributedElements(ElementDistribution):
     def createAndDropElementsOfChangedMesh(self, model):
         """After a model modifier changed the mesh -- every process changes it identically -- forget
         the elements no longer in it, and create and drop elements so that this process holds exactly
-        those it now needs: its own, which the modifier created already (:meth:`placeChildElement`),
-        and the loaded
-        elements sharing a node with one of them (see :meth:`decideWhichElementsAreCreatedHere`),
-        which the elements and the sets of the changed mesh may have changed. Local: the decision
-        reads only the mesh, which every process holds whole.
+        those it now needs (see :meth:`decideWhichElementsAreCreatedHere`): its own, which the
+        modifier created already (:meth:`placeChildElement`). Local: the decision reads only the
+        mesh, which every process holds whole.
 
         Parameters
         ----------
@@ -478,7 +416,6 @@ class DistributedElements(ElementDistribution):
             )
         self.owners = {number: self.owners[number] for number in mesh.elements}
 
-        self._loadedElements = self._elementsLoadedIn(mesh)
         self._createAndDropElementsCreatedFor(model)
 
     def isCreatedHere(self, number: int) -> bool:

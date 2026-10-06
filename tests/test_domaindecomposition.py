@@ -361,11 +361,8 @@ nSet=gen_left, referencePoint=gen_leftBottom
     assert "expression field output fromElements reads the elements of element set gen_all" in reasons[4]
 
 
-def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
-    from edelweissfe.domaindecomposition.distributedelements import (
-        DistributedElements,
-        _stepActionDefinitions,
-    )
+def test_a_process_creates_only_its_own_elements_also_where_a_load_reaches_its_subdomain(tmp_path):
+    from edelweissfe.domaindecomposition.distributedelements import DistributedElements
     from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
     from edelweissfe.journal.journal import Journal
     from edelweissfe.models.femodel import FEModel
@@ -375,15 +372,16 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     deck.write_text(_DISTRIBUTION_DECK)
     inputFile = parseInputFile(str(deck))
     model = FEModel(2)
-    distribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
+    distribution = DistributedElements(_SecondOfTwoProcesses())
     model.elementDistribution = distribution
     model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
 
     own = {number for number, owner in distribution.owners.items() if owner == 1}
     assert own == set(range(9, 17))
     # The planeRectQuad grid is numbered column by column (two elements each): of the loaded top
-    # row (the even numbers), element 8 shares nodes with element 9, which this process computes.
-    assert set(model.elements) == own | {8}
+    # row (the even numbers), element 8 shares nodes with element 9, which this process computes --
+    # but its load is evaluated where it is computed, so it is not created here.
+    assert set(model.elements) == own
     assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == sorted(own)
     assert not model.elementSets["gen_top"].isComplete
 
@@ -391,7 +389,6 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
 def test_contact_facets_are_made_everywhere_and_computed_with_their_host_element(tmp_path):
     from edelweissfe.domaindecomposition.distributedelements import (
         DistributedElements,
-        _stepActionDefinitions,
         reasonsForTheWholeModel,
     )
     from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
@@ -412,7 +409,7 @@ name=top
     assert reasonsForTheWholeModel(inputFile) == []
 
     model = FEModel(2)
-    distribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
+    distribution = DistributedElements(_SecondOfTwoProcesses())
     model.elementDistribution = distribution
     model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
 
@@ -429,10 +426,7 @@ name=top
 
 
 def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_whole_set(tmp_path):
-    from edelweissfe.domaindecomposition.distributedelements import (
-        DistributedElements,
-        _stepActionDefinitions,
-    )
+    from edelweissfe.domaindecomposition.distributedelements import DistributedElements
     from edelweissfe.helpers.inputfilehelpers import (
         createFieldOutputFromInputFile,
         fillFEModelFromInputFile,
@@ -451,7 +445,7 @@ def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_who
     )
     inputFile = parseInputFile(str(deck))
     model = FEModel(2)
-    model.elementDistribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
+    model.elementDistribution = DistributedElements(_SecondOfTwoProcesses())
     model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
     model.prepareYourself(Journal(verbose=False))
     for nodeField in model.nodeFields.values():
@@ -495,10 +489,7 @@ class _SecondOfTwoProcessesExchanging(_SecondOfTwoProcesses):
 
 
 def test_an_element_moves_with_its_state_and_its_section(tmp_path):
-    from edelweissfe.domaindecomposition.distributedelements import (
-        DistributedElements,
-        _stepActionDefinitions,
-    )
+    from edelweissfe.domaindecomposition.distributedelements import DistributedElements
     from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
     from edelweissfe.journal.journal import Journal
     from edelweissfe.models.femodel import FEModel
@@ -509,11 +500,11 @@ def test_an_element_moves_with_its_state_and_its_section(tmp_path):
     inputFile = parseInputFile(str(deck))
     model = FEModel(2)
     communicator = _SecondOfTwoProcessesExchanging({})
-    distribution = DistributedElements(communicator, _stepActionDefinitions(inputFile))
+    distribution = DistributedElements(communicator)
     model.elementDistribution = distribution
     model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
     model.prepareYourself(Journal(verbose=False))
-    elementSet, element9 = model.elementSets["all"], model.elements[9]
+    elementSet = model.elementSets["all"]
 
     # Elements 7 and 8 come to this process, 9 and 10 leave it.
     stateOf7 = np.arange(model.elements[11].getStateVars().shape[0], dtype=float) + 7.0
@@ -523,11 +514,9 @@ def test_an_element_moves_with_its_state_and_its_section(tmp_path):
     created, dropped, received = distribution.moveElementsTo(model, owners)
 
     assert set(communicator.sentToRankZero) == {9, 10}
-    # The grid is numbered column by column, the top row (even numbers) loaded: element 8 was held
-    # before, for its load; element 6 is now held for its load, and element 10 is kept for it.
-    assert (created, dropped, received) == (2, 1, 2)
-    assert list(model.elements) == [6, 7, 8] + list(range(10, 17))
-    assert model.elements[10] is not element9 and 9 not in model.elements
+    assert (created, dropped, received) == (2, 2, 2)
+    assert list(model.elements) == [7, 8] + list(range(11, 17))
+    assert 9 not in model.elements and 10 not in model.elements
     # The sets are those references point to, updated in place.
     assert model.elementSets["all"] is elementSet and [element.elNumber for element in elementSet] == list(
         model.elements
