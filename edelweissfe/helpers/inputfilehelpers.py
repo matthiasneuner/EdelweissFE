@@ -150,11 +150,9 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
             if definition["nSet"]:
                 subset = model.nodeSets[definition["nSet"]]
             elif definition["elSet"]:
-                # The nodes of the whole set: through the set where all of it was created here (so that
-                # they follow a refinement of the set), from the mesh where a domain-decomposed process
-                # created only part of it.
-                elementSet = model.elementSets[definition["elSet"]]
-                subset = elementSet if elementSet.isComplete else model.nodesOfElementSetOfMesh(definition["elSet"])
+                # The nodes of the whole set, through the set, so that they follow a refinement of the
+                # set; from the mesh, also where a domain-decomposed process created only part of it.
+                subset = model.elementSets[definition["elSet"]]
 
             if subset:
                 nodeField = nodeField.subset(subset)

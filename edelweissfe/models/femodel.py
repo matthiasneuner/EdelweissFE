@@ -49,7 +49,6 @@ from edelweissfe.numerics.parallelizationutilities import (
     isFreeThreadingSupported,
 )
 from edelweissfe.sets.elementset import ElementSet
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -282,31 +281,16 @@ class FEModel:
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh)
+            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh, nodesOfModel=self.nodes)
         else:
             if list(elementSet) != created:
                 elementSet.replaceMembers(created)
+            # its nodes are those of the whole set in the mesh, which may have changed even where the
+            # part created here did not
+            elementSet.forgetNodes()
             elementSet.mesh = self.mesh
+            elementSet.nodesOfModel = self.nodes
         return elementSet
-
-    def nodesOfElementSetOfMesh(self, name: str) -> NodeSet:
-        """The nodes of the mesh's element set ``name``, without duplicates, in the order its elements
-        list them -- the nodes of the whole set, whichever of its elements were created here.
-
-        Parameters
-        ----------
-        name
-            The name of the element set in :attr:`mesh`.
-
-        Returns
-        -------
-        NodeSet
-            The nodes, named like the set.
-        """
-
-        records = self.mesh.elements
-        labels = dict.fromkeys(label for number in self.mesh.elementSets[name] for label in records[number].nodeLabels)
-        return NodeSet(name, [self.nodes[label] for label in labels])
 
     def resolveSurfaceOfMesh(self, name: str):
         """Make ``surfaces[name]`` the surface of the mesh with the given name, on the elements created

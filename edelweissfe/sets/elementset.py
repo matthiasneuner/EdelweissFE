@@ -48,6 +48,7 @@ if checkSuccessfulExtension("edelweissfe.materials.marmot.marmothypoelastic") or
 else:
     MarmotMaterialWrappingElement = None
 
+from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.sets.orderedset import OrderedSet
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
@@ -62,7 +63,9 @@ class ElementSet(OrderedSet):
     (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`). In a serial run that is every
     element of the set. A domain-decomposed run may create only part of the mesh in each process; a
     set then holds only its part, and says so through :attr:`isComplete`. Code that needs the whole set
-    -- an output, a checkpoint, a marker -- states it by calling :meth:`requireComplete`.
+    -- an output, a checkpoint, a marker -- states it by calling :meth:`requireComplete`. What the mesh
+    and the nodes describe is known for the whole set in every process: its element numbers
+    (:meth:`elementNumbersOfWholeSet`) and its nodes (:meth:`extractNodeSet`).
 
     Parameters
     ----------
@@ -73,6 +76,9 @@ class ElementSet(OrderedSet):
     mesh
         The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name, if the set
         was resolved from a mesh; :attr:`isComplete` is derived from it.
+    nodesOfModel
+        The nodes of the model, by label, if the set was resolved from a mesh; the nodes of the whole
+        set (:meth:`extractNodeSet`) are taken from them.
     """
 
     def __init__(
@@ -80,6 +86,7 @@ class ElementSet(OrderedSet):
         label: str,
         elements,
         mesh=None,
+        nodesOfModel: dict = None,
     ):
         self.allowedObjectTypes = [BaseElement]
         self.allowedObjectTypes.append(MarmotElementWrapper) if MarmotElementWrapper is not None else None
@@ -93,6 +100,8 @@ class ElementSet(OrderedSet):
         self._nodes = None
         #: The mesh describing this set, or None for a set not resolved from a mesh.
         self.mesh = mesh
+        #: The nodes of the model, by label, or None for a set not resolved from a mesh.
+        self.nodesOfModel = nodesOfModel
 
         self.elements = self.items
 
@@ -152,22 +161,34 @@ class ElementSet(OrderedSet):
     ):
         """The nodes of the set, without duplicates, in the order the elements list them.
 
-        Only for a complete set: the nodes of a set of which only part was created here are found
-        from the mesh (:meth:`~edelweissfe.models.femodel.FEModel.nodesOfElementSetOfMesh`).
+        The nodes of the whole set, also of a set of which only part was created here: a set resolved
+        from a mesh reads its elements' node labels from the mesh, which every process holds whole.
+        A set not resolved from a mesh is complete, and reads its elements.
 
         Returns
         -------
         NodeSet
-            The nodes.
+            The nodes, named like the set.
         """
-        self.requireComplete("the nodes of the element set")
         if not self._nodes:
-            self._nodes = extractNodesFromElementSet(self)
+            if self.nodesOfModel is not None and self.mesh is not None and self.name in self.mesh.elementSets:
+                records = self.mesh.elements
+                labels = dict.fromkeys(
+                    label for number in self.mesh.elementSets[self.name] for label in records[number].nodeLabels
+                )
+                self._nodes = NodeSet(self.name, [self.nodesOfModel[label] for label in labels])
+            else:
+                self._nodes = extractNodesFromElementSet(self)
         return self._nodes
+
+    def forgetNodes(self):
+        """Forget the nodes :meth:`extractNodeSet` found, because the set changed in the mesh -- also
+        where the part of it created here did not."""
+        self._nodes = None
 
     def replaceMembers(self, item_s):
         """Replace all members in-place (see :meth:`OrderedSet.replaceMembers`), additionally
         invalidating the cached :meth:`extractNodeSet` result, which is stale once the element
         membership changes."""
         super().replaceMembers(item_s)
-        self._nodes = None
+        self.forgetNodes()
