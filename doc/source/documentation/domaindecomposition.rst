@@ -364,15 +364,25 @@ and the increment plan with its element timing. The field outputs set up their v
 element results again for the elements now reported here. All of these are released *before* the
 elements move -- the solver keeps only plain copies of the three vectors it carries over, the field
 outputs keep element numbers, not elements -- so that a dropped element is freed before the new ones
-are created, and a migration does not raise the memory of a process beyond what its elements need. A
+are created, and a migration does not raise the memory of a process beyond what its elements need:
+on a 192 000-element GC3D8 block at 8 processes, two migrations raised the peak resident memory per
+process by 80--150 MB (the transient of the exchange and the rebuild), and the memory at the end of
+the run equals that of a run that never migrated. A
 migrated element is bit for bit the element its previous
 process held -- exactly as a resumed restart's element is -- and every sum is still formed in model
 order, so a run that migrates elements is bit-identical to a serial run too. The journal reports
 every migration (``Element migration: ... element(s) changed process``).
 
+What balancing buys is the waiting it removes, and no more. On that block the costliest process was
+only 3--5 % above the mean; a light process (rank 0) waited about 9 % of each increment for it, and
+after the migrations a quarter of that, computing more elements in the time it had waited before. The
+time per increment, set by the costliest process, could therefore not improve noticeably, and did
+not. Balancing pays where damage localizes and the imbalance grows large.
+
 The timed costs make a partition, and so a migration, depend on the machine and its load.
 ``load-balance-costs=elementNumber`` weighs every element by its number instead: a deterministic,
-deliberately uneven cost, with which a test knows that elements move, and when.
+deliberately uneven cost, with which a test knows that elements move, and when. It balances element
+numbers, not work, so a run with it is no measure of performance.
 ``testfiles/mpi/marmot/NEDRebalanceDistributed`` is such a test: at its output increment 20, after
 the material has yielded, elements move between the processes; its result and the checkpoint written
 after the migration equal a serial run's, and ``check_element_distribution.py`` checks that elements
