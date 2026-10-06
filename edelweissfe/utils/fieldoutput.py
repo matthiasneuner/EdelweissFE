@@ -671,6 +671,7 @@ class ElementFieldOutput(_FieldOutputBase):
         all of them, unless a domain-decomposed run computes some of them elsewhere."""
 
         self._seenSetVersion = self.associatedSet._version
+        self._seenOwnershipVersion = model.elementDistribution.ownershipVersion
         self._elementsReportedHere = model.elementDistribution.elementsReportedHere(self.associatedSet)
         self.elementResultCollector = (
             ElementResultCollector(self._elementsReportedHere, self.quadraturePoints, self.resultName)
@@ -681,9 +682,15 @@ class ElementFieldOutput(_FieldOutputBase):
     def _rebuildCollectorIfSetChanged(self):
         """Rebuild the element result collector -- which pins a fixed snapshot of the element
         list at construction -- if the associated ElementSet was mutated in-place (e.g. AMR
-        replacing a refined parent element with its children) since the last check. Unlike a plain
-        iteration over the set, this pinned snapshot does not see new elements on its own."""
-        if self.associatedSet._version != self._seenSetVersion:
+        replacing a refined parent element with its children), or elements moved between the
+        processes of a domain-decomposed run, since the last check. Unlike a plain iteration over
+        the set, this pinned snapshot does not see new elements on its own, and it holds views into
+        the state of the elements it was made for: a moved element's views would read an element
+        this process no longer computes, or no longer holds."""
+        if (
+            self.associatedSet._version != self._seenSetVersion
+            or self.model.elementDistribution.ownershipVersion != self._seenOwnershipVersion
+        ):
             self._collectFromElementsReportedHere(self.model)
 
     def updateResults(self, model: FEModel):

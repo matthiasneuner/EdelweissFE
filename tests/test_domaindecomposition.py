@@ -344,3 +344,73 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     assert set(model.elements) == own | {8}
     assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == sorted(own)
     assert not model.elementSets["gen_top"].isComplete
+
+
+def test_a_repartition_keeps_elements_where_they_were():
+    from edelweissfe.domaindecomposition.partitioning import keepElementsWhereTheyWere
+
+    previous = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    # METIS numbered the same parts differently, and moved element 4 from the second to the third
+    repartitioned = {1: 2, 2: 2, 3: 0, 4: 1, 5: 1, 6: 1}
+
+    assert keepElementsWhereTheyWere(repartitioned, previous, 3) == {1: 0, 2: 0, 3: 1, 4: 2, 5: 2, 6: 2}
+
+
+class _SecondOfTwoProcessesExchanging(_SecondOfTwoProcesses):
+    """Rank 1 of 2, as in :class:`_SecondOfTwoProcesses`, exchanging element states with rank 0: what
+    rank 0 sends is the state given."""
+
+    def __init__(self, receivedFromRankZero: dict):
+        self.receivedFromRankZero = receivedFromRankZero
+        self.sentToRankZero = None
+
+    def alltoall(self, outgoing):
+        self.sentToRankZero = outgoing[0]
+        return [self.receivedFromRankZero, outgoing[1]]
+
+
+def test_an_element_moves_with_its_state_and_its_section(tmp_path):
+    from edelweissfe.domaindecomposition.distributedelements import (
+        DistributedElements,
+        _stepActionDefinitions,
+    )
+    from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(_DISTRIBUTION_DECK)
+    inputFile = parseInputFile(str(deck))
+    model = FEModel(2)
+    communicator = _SecondOfTwoProcessesExchanging({})
+    distribution = DistributedElements(communicator, _stepActionDefinitions(inputFile))
+    model.elementDistribution = distribution
+    model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    elementSet, element9 = model.elementSets["all"], model.elements[9]
+
+    # Elements 7 and 8 come to this process, 9 and 10 leave it.
+    stateOf7 = np.arange(model.elements[11].getStateVars().shape[0], dtype=float) + 7.0
+    communicator.receivedFromRankZero = {7: stateOf7, 8: model.elements[12].getStateVars()}
+    owners = dict(distribution.owners)
+    owners.update({7: 1, 8: 1, 9: 0, 10: 0})
+    created, dropped, received = distribution.moveElementsTo(model, owners)
+
+    assert set(communicator.sentToRankZero) == {9, 10}
+    # The grid is numbered column by column, the top row (even numbers) loaded: element 8 was held
+    # before, for its load; element 6 is now held for its load, and element 10 is kept for it.
+    assert (created, dropped, received) == (2, 1, 2)
+    assert list(model.elements) == [6, 7, 8] + list(range(10, 17))
+    assert model.elements[10] is not element9 and 9 not in model.elements
+    # The sets are those references point to, updated in place.
+    assert model.elementSets["all"] is elementSet and [element.elNumber for element in elementSet] == list(
+        model.elements
+    )
+    assert model.elements[7].hasMaterial
+    assert np.array_equal(model.elements[7].getStateVars(), stateOf7)
+    assert distribution.ownershipVersion == 1
+    assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == [
+        7,
+        8,
+    ] + list(range(11, 17))

@@ -55,6 +55,11 @@ class ElementDistribution:
     #: Whether every process creates every element of the mesh.
     createsEveryElement = True
 
+    #: Changed whenever elements move between processes, so that whatever was derived from the
+    #: elements this process holds or reports (e.g. the result views of a field output) is derived
+    #: again. Here: never.
+    ownershipVersion = 0
+
     def decideWhichElementsAreCreatedHere(self, mesh: Mesh, domainSize: int):
         """Decide, once the mesh is described and before any element exists, which of its elements
         this process creates. Here: all of them, so there is nothing to decide.

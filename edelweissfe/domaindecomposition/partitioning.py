@@ -110,6 +110,53 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
     return dict(zip(numbers, parts.tolist()))
 
 
+def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -> dict:
+    """Renumber the parts of a new partition so that as many elements as possible keep their process.
+
+    METIS numbers the parts of a partition arbitrarily: a repartition close to the previous one may
+    still give every part another number, and so move every element to another process. Each new part
+    is given the number of the previous part it shares the most elements with, largest overlaps first;
+    the parts left over keep their order. The parts themselves -- which elements are computed
+    together -- do not change, only which process computes them.
+
+    Parameters
+    ----------
+    owners
+        The rank of every element, by number, in the new partition.
+    previousOwners
+        The rank of every element, by number, in the previous partition; the same elements.
+    nParts
+        The number of processes.
+
+    Returns
+    -------
+    dict
+        The new partition, its parts renumbered.
+    """
+
+    numbers = list(owners.keys())
+    new = np.array([owners[number] for number in numbers], dtype=np.int64)
+    previous = np.array([previousOwners[number] for number in numbers], dtype=np.int64)
+    overlap = np.zeros((nParts, nParts), dtype=np.int64)
+    np.add.at(overlap, (new, previous), 1)
+
+    renumbered = np.full(nParts, -1, dtype=np.int64)
+    taken = np.zeros(nParts, dtype=bool)
+    # Largest overlap first; ties in the order of the new, then the previous part, so that every
+    # process arrives at the same renumbering.
+    newParts, previousParts = np.unravel_index(np.argsort(-overlap, axis=None, kind="stable"), overlap.shape)
+    for newPart, previousPart in zip(newParts, previousParts):
+        if renumbered[newPart] < 0 and not taken[previousPart] and overlap[newPart, previousPart] > 0:
+            renumbered[newPart] = previousPart
+            taken[previousPart] = True
+    leftOver = iter(np.flatnonzero(~taken).tolist())
+    for newPart in range(nParts):
+        if renumbered[newPart] < 0:
+            renumbered[newPart] = next(leftOver)
+
+    return dict(zip(numbers, renumbered[new].tolist()))
+
+
 def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.ndarray:
     """Integer METIS weights from measured element costs, 1000 per median measured element.
 

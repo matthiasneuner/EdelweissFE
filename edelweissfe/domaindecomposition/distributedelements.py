@@ -208,6 +208,10 @@ class DistributedElements(ElementDistribution):
         self.owners = None
         #: The numbers of the elements created in this process.
         self._createdHere = set()
+        #: The numbers of the elements carrying a load of some step.
+        self._loadedElements = set()
+        #: Changed by every :meth:`moveElementsTo`.
+        self.ownershipVersion = 0
         #: The state of every element of the model, by number, on rank 0, between
         #: :meth:`gatherStatesForCheckpoint` and :meth:`forgetGatheredStates`.
         self._gatheredStates = None
@@ -233,17 +237,110 @@ class DistributedElements(ElementDistribution):
 
         self.owners = partitionElementsOfMesh(mesh, self.communicator.Get_size(), domainSize, self.communicator)
 
-        own = {number for number, owner in self.owners.items() if owner == self.rank}
+        self._loadedElements = set()
+        for stepActionClass, definition in self._stepActionDefinitions:
+            self._loadedElements.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
+
+        self._createdHere = self._elementsCreatedFor(mesh, self.owners)
+
+    def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
+        """The numbers of the elements this process creates under a partition: its own, and the
+        loaded elements sharing a node with one of them; see :meth:`decideWhichElementsAreCreatedHere`.
+
+        Parameters
+        ----------
+        mesh
+            The mesh.
+        owners
+            The rank of every element of the mesh, by number.
+
+        Returns
+        -------
+        set
+            The element numbers.
+        """
+
+        own = {number for number, owner in owners.items() if owner == self.rank}
         nodesOfOwnElements = {label for number in own for label in mesh.elements[number].nodeLabels}
 
-        loaded = set()
-        for stepActionClass, definition in self._stepActionDefinitions:
-            loaded.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
-
         loadedNeighbours = {
-            number for number in loaded - own if not nodesOfOwnElements.isdisjoint(mesh.elements[number].nodeLabels)
+            number
+            for number in self._loadedElements - own
+            if not nodesOfOwnElements.isdisjoint(mesh.elements[number].nodeLabels)
         }
-        self._createdHere = own | loadedNeighbours
+        return own | loadedNeighbours
+
+    def moveElementsTo(self, model, owners: dict) -> tuple[int, int, int]:
+        """Adopt a new partition: move every element whose process changes to its new process
+        (migration). Collective; only where every process holds the converged state of the elements
+        it computes, i.e. after an increment was accepted.
+
+        An element is completely described by the mesh, the replicated definitions -- its sections,
+        material and element properties -- and its state. So, in this order:
+
+        1. each process sends the state of every element it computed and no longer computes to the
+           element's new process;
+        2. each process drops the objects of the elements it no longer needs, and creates those it
+           now needs -- its new elements, and new loaded neighbours
+           (:meth:`decideWhichElementsAreCreatedHere`) -- from the mesh, in mesh order;
+        3. the element sets and surfaces are resolved to the elements now created here, the new
+           elements receive their sections and element properties, as at setup, and every element
+           this process now computes, but did not compute before, receives the state its previous
+           process sent.
+
+        A migrated element is therefore the element its previous process held, bit for bit, as a
+        resumed restart's element is. What else is derived from the elements held here -- the
+        degree-of-freedom indices of the elements, the subdomain, the increment plan, the result
+        views of field outputs -- must be derived again; :attr:`ownershipVersion` says that it
+        changed.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        owners
+            The new rank of every element of the mesh, by number.
+
+        Returns
+        -------
+        tuple[int, int, int]
+            How many element objects this process created, dropped, and received the state of.
+        """
+
+        mesh = model.mesh
+        rank = self.rank
+        previousOwners = self.owners
+
+        outgoing = [{} for _ in range(self.communicator.Get_size())]
+        for number, owner in owners.items():
+            if previousOwners[number] == rank and owner != rank:
+                outgoing[owner][number] = model.elements[number].getStateVars()
+        incoming = self.communicator.alltoall(outgoing)
+        del outgoing
+
+        createdHere = self._elementsCreatedFor(mesh, owners)
+        toDrop = [number for number in model.elements if number not in createdHere]
+        toCreate = [number for number in mesh.elements if number in createdHere and number not in model.elements]
+
+        # Element objects change process; the mesh does not change.
+        with model.topology.changes():
+            for number in toDrop:
+                model.dropElementOfMesh(number)
+            created = {number: model.createElementOfMesh(number) for number in toCreate}
+        model.putElementsInMeshOrder()
+        model.resolveSetsAndSurfacesOfMesh()
+        model.assignSectionsAndPropertiesToElements(created)
+
+        nReceived = 0
+        for states in incoming:
+            for number, state in states.items():
+                model.elements[number].setStateVars(state)
+                nReceived += 1
+
+        self.owners = owners
+        self._createdHere = createdHere
+        self.ownershipVersion += 1
+        return len(created), len(toDrop), nReceived
 
     def isCreatedHere(self, number: int) -> bool:
         """Whether this process creates the element with the given number.
