@@ -303,6 +303,7 @@ def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
         + """
 *modelModifier, type=hAdaptivity, name=amr
 >>marker, type=elementSet, elSet=gen_all
+*modelModifier, type=surfaceSnap, name=snap
 *modelGenerator, generator=executePythonCode, name=code
 print("hello")
 *modelGenerator, generator=boxGen, name=late, executeAfterManualGeneration=True
@@ -312,8 +313,10 @@ nX=1
 """
     )
     reasons = reasonsForTheWholeModel(parseInputFile(str(deck)))
+    # adaptive refinement reads the mesh only and runs distributed; the surface snap does not
     assert len(reasons) == 4
-    assert "model modifier amr (hAdaptivity)" in reasons[0]
+    assert "model modifier snap (surfaceSnap) changes the mesh during the run" in reasons[0]
+    assert not any("amr" in reason for reason in reasons)
     assert "generator code (executePythonCode)" in reasons[1]
     assert "generator late (boxGen) runs after the mesh is partitioned" in reasons[2]
     assert "expression field output fromElements reads the elements of element set gen_all" in reasons[3]

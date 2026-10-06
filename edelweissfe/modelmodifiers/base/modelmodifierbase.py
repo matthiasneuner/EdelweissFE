@@ -49,6 +49,14 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     #: disqualify that solver. See NonlinearSolverBase.validateModelCapabilities.
     initiatesTopologyChanges = True
 
+    #: Why a domain-decomposed job with this modifier must hold the whole model in every process
+    #: (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`), or
+    #: None for a modifier that reads only the mesh, the nodes and the node fields -- which every
+    #: process holds whole -- and creates the element objects of a changed mesh only where they are
+    #: computed. Not None unless a modifier says so, since a modifier is free to read and change the
+    #: element objects of the whole model.
+    wholeModelReason: str | None = "changes the mesh during the run, reading the element objects of the whole model"
+
     @property
     def actsOnlyAtSimulationStart(self) -> bool:
         """Whether every topology change this modifier can plan happens on the very first topology

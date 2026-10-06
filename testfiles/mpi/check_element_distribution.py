@@ -37,13 +37,17 @@ from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulatio
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 #: The test cases expected to run distributed; every other test case is expected to hold the whole
-#: model (it has contact, a tie, adaptive refinement, or contact facets).
+#: model (it has contact, a tie, or contact facets).
 EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NED",
     "marmot/GCDPNEDExplicit",
+    "marmot/GCDPNEDExplicitAMR",
     "marmot/GCDPNEDExplicitHyperbolic",
+    "marmot/GCDPNEDExplicitHyperbolicAMR",
     "marmot/NED",
     "marmot/NEDInitialStressPressure",
+    "marmot/NEDLiveAMR",
+    "marmot/NEDLiveAMRStepEndsOffInterval",
     "marmot/NEDParallel",
     "marmot/NEDRestartDistributed1Write",
     "marmot/NEDRestartDistributed2Resume",

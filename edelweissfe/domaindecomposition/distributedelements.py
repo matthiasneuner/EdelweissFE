@@ -48,6 +48,7 @@ of :mod:`.mpienvironment`, and a serial run gets the serial distribution.
 import numpy as np
 
 from edelweissfe.config.generators import getGeneratorClass
+from edelweissfe.config.modelmodifiers import getModelModifierClass
 from edelweissfe.config.stepactions import stepActionFactory
 from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
@@ -67,8 +68,11 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
     while it runs, and has not yet been taught to gather what it reads from the processes computing
     it:
 
-    * **model modifiers** -- adaptive refinement above all -- change the mesh during the run, and
-      their topology logic and state transfer read the whole mesh;
+    * **model modifiers that read element objects of the whole model** (see
+      :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.wholeModelReason`),
+      e.g. the surface snap; adaptive refinement (``hAdaptivity``) is not among them: it reads the
+      mesh, which every process holds whole, and creates the children of a refined element where
+      the parent is computed;
     * **constraints** -- contact, ties and the like -- are evaluated whole by one process, search the
       whole surface, and may couple nodes of any subdomain;
     * **generators that do more than describe the mesh** (see
@@ -93,9 +97,9 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
 
     reasons = []
     for definition in inputfile["modelModifier"]:
-        reasons.append(
-            "model modifier {:} ({:}) changes the mesh during the run".format(definition["name"], definition["type"])
-        )
+        reason = getModelModifierClass(definition["type"]).wholeModelReason
+        if reason is not None:
+            reasons.append("model modifier {:} ({:}) {:}".format(definition["name"], definition["type"], reason))
     for definition in inputfile["constraint"]:
         reasons.append(
             "constraint {:} ({:}) is evaluated whole by one process".format(definition["name"], definition["type"])
