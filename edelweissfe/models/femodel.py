@@ -878,6 +878,13 @@ def printPrettyModelSummary(model: FEModel, journal: Journal):
         identification,
         0,
     )
+    # A domain-decomposed process may create only some of the elements of the mesh.
+    if len(model.mesh.elements) > len(model.elements):
+        journal.message(
+            " {:<20}{:<15}".format("in the mesh: ", len(model.mesh.elements)),
+            identification,
+            0,
+        )
     journal.message(
         " {:<20}{:<15}".format("element sets: ", len(model.elementSets)),
         identification,
