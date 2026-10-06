@@ -288,9 +288,8 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
 
     # The mesh is described: decide which of its elements this process creates -- every one, unless
     # a domain-decomposed run distributes them over its processes -- and make them.
-    elementDistribution = model.elementDistribution
-    elementDistribution.decideWhichElementsAreCreatedHere(model.mesh, model.domainSize)
-    model.createElementsOfMesh(elementDistribution.isCreatedHere)
+    model.elementDistribution.decideWhichElementsAreCreatedHere(model.mesh, model.domainSize)
+    model.createElementsOfMesh()
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file
     # rather than from the allocators (see TopologyPipeline.adoptSetupElementNumbers). Raise both allocators
@@ -323,7 +322,7 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
 
     # A late generator may describe further elements (e.g. a boxgen with executeAfterManualGeneration):
     # make them too, before anything refers to element objects again.
-    model.createElementsOfMesh(elementDistribution.isCreatedHere)
+    model.createElementsOfMesh()
 
     model = abqModelConstructor.createConstraintsFromInputFile(model, inputfile)
     model = abqModelConstructor.createModelModifiersFromInputFile(model, inputfile)

@@ -34,7 +34,7 @@ A model can be built the same way from Python:
 
     import numpy as np
 
-    from edelweissfe.models.femodel import FEModel, everyElement
+    from edelweissfe.models.femodel import FEModel
     from edelweissfe.points.node import Node
 
     model = FEModel(2)
@@ -44,12 +44,11 @@ A model can be built the same way from Python:
     with model.topology.changes():
         model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
         model.mesh.setElementSet("all", [1])
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
 
-The predicate of :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` decides which
-elements a process creates. When a model is built from an input file, it is the model's
-:attr:`~edelweissfe.models.femodel.FEModel.elementDistribution` that answers -- every element, unless
-a domain-decomposed run distributes the elements over its processes; see
+Which elements :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` creates, the model's
+:attr:`~edelweissfe.models.femodel.FEModel.elementDistribution` decides -- every element, unless a
+domain-decomposed run distributes the elements over its processes; see
 :ref:`domaindecomposition_mesh_to_elements`.
 
 .. automodule:: edelweissfe.models.elementdistribution

@@ -254,9 +254,14 @@ class DistributedElements(ElementDistribution):
         Raises
         ------
         TopologyError
-            For an element described after the mesh was partitioned: no process owns it.
+            Before the mesh was partitioned, and for an element described after it: no process owns
+            it.
         """
 
+        if self.owners is None:
+            raise TopologyError(
+                "element {:} is to be created before the mesh was partitioned over the processes".format(number)
+            )
         if number not in self.owners:
             raise TopologyError(
                 "element {:} was described after the mesh was partitioned over the processes, so no process "

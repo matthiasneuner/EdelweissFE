@@ -53,7 +53,7 @@ from edelweissfe.generators.discreterigidbodygenerator import (
 )
 from edelweissfe.generators.surfaceelementgenerator import buildContactFacets
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType
 from edelweissfe.points.node import Node
@@ -126,7 +126,7 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
 
             model.mesh.setElementSet("s", [e.elNumber for e in slaveElements])
             model.mesh.addSurface("slaveFace", {_YMIN: "s"})
-            model.createElementsOfMesh(everyElement)
+            model.createElementsOfMesh()
             slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "midside", "facetConsistent", self.journal)
 
             rigidBody = generateDiscreteRigidBodyFromMeshFile(

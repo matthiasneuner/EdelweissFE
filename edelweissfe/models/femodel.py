@@ -30,7 +30,6 @@
 # @author: Matthias Neuner
 
 import textwrap
-from collections.abc import Callable
 from operator import attrgetter
 
 import h5py
@@ -55,24 +54,6 @@ from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
 from edelweissfe.variables.fieldvariable import FieldVariable
 from edelweissfe.variables.scalarvariable import ScalarVariable
-
-
-def everyElement(number: int) -> bool:
-    """The predicate of :meth:`FEModel.createElementsOfMesh` that creates every element of the mesh,
-    as a serial run does.
-
-    Parameters
-    ----------
-    number
-        The element number.
-
-    Returns
-    -------
-    bool
-        Always True.
-    """
-
-    return True
 
 
 class FEModel:
@@ -100,13 +81,10 @@ class FEModel:
         self.nodes = {}  #: Nodes in the model.
         self.mesh = Mesh()  #: The mesh, as data: the elements, element sets and surfaces described for the model.
         self.elements = {}  #: The element objects created from the mesh, by number, in mesh order.
-        #: Whether this process creates the element with the given number: the predicate last passed to
-        #: :meth:`createElementsOfMesh`. An element of the mesh that is not created here must have been
-        #: declined by it; see :meth:`_checkEveryElementIsCreatedOrDeclined`.
-        self._isCreatedHere = everyElement
-        #: Which elements of the mesh this process creates, and how results of the whole model are
-        #: read from the processes that computed them; every element, here, unless a
-        #: domain-decomposed run sets another (see :mod:`~edelweissfe.models.elementdistribution`).
+        #: Which elements of the mesh this process creates (:meth:`createElementsOfMesh` asks it), and
+        #: how results of the whole model are read from the processes that computed them; every
+        #: element, here, unless a domain-decomposed run sets another (see
+        #: :mod:`~edelweissfe.models.elementdistribution`).
         self.elementDistribution = ElementDistribution()
         self.nodeSets = {}  #: NodeSets in the model.
         self.nodeFields = {}  #: NodeFields in the model.
@@ -210,7 +188,7 @@ class FEModel:
         self.elements[number] = element
         return element
 
-    def createElementsOfMesh(self, isCreatedHere: Callable[[int], bool]):
+    def createElementsOfMesh(self):
         """Create the element objects of the mesh, and resolve its element sets and surfaces to them.
 
         Elements are created in mesh order, so :attr:`elements` lists them in the order they were
@@ -218,20 +196,18 @@ class FEModel:
         :class:`~edelweissfe.sets.elementset.ElementSet` of the elements created here, and each surface
         an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
 
-        Calling it again is harmless: elements already created are kept (the predicate is asked again
-        for the others), and sets and surfaces that already exist are updated in place (references
-        held to them stay valid), so a mesh described in several steps can be made in several steps.
-        The predicate is kept: :meth:`prepareYourself` checks that every element of the mesh was either
-        created or declined by it.
+        Which elements are created here, :attr:`elementDistribution` decides
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isCreatedHere`): every
+        element in a serial run, only its own in a process of a distributed one.
 
-        Parameters
-        ----------
-        isCreatedHere
-            Whether this process creates the element with the given number. A serial run creates
-            every element (:func:`everyElement`); a domain-decomposed run may create only its own.
+        Calling it again is harmless: elements already created are kept (the distribution is asked
+        again for the others), and sets and surfaces that already exist are updated in place
+        (references held to them stay valid), so a mesh described in several steps can be made in
+        several steps. :meth:`prepareYourself` checks that every element of the mesh was either
+        created or declined.
         """
 
-        self._isCreatedHere = isCreatedHere
+        isCreatedHere = self.elementDistribution.isCreatedHere
         for number in self.mesh.elements:
             if number not in self.elements and isCreatedHere(number):
                 self.createElementOfMesh(number)
@@ -320,8 +296,8 @@ class FEModel:
             )
 
     def _checkEveryElementIsCreatedOrDeclined(self):
-        """Raise unless every element of the mesh was either created here or declined by the predicate
-        of :meth:`createElementsOfMesh` -- an element described after the elements were made, and
+        """Raise unless every element of the mesh was either created here or declined by
+        :attr:`elementDistribution` -- an element described after the elements were made, and
         never made, would otherwise silently be missing from the model.
 
         Raises
@@ -331,7 +307,9 @@ class FEModel:
         """
 
         neverCreated = sorted(
-            number for number in self.mesh.elements.keys() - self.elements.keys() if self._isCreatedHere(number)
+            number
+            for number in self.mesh.elements.keys() - self.elements.keys()
+            if self.elementDistribution.isCreatedHere(number)
         )
         if neverCreated:
             raise TopologyError(
@@ -823,7 +801,11 @@ class FEModel:
         for elementKey, stateVars in f["elements"].items():
             elNumber = int(elementKey)
             element = self.elements.get(elNumber)
-            if element is None and elNumber in self.mesh.elements and not self._isCreatedHere(elNumber):
+            if (
+                element is None
+                and elNumber in self.mesh.elements
+                and not self.elementDistribution.isCreatedHere(elNumber)
+            ):
                 continue
             if element is None:
                 raise RestartError(

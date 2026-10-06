@@ -116,7 +116,8 @@ Every model is built in two stages (see :doc:`mesh`): the input file and the mes
 element's number, type, provider and node labels, the element sets as lists of element numbers and
 the surfaces by their element sets -- and the element objects are then *made* from it by
 :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`, for every element the model's
-:class:`~edelweissfe.models.elementdistribution.ElementDistribution` creates here. Four properties
+:class:`~edelweissfe.models.elementdistribution.ElementDistribution` creates here (the model owns its
+distribution, ``model.elementDistribution``). Four properties
 make a distributed model possible:
 
 * **The layout of the degrees of freedom follows from the mesh.** Which fields an element has at

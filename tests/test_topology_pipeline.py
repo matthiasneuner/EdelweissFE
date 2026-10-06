@@ -42,7 +42,7 @@ from edelweissfe.adaptivity.refinement import NodeRegistry
 from edelweissfe.modelmodifiers.surfacefacets.surfacefacets import (
     ModelModifier as _SurfaceFacetsModifier,
 )
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
@@ -235,7 +235,7 @@ def test_parsed_element_set_keeps_its_declaration_order():
 
     model = AbqModelConstructor(Journal(verbose=False)).createGeometryFromInputFile(FEModel(2), inputFile)
     with model.topology.changes():
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
 
     assert [el.elNumber for el in model.elementSets["declared"]] == list(range(1, nElements + 1))
 
@@ -414,7 +414,7 @@ def _tinyMeshModel(elementNumbers=(1, 2), shiftCoordinate=0.0):
     for elNumber, conn in zip(elementNumbers, [(1, 2, 5, 4), (2, 3, 6, 5)]):
         model.mesh.addElement(elNumber, "CPE4", "edelweiss", conn)
     with model.topology.changes():
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
     return model
 
 

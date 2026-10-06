@@ -43,7 +43,7 @@ from edelweissfe.config.phenomena import domainMapping
 from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.mesh import SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.points.node import Node
@@ -107,7 +107,7 @@ class _ElementsByPredicate(ElementDistribution):
         return self._predicate(number)
 
 
-def _buildModel(tmp_path, isCreatedHere=everyElement) -> FEModel:
+def _buildModel(tmp_path, isCreatedHere=lambda number: True) -> FEModel:
     """Build the model of :data:`DECK`, creating the elements for which ``isCreatedHere`` holds."""
 
     deck = tmp_path / "test.inp"
@@ -318,12 +318,13 @@ def test_completeness_is_derived_from_the_mesh_and_repeated_making_changes_nothi
     assert part.elementSets["picked"] is picked and picked.isComplete
 
     # making the mesh again neither replaces nor touches sets and surfaces that did not change
+    part.elementDistribution = ElementDistribution()
     with part.topology.changes():
-        part.createElementsOfMesh(everyElement)
+        part.createElementsOfMesh()
     assert all(elementSet.isComplete for elementSet in part.elementSets.values())
     versions = {name: s._version for name, s in part.surfaces.items()}
     setVersions = {name: s._version for name, s in part.elementSets.items()}
     with part.topology.changes():
-        part.createElementsOfMesh(everyElement)
+        part.createElementsOfMesh()
     assert {name: s._version for name, s in part.surfaces.items()} == versions
     assert {name: s._version for name, s in part.elementSets.items()} == setVersions

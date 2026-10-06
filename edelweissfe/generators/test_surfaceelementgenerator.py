@@ -50,7 +50,7 @@ from edelweissfe.generators.surfaceelementgenerator import (
     canonicalParentFace,
 )
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.utils.facetcontactgeometry import facetNormalAndMeasure
@@ -118,7 +118,7 @@ class TestContactFacetNodalWeights(unittest.TestCase):
             model.createElement(element)
         model.mesh.setElementSet("theFace", [element.elNumber])
         model.mesh.addSurface("theSurface", {1: "theFace"})
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
 
         return model
 
@@ -247,7 +247,7 @@ class TestContactFacetNodalWeights(unittest.TestCase):
             model.createElement(element)
         model.mesh.setElementSet("theEdge", [element.elNumber])
         model.mesh.addSurface("theSurface", {1: "theEdge"})
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
 
         return model
 

@@ -68,7 +68,7 @@ class ElementDistribution:
         """
 
     def isCreatedHere(self, number: int) -> bool:
-        """Whether this process creates the element with the given number: the predicate of
+        """Whether this process creates the element with the given number; asked by
         :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.
 
         Parameters

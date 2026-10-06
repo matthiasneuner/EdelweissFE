@@ -59,7 +59,7 @@ The code may read any element of the model, so the elements of the mesh describe
 
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 
 
 class Generator(GeneratorBase):
@@ -92,7 +92,7 @@ class Generator(GeneratorBase):
         cleanCodeLines = codeLines.replace(r"\t", "\t")  # literal \t sequences become tabs, used for indentation
 
         # arbitrary code may read any element: make every element described so far
-        model.createElementsOfMesh(everyElement)
+        model.createElementsOfMesh()
         exec(cleanCodeLines, {"model": model})
 
     @classmethod
