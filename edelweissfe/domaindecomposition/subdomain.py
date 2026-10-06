@@ -311,7 +311,7 @@ class Subdomain:
         if not distribution.createsEveryElement and model.mesh.elements.keys() != distribution.owners.keys():
             raise TopologyError(
                 "the mesh of this distributed model changed, but the processes computing its elements were not "
-                "decided for the changed mesh (ElementDistribution.holdElementsOfChangedMesh)"
+                "decided for the changed mesh (ElementDistribution.createAndDropElementsOfChangedMesh)"
             )
 
         if distribution.createsEveryElement or byMeasuredCosts:

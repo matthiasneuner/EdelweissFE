@@ -86,9 +86,9 @@ class ElementDistribution:
             The number of the element it replaces (in part), still described in the mesh.
         """
 
-    def holdElementsOfChangedMesh(self, model):
-        """After a model modifier changed the mesh, hold here exactly the element objects this process
-        needs for the changed mesh. Here: the modifier created every new element itself, so there is
+    def createAndDropElementsOfChangedMesh(self, model):
+        """After a model modifier changed the mesh, create and drop element objects so that this process
+        holds exactly those it needs for the changed mesh. Here: the modifier created every new element itself, so there is
         nothing left to do.
 
         Parameters

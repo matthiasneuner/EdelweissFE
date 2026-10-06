@@ -123,7 +123,7 @@ place of another (``model.mesh.addElement``) places it with
 :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement` and creates its
 object only where :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isCreatedHere`
 says so; after ``apply`` the pipeline lets the distribution create the other elements a process
-needs (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdElementsOfChangedMesh`).
+needs (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`).
 A modifier that reads only the mesh, the nodes and the node fields -- not the element objects of the
 whole model -- says so with ``wholeModelReason = None``; any other keeps the job on the whole model
 (see :doc:`domaindecomposition`). ``hAdaptivity`` is the example of both.

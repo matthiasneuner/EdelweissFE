@@ -84,7 +84,7 @@ def migrationOf(model, communicator) -> str:
     """How many elements of a distributed model moved between the processes over the run, and whether
     every process holds exactly the element objects of its model."""
 
-    moved = sum(communicator.allgather(model.elementDistribution.receivedElements))
+    moved = sum(communicator.allgather(model.elementDistribution.nElementsReceived))
 
     gc.collect()
     elementClasses = {type(element) for element in model.elements.values()}

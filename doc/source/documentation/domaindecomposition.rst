@@ -334,8 +334,8 @@ process that computed its parent
 Only that process creates it from the mesh, assigns it its parent's section and element properties,
 and transfers its parent's state to it; the parent is then dropped. Every process updates the mesh,
 the nodes, the element and node sets, the surfaces and the node fields identically. After the
-modifier, the topology pipeline lets the distribution hold the elements of the changed mesh
-(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdElementsOfChangedMesh`): a
+modifier, the topology pipeline lets the distribution create and drop the elements of the changed
+mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`): a
 process creates the loaded children touching its own elements (a body force on a refined set, a
 distributed load on a refined surface) and drops loaded elements it no longer needs. The equation
 system is then built again, as after any topology change, adopting this partition; the next

@@ -218,7 +218,7 @@ class DistributedElements(ElementDistribution):
         self.ownershipVersion = 0
         #: How many elements this process received from another one over the run, by
         #: :meth:`moveElementsTo`; a diagnostic.
-        self.receivedElements = 0
+        self.nElementsReceived = 0
         #: The state of every element of the model, by number, on rank 0, between
         #: :meth:`gatherStatesForCheckpoint` and :meth:`forgetGatheredStates`.
         self._gatheredStates = None
@@ -343,7 +343,7 @@ class DistributedElements(ElementDistribution):
 
         # Element objects change process; the mesh does not change.
         self.owners = owners
-        created, dropped = self._holdElementsCreatedFor(model)
+        created, dropped = self._createAndDropElementsCreatedFor(model)
 
         nReceived = 0
         for states in incoming:
@@ -352,13 +352,13 @@ class DistributedElements(ElementDistribution):
                 nReceived += 1
 
         self.ownershipVersion += 1
-        self.receivedElements += nReceived
+        self.nElementsReceived += nReceived
         return len(created), len(dropped), nReceived
 
-    def _holdElementsCreatedFor(self, model) -> tuple[dict, list]:
-        """Hold here exactly the element objects this process creates under the current partition
-        (:attr:`owners`): drop those it no longer needs, and create those it lacks from the mesh, in
-        mesh order, with their sections and element properties, as at setup.
+    def _createAndDropElementsCreatedFor(self, model) -> tuple[dict, list]:
+        """Create and drop element objects so that this process holds exactly those it creates under
+        the current partition (:attr:`owners`): drop those it no longer needs, and create those it
+        lacks from the mesh, in mesh order, with their sections and element properties, as at setup.
 
         The dropped elements leave their sets and surfaces before the new ones are created, so that
         they are released first.
@@ -409,10 +409,11 @@ class DistributedElements(ElementDistribution):
         if owner == self.rank:
             self._createdHere.add(childNumber)
 
-    def holdElementsOfChangedMesh(self, model):
+    def createAndDropElementsOfChangedMesh(self, model):
         """After a model modifier changed the mesh -- every process changes it identically -- forget
-        the elements no longer in it, and hold here exactly the elements this process now needs:
-        its own, which the modifier created already (:meth:`placeChildElement`), and the loaded
+        the elements no longer in it, and create and drop elements so that this process holds exactly
+        those it now needs: its own, which the modifier created already (:meth:`placeChildElement`),
+        and the loaded
         elements sharing a node with one of them (see :meth:`decideWhichElementsAreCreatedHere`),
         which the elements and the sets of the changed mesh may have changed. Local: the decision
         reads only the mesh, which every process holds whole.
@@ -440,7 +441,7 @@ class DistributedElements(ElementDistribution):
         self.owners = {number: self.owners[number] for number in mesh.elements}
 
         self._loadedElements = self._elementsLoadedIn(mesh)
-        self._holdElementsCreatedFor(model)
+        self._createAndDropElementsCreatedFor(model)
 
     def isCreatedHere(self, number: int) -> bool:
         """Whether this process creates the element with the given number.

@@ -377,7 +377,7 @@ class TopologyPipeline:
                     plan = modifier.plan(self._model, change, step)
                     if plan is None:
                         continue
-                    modelChange = self._carryOut(modifier, plan)
+                    modelChange = self._applyPlan(modifier, plan)
                     # A modifier may plan and then find nothing left to do. Recording that would
                     # rebuild the equation system for nothing, pay a topology fingerprint for
                     # nothing, and let the no-op modifier burn through maxRounds and be
@@ -411,10 +411,10 @@ class TopologyPipeline:
                     )
         return changed
 
-    def _carryOut(self, modifier, plan):
-        """Let a model modifier carry out its plan, live or replayed, and then let this process hold
-        the element objects it needs for the changed mesh
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdElementsOfChangedMesh`):
+    def _applyPlan(self, modifier, plan):
+        """Let a model modifier carry out its plan, live or replayed, and then let this process create
+        and drop the element objects it needs for the changed mesh
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`):
         in a serial run the modifier created every new element itself; in a domain-decomposed run
         that created only each process' own elements, the modifier created those computed here,
         and the elements loading them are created afterwards.
@@ -433,7 +433,7 @@ class TopologyPipeline:
         """
 
         modelChange = modifier.apply(self._model, plan)
-        self._model.elementDistribution.holdElementsOfChangedMesh(self._model)
+        self._model.elementDistribution.createAndDropElementsOfChangedMesh(self._model)
         return modelChange
 
     def recordSetupFingerprint(self):
@@ -611,7 +611,7 @@ class TopologyPipeline:
                         "being resumed".format(record.modifier)
                     )
                 plan = modifier.decodePlan(record.plan)
-                modelChange = self._carryOut(modifier, plan)
+                modelChange = self._applyPlan(modifier, plan)
                 # Carry the recorded digest forward instead of recomputing it -- unless every record
                 # is to be verified, which needs the replayed one.
                 replayed = self.recordChange(
