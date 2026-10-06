@@ -178,7 +178,8 @@ class SubdomainInterface:
 class _TaggedContributions:
     """The exchange of individual nodal contributions with the neighbouring processes, each tagged
     with its degree of freedom and its place in the order in which a single process computing the
-    whole model adds it; what the assemblies at the interface have in common.
+    whole model adds it; what :class:`InterfaceForceAssembly` and :class:`InterfaceLoadAssembly`
+    have in common.
 
     Each process holds its contributions in one buffer, an entry per contribution. It sends each
     neighbour the entries at the degrees of freedom the two share -- the tags once, when this
@@ -359,6 +360,77 @@ class InterfaceForceAssembly:
         vector.view(np.ndarray)[interfaceDofs] = np.bincount(
             self._targets, weights=exchange.merged[exchange.order], minlength=interfaceDofs.shape[0]
         )
+
+
+class InterfaceLoadAssembly:
+    """The nodal forces of the loads acting on the elements of one subdomain -- distributed loads and
+    body forces -- and how to add them, at every degree of freedom, in the order a single process
+    adds them.
+
+    A load acting on an element is a contribution of that element, so it is evaluated where the
+    element is: by the process computing it, with its current solution. Each process evaluates the
+    loads of its elements into one buffer, an entry per element and degree of freedom, in the order
+    of the loads -- the load in deck order, the face of its surface, the element in the set. At a
+    degree of freedom another process integrates too, that process receives the entries, tagged with
+    the place of the contribution in the order of all loads of the model; so every process
+    integrating a degree of freedom holds all the load contributions there.
+
+    They are *added* onto the vector, one after another, in that order: a single process adds every
+    load contribution onto the net force the elements and the concentrated loads already left there
+    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads`), and
+    floating-point addition is not associative, so the sums are formed the same way here -- the
+    first contribution at every degree of freedom, then the second, and so on. Within one such
+    *layer* no degree of freedom appears twice, so each is one vectorized addition.
+
+    Constructed collectively among neighbours, whenever the subdomain or the loads change.
+
+    Parameters
+    ----------
+    interface
+        The subdomain interface.
+    entryDofs
+        The degree of freedom of every entry of this process' load buffer.
+    entryLoadOrder
+        The place of every entry in the order of all load contributions of the model.
+    """
+
+    def __init__(self, interface: SubdomainInterface, entryDofs: np.ndarray, entryLoadOrder: np.ndarray):
+        entryDofs = np.asarray(entryDofs, dtype=np.int64)
+        self._contributions = _TaggedContributions(
+            interface, entryDofs, entryLoadOrder, np.arange(entryDofs.shape[0], dtype=np.int64)
+        )
+        order = self._contributions.order
+        sortedDofs = self._contributions.tagDofs[order]
+
+        # The rank of every sorted entry among those at its degree of freedom: 0 for the first added.
+        firstOfDof = np.ones(sortedDofs.shape[0], dtype=bool)
+        firstOfDof[1:] = sortedDofs[1:] != sortedDofs[:-1]
+        starts = np.flatnonzero(firstOfDof)
+        rankAtDof = np.arange(sortedDofs.shape[0]) - np.repeat(starts, np.diff(np.append(starts, sortedDofs.shape[0])))
+
+        #: Per layer, the merged entries added and the degrees of freedom they are added at.
+        self._layers = [
+            (order[rankAtDof == rank], sortedDofs[rankAtDof == rank])
+            for rank in range(int(rankAtDof.max()) + 1 if rankAtDof.size else 0)
+        ]
+
+    def assemble(self, contributions: np.ndarray, vector: np.ndarray):
+        """Add the load contributions of all processes at the degrees of freedom integrated here onto
+        ``vector``, in the order of the loads of the model. Collective among neighbours.
+
+        Parameters
+        ----------
+        contributions
+            This process' load buffer, one entry per loaded element and degree of freedom.
+        vector
+            The vector to add into.
+        """
+
+        exchange = self._contributions
+        exchange.exchange(contributions)
+        plain = vector.view(np.ndarray)
+        for entries, dofs in self._layers:
+            plain[dofs] += exchange.merged[entries]
 
 
 class ConstraintForceExchange:

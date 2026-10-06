@@ -63,6 +63,7 @@ from edelweissfe.domaindecomposition.statesynchronization import (
 from edelweissfe.domaindecomposition.subdomaininterface import (
     ConstraintForceExchange,
     InterfaceForceAssembly,
+    InterfaceLoadAssembly,
     SubdomainInterface,
 )
 from edelweissfe.models.femodel import FEModel
@@ -86,7 +87,7 @@ _NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
 
 
 class DistributedLoadOnSubdomain:
-    """A distributed load, restricted to the faces of the elements reaching into a subdomain.
+    """A distributed load, restricted to the faces of the elements computed in a subdomain.
 
     What the shared load assembly
     (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeDistributedLoads`)
@@ -129,7 +130,7 @@ class DistributedLoadOnSubdomain:
 
 
 class BodyLoadOnSubdomain:
-    """A body load, restricted to the elements reaching into a subdomain.
+    """A body load, restricted to the elements computed in a subdomain.
 
     What the shared load assembly
     (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeBodyForces`)
@@ -163,6 +164,64 @@ class BodyLoadOnSubdomain:
         """
 
         return self.load.getCurrentLoad(timeStep)
+
+
+class LoadsOnSubdomain:
+    """The distributed and body loads of a step, restricted to the elements computed in a subdomain,
+    and the assembly completing their nodal forces at the interface; see
+    :meth:`Subdomain.loadsOnSubdomain`.
+
+    Parameters
+    ----------
+    distributedLoads
+        The distributed loads of the step, as given.
+    bodyLoads
+        The body loads of the step, as given.
+    restrictedDistributedLoads
+        The distributed loads, restricted to the elements computed here.
+    restrictedBodyLoads
+        The body loads, restricted to the elements computed here.
+    assembly
+        The assembly of their nodal forces, entries in the order the restricted loads are evaluated.
+    """
+
+    def __init__(
+        self,
+        distributedLoads: list,
+        bodyLoads: list,
+        restrictedDistributedLoads: list[DistributedLoadOnSubdomain],
+        restrictedBodyLoads: list[BodyLoadOnSubdomain],
+        assembly: InterfaceLoadAssembly,
+    ):
+        self._loads = (distributedLoads, bodyLoads)
+        #: The distributed loads, restricted to the elements computed here.
+        self.distributedLoads = restrictedDistributedLoads
+        #: The body loads, restricted to the elements computed here.
+        self.bodyLoads = restrictedBodyLoads
+        #: The assembly of their nodal forces.
+        self.assembly = assembly
+
+    def isFor(self, distributedLoads: list, bodyLoads: list) -> bool:
+        """Whether these are the restrictions of the given loads.
+
+        Parameters
+        ----------
+        distributedLoads
+            The distributed loads.
+        bodyLoads
+            The body loads.
+
+        Returns
+        -------
+        bool
+            Whether they are the loads given here, the same objects in the same order.
+        """
+
+        given = (distributedLoads, bodyLoads)
+        return all(
+            len(mine) == len(theirs) and all(a is b for a, b in zip(mine, theirs))
+            for mine, theirs in zip(self._loads, given)
+        )
 
 
 class Subdomain:
@@ -207,7 +266,6 @@ class Subdomain:
         self._ownedConstraints = {}
 
         self._interface = None
-        self._inSubdomain = None
         self._stateSynchronization = None
         self._constraintForceExchange = None
         #: The position of every element in the model, by number: the order interface forces are
@@ -226,10 +284,9 @@ class Subdomain:
         is kept alive here."""
 
         self._ownedElements = {}
-        #: The elements whose degrees of freedom reach into this subdomain, and the loads acting on
-        #: them, by load; see distributedLoadsOnSubdomain and bodyLoadsOnSubdomain.
-        self._elementsTouchingSubdomain = set()
-        self._loadsOnSubdomain = {}
+        #: The loads of the elements computed here, and their assembly, for the loads last asked
+        #: for; see loadsOnSubdomain.
+        self._loadsOnSubdomain = None
         #: The elements, constraints and degrees of freedom this process computes, as of the last
         #: definition.
         self.partition = None
@@ -402,14 +459,6 @@ class Subdomain:
 
         self._interface = SubdomainInterface(self.communicator, touched, dofManager.nDof)
 
-        self._inSubdomain = np.zeros(dofManager.nDof, dtype=bool)
-        self._inSubdomain[self._interface.subdomainDofs] = True
-        self._elementsTouchingSubdomain = {
-            element
-            for element in model.elements.values()
-            if self._inSubdomain[dofManager.idcsOfElementsInDofVector[element]].any()
-        }
-
         if ownershipChanged:
             # The states of the elements other processes compute are kept current only where every
             # element was created; a distributed model gathers what it reads instead.
@@ -425,7 +474,7 @@ class Subdomain:
         self._constraintForceExchange = ConstraintForceExchange(
             self.communicator, model.constraints, self._ownedConstraints, dofManager.idcsOfConstraintsInDofVector
         )
-        self._loadsOnSubdomain = {}
+        self._loadsOnSubdomain = None
 
         self.partition = ModelPartition(
             self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs, self._interface.ownedDofMask
@@ -598,114 +647,98 @@ class Subdomain:
 
     # --- What is computed here ----------------------------------------------------------------
 
-    def distributedLoadsOnSubdomain(self, distributedLoads) -> list[DistributedLoadOnSubdomain]:
-        """The given distributed loads, each restricted to the elements reaching into the subdomain,
-        owned or not: each process adds the loads at its subdomain degrees of freedom itself, since
-        loads are not exchanged.
+    def loadsOnSubdomain(self, distributedLoads, bodyLoads) -> LoadsOnSubdomain:
+        """The given loads, restricted to the elements computed here, and how their nodal forces are
+        completed at the interface; built when the loads or the subdomain changed. Collective among
+        neighbours when built: every process asks for the same loads at the same time.
+
+        A load acting on an element is a contribution of that element: it is evaluated by the
+        process computing the element, with that process' current solution -- the element's degrees
+        of freedom are all integrated there -- and its nodal forces are sent to the neighbours
+        integrating the same degrees of freedom (:class:`~.subdomaininterface.InterfaceLoadAssembly`).
+        Every contribution is tagged with its place in the order a single process adds the loads in
+        (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads`):
+        the distributed loads in the order given, the faces of each surface, the elements of each
+        face as the mesh describes it; then the body loads, the elements of each set.
 
         Parameters
         ----------
         distributedLoads
-            The distributed loads of the step.
+            The distributed loads of the step, in deck order.
+        bodyLoads
+            The body loads of the step, in deck order.
 
         Returns
         -------
-        list[DistributedLoadOnSubdomain]
-            The restricted loads, in the order given.
+        LoadsOnSubdomain
+            The restricted loads and their assembly.
         """
 
-        restricted = []
+        distributedLoads, bodyLoads = list(distributedLoads), list(bodyLoads)
+        if self._loadsOnSubdomain is not None and self._loadsOnSubdomain.isFor(distributedLoads, bodyLoads):
+            return self._loadsOnSubdomain
+
+        mesh = self._model.mesh
+        dofsOf = self._dofManager.idcsOfElementsInDofVector
+        entryDofs, entryOrder = [], []
+        loadsBefore = 0
+
+        def computedHere(loadedSetName: str, elements, numbersInMesh: list) -> list:
+            """The elements of a loaded set computed here, in set order, with their entries tagged by
+            their place among all load contributions; advances the count of contributions."""
+
+            nonlocal loadsBefore
+            positionInMesh = {number: position for position, number in enumerate(numbersInMesh)}
+            computed = []
+            previous = -1
+            for element in elements:
+                position = positionInMesh.get(element.elNumber)
+                if position is None or position < previous:
+                    raise TopologyError(
+                        "element {:} of {:} carries a load, but not in the place the mesh describes".format(
+                            element.elNumber, loadedSetName
+                        )
+                    )
+                previous = position
+                if element.elNumber in self._ownedElements:
+                    computed.append(element)
+                    entryDofs.append(dofsOf[element])
+                    entryOrder.append(np.full(element.nDof, loadsBefore + position, dtype=np.int64))
+            loadsBefore += len(numbersInMesh)
+            return computed
+
+        restrictedDistributedLoads = []
         for load in distributedLoads:
-            onSubdomain = self._loadsOnSubdomain.get(load)
-            if onSubdomain is None:
-                self._requireLoadedElementsCreatedHere(
-                    load.surface.name,
-                    [
-                        number
-                        for numbers in self._model.mesh.elementNumbersOfSurface(load.surface.name).values()
-                        for number in numbers
-                    ],
-                )
-                onSubdomain = DistributedLoadOnSubdomain(
+            numbersOfFaces = mesh.elementNumbersOfSurface(load.surface.name)
+            restrictedDistributedLoads.append(
+                DistributedLoadOnSubdomain(
                     load,
                     {
-                        faceID: [element for element in elementSet if element in self._elementsTouchingSubdomain]
+                        faceID: computedHere(load.surface.name, elementSet, numbersOfFaces[faceID])
                         for faceID, elementSet in load.surface.items()
                     },
                 )
-                self._loadsOnSubdomain[load] = onSubdomain
-            restricted.append(onSubdomain)
-        return restricted
+            )
+        restrictedBodyLoads = [
+            BodyLoadOnSubdomain(
+                load,
+                computedHere(load.elementSet.name, load.elementSet, load.elementSet.elementNumbersOfWholeSet()),
+            )
+            for load in bodyLoads
+        ]
 
-    def bodyLoadsOnSubdomain(self, bodyLoads) -> list[BodyLoadOnSubdomain]:
-        """The given body loads, each restricted to the elements reaching into the subdomain; see
-        :meth:`distributedLoadsOnSubdomain`.
-
-        Parameters
-        ----------
-        bodyLoads
-            The body loads of the step.
-
-        Returns
-        -------
-        list[BodyLoadOnSubdomain]
-            The restricted loads, in the order given.
-        """
-
-        restricted = []
-        for load in bodyLoads:
-            onSubdomain = self._loadsOnSubdomain.get(load)
-            if onSubdomain is None:
-                self._requireLoadedElementsCreatedHere(
-                    load.elementSet.name, self._model.mesh.elementSets[load.elementSet.name]
-                )
-                onSubdomain = BodyLoadOnSubdomain(
-                    load, [element for element in load.elementSet if element in self._elementsTouchingSubdomain]
-                )
-                self._loadsOnSubdomain[load] = onSubdomain
-            restricted.append(onSubdomain)
-        return restricted
-
-    def _requireLoadedElementsCreatedHere(self, loadedSetName: str, numbers: list):
-        """Refuse a load whose elements reaching into the subdomain were not all created here.
-
-        Each process adds the loads at its subdomain degrees of freedom itself, from the loaded
-        elements reaching into the subdomain. A distributed model creates those that share a node
-        with an element of the subdomain (see
-        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`);
-        a subdomain reaching further -- through a constraint or a multi-point constraint -- could miss
-        a load silently, and is refused instead.
-
-        Parameters
-        ----------
-        loadedSetName
-            The name of the loaded surface or element set, for the message.
-        numbers
-            The numbers of the loaded elements, as described in the mesh.
-
-        Raises
-        ------
-        TopologyError
-            If a loaded element reaches into the subdomain without having been created here.
-        """
-
-        model = self._model
-        if model.elementDistribution.createsEveryElement:
-            return
-
-        dofsOf = self._dofManager.idcsOfFieldVariablesInDofVector
-        nodes = model.nodes
-        for number in numbers:
-            if number in model.elements:
-                continue
-            for label in model.mesh.elements[number].nodeLabels:
-                if any(
-                    self._inSubdomain[dofsOf[fieldVariable]].any() for fieldVariable in nodes[label].fields.values()
-                ):
-                    raise TopologyError(
-                        "element {:} of {:} carries a load and reaches into the subdomain of process {:}, but was "
-                        "not created there".format(number, loadedSetName, self.rank)
-                    )
+        self._loadsOnSubdomain = LoadsOnSubdomain(
+            distributedLoads,
+            bodyLoads,
+            restrictedDistributedLoads,
+            restrictedBodyLoads,
+            InterfaceLoadAssembly(
+                self._interface,
+                np.concatenate(entryDofs) if entryDofs else np.empty(0, dtype=np.int64),
+                np.concatenate(entryOrder) if entryOrder else np.empty(0, dtype=np.int64),
+            ),
+        )
+        return self._loadsOnSubdomain
 
     def constraintsSearchedHere(self, model: FEModel, constraints: dict) -> dict:
         """Those of the given constraints whose connectivity search is run here: those this process

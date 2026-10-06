@@ -126,6 +126,36 @@ def test_single_subdomain_owns_and_integrates_everything():
     assert np.array_equal(vector, np.arange(10.0))
 
 
+def test_loads_are_added_one_after_another_in_the_order_of_the_loads():
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.subdomaininterface import (
+        InterfaceLoadAssembly,
+        SubdomainInterface,
+    )
+
+    rng = np.random.default_rng(7)
+    nDof, nEntries = 50, 400
+    interface = SubdomainInterface(MPI.COMM_SELF, np.arange(nDof), nDof)
+    entryDofs = rng.integers(0, nDof, nEntries)
+    # Every entry its own place in the order of the loads, given in scrambled order; values of very
+    # different magnitudes and signed zeros, so that any other order of additions, or a sum started
+    # from zero rather than from the vector, gives different bits.
+    entryOrder = rng.permutation(nEntries)
+    contributions = rng.standard_normal(nEntries) * 10.0 ** rng.integers(-12, 12, nEntries)
+    contributions[::17] = -0.0
+    initial = rng.standard_normal(nDof) * 1e8
+    initial[::5] = -0.0
+
+    expected = initial.copy()
+    for entry in np.argsort(entryOrder):
+        expected[entryDofs[entry]] += contributions[entry]
+
+    vector = initial.copy()
+    InterfaceLoadAssembly(interface, entryDofs, entryOrder).assemble(contributions, vector)
+
+    assert np.array_equal(vector.view(np.int64), expected.view(np.int64))
+
+
 class _SpringElement:
     """An element just complex enough for the explicit element loop: a force that depends on its
     solution, and an internal energy."""

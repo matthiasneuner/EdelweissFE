@@ -109,7 +109,8 @@ communication, each in an override of a method of ``NED``:
 * :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
   shares them from the owners;
 * :meth:`NEDMPI.assembleConstraintForces` shares the constraint forces;
-* :meth:`NEDMPI.assembleLoads` adds the loads of the elements reaching into the subdomain only;
+* :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements computed here, and completes
+  them at the interface like the forces;
 * :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
   the minimum and the sums over all processes;
 * :meth:`NEDMPI.acceptIncrement` synchronizes the model on output increments and rebalances it,
@@ -423,6 +424,7 @@ class NEDMPI(NEDParallel):
 
         return P, psi
 
+    @performancetiming.timeit("assemble loads")
     def assembleLoads(
         self,
         nodeForces: list[StepActionBase],
@@ -433,9 +435,11 @@ class NEDMPI(NEDParallel):
         K: None,
         timeStep: TimeStep,
     ) -> tuple[DofVector, None]:
-        """Assemble the loads of :meth:`NED.assembleLoads`, those acting on elements restricted to the
-        elements reaching into the subdomain; see
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`.
+        """Assemble the loads of :meth:`NED.assembleLoads` in the same order, those acting on
+        elements as the element forces are: each process evaluates the loads of the elements it
+        computes, and the contributions are completed at the interface and added in the order of the
+        loads of the model; see :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`.
+        Collective among neighbours.
 
         Parameters
         ----------
@@ -460,15 +464,18 @@ class NEDMPI(NEDParallel):
             The updated external load vector, and ``K``.
         """
 
-        return super().assembleLoads(
-            nodeForces,
-            self.subdomain.distributedLoadsOnSubdomain(distributedLoads),
-            self.subdomain.bodyLoadsOnSubdomain(bodyForces),
-            U_np,
-            PExt,
-            K,
-            timeStep,
-        )
+        # A concentrated load acts on degrees of freedom, not on elements: every process integrating
+        # one adds it, onto the same complete net force.
+        PExt = self.assembleConcentratedLoads(nodeForces, PExt, timeStep)
+        if not distributedLoads and not bodyForces:
+            return PExt, K
+
+        loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
+        forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
+        forces += [Pe for _, Pe in self.bodyForcesOfElements(loads.bodyLoads, U_np, K, timeStep)]
+        with performancetiming.timeit("interface loads"):
+            loads.assembly.assemble(np.concatenate(forces) if forces else np.empty(0), PExt)
+        return PExt, K
 
     @performancetiming.timeit("assemble constraints")
     def assembleConstraintForces(

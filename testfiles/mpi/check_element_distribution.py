@@ -41,7 +41,7 @@ from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulatio
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 #: The test cases expected to run distributed; every other test case is expected to hold the whole
-#: model (NEDWholeModel, by a reason of the rule).
+#: model (NEDWholeModel and NEDFollowerPressureULWholeModel, by a reason of the rule).
 EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NED",
     "edelweiss-only/NEDContact",
@@ -59,6 +59,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/GCDPNEDExplicitHyperbolic",
     "marmot/GCDPNEDExplicitHyperbolicAMR",
     "marmot/NED",
+    "marmot/NEDFollowerPressureUL",
     "marmot/NEDInitialStressPressure",
     "marmot/NEDLiveAMR",
     "marmot/NEDLiveAMRRebalanceDistributed",
@@ -68,6 +69,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDLiveAMRRestartDistributed2Resume",
     "marmot/NEDLiveAMRStepEndsOffInterval",
     "marmot/NEDLiveAMRTieDistributed",
+    "marmot/NEDLoadsEqualValuePenalty",
     "marmot/NEDParallel",
     "marmot/NEDRestartDistributed1Write",
     "marmot/NEDRestartDistributed2Resume",

@@ -1,0 +1,31 @@
+** The NEDFollowerPressureUL test case, held whole in every process: the expression field output
+** over an element set is a reason for the whole-model fallback. Every process holds every element,
+** but evaluates the follower pressure of the elements it computes only, as distributed. Bit-identical
+** to a serial run (U.ref).
+*material, name=VonMises/Hughes-Winget, id=vm
+10000, 0.3, 1e9, 1000, 200, 1400, 1, 1e-3
+
+*modelGenerator, generator=boxGen, name=box
+nX=6
+nY=6
+nZ=6
+lX=1
+lY=1
+lZ=1
+elType=C3D8UL
+
+*section, name=section1, material=vm, type=solid
+box_all
+
+*job, name=followerpressurewholejob, domain=3d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=7
+
+*fieldOutput
+>>perNode, name=U, elSet=box_all, field=displacement, result=U
+>>fromExpression, name=nElements, elSet=box_all, expression='np.zeros(len(model.elementSets["box_all"]))'
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=300, maxIter=25, stepLength=0.5
+>>dirichlet, name=fix, nSet=box_back, field=displacement, 1=0.0, 2=0.0, 3=0.0
+>>distributedload, name=p, surface=box_front, magnitude=500, f(t)=t, type=pressure

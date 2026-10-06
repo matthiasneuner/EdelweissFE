@@ -1,0 +1,35 @@
+** A body force on every element and a pressure on the top surface, together with an equal-value
+** penalty constraint coupling the whole top edge across the subdomains. Each load is evaluated by the
+** process computing its element and completed at the interface like the element forces. Runs
+** distributed, bit-identical to a serial run (U.ref) on any number of processes.
+*material, name=linearElastic, id=le
+30000.0, 0.15, 1e-6
+
+*modelGenerator, generator=planeRectQuad, name=gen
+elType=CPE4
+nX=8
+nY=8
+l=100
+h=100
+
+*constraint, type=equalValuePenalty, name=myConstraint
+nSet=gen_top
+field=displacement
+component=1
+penalty=1e4
+
+*section, name=section1, thickness=1.0, material=le, type=plane
+all
+
+*job, name=nedloadsjob, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=13
+
+*fieldOutput
+>>perNode, name=displacement, elSet=all, field=displacement, result=U
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=400, maxIter=25, stepLength=1e-2
+>>dirichlet, name=bottom, nSet=gen_bottom, field=displacement, 1=0.0, 2=0.0
+>>bodyForce, name=gravity, elSet=all, forceVector='0.0, -0.01', f(t)=t
+>>distributedload, name=pTop, surface=gen_top, magnitude=0.5, f(t)=t, type=pressure
