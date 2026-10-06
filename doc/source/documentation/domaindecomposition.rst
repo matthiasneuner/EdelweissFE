@@ -69,8 +69,11 @@ The fallback rule
 file and names every reason to hold the whole model on every process; the job is distributed only if
 there is none:
 
-* a **model modifier** (``*modelModifier`` -- adaptive refinement above all): it changes the mesh
-  during the run, and its topology logic, marker and state transfer read the whole mesh;
+* a **model modifier that reads element objects of the whole model** (``*modelModifier``, e.g.
+  ``surfaceSnap``): it changes the mesh during the run from what it reads. Every model modifier says
+  so through :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.wholeModelReason`;
+  one that does not say it reads only the mesh is assumed to need the whole model. Adaptive
+  refinement (``hAdaptivity``) reads only the mesh and runs distributed (see `Adaptive refinement`_);
 * a **constraint** (``*constraint`` -- contact, ties, and the like): each is evaluated whole by one
   process, searches its whole surface, and may couple nodes of any subdomain;
 * a **generator that does more than describe the mesh**: ``executePythonCode`` and ``cubit`` act on
@@ -84,8 +87,9 @@ there is none:
 * an **expression field output over an element set** (``>>fromExpression, elSet=``): the expression
   reads the element objects of the whole set itself, which cannot be gathered.
 
-Moving these readers to gathers of their own -- refinement on replicated mesh data with owner-local
-elements, contact through surface-sized exchanges -- removes them from the rule one by one.
+Moving these readers to gathers of their own removes them from the rule one by one: adaptive
+refinement on replicated mesh data with owner-local elements is done; contact through surface-sized
+exchanges is next.
 
 What a distributed process creates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -133,9 +137,9 @@ make a distributed model possible:
 * **An element set is the part of the set created here.** Each
   :class:`~edelweissfe.sets.elementset.ElementSet` of the model holds the created elements of its set
   in the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
-  The nodes of the whole set come from the mesh
-  (:meth:`~edelweissfe.models.femodel.FEModel.nodesOfElementSetOfMesh`), and so are the same in
-  every process; ``extractNodeSet`` of a partial set refuses.
+  What the mesh describes is known for the whole set in every process: its element numbers
+  (:meth:`~edelweissfe.sets.elementset.ElementSet.elementNumbersOfWholeSet`) and its nodes
+  (:meth:`~edelweissfe.sets.elementset.ElementSet.extractNodeSet`), read from the mesh.
 * **Whole-model readers gather, or refuse.** A reader that needs every element of a set or of the
   model either goes through the gather path of the element distribution (see `Where the whole model is
   read`_), or says that it needs the whole set
@@ -260,8 +264,8 @@ element field output over a set         ``resultsOfWholeSet``: each process coll
                                         process, by mesh element number, in set order -- so a field
                                         output is the same in every process, as without decomposition
 node field output over an element set   the nodes of the whole set, from the mesh
-(``>>perNode, elSet=``)                 (``nodesOfElementSetOfMesh``); the node fields are
-                                        global-length
+(``>>perNode, elSet=``)                 (``ElementSet.extractNodeSet``, also of a partial set, and
+                                        again after a refinement); the node fields are global-length
 Ensight                                 rank 0 draws the geometry of a partial set from the mesh
                                         (``visualizedElementsOf``) and writes the gathered results
 monitor, conditional stop               read field outputs
@@ -275,9 +279,8 @@ restart checkpoint                      before the output of an output increment
 
 Still guarded, and refused loudly on a partial model: an expression field output over an element
 set (``>>fromExpression, elSet=``, which the fallback rule already sends to the whole model), the
-mesh plot and ``meshDataToFile`` (which fail at their setup), the element set marker, adaptive
-refinement, ``surfaceSnap`` and the P1 topology classification (which only exist with a model
-modifier, and so with the whole model).
+mesh plot and ``meshDataToFile`` (which fail at their setup), ``surfaceSnap`` and the P1 topology
+classification (which only exist with a model modifier the fallback rule sends to the whole model).
 
 The gathers of the field outputs happen inside the output step that every process agrees on: each
 process reaches them in the same order, before anything that runs in one process only (the output
@@ -303,15 +306,51 @@ fields every constraint couples are compared across processes
 Adaptive refinement
 -------------------
 
-Adaptive refinement holds the whole model on every process (see `The fallback rule`_). Because every
-process holds the complete, synchronized model at a topology check, every process runs
-the same refinement -- the same marker on the same field output, the same state transfer from the
-same parent states -- and arrives at the same refined model. That is verified, not assumed: after
-every build of the equation system, a fingerprint of the mesh (element numbers and connectivity),
-the degree of freedom of every node of every field, the node coordinates and the size of the system
-is compared across all processes, and the run stops if any two differ. It is made from the mesh and
-the nodes, which every process holds whole, so it serves a distributed model as well. The refined model is then partitioned afresh. Nothing migrates, because every process already
-holds every element.
+Adaptive refinement (``hAdaptivity``) runs on a distributed model. What it decides is split by
+what it reads:
+
+**Replicated, the same in every process: the topology.** The octree mirror, the marking, the 2:1
+balance, the hanging nodes and the conformity check, and the numbers of the new nodes and elements,
+are derived from the mesh, the nodes and the node fields -- which every process holds whole -- and
+never from an element object (:mod:`~edelweissfe.modelmodifiers.adaptivity.hadaptivity`). The
+markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
+
+* a field-output marker thresholds the result of an element field output, which is a result of the
+  whole set in every process (``resultsOfWholeSet``), row by row in the set order of the mesh;
+* the element-set, node-set and surface markers read the sets and surfaces of the mesh;
+* the recovery-error marker reads the node coordinates and a node field at the nodes of the
+  refineable elements of the mesh -- global data only, current in every process after the output
+  synchronization a topology check follows -- so it, too, marks the same elements everywhere and
+  needs no gather of its own.
+
+Every process therefore refines the same mesh, and numbers it the same way. That is verified, not
+assumed: after every build of the equation system, a fingerprint of the mesh (element numbers and
+connectivity), the degree of freedom of every node of every field, the node coordinates and the size
+of the system is compared across all processes, and the run stops if any two differ.
+
+**Owner-local: the elements and their states.** The child of a refined element is computed by the
+process that computed its parent
+(:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.placeChildElement`).
+Only that process creates it from the mesh, assigns it its parent's section and element properties,
+and transfers its parent's state to it; the parent is then dropped. Every process updates the mesh,
+the nodes, the element and node sets, the surfaces and the node fields identically. After the
+modifier, the topology pipeline lets the distribution hold the elements of the changed mesh
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdElementsOfChangedMesh`): a
+process creates the loaded children touching its own elements (a body force on a refined set, a
+distributed load on a refined surface) and drops loaded elements it no longer needs. The equation
+system is then built again, as after any topology change, adopting this partition; the next
+rebalancing check may move the children like any other element (`Load balancing`_). The hanging-node
+constraints of the refinement are multi-point constraints, closed over in the subdomain by degree of
+freedom (a process integrating any degree of freedom of a hanging node integrates its masters too),
+whichever process computes the elements around them.
+
+**Restart.** A resumed run replays the recorded refinements on the partition its processes start
+with: the children are created where the replayed partition computes their parents -- not where the
+written run had moved them -- and every process restores, by number, the states of the elements it
+created from the one checkpoint rank 0 wrote. The result is that of an uninterrupted run.
+
+A whole-model run (another reason in `The fallback rule`_) refines identically, with every process
+creating every child; its refined model is then partitioned afresh.
 
 Load balancing
 --------------
@@ -395,7 +434,11 @@ Only rank 0 creates output managers. A restart checkpoint is the last output of 
 increment, written after the synchronization of that output, so rank 0's copy of the model holds
 every element and every constraint as the process computing it left it, and the external work of
 the whole model. A distributed model gathers the element states to rank 0 for it instead (see
-`Where the whole model is read`_); the file is the same, bit for bit, as a serial run's. It is an ordinary checkpoint of the whole model, so a run can be resumed by
+`Where the whole model is read`_); the file is the same, bit for bit, as a serial run's -- with one
+exception: the solver's external work, an energy diagnostic, is the sum of the work each process
+accumulated at the prescribed degrees of freedom it owns, so where a partition splits them, it may
+differ from a serial run's single running sum in the last bit (seen at 2 processes after a
+refinement and a migration). The solution does not depend on it. It is an ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the
 uninterrupted one does (see :doc:`restart`).
@@ -468,7 +511,10 @@ Limitations
   at the start does (2.2 s on a 192 000-element block at 8 processes, plus 0.3--0.6 s to move the
   elements); the gain check above weighs that cost.
 * METIS repartitions from scratch: even a small imbalance can move a fifth of the elements.
-* Adaptive refinement is computed by every process, in full, on the whole model.
+* The topology of an adaptive refinement -- its octree mirror, the 2:1 balance, the hanging nodes --
+  is computed by every process on the whole mesh, and the mirror is held by every process: about
+  4.7 KB of Python objects per root element (110 MB for 24 000 GC3D20R elements, 334 MB for the
+  c1_150 model).
 * A constraint is evaluated whole, by one process; a single large contact constraint is not split.
 * Only the explicit dynamic solver is decomposed.
 

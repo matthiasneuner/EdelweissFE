@@ -457,6 +457,17 @@ design had each modifier serializing its own history and implementing its own re
 precisely how a resumed run came to rebuild a differently-numbered mesh -- two implementations of
 one mutation always drift. See :doc:`topologypipeline`.
 
+Domain decomposition
+--------------------
+
+``hAdaptivity`` runs on a domain-decomposed explicit model (``NEDMPI``) whose processes each create
+only their own elements: the octree mirror, the markers, the 2:1 balance, the hanging nodes and the
+numbering are derived from the mesh, the nodes and the node fields, which every process holds whole,
+so every process refines identically; the children of a refined element are created, with their
+parent's section, properties and state, only by the process computing the parent. Markers mark
+element numbers, not element objects. ``surfaceSnap`` still needs the whole model on every process.
+See :doc:`domaindecomposition`.
+
 Implementing your own model modifiers
 -------------------------------------
 
