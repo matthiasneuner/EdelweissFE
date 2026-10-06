@@ -302,9 +302,15 @@ class DistributedElements(ElementDistribution):
         Raises
         ------
         TopologyError
-            If an element of the set is computed by no process.
+            If the set is not described in the mesh, or an element of the set is computed by no
+            process.
         """
 
+        if elementSet.mesh is None or elementSet.name not in elementSet.mesh.elementSets:
+            raise TopologyError(
+                "element set {:} is not described in the mesh, so its results cannot be gathered from the "
+                "processes".format(elementSet.name)
+            )
         numbers = elementSet.mesh.elementSets[elementSet.name]
         pieces = self.communicator.allgather(([element.elNumber for element in reportedHere], results))
 
