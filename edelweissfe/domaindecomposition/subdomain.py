@@ -26,16 +26,19 @@
 #  The full text of the license can be found in the file LICENSE.md at
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
-"""The subdomain one MPI process computes: the model partition of a domain-decomposed solver.
+"""The subdomain one MPI process computes, and what it exchanges with the others.
 
-A :class:`Subdomain` is the :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of one
-process of several. It computes the elements METIS assigns to it and the constraints dealt to it,
-and integrates the degrees of freedom those touch (:mod:`.partitioning`). Its element forces are
-completed at the interface with the neighbouring subdomains (:mod:`.subdomaininterface`), the
-constraint forces are shared with every process, sums are formed over all processes in rank order,
-and the vectors and states of the whole model are made current from the processes computing them
-(:mod:`.statesynchronization`). Every sum that decides the solution is formed in the order it is
-formed without decomposition, so a run is bit-identical to one in a single process.
+A :class:`Subdomain` decides which part of the model its process computes -- the elements METIS
+assigns to it, the constraints dealt to it, and the degrees of freedom those touch
+(:mod:`.partitioning`) -- and describes it as a
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` (:attr:`Subdomain.partition`). It
+also carries out every exchange between the processes the domain-decomposed solver needs: the
+element forces are completed at the interface with the neighbouring subdomains
+(:mod:`.subdomaininterface`), the constraint forces are shared with every process, sums are formed
+over all processes in rank order, failures are agreed on, and the vectors and states of the whole
+model are made current from the processes computing them (:mod:`.statesynchronization`). Every sum
+that decides the solution is formed in the order it is formed without decomposition, so a run is
+bit-identical to one in a single process.
 """
 
 import hashlib
@@ -64,6 +67,9 @@ from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
+from edelweissfe.stepactions.base.bodyloadbase import BodyLoadBase
+from edelweissfe.stepactions.base.distributedloadbase import DistributedLoadBase
+from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
 
 #: How :meth:`Subdomain.agreedOnByAllParts` ranks what went wrong: the most severe outcome of any
@@ -71,8 +77,89 @@ from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFa
 _NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
 
 
-class Subdomain(ModelPartition):
-    """The subdomain this MPI process computes; see the module documentation.
+class DistributedLoadOnSubdomain:
+    """A distributed load, restricted to the faces of the elements reaching into a subdomain.
+
+    What the shared load assembly
+    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeDistributedLoads`)
+    reads of a :class:`~edelweissfe.stepactions.base.distributedloadbase.DistributedLoadBase`, with
+    a smaller surface.
+
+    Parameters
+    ----------
+    load
+        The distributed load.
+    surface
+        The faces it acts on in the subdomain: element lists by face, in the load's order.
+    """
+
+    def __init__(self, load: DistributedLoadBase, surface: dict):
+        self.load = load
+        self.surface = surface
+
+    @property
+    def loadType(self) -> str:
+        """The load's type."""
+
+        return self.load.loadType
+
+    def getCurrentLoad(self, timeStep: TimeStep) -> np.ndarray:
+        """The load's current magnitude.
+
+        Parameters
+        ----------
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        np.ndarray
+            The magnitude.
+        """
+
+        return self.load.getCurrentLoad(timeStep)
+
+
+class BodyLoadOnSubdomain:
+    """A body load, restricted to the elements reaching into a subdomain.
+
+    What the shared load assembly
+    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeBodyForces`)
+    reads of a :class:`~edelweissfe.stepactions.base.bodyloadbase.BodyLoadBase`, with a smaller
+    element set.
+
+    Parameters
+    ----------
+    load
+        The body load.
+    elementSet
+        The elements it acts on in the subdomain, in the load's order.
+    """
+
+    def __init__(self, load: BodyLoadBase, elementSet: list):
+        self.load = load
+        self.elementSet = elementSet
+
+    def getCurrentLoad(self, timeStep: TimeStep) -> np.ndarray:
+        """The load's current magnitude.
+
+        Parameters
+        ----------
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        np.ndarray
+            The magnitude.
+        """
+
+        return self.load.getCurrentLoad(timeStep)
+
+
+class Subdomain:
+    """The subdomain this MPI process computes, and its exchanges with the others; see the module
+    documentation.
 
     Parameters
     ----------
@@ -111,15 +198,21 @@ class Subdomain(ModelPartition):
         #: The position of every element in the model, by number: the order interface forces are
         #: summed in.
         self._elementPositions = {}
-        #: The elements whose degrees of freedom reach into this subdomain; see loadedElements.
+        #: The elements whose degrees of freedom reach into this subdomain, and the loads acting on
+        #: them, by load; see distributedLoadsOnSubdomain and bodyLoadsOnSubdomain.
         self._elementsTouchingSubdomain = set()
+        self._loadsOnSubdomain = {}
+
+        #: The elements, constraints and degrees of freedom this process computes, as of the last
+        #: definition.
+        self.partition = None
 
         #: What the last definition was made for; a rebalance redefines from it.
         self._model = None
         self._dofManager = None
         self._mpcTransformation = None
 
-    # --- ModelPartition: defining the subdomain --------------------------------------------------
+    # --- Defining the subdomain -------------------------------------------------------------------
 
     def define(
         self,
@@ -129,11 +222,25 @@ class Subdomain(ModelPartition):
         topologyChanged: bool,
     ):
         """Partition the model if its elements changed, and determine this process' subdomain
-        degrees of freedom and interface; see :meth:`ModelPartition.define`. Collective.
+        degrees of freedom and interface: the :attr:`partition`. Collective.
 
-        A rebuild with the same elements -- a new step, a changed material property -- keeps the
-        partition, and must: the states of the elements another process computed are current only
-        after a synchronization, and only a topology change is guaranteed to follow one.
+        Called whenever the equation system has been built (``topologyChanged``) or its constraints
+        re-located (a contact search moved them). A rebuild with the same elements -- a new step, a
+        changed material property -- keeps the partition, and must: the states of the elements
+        another process computed are current only after a synchronization, and only a topology
+        change is guaranteed to follow one.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        dofManager
+            The degree-of-freedom layout of the current equation system.
+        mpcTransformation
+            The multi-point-constraint transformation of the current equation system, or None.
+        topologyChanged
+            True after the equation system was built afresh; False when only the constraints were
+            re-located.
         """
 
         self._model = model
@@ -252,6 +359,11 @@ class Subdomain(ModelPartition):
         self._constraintForceExchange = ConstraintForceExchange(
             self.communicator, model.constraints, self._ownedConstraints, dofManager.idcsOfConstraintsInDofVector
         )
+        self._loadsOnSubdomain = {}
+
+        self.partition = ModelPartition(
+            self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs, self._interface.ownedDofMask
+        )
 
     def _closeOverMultiPointConstraints(self, touched: np.ndarray, nDof: int) -> np.ndarray:
         """Add to the touched degrees of freedom every one linked to them by a multi-point
@@ -364,67 +476,68 @@ class Subdomain(ModelPartition):
             0 if topologyChanged else 2,
         )
 
-        if topologyChanged and self._stateSynchronization is not None:
-            withoutState = len(self._stateSynchronization.elementsWithoutState)
-            if withoutState:
-                self.journal.message(
-                    "{:} element(s) expose no state (getStateVars); their state is not synchronized "
-                    "between processes, so output and refinement read it only where it was computed.".format(
-                        withoutState
-                    ),
-                    self.identification,
-                    0,
+    # --- What is computed here ----------------------------------------------------------------
+
+    def distributedLoadsOnSubdomain(self, distributedLoads) -> list[DistributedLoadOnSubdomain]:
+        """The given distributed loads, each restricted to the elements reaching into the subdomain,
+        owned or not: each process adds the loads at its subdomain degrees of freedom itself, since
+        loads are not exchanged.
+
+        Parameters
+        ----------
+        distributedLoads
+            The distributed loads of the step.
+
+        Returns
+        -------
+        list[DistributedLoadOnSubdomain]
+            The restricted loads, in the order given.
+        """
+
+        restricted = []
+        for load in distributedLoads:
+            onSubdomain = self._loadsOnSubdomain.get(load)
+            if onSubdomain is None:
+                onSubdomain = DistributedLoadOnSubdomain(
+                    load,
+                    {
+                        faceID: [element for element in elementSet if element in self._elementsTouchingSubdomain]
+                        for faceID, elementSet in load.surface.items()
+                    },
                 )
+                self._loadsOnSubdomain[load] = onSubdomain
+            restricted.append(onSubdomain)
+        return restricted
 
-    # --- ModelPartition: what is computed here ---------------------------------------------------
+    def bodyLoadsOnSubdomain(self, bodyLoads) -> list[BodyLoadOnSubdomain]:
+        """The given body loads, each restricted to the elements reaching into the subdomain; see
+        :meth:`distributedLoadsOnSubdomain`.
 
-    @property
-    def elements(self) -> dict:
-        """The elements this process owns."""
+        Parameters
+        ----------
+        bodyLoads
+            The body loads of the step.
 
-        return self._ownedElements
+        Returns
+        -------
+        list[BodyLoadOnSubdomain]
+            The restricted loads, in the order given.
+        """
 
-    @property
-    def constraints(self) -> dict:
-        """The constraints this process owns."""
-
-        return self._ownedConstraints
-
-    @property
-    def dofs(self) -> np.ndarray:
-        """The subdomain degrees of freedom: those the owned elements and constraints touch, closed
-        over the multi-point constraints. The others hold whatever the last synchronization gave
-        them until the next one overwrites them."""
-
-        return self._interface.subdomainDofs
-
-    def integratedValuesOf(self, vector: np.ndarray) -> np.ndarray:
-        """The entries at the subdomain degrees of freedom, gathered into a copy."""
-
-        return vector[self._interface.subdomainDofs]
-
-    def storeIntegratedValues(self, vector: np.ndarray, values: np.ndarray):
-        """Scattered back to the subdomain degrees of freedom."""
-
-        vector[self._interface.subdomainDofs] = values
-
-    def integratedEntries(self, indices: np.ndarray) -> np.ndarray:
-        """Those among the subdomain degrees of freedom."""
-
-        return np.flatnonzero(self._inSubdomain[indices])
-
-    def ownedEntries(self, indices: np.ndarray) -> np.ndarray:
-        """Those this process owns: the lowest-ranked process integrating a degree of freedom owns it."""
-
-        return self._interface.ownedDofMask[indices]
-
-    def loadedElements(self, elements) -> list:
-        """Those reaching into the subdomain, owned or not."""
-
-        return [element for element in elements if element in self._elementsTouchingSubdomain]
+        restricted = []
+        for load in bodyLoads:
+            onSubdomain = self._loadsOnSubdomain.get(load)
+            if onSubdomain is None:
+                onSubdomain = BodyLoadOnSubdomain(
+                    load, [element for element in load.elementSet if element in self._elementsTouchingSubdomain]
+                )
+                self._loadsOnSubdomain[load] = onSubdomain
+            restricted.append(onSubdomain)
+        return restricted
 
     def constraintsSearchedHere(self, model: FEModel, constraints: dict) -> dict:
-        """Those this process owns, or -- right after a topology change -- is going to own.
+        """Those of the given constraints whose connectivity search is run here: those this process
+        owns, or -- right after a topology change -- is going to own.
 
         A search -- a contact search above all -- is run by the constraint's owner alone, at the
         periodic contact update and at a topology check alike: only the owner's evaluation reads its
@@ -432,15 +545,39 @@ class Subdomain(ModelPartition):
         the mesh refreshes since applied to it as to the owner's; such a footprint names nodes of
         the model, so a degree-of-freedom layout built with it is complete, and the layout
         fingerprint compared after every build makes sure of that.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        constraints
+            Constraints, by name.
+
+        Returns
+        -------
+        dict
+            Those searched here, by name, in the order given.
         """
 
         owners = self._constraintOwnersOf(model)
         return {name: constraint for name, constraint in constraints.items() if owners[name] == self.rank}
 
-    # --- ModelPartition: completing the results of the whole model -------------------------------
+    # --- Completing the results of the whole model ------------------------------------------------
 
     def interfaceAssemblyFor(self, plan: ElementPlan) -> InterfaceForceAssembly:
-        """The exchange of the plan's contributions at the interface, summed in model order."""
+        """The exchange of a plan's element contributions at the interface, summed in model order.
+        Collective among neighbours.
+
+        Parameters
+        ----------
+        plan
+            A plan of elements computed here.
+
+        Returns
+        -------
+        InterfaceForceAssembly
+            The exchange.
+        """
 
         entryElementPositions = np.repeat(
             [self._elementPositions[number] for number in plan.elements],
@@ -449,17 +586,35 @@ class Subdomain(ModelPartition):
         return InterfaceForceAssembly(self._interface, plan.entryDofs, entryElementPositions)
 
     def shareFromOwners(self, vector: DofVector):
-        """Every entry from its owner."""
+        """Make a vector, correct at the degrees of freedom owned here, the same complete vector in
+        every process, in place: every entry from its owner. Collective.
+
+        Parameters
+        ----------
+        vector
+            A vector of the whole model.
+        """
 
         self._interface.gatherFromOwners(vector)
 
     def addConstraintForces(self, forces: dict, P: DofVector):
-        """Share the forces of the owned constraints with every process, and add those of all.
+        """Share the forces of the constraints evaluated here with every process, and add those of
+        every constraint of the model into ``P``, in model order. Collective.
 
         The degrees of freedom are the owner's: another process' copy of a contact constraint
         couples the nodes of its last synchronization.
+
+        Parameters
+        ----------
+        forces
+            The :class:`~edelweissfe.solvers.nonlinearexplicitdynamic.ConstraintForce` of every
+            constraint evaluated here, by name.
+        P
+            The net nodal force vector.
         """
 
+        if not self._constraintOwners:
+            return
         with performancetiming.timeit("constraint force exchange"):
             self._constraintForceExchange.addAllConstraintForces(
                 {name: constraintForce.forces for name, constraintForce in forces.items()}, P
@@ -467,14 +622,33 @@ class Subdomain(ModelPartition):
 
     @performancetiming.timeit("subdomain synchronization")
     def synchronizeStates(self, includeElements: bool):
-        """From the processes that computed them."""
+        """Give every stateful constraint -- and, if asked, every element -- of this process' model
+        the state the process computing it last left it in. Collective.
+
+        Parameters
+        ----------
+        includeElements
+            Whether the element states are synchronized as well.
+        """
 
         if includeElements:
             self._stateSynchronization.synchronizeElementStates()
         self._stateSynchronization.synchronizeConstraintStates()
 
     def sumAcrossParts(self, values: list[float]) -> list[float]:
-        """Summed in ascending rank order, so that they are the same bits on every process."""
+        """The sums of values over all processes, added in ascending rank order, so that they are the
+        same bits in every process. Collective.
+
+        Parameters
+        ----------
+        values
+            This process' contributions.
+
+        Returns
+        -------
+        list[float]
+            The sum of every entry over all processes.
+        """
 
         gathered = self.communicator.allgather(list(values))
         totals = list(gathered[0])
@@ -483,17 +657,52 @@ class Subdomain(ModelPartition):
         return totals
 
     def minAcrossParts(self, value: float) -> float:
-        """By an MPI reduction."""
+        """The minimum of a value over all processes. Collective.
+
+        Parameters
+        ----------
+        value
+            This process' value.
+
+        Returns
+        -------
+        float
+            The minimum.
+        """
 
         return self.communicator.allreduce(value, op=MPI.MIN)
 
     def anyPart(self, flag: bool) -> bool:
-        """By an MPI reduction."""
+        """Whether a flag is set in any process. Collective.
+
+        Parameters
+        ----------
+        flag
+            This process' flag.
+
+        Returns
+        -------
+        bool
+            Whether any process set it.
+        """
 
         return bool(self.communicator.allreduce(bool(flag), op=MPI.LOR))
 
     def requireSameOnAllParts(self, value, description: str):
-        """Compared over all processes."""
+        """Refuse to continue unless every process holds the same value. Collective.
+
+        Parameters
+        ----------
+        value
+            This process' value; anything comparable for equality.
+        description
+            What the value says, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            In every process, if two processes hold different values.
+        """
 
         values = self.communicator.allgather(value)
         if any(other != values[0] for other in values[1:]):
@@ -504,7 +713,25 @@ class Subdomain(ModelPartition):
 
     @contextmanager
     def agreedOnByAllParts(self, operation: str):
-        """Every process reports what went wrong in it, and every process raises the most severe."""
+        """A context in which an exception raised in one process is raised in every process.
+        Collective.
+
+        A process raising alone would leave the others waiting for it in the next exchange forever.
+        Every process reports what went wrong in it, and every process raises the most severe: a
+        :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
+        :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere,
+        so that every process takes the same path out of the step. Nothing inside the context may itself communicate: a process
+        that raised would skip it.
+
+        Parameters
+        ----------
+        operation
+            What is done in the context, for the message.
+
+        Yields
+        ------
+        None
+        """
 
         failure = None
         try:
@@ -541,21 +768,40 @@ class Subdomain(ModelPartition):
             raise CutbackRequest(message, 0.5) from failure
         raise StepFailed("{:} failed in {:}".format(operation, message)) from failure
 
-    def shareOfModelTotal(self, value: float) -> float:
-        """Rank 0 carries the total."""
-
-        return value if self.rank == 0 else 0.0
-
-    # --- ModelPartition: load balancing ----------------------------------------------------------
+    # --- Load balancing -----------------------------------------------------------------------------
 
     def measuresElementCosts(self) -> bool:
-        """Whenever load balancing is enabled."""
+        """Whether the element kernels are to be timed, for :meth:`rebalance`: whenever load
+        balancing is enabled.
+
+        Returns
+        -------
+        bool
+            Whether to time them.
+        """
 
         return bool(self.loadBalanceTolerance)
 
     def rebalance(self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int) -> bool:
         """Repartition with the measured element costs if the slowest process has fallen more than
-        ``loadBalanceTolerance`` behind the mean; see :meth:`ModelPartition.rebalance`."""
+        ``loadBalanceTolerance`` behind the mean. Collective; only when every element state has just
+        been synchronized, since an element changing process must arrive with its current state.
+
+        Parameters
+        ----------
+        plan
+            The plan of the elements whose kernels are computed here.
+        costs
+            The measured kernel time of every element of the plan, in plan order, or None.
+        nIncrements
+            The increments the costs were measured over.
+
+        Returns
+        -------
+        bool
+            Whether the partition changed; then everything derived from :attr:`partition` must be
+            derived again.
+        """
 
         tolerance = self.loadBalanceTolerance
         if not tolerance or self.nProcesses == 1 or costs is None or not nIncrements:

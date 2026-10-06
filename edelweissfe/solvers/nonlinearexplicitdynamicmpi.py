@@ -82,10 +82,25 @@ softening material costs more where it softens, so every element kernel is timed
 increment the model is repartitioned with the measured costs whenever the slowest process falls
 more than ``load-balance-tolerance`` behind the mean.
 
-**What this solver changes.** Nothing in the increment of ``NED``: the subdomain of its process is
-the :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the increment computes, a
-:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain`, and this solver only creates it and
-adds the option of the load balancing.
+**What this solver changes.** The increment of ``NED`` runs over the
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of this process' subdomain, which a
+:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines. What this solver adds is the
+communication, each in an override of a method of ``NED``:
+
+* :meth:`NEDMPI.computeElements` completes the element forces at the interface;
+* :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
+  shares them from the owners;
+* :meth:`NEDMPI.assembleConstraintForces` shares the constraint forces;
+* :meth:`NEDMPI.assembleLoads` adds the loads of the elements reaching into the subdomain only;
+* :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
+  the minimum and the sums over all processes;
+* :meth:`NEDMPI.acceptIncrement` synchronizes the model on output increments and rebalances it,
+  :meth:`NEDMPI.updateConstraintConnectivity` synchronizes it before a contact search,
+  :meth:`NEDMPI.applyStepActionsAtStepEnd` at the end of a step;
+* :meth:`NEDMPI.updateConnectivityOf` runs a contact search on the constraint's process only;
+* and every step that can fail in one process alone -- the element and constraint evaluation, a
+  contact search, writing the output -- is agreed on by all of them
+  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`).
 
 **Limits of this prototype.** Every process holds the complete model -- every element, with its
 material and state, the sets, the degree-of-freedom layout -- so the memory per process does not
@@ -103,15 +118,27 @@ process' element loop, as for ``NEDParallel``.
 
 from dataclasses import dataclass
 
+import numpy as np
 from mpi4py import MPI
 
+import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
-from edelweissfe.solvers.nonlinearexplicitdynamic import NED, NEDSchema
+from edelweissfe.solvers.base.modelpartition import ModelPartition
+from edelweissfe.solvers.base.parallelelementcomputation import (
+    ElementPlan,
+    computeElementsForExplicit,
+    computeLumpedDiagonalForExplicit,
+)
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED, IncrementPlan, NEDSchema
 from edelweissfe.solvers.nonlinearexplicitdynamicparallel import NEDParallel
+from edelweissfe.stepactions.base.stepactionbase import StepActionBase
+from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.fieldoutput import FieldOutputController
 from edelweissfe.utils.schema import schemaField
 
@@ -153,26 +180,28 @@ class NEDMPI(NEDParallel):
 
     SolverSpecificOptions = NED.SolverSpecificOptions | {"load-balance-tolerance": 0.1}
 
-    def createPartition(self) -> Subdomain:
-        """The subdomain this process computes, among all processes of the launcher; see
-        :meth:`NED.createPartition`.
-
-        Started without a launcher, this solver computes a subdomain of one: the same code path, with
-        every exchange a copy.
-
-        Returns
-        -------
-        Subdomain
-            The subdomain.
-        """
+    def __init__(self, jobInfo, journal, **kwargs):
+        super().__init__(jobInfo, journal, **kwargs)
 
         communicator = worldCommunicator()
-        return Subdomain(
+        #: The subdomain this process computes, among all processes of the launcher; started without
+        #: a launcher, a subdomain of one -- the same code path, with every exchange a copy.
+        self.subdomain = Subdomain(
             MPI.COMM_SELF if communicator is None else communicator,
-            self.journal,
+            journal,
             self.identification,
             self.options["load-balance-tolerance"],
         )
+        #: How the element forces of the current increment plan are completed at the interface.
+        self._interfaceAssembly: InterfaceForceAssembly | None = None
+        #: The kernel time of every element of the current increment plan, in plan order, summed
+        #: over :attr:`_nMeasuredIncrements` increments, if the subdomain balances load; else None.
+        self._elementCosts: np.ndarray | None = None
+        self._nMeasuredIncrements = 0
+        #: The external work of the whole model: :attr:`NED._externalWork` -- here, the work at the
+        #: degrees of freedom this process owns -- summed over all processes at the last
+        #: synchronization. What a checkpoint records.
+        self._externalWorkOfModel = 0.0
 
     def beginStep(
         self,
@@ -197,9 +226,431 @@ class NEDMPI(NEDParallel):
 
         self.journal.message(
             "Domain decomposition over {:} MPI process(es), {:} thread(s) each".format(
-                self.partition.nProcesses, getNumberOfThreads()
+                self.subdomain.nProcesses, getNumberOfThreads()
             ),
             self.identification,
             0,
         )
+        self._externalWorkOfModel = 0.0
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
+
+    # --- Restart ------------------------------------------------------------------------------------
+
+    def getRestartData(self) -> dict[str, np.ndarray]:
+        """The state of :meth:`NED.getRestartData`, with the external work of the whole model, as
+        summed at the synchronization the checkpoint is written after.
+
+        Returns
+        -------
+        dict[str, numpy.ndarray]
+            The state.
+        """
+
+        data = super().getRestartData()
+        data["_externalWork"] = np.array(self._externalWorkOfModel, dtype=float)
+        return data
+
+    def setRestartData(self, data: dict[str, np.ndarray]):
+        """Restore the state :meth:`getRestartData` returned. The external work of the whole model
+        is carried on by rank 0, so that the sum over all processes stays the total.
+
+        Parameters
+        ----------
+        data
+            The state.
+        """
+
+        super().setRestartData(data)
+        self._externalWorkOfModel = self._externalWork
+        if self.subdomain.rank != 0:
+            self._externalWork = 0.0
+
+    # --- The subdomain ------------------------------------------------------------------------------
+
+    def partitionModel(self, model: FEModel, topologyChanged: bool) -> ModelPartition:
+        """The subdomain of this process; see :meth:`NED.partitionModel`. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        topologyChanged
+            As for :meth:`NED.partitionModel`.
+
+        Returns
+        -------
+        ModelPartition
+            The partition.
+        """
+
+        self.subdomain.define(model, self.theDofManager, self.mpcTransformation, topologyChanged)
+        return self.subdomain.partition
+
+    def planIncrement(self, model: FEModel) -> IncrementPlan:
+        """The increment plan of :meth:`NED.planIncrement`, and how its element forces are completed
+        at the interface. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        IncrementPlan
+            The plan.
+        """
+
+        plan = super().planIncrement(model)
+        self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
+        self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if self.subdomain.measuresElementCosts() else None
+        self._nMeasuredIncrements = 0
+        return plan
+
+    def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
+        """Assemble a lumped operator of the elements computed here, complete at every degree of
+        freedom of the model: completed at the interface like the forces, and shared from the
+        owners. Collective.
+
+        Parameters
+        ----------
+        plan
+            The plan of the elements computed here.
+        elementContribution
+            As for :meth:`NED.assembleLumpedDiagonal`.
+
+        Returns
+        -------
+        DofVector
+            The assembled diagonal.
+        """
+
+        vector = self.theDofManager.constructDofVector()
+        vector[:] = 0.0
+        contributions = computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
+        with performancetiming.timeit("interface forces"):
+            self.subdomain.interfaceAssemblyFor(plan).assemble(contributions, vector)
+            self.subdomain.shareFromOwners(vector)
+        return vector
+
+    # --- The increment ------------------------------------------------------------------------------
+
+    @performancetiming.timeit("elements")
+    def computeElements(
+        self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
+    ) -> tuple[DofVector, float]:
+        """Evaluate the elements of the subdomain, agreed on by all processes, and complete their
+        internal force at the interface; see :meth:`NED.computeElements`. Collective.
+
+        Parameters
+        ----------
+        U_np
+            The current solution vector.
+        dU
+            The solution increment vector.
+        P
+            The internal force vector; overwritten.
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        tuple[DofVector, float]
+            The internal force vector, and the internal energy the elements of the subdomain report.
+        """
+
+        P[:] = 0.0
+        with self.subdomain.agreedOnByAllParts("Evaluating the elements"):
+            psi, contributions = computeElementsForExplicit(
+                self._incrementPlan.elementPlan, U_np, dU, P, timeStep, self._elementCosts
+            )
+        if self._elementCosts is not None:
+            self._nMeasuredIncrements += 1
+
+        # At a degree of freedom shared with another subdomain, the contributions of that
+        # subdomain's elements are still missing.
+        with performancetiming.timeit("interface forces"):
+            self._interfaceAssembly.assemble(contributions, P)
+
+        return P, psi
+
+    def assembleLoads(self, nodeForces, distributedLoads, bodyForces, U_np, PExt, K, timeStep):
+        """Assemble the loads of :meth:`NED.assembleLoads`, those acting on elements restricted to the
+        elements reaching into the subdomain; see
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`.
+
+        Parameters
+        ----------
+        nodeForces
+            The concentrated (nodal) loads.
+        distributedLoads
+            The distributed (surface) loads.
+        bodyForces
+            The body loads.
+        U_np
+            The current solution vector.
+        PExt
+            The external load vector.
+        K
+            None: an explicit solver assembles no system matrix.
+        timeStep
+            The current time step.
+
+        Returns
+        -------
+        tuple
+            The updated external load vector, and ``K``.
+        """
+
+        return super().assembleLoads(
+            nodeForces,
+            self.subdomain.distributedLoadsOnSubdomain(distributedLoads),
+            self.subdomain.bodyLoadsOnSubdomain(bodyForces),
+            U_np,
+            PExt,
+            K,
+            timeStep,
+        )
+
+    @performancetiming.timeit("assemble constraints")
+    def assembleConstraintForces(
+        self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
+    ) -> DofVector:
+        """Evaluate the constraints of the subdomain, agreed on by all processes, share their forces
+        with every process, and add those of every constraint of the model, in model order; see
+        :meth:`NED.assembleConstraintForces`. Collective.
+
+        Parameters
+        ----------
+        constraints
+            The constraints evaluated here, by name, in model order.
+        U_np
+            The current solution vector.
+        dU
+            The current solution increment.
+        P
+            The net force vector to be augmented.
+        timeStep
+            The current time step.
+
+        Returns
+        -------
+        DofVector
+            The augmented net force vector.
+        """
+
+        forces = {}
+        with self.subdomain.agreedOnByAllParts("Evaluating the constraints"):
+            for name, constraint in constraints.items():
+                forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
+
+        self.subdomain.addConstraintForces(forces, P)
+        return P
+
+    def getCriticalTimeStepForExplicitDynamics(self, model: FEModel, U: DofVector) -> float:
+        """The smallest critical time step of all subdomains; see
+        :meth:`NED.getCriticalTimeStepForExplicitDynamics`. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        U
+            The solution vector.
+
+        Returns
+        -------
+        float
+            The critical time step.
+        """
+
+        return self.subdomain.minAcrossParts(super().getCriticalTimeStepForExplicitDynamics(model, U))
+
+    def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
+        """The terms of :meth:`NED.energyBalanceTerms`, each summed over all processes in rank order.
+        Collective.
+
+        These sums are formed per subdomain and then added, so they may differ from a serial run's
+        in their last digits; they enter nothing but the energy table.
+
+        Parameters
+        ----------
+        psi
+            The internal energy the elements of the subdomain report.
+        V
+            The velocity vector.
+
+        Returns
+        -------
+        tuple[float, float, float, list[float]]
+            As for :meth:`NED.energyBalanceTerms`.
+        """
+
+        Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
+        Wint, Wkin, Wext, *nonMechanical = self.subdomain.sumAcrossParts([Wint, Wkin, Wext] + nonMechanical)
+        return Wint, Wkin, Wext, nonMechanical
+
+    def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
+        """Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then make
+        the whole model current in every process -- the output that follows reads all of it, and so
+        do a checkpoint written with it and the topology check at the start of the next increment --
+        and rebalance the subdomains. Collective.
+
+        Parameters
+        ----------
+        step
+            The step being solved.
+        model
+            The model tree.
+        timeStep
+            The increment.
+        """
+
+        super().acceptIncrement(step, model, timeStep)
+
+        if self.isOutputIncrement(timeStep):
+            self._synchronizeModel(model, timeStep, includeStates=True)
+
+            # Right after every element state was synchronized, because an element computed by
+            # another process from now on must arrive there with its current state.
+            if self.subdomain.rebalance(self._incrementPlan.elementPlan, self._elementCosts, self._nMeasuredIncrements):
+                self.partition = self.subdomain.partition
+                self._incrementPlan = self.planIncrement(model)
+
+    def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
+        """Write the output of an accepted increment, agreed on by all processes: a conditional stop
+        is decided by an output manager of rank 0, and a failure to write may happen in one process
+        only. Collective.
+
+        Parameters
+        ----------
+        fieldOutputController
+            The field output controller.
+        outputManagers
+            The output managers, restart checkpoint writers last; on processes other than rank 0,
+            none.
+        """
+
+        with performancetiming.timeit("finalize output"), self.subdomain.agreedOnByAllParts("Writing the output"):
+            super().writeIncrementOutput(fieldOutputController, outputManagers)
+
+    def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
+        """Make the whole model current in every process, then let the step actions finish the step.
+        Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        stepActions
+            The step actions, by type.
+        """
+
+        if self._system is not None:
+            self._synchronizeModel(model, self.prevTimeStep, includeStates=True)
+        super().applyStepActionsAtStepEnd(model, stepActions)
+
+    # --- Searches and topology updates ---------------------------------------------------------------
+
+    def updateConstraintConnectivity(self, model: FEModel) -> bool:
+        """Make the solution current in every process, then run the periodic contact search; see
+        :meth:`NED.updateConstraintConnectivity`. Collective.
+
+        A search reads the positions of every candidate node, not only of those this process
+        integrates.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        bool
+            Whether any constraint's DOF footprint changed.
+        """
+
+        self._synchronizeModel(model, self.prevTimeStep, includeStates=False)
+        return super().updateConstraintConnectivity(model)
+
+    def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
+        """Let those of the given constraints update their connectivity whose search runs in this
+        process, agreed on by all processes; whether a constraint of any process changed. See
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.constraintsSearchedHere`.
+        Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        constraints
+            The constraints to update, by name.
+
+        Returns
+        -------
+        bool
+            Whether any constraint's DOF footprint changed.
+        """
+
+        searched = self.subdomain.constraintsSearchedHere(model, constraints)
+        with self.subdomain.agreedOnByAllParts("Updating the constraint connectivity"):
+            changed = super().updateConnectivityOf(model, searched)
+        return self.subdomain.anyPart(changed)
+
+    def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
+        """Run the model modifiers and the mesh refresh of
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopology` in
+        every process, on the same synchronized model, and check that every process arrived at the
+        same outcome. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        step
+            The step being solved.
+        offerModelModifiers
+            As for the base class.
+
+        Returns
+        -------
+        tuple[bool, bool]
+            Whether the topology changed, and whether a mesh-dependent consumer was refreshed.
+        """
+
+        changed = super().updateTopology(model, step, offerModelModifiers)
+        self.subdomain.requireSameOnAllParts(
+            tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
+        )
+        return changed
+
+    def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool):
+        """Make the model in this process complete before something reads all of it: every degree of
+        freedom of the vectors, published into the node fields, and optionally every element and
+        constraint state, as the process computing it last left it. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        timeStep
+            The last completed time step, or None before the first one.
+        includeStates
+            Whether the element and constraint states, and the external work, are synchronized as
+            well, or only the vectors.
+        """
+
+        U, V, P = self._U, self._V, self._P
+        for vector in (U, V, P):
+            self.subdomain.shareFromOwners(vector)
+        self.publishNodeFields(model, U, V, P)
+
+        if includeStates:
+            self.subdomain.synchronizeStates(includeElements=True)
+            (self._externalWorkOfModel,) = self.subdomain.sumAcrossParts([self._externalWork])
+
+        # A rigid body's surface follows its reference node, which only some processes integrated:
+        # it was moved in acceptIncrement from what this process integrates, and is moved again now
+        # from the complete solution.
+        if timeStep is not None:
+            self.updateRigidBodies(model, timeStep)

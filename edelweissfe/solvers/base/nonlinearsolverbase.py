@@ -192,10 +192,32 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             What changed; the solver decides from it whether to rebuild its equation system.
         """
 
-        topologyChanged = model.topology.update(step) if offerModelModifiers else False
-        meshDependentsRefreshed = model.topology.refreshMeshDependents()
+        topologyChanged, meshDependentsRefreshed = self.updateTopology(model, step, offerModelModifiers)
         constraintConnectivityChanged = self.updateConnectivityOf(model, model.constraints)
         return TopologyUpdate(topologyChanged, meshDependentsRefreshed, constraintConnectivityChanged)
+
+    def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
+        """The first phase of :meth:`updateTopologyAndConnectivity`: let the model modifiers change
+        the mesh, then refresh what depends on it -- tie and contact surfaces.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        step
+            The step being solved.
+        offerModelModifiers
+            As for :meth:`updateTopologyAndConnectivity`.
+
+        Returns
+        -------
+        tuple[bool, bool]
+            Whether the topology changed, and whether a mesh-dependent consumer was refreshed.
+        """
+
+        topologyChanged = model.topology.update(step) if offerModelModifiers else False
+        meshDependentsRefreshed = model.topology.refreshMeshDependents()
+        return topologyChanged, meshDependentsRefreshed
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let the given constraints update their connectivity, in the order given.
@@ -217,23 +239,6 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         """
 
         return any([constraint.updateConnectivity(model) for constraint in constraints.values()])
-
-    def elementsLoadedHere(self, elements) -> list:
-        """Those of the given elements -- the elements of a distributed load or a body force -- whose
-        load this solver assembles: all of them, unless the solver computes only a part of the model.
-
-        Parameters
-        ----------
-        elements
-            An iterable of elements of the model.
-
-        Returns
-        -------
-        list
-            Those elements, in the order given.
-        """
-
-        return elements
 
     @performancetiming.timeit("distributed loads")
     def computeDistributedLoads(
@@ -272,7 +277,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         for dLoad in distributedLoads:
             load = dLoad.getCurrentLoad(timeStep)
             for faceID, elementSet in dLoad.surface.items():
-                for el in self.elementsLoadedHere(elementSet):
+                for el in elementSet:
                     Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
                     Pe = np.zeros(el.nDof)
 
@@ -318,7 +323,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         for bForce in bodyForces:
             force = bForce.getCurrentLoad(timeStep)
-            for el in self.elementsLoadedHere(bForce.elementSet):
+            for el in bForce.elementSet:
                 Pe = np.zeros(el.nDof)
                 Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
 

@@ -33,9 +33,9 @@ same input file -- and *computes* one subdomain of it: the elements a graph part
 it, the constraints assigned to it, and the degrees of freedom those touch. A degree of freedom at
 the interface between two subdomains is integrated by both, and its nodal force is completed by
 summing the partial forces of every subdomain touching it (:mod:`.subdomaininterface`).
-The subdomain of a process, as the explicit solver computes it, is a :mod:`.subdomain` -- the
-model partition of :mod:`edelweissfe.solvers.base.modelpartition` that a domain-decomposed solver
-creates in place of the whole model.
+A :class:`~.subdomain.Subdomain` decides the subdomain of a process -- as the
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the explicit increment runs over,
+in place of the whole model -- and carries out every exchange between the processes.
 
 Holding the whole model everywhere is what makes adaptive refinement tractable: at a topology change
 every process first receives the current state of the parts it did not compute

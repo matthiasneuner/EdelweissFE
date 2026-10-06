@@ -213,22 +213,18 @@ def test_element_loop_sums_in_element_order_on_any_number_of_threads():
 
 
 def test_the_whole_model_is_a_trivial_partition():
-    from edelweissfe.solvers.base.modelpartition import WholeModel
+    from types import SimpleNamespace
 
-    partition = WholeModel()
-    indices = np.array([4, 2, 9])
+    from edelweissfe.solvers.base.modelpartition import ModelPartition
 
-    assert np.array_equal(indices[partition.integratedEntries(indices)], indices)
-    assert np.array_equal(indices[partition.ownedEntries(indices)], indices)
-    assert partition.sumAcrossParts([1.5, -2.0]) == [1.5, -2.0]
-    assert partition.minAcrossParts(0.25) == 0.25
-    assert partition.anyPart(True) and not partition.anyPart(False)
-    assert not partition.rebalance(None, None, 0)
+    model = SimpleNamespace(elements={1: "element"}, constraints={"c": "constraint"})
+    partition = ModelPartition.wholeModel(model, 5)
+    vector = np.arange(5.0)
 
-    # an exception is raised as it is, not translated
-    with pytest.raises(KeyError):
-        with partition.agreedOnByAllParts("testing"):
-            raise KeyError("raised as it is")
+    assert partition.elements is model.elements and partition.constraints is model.constraints
+    # every degree of freedom, as a view: no copy, and writing it back writes it onto itself
+    assert np.shares_memory(vector[partition.dofs], vector) and vector[partition.dofs].shape == vector.shape
+    assert partition.ownedDofMask.all() and partition.ownedDofMask.shape == (5,)
 
 
 def test_a_single_subdomain_agrees_with_itself():
@@ -241,12 +237,11 @@ def test_a_single_subdomain_agrees_with_itself():
     assert subdomain.sumAcrossParts([1.5, -2.0]) == [1.5, -2.0]
     assert subdomain.minAcrossParts(0.25) == 0.25
     assert subdomain.anyPart(True) and not subdomain.anyPart(False)
-    assert subdomain.shareOfModelTotal(3.0) == 3.0
     subdomain.requireSameOnAllParts((True, False), "a verdict")
 
     with subdomain.agreedOnByAllParts("testing"):
         pass
-    for raised, agreed in ((CutbackRequest("x", 0.5), CutbackRequest), (ConditionalStop(), ConditionalStop)):
+    for raised, agreed in ((CutbackRequest("x", 0.25), CutbackRequest), (ConditionalStop(), ConditionalStop)):
         with pytest.raises(agreed):
             with subdomain.agreedOnByAllParts("testing"):
                 raise raised

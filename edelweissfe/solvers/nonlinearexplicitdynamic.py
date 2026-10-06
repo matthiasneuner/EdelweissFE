@@ -110,15 +110,13 @@ smallest coefficient the increment divides by is reported alongside -- an inerti
 second-order degree of freedom, a damping at a first-order one -- since that is what bounds the
 step.
 
-**The part of the model computed here.** The solver holds one more object than the central
-difference needs, a :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`
-(:attr:`NED.partition`): which elements, constraints and degrees of freedom this process computes,
-and how what it computes becomes a result of the whole model. This solver computes the whole model
-in one process (:class:`~edelweissfe.solvers.base.modelpartition.WholeModel`): every degree of
-freedom is integrated here, a force is complete as assembled, a sum over the parts is the value
-itself, and there is nothing to synchronize. A domain-decomposed solver computes one subdomain per
-process with the same increment, by creating a different partition and nothing else; read the
-increment with "here" meaning "everywhere".
+**The part of the model computed here.** The increment runs over the elements, constraints and
+degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`
+(:attr:`NED.partition`). This solver computes the whole model in one process, so its partition is
+the whole model: every element and constraint, and every degree of freedom -- the slice
+``slice(None)``, so that ``V[dofs]`` is the whole vector ``V``. A domain-decomposed solver
+(:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
+subdomain per process, and adds the exchange between the subdomains in methods of its own.
 
 **Restart.** A resumed run must not repeat the half-step that starts a leapfrog: the velocity in
 the checkpoint already carries the half-increment offset, so applying the startup again would apply
@@ -133,10 +131,12 @@ from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
+from scipy.sparse import csr_matrix
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesKineticEnergy, carriesLinearMomentum
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.assembly import addNodalForces
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
@@ -148,18 +148,14 @@ from edelweissfe.solvers.base.conservationchecks import (
     formatMomentumAndKineticEnergy,
     linearMomentum,
 )
-from edelweissfe.solvers.base.modelpartition import ModelPartition, WholeModel
-from edelweissfe.solvers.base.nonlinearsolverbase import (
-    NonlinearSolverBase,
-    TopologyUpdate,
-)
+from edelweissfe.solvers.base.modelpartition import ModelPartition
+from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.solvers.base.parallelelementcomputation import (
     ElementPlan,
     computeElementsForExplicit,
     computeLumpedDiagonalForExplicit,
     planElements,
 )
-from edelweissfe.stepactions.base.stepactionbase import StepActionBase
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.exceptions import CutbackRequest, StepFailed
 from edelweissfe.utils.fieldoutput import FieldOutputController
@@ -357,33 +353,6 @@ class _ReusableExplicitOperators:
     mpcTransformation: MultiPointConstraintTransformation | None
 
 
-@dataclass
-class ElementLoop:
-    """The explicit element loop of the elements computed here: their plan, how their forces are
-    completed at the degrees of freedom shared with other parts of the model, and -- if the
-    partition balances load -- the kernel time measured per element.
-
-    Parameters
-    ----------
-    plan
-        The gather and assembly plan of the elements with kernels; see
-        :func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`.
-    interfaceAssembly
-        What completes the assembled forces at the shared degrees of freedom; see
-        :meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.interfaceAssemblyFor`.
-    costs
-        The kernel time of every element of the plan, in plan order, summed since the plan was made;
-        None if not measured.
-    nMeasuredIncrements
-        The increments ``costs`` was summed over.
-    """
-
-    plan: ElementPlan
-    interfaceAssembly: object
-    costs: np.ndarray | None
-    nMeasuredIncrements: int = 0
-
-
 @dataclass(frozen=True)
 class NodeFieldSlot:
     """Where degrees of freedom of a vector are published in a node field.
@@ -398,7 +367,7 @@ class NodeFieldSlot:
         The degrees of freedom published there, in the same order, as an index into a vector.
     """
 
-    nodeField: object
+    nodeField: NodeField
     positions: slice | np.ndarray
     dofs: slice | np.ndarray
 
@@ -408,21 +377,13 @@ class IncrementPlan:
     """What an increment computes in this process, derived from the model partition and the equation
     system together, and derived again whenever either changes.
 
-    The velocity update runs on the degrees of freedom integrated here as one vector (see
-    :meth:`NED.solveIncrement`), so its per-DOF factors are kept restricted to them.
-
     Parameters
     ----------
-    elementLoop
-        The element loop of the elements computed here.
-    halfDampingRate
-        Half the damping rate at the degrees of freedom integrated here, zero off the second-order
-        ones.
-    secondOrderMask
-        1.0 at the second-order degrees of freedom integrated here, 0.0 elsewhere.
-    firstOrderPositions
-        The positions of the first-order degrees of freedom integrated here among those integrated
-        here.
+    elementPlan
+        The gather and assembly plan of the elements computed here that have kernels; see
+        :func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`.
+    firstOrderDofs
+        The first-order degrees of freedom integrated here.
     nodeFieldSlots
         Where the degrees of freedom integrated here are published in the node fields.
     mpcForceFold
@@ -431,12 +392,10 @@ class IncrementPlan:
         :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldExplicitForceOperator`.
     """
 
-    elementLoop: ElementLoop
-    halfDampingRate: np.ndarray
-    secondOrderMask: np.ndarray
-    firstOrderPositions: np.ndarray
+    elementPlan: ElementPlan
+    firstOrderDofs: np.ndarray
     nodeFieldSlots: list[NodeFieldSlot]
-    mpcForceFold: object
+    mpcForceFold: csr_matrix | None
 
 
 @dataclass(frozen=True)
@@ -510,10 +469,8 @@ class NED(NonlinearSolverBase):
     }
 
     #: The last completed increment (the central-difference velocity update reads its length) and the
-    #: accumulated external work of the whole model -- an accumulator, summed increment by increment
-    #: from the reaction forces at the prescribed degrees of freedom, which nothing in a converged
-    #: solution reproduces. A checkpoint is written after the model was synchronized (see
-    #: :meth:`acceptIncrement`), so :attr:`_externalWork` is then current.
+    #: accumulated external work -- an accumulator, summed increment by increment from the reaction
+    #: forces at the prescribed degrees of freedom, which nothing in a converged solution reproduces.
     checkpointedState = {
         "prevTimeStep": TimeStep,
         "_externalWork": float,
@@ -561,12 +518,9 @@ class NED(NonlinearSolverBase):
         #: drift those changes accumulate over a step; reset at every step start.
         self._conservationCheck = ConservationCheck(journal, self.identification)
         #: Work done on the model by its prescribed degrees of freedom, accumulated every
-        #: increment over the degrees of freedom this part of the model owns. Compared against the
-        #: kinetic energy to detect energy creation; see _ENERGY_CREATION_TOLERANCE.
-        self._externalWorkOfThisPart = 0.0
-        #: The external work of the whole model: :attr:`_externalWorkOfThisPart` summed over all
-        #: parts at the last synchronization (see :meth:`synchronizeModel`); what a checkpoint
-        #: records. In a model computed whole the two are the same number.
+        #: increment over those owned here (see :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`).
+        #: Compared against the kinetic energy to detect energy creation; see
+        #: _ENERGY_CREATION_TOLERANCE.
         self._externalWork = 0.0
         #: The last completed increment. The central-difference velocity update reads
         #: 0.5 * (dT + dT_prev); None makes the first increment of a cold step the half step that
@@ -576,7 +530,7 @@ class NED(NonlinearSolverBase):
         #: The force buffer of every constraint evaluated here, by name; see
         #: :class:`ConstraintForce`. Cleared whenever the DofManager is rebuilt.
         self._constraintForces = {}
-        #: What an increment computes here; see :class:`IncrementPlan` and :meth:`_planIncrement`.
+        #: What an increment computes here; see :class:`IncrementPlan` and :meth:`planIncrement`.
         #: None until the first equation system is built: an increment without a plan would
         #: evaluate no elements at all, and go on quietly producing wrong answers.
         self._incrementPlan = None
@@ -585,24 +539,9 @@ class NED(NonlinearSolverBase):
         #: The lumped operators of the current equation system, kept across a rebuild that only a
         #: constraint's connectivity asked for; see :class:`_ReusableExplicitOperators`.
         self._reusableOperators = None
-        #: The part of the model this process computes; see :meth:`createPartition`.
-        self.partition = self.createPartition()
-
-    def createPartition(self) -> ModelPartition:
-        """The part of the model this process computes, and how its results become results of the
-        whole model; see :mod:`~edelweissfe.solvers.base.modelpartition`.
-
-        This solver computes the whole model in one process, so everything is computed here. A
-        domain-decomposed solver returns the subdomain of its process instead, and that is all it
-        changes about the increment.
-
-        Returns
-        -------
-        ModelPartition
-            The partition.
-        """
-
-        return WholeModel()
+        #: The elements, constraints and degrees of freedom this process computes; defined with every
+        #: equation system, see :meth:`partitionModel`.
+        self.partition = None
 
     def elementLoopThreads(self) -> int:
         """The number of threads the element loop runs on: one.
@@ -614,23 +553,6 @@ class NED(NonlinearSolverBase):
         """
 
         return 1
-
-    def setRestartData(self, data: dict[str, np.ndarray]):
-        """Restore the state :meth:`getRestartData` returned; see
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.setRestartData`.
-
-        The checkpoint holds the external work of the whole model, and this part continues with its
-        share of it (:meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.shareOfModelTotal`):
-        all of it in a model computed whole.
-
-        Parameters
-        ----------
-        data
-            The state.
-        """
-
-        super().setRestartData(data)
-        self._externalWorkOfThisPart = self.partition.shareOfModelTotal(self._externalWork)
 
     def beginStep(
         self,
@@ -663,7 +585,6 @@ class NED(NonlinearSolverBase):
         # window they never ran in and drive the residue negative.
         self._stepWallClockTic = perf_counter()
 
-        self._externalWorkOfThisPart = 0.0
         self._externalWork = 0.0
         self.prevTimeStep = None
         self._conservationCheck.reset()
@@ -883,9 +804,6 @@ class NED(NonlinearSolverBase):
             and timeStep.number % contactUpdateFrequency == 0
             and not topologyCheckDueThisIncrement
         ):
-            # A search reads the positions of every candidate node, not only of those this process
-            # integrates; see synchronizeModel.
-            self.synchronizeModel(model, U, V, P, self.prevTimeStep, includeElementStates=False)
             connectivityChanged = self.updateConstraintConnectivity(model)
 
             if connectivityChanged:
@@ -954,7 +872,7 @@ class NED(NonlinearSolverBase):
         if timeStep.timeIncrement > 0.0:
             self.prevTimeStep = timeStep
 
-        # Only the degrees of freedom integrated here: in a model computed whole, all of them.
+        # Those integrated here: in a model computed whole, every one.
         with performancetiming.timeit("publish node fields"):
             self._publish(model, self._incrementPlan.nodeFieldSlots, U, V, P)
 
@@ -964,44 +882,13 @@ class NED(NonlinearSolverBase):
         # method shared with the implicit solvers, where it runs once per *converged*
         # increment and is amortised over a Newton loop; here it runs on every one of
         # millions of increments, and it is a serial Python loop over every element,
-        # constraint and multi-point constraint in the model.
+        # constraint and multi-point constraint in the model -- here, over those computed here.
         with performancetiming.timeit("accept state"):
             model.advanceToTime(
                 timeStep.totalTime,
                 elements=self.partition.elements,
                 constraints=self.partition.constraints,
             )
-
-        if self.isOutputIncrement(timeStep):
-            # The output that follows reads the whole model, and so does a checkpoint written with
-            # it and the topology check at the start of the next increment.
-            self.synchronizeModel(model, U, V, P, timeStep, includeElementStates=True)
-
-            # Here, right after every element state was synchronized, because an element computed
-            # by another part from now on must arrive there with its current state. The single
-            # process of a model computed whole has nothing to balance.
-            loop = self._incrementPlan.elementLoop
-            if self.partition.rebalance(loop.plan, loop.costs, loop.nMeasuredIncrements):
-                self._incrementPlan = self._planIncrement(model)
-
-    def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
-        """Write the output of an accepted increment; see
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.writeIncrementOutput`.
-
-        The model was synchronized for it in :meth:`acceptIncrement`. A conditional stop is decided
-        by an output manager, and a failure to write may happen in one part of the model only; both
-        are agreed on by every part, so that all of them leave the step the same way.
-
-        Parameters
-        ----------
-        fieldOutputController
-            The field output controller.
-        outputManagers
-            The output managers, restart checkpoint writers last.
-        """
-
-        with performancetiming.timeit("finalize output"), self.partition.agreedOnByAllParts("Writing the output"):
-            super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def endStep(self, step, model: FEModel):
         """Report the step's performance timing.
@@ -1018,22 +905,6 @@ class NED(NonlinearSolverBase):
         self.journal.printPrettyTable(prettyTable, self.identification)
         performancetiming.reset()
 
-    def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
-        """Make the model complete in this process (:meth:`synchronizeModel`), then let the step
-        actions finish the step; called once the step ended regularly.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        stepActions
-            The step actions, by type.
-        """
-
-        if self._system is not None:
-            self.synchronizeModel(model, self._U, self._V, self._P, self.prevTimeStep, includeElementStates=True)
-        super().applyStepActionsAtStepEnd(model, stepActions)
-
     @performancetiming.timeit("increment")
     def solveIncrement(
         self,
@@ -1047,37 +918,40 @@ class NED(NonlinearSolverBase):
         timeStep: TimeStep,
         prevTimeStep: TimeStep,
     ) -> tuple[DofVector, DofVector, DofVector]:
-        """Standard explicit update scheme to solve for an increment.
+        """One increment of the central-difference scheme.
+
+        From the net nodal force of the previous increment, the velocity is advanced half a step
+        beyond it, the solution a whole step; then the elements, the loads and the constraints are
+        evaluated at the new solution for the net nodal force of this one. Everything runs over the
+        degrees of freedom integrated in this process (:attr:`partition`): all of them in a model
+        computed whole.
 
         Parameters
         ----------
-        Un
-            The old solution vector.
+        U_n
+            The solution vector; advanced in place.
+        dU
+            The solution increment vector; overwritten.
         V
-            The old velocity vector.
+            The velocity vector, half an increment behind ``U_n``; advanced in place.
         P
-            The old reaction vector.
-        M
-            The lumped mass matrix to be used.
-        elements
-            The dictionary containing all elements.
+            The net nodal force of the previous increment; overwritten with this one's.
+        Minv
+            The inverse of the lumped coefficient each degree of freedom divides by: an inertia at
+            a second-order one, a damping at a first-order one.
         stepActions
-            The list of active step actions.
+            The active step actions, by type.
         model
             The model tree.
         timeStep
             The time step.
         prevTimeStep
-            The previous time step.
+            The previous time step; None in the first increment of a cold step.
 
         Returns
         -------
-        tuple[DofVector,DofVector,DofVector,DofVector]
-            A tuple containing
-                - the new solution vector
-                - the solution increment
-                - the new velocity vector
-                - the new reaction vector
+        tuple[DofVector, DofVector, DofVector]
+            The solution, the velocity and the net nodal force.
         """
 
         dirichlets = stepActions["dirichlet"].values()
@@ -1123,12 +997,12 @@ class NED(NonlinearSolverBase):
                 # kinetic energy in newton-millimetres -- the same units error the kinetic sum
                 # below excludes it from, at the other end of the same balance.
                 #
-                # Summed over the degrees of freedom this part of the model owns: every other part
-                # that integrates one of them holds the same reaction, and counting it there as well
-                # would multiply the work by the number of parts sharing the node.
+                #
+                # Counted where the degree of freedom is owned -- here, in a model computed whole --
+                # so that a degree of freedom shared by two parts of a model is not counted twice.
                 if carriesKineticEnergy(dirichlet.field):
-                    owned = self.partition.ownedEntries(dirichlet.constrainedDofIndices)
-                    self._externalWorkOfThisPart -= float(
+                    owned = self.partition.ownedDofMask[dirichlet.constrainedDofIndices]
+                    self._externalWork -= float(
                         np.dot(P[dirichlet.constrainedDofIndices][owned], prescribedIncrement[owned])
                     )
 
@@ -1146,23 +1020,25 @@ class NED(NonlinearSolverBase):
             # damping would need no code here. The damping is not optional for a hyperbolic
             # non-local field: undamped, the transients minted at the start of the step and at every
             # refinement never decay, and the damage variable follows every overshoot instead of the
-            # mean. Written on whole vectors -- of the degrees of freedom integrated here, all of
-            # them in a model computed whole: h and the mask are zero off the second-order DOFs,
-            # which leaves those velocities unchanged. First-order DOFs: V = Minv P (forward Euler).
-            plan = self._incrementPlan
-            partition = self.partition
-            dtAverage = 0.5 * (timeStep.timeIncrement + prevTimeStep.timeIncrement)
-            halfRateStep = plan.halfDampingRate * dtAverage
-            forceOverMass = partition.integratedValuesOf(Minv.asPlainArray()) * partition.integratedValuesOf(
-                P.asPlainArray()
-            )
+            # mean. Written on whole vectors -- of the degrees of freedom integrated here, ``dofs``:
+            # h and the mask are zero off the second-order DOFs, which leaves those velocities
+            # unchanged. First-order DOFs: V = Minv P (forward Euler).
+            #
+            # In a model computed whole, ``dofs`` is ``slice(None)``: every ``x[dofs]`` below is a view
+            # of the whole vector, and writing it back is writing it onto itself.
+            dofs = self.partition.dofs
+            firstOrderDofs = self._incrementPlan.firstOrderDofs
+            VPlain, PPlain, MinvPlain = V.asPlainArray(), P.asPlainArray(), Minv.asPlainArray()
 
-            velocity = partition.integratedValuesOf(V.asPlainArray())
+            dtAverage = 0.5 * (timeStep.timeIncrement + prevTimeStep.timeIncrement)
+            halfRateStep = self._halfDampingRate[dofs] * dtAverage
+
+            velocity = VPlain[dofs]
             velocity *= 1.0 - halfRateStep
-            velocity += forceOverMass * (plan.secondOrderMask * dtAverage)
+            velocity += MinvPlain[dofs] * PPlain[dofs] * (self._secondOrderMask[dofs] * dtAverage)
             velocity /= 1.0 + halfRateStep
-            velocity[plan.firstOrderPositions] = forceOverMass[plan.firstOrderPositions]
-            partition.storeIntegratedValues(V.asPlainArray(), velocity)
+            VPlain[dofs] = velocity
+            VPlain[firstOrderDofs] = MinvPlain[firstOrderDofs] * PPlain[firstOrderDofs]
 
             # A prescribed velocity is a boundary condition, not a solution, and both updates above
             # overwrote it: the damped one scales it by (1 - alpha dt/2)/(1 + alpha dt/2), the
@@ -1177,14 +1053,10 @@ class NED(NonlinearSolverBase):
             if self.mpcTransformation is not None:
                 self.mpcTransformation.applySlaveKinematics(V)
 
-            # dU = V dT and U += dU, at the degrees of freedom integrated here; the others hold the
-            # last synchronization's values until the next one overwrites them.
-            dUHere = partition.integratedValuesOf(dU.asPlainArray())
-            UHere = partition.integratedValuesOf(U_n.asPlainArray())
-            np.multiply(partition.integratedValuesOf(V.asPlainArray()), timeStep.timeIncrement, out=dUHere)
-            np.add(UHere, dUHere, out=UHere)
-            partition.storeIntegratedValues(dU.asPlainArray(), dUHere)
-            partition.storeIntegratedValues(U_n.asPlainArray(), UHere)
+            # dU = V dt, U += dU
+            increment = VPlain[dofs] * timeStep.timeIncrement
+            dU.asPlainArray()[dofs] = increment
+            U_n.asPlainArray()[dofs] += increment
 
         with performancetiming.timeit("step actions"):
             self.applyStepActionsAtIncrementStart(model, timeStep, stepActions)
@@ -1196,17 +1068,16 @@ class NED(NonlinearSolverBase):
         P, psi = self.computeElements(U_n, dU, P, timeStep)
         P[:] = -P[:]
         P, _ = self.assembleLoads(nodeforces, distributedLoads, bodyForces, U_n, P, None, timeStep)
-        P = self.assembleConstraintForces(model.constraints, U_n, dU, P, timeStep)
+        P = self.assembleConstraintForces(self.partition.constraints, U_n, dU, P, timeStep)
 
         # fold the forces acting on slave DOFs onto their masters (action-reaction through the
         # rigid interpolation link); done here so the Dirichlet handling at the start of the next
         # increment operates on the already-folded vector. A slave and its masters are always
         # integrated in the same part of the model, so the fold is restricted to its DOFs.
-        if plan.mpcForceFold is not None:
+        mpcForceFold = self._incrementPlan.mpcForceFold
+        if mpcForceFold is not None:
             with performancetiming.timeit("mpc force fold"):
-                dofs = partition.dofs
-                PPlain = P.asPlainArray()
-                PPlain[dofs] = plan.mpcForceFold @ PPlain[dofs]
+                PPlain[dofs] = mpcForceFold @ PPlain[dofs]
 
         if timeStep.number % self.options["output-frequency"] == 0:
             self.reportEnergyBalance(psi, V, timeStep)
@@ -1234,23 +1105,7 @@ class NED(NonlinearSolverBase):
             If the balance is no longer a finite number.
         """
 
-        # Every term summed over the parts of the model, each counted once: an element energy
-        # by the part computing the element, a kinetic energy and a work by the part owning the
-        # degree of freedom.
-        #
-        # The kinetic energy only over the degrees of freedom where 0.5 * m * v**2 is an energy.
-        # Summing the whole vector also collected the first-order fields, whose "mass" is a
-        # viscosity and whose "velocity" is that field's rate -- no energy meaning, and orders of
-        # magnitude larger than the real term (eta ~ 1e-4 against a density ~ 1e-9): every
-        # balance then read as 100 % kinetic.
-        nonMechanicalIndices = [
-            self.theDofManager.idcsOfFieldsInDofVector[fieldName] for fieldName in self.nonMechanicalSecondOrderFields
-        ]
-        Wint, twiceWkin, Wext, *twiceNonMechanical = self.partition.sumAcrossParts(
-            [psi, self._ownedSumOfSquaredRates(self.ids_mechanicalEnergy, V), self._externalWorkOfThisPart]
-            + [self._ownedSumOfSquaredRates(indices, V) for indices in nonMechanicalIndices]
-        )
-        Wkin = 0.5 * twiceWkin
+        Wint, Wkin, Wext, nonMechanical = self.energyBalanceTerms(psi, V)
 
         # Everything the model absorbed that no reported term accounts for: strain energy the
         # material does not publish, plastic and viscous dissipation, and damage. It must stay
@@ -1273,8 +1128,8 @@ class NED(NonlinearSolverBase):
         # or into the total. For a hyperbolic non-local field the inertia is a time squared, so
         # 0.5 * m * rate**2 is a volume rather than an energy -- kept on its own line because
         # it is the energy in the ringing the damping exists to remove.
-        for fieldName, twiceEnergy in zip(self.nonMechanicalSecondOrderFields, twiceNonMechanical):
-            energyRows.append([fieldName, "{:+.6e}".format(0.5 * twiceEnergy), "not an energy"])
+        for fieldName, energy in zip(self.nonMechanicalSecondOrderFields, nonMechanical):
+            energyRows.append([fieldName, "{:+.6e}".format(energy), "not an energy"])
 
         self.journal.printTable(
             energyRows,
@@ -1355,73 +1210,41 @@ class NED(NonlinearSolverBase):
                 1,
             )
 
-    def _ownedSumOfSquaredRates(self, indices: np.ndarray, V: DofVector) -> float:
-        """:math:`\\sum m \\, v^2` over those of the given degrees of freedom this part owns; see
-        :meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.ownedEntries`.
+    def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
+        """The terms of the energy balance: the internal energy, the kinetic energy, the external work,
+        and the "kinetic energy" :math:`\\frac{1}{2} m v^2` of every second-order field whose inertia
+        is not a mass, which is not an energy and enters no balance.
+
+        The kinetic energy only over the degrees of freedom where :math:`\\frac{1}{2} m v^2` is an
+        energy. Summing the whole vector also collected the first-order fields, whose "mass" is a
+        viscosity and whose "velocity" is that field's rate -- no energy meaning, and orders of
+        magnitude larger than the real term (eta ~ 1e-4 against a density ~ 1e-9): every balance
+        then read as 100 % kinetic. Each term is counted at the degrees of freedom owned here: all
+        of them, in a model computed whole.
 
         Parameters
         ----------
-        indices
-            Degree-of-freedom indices, or a slice of the vector (a field's contiguous range).
+        psi
+            The internal energy the elements computed here report.
         V
             The velocity vector.
 
         Returns
         -------
-        float
-            The sum, before any sum across the parts of the model.
+        tuple[float, float, float, list[float]]
+            The internal energy, the kinetic energy, the external work, and the term of every field
+            of :attr:`nonMechanicalSecondOrderFields`, in that order.
         """
 
-        indices = np.arange(V.shape[0])[indices]
-        owned = indices[self.partition.ownedEntries(indices)]
-        return float(np.sum(self._rawLumpedMass[owned] * V[owned] ** 2))
+        def halfSumOfMassTimesSquaredRate(indices):
+            owned = indices[self.partition.ownedDofMask[indices]]
+            return 0.5 * float(np.sum(self._rawLumpedMass[owned] * V[owned] ** 2))
 
-    def synchronizeModel(
-        self,
-        model: FEModel,
-        U: DofVector,
-        V: DofVector,
-        P: DofVector,
-        timeStep: TimeStep | None,
-        includeElementStates: bool,
-    ):
-        """Make the model in this process complete before something reads all of it: every degree of
-        freedom of the vectors, published into the node fields, and optionally every element and
-        constraint state, as the part of the model computing it last left it.
-
-        Called before a contact search (which reads every candidate node's position), before field
-        outputs, output managers and restart checkpoints are written (which read everything, and on
-        which the topology check at the start of the next increment decides), and at the end of a
-        step. In a model computed whole every entry is current already, and this only publishes the
-        vectors once more.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        U
-            The solution vector.
-        V
-            The velocity vector.
-        P
-            The net nodal force vector.
-        timeStep
-            The last completed time step, or None before the first one.
-        includeElementStates
-            Whether the element and constraint states are synchronized as well, or only the vectors.
-        """
-
-        for vector in (U, V, P):
-            self.partition.shareFromOwners(vector)
-        self.publishNodeFields(model, U, V, P)
-
-        if includeElementStates:
-            self.partition.synchronizeStates(includeElements=True)
-            (self._externalWork,) = self.partition.sumAcrossParts([self._externalWorkOfThisPart])
-
-        # A rigid body's surface follows its reference node, which only some parts integrated.
-        if timeStep is not None:
-            self.updateRigidBodies(model, timeStep)
+        nonMechanical = [
+            halfSumOfMassTimesSquaredRate(np.arange(V.shape[0])[self.theDofManager.idcsOfFieldsInDofVector[fieldName]])
+            for fieldName in self.nonMechanicalSecondOrderFields
+        ]
+        return psi, halfSumOfMassTimesSquaredRate(self.ids_mechanicalEnergy), self._externalWork, nonMechanical
 
     @performancetiming.timeit("elements")
     def computeElements(
@@ -1431,8 +1254,8 @@ class NED(NonlinearSolverBase):
         P: DofVector,
         timeStep: TimeStep,
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements computed here and assemble their internal force, complete at every
-        degree of freedom integrated here; see :class:`ElementLoop`.
+        """Evaluate the elements computed here and assemble their internal force; see
+        :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
 
         Parameters
         ----------
@@ -1451,19 +1274,8 @@ class NED(NonlinearSolverBase):
             The internal force vector, and the internal energy the elements report.
         """
 
-        loop = self._incrementPlan.elementLoop
-
         P[:] = 0.0
-        with self.partition.agreedOnByAllParts("Evaluating the elements"):
-            psi, contributions = computeElementsForExplicit(loop.plan, U_np, dU, P, timeStep, loop.costs)
-        if loop.costs is not None:
-            loop.nMeasuredIncrements += 1
-
-        # At a degree of freedom shared with another part of the model, the contributions of that
-        # part's elements are still missing.
-        with performancetiming.timeit("interface forces"):
-            loop.interfaceAssembly.assemble(contributions, P)
-
+        psi, _ = computeElementsForExplicit(self._incrementPlan.elementPlan, U_np, dU, P, timeStep)
         return P, psi
 
     def validateModelCapabilities(self, model: FEModel):
@@ -1624,17 +1436,15 @@ class NED(NonlinearSolverBase):
         for variable in model.scalarVariables.values():
             variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
 
-    def _nodeFieldSlotsOf(self, model: FEModel, selectEntries) -> list[NodeFieldSlot]:
-        """Where degrees of freedom are published in the node fields: those ``selectEntries`` selects
-        of every field.
+    def _nodeFieldSlotsOf(self, model: FEModel, dofs: slice | np.ndarray) -> list[NodeFieldSlot]:
+        """Where the given degrees of freedom are published in the node fields.
 
         Parameters
         ----------
         model
             The model tree.
-        selectEntries
-            ``selectEntries(indices)`` returns which of a field's degree-of-freedom indices to
-            publish, as an index into them.
+        dofs
+            ``slice(None)`` for every degree of freedom, or sorted degree-of-freedom indices.
 
         Returns
         -------
@@ -1642,63 +1452,20 @@ class NED(NonlinearSolverBase):
             One slot per node field.
         """
 
+        selected = np.zeros(self.theDofManager.nDof, dtype=bool)
+        selected[dofs] = True
         slots = []
         for nodeField in model.nodeFields.values():
             indices = self.theDofManager.idcsOfNodeFieldsInDofVector[nodeField.name]
             fieldDofs = np.arange(self.theDofManager.nDof)[indices]
-            positions = selectEntries(fieldDofs)
-            dofs = fieldDofs[positions]
-            # Every degree of freedom of the field: kept as the field's own index, which reads
-            # without gathering where it is a slice.
-            slots.append(NodeFieldSlot(nodeField, positions, indices if dofs.shape == fieldDofs.shape else dofs))
+            positions = np.flatnonzero(selected[fieldDofs])
+            if positions.shape == fieldDofs.shape:
+                # Every degree of freedom of the field: published through the field's own index,
+                # which copies without gathering where it is a slice.
+                slots.append(NodeFieldSlot(nodeField, slice(None), indices))
+            else:
+                slots.append(NodeFieldSlot(nodeField, positions, fieldDofs[positions]))
         return slots
-
-    def updateTopologyAndConnectivity(self, model: FEModel, step, offerModelModifiers: bool = True) -> TopologyUpdate:
-        """Run the topology update; see
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopologyAndConnectivity`.
-
-        Every part of the model refines the whole of it, from the same synchronized state; a part
-        disagreeing on the outcome would rebuild alone and wait for the others forever, so that is
-        checked. The constraint connectivity is agreed on by :meth:`updateConnectivityOf`.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        step
-            The step being solved.
-        offerModelModifiers
-            As for the base class.
-
-        Returns
-        -------
-        TopologyUpdate
-            What changed.
-        """
-
-        topologyUpdate = super().updateTopologyAndConnectivity(model, step, offerModelModifiers)
-        self.partition.requireSameOnAllParts(
-            (bool(topologyUpdate.topologyChanged), bool(topologyUpdate.meshDependentsRefreshed)),
-            "whether the topology update changed the mesh",
-        )
-        return topologyUpdate
-
-    def elementsLoadedHere(self, elements) -> list:
-        """Those reaching a degree of freedom integrated here; see
-        :meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.loadedElements`.
-
-        Parameters
-        ----------
-        elements
-            An iterable of elements of the model.
-
-        Returns
-        -------
-        list
-            Those elements, in the order given.
-        """
-
-        return self.partition.loadedElements(elements)
 
     @performancetiming.timeit("constraint connectivity")
     def updateConstraintConnectivity(self, model: FEModel) -> bool:
@@ -1726,34 +1493,6 @@ class NED(NonlinearSolverBase):
         """
 
         return self.updateConnectivityOf(model, self._dynamicConnectivityConstraints)
-
-    def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
-        """Let those of the given constraints update their connectivity whose search runs in this
-        part of the model, in the order given; whether a constraint of any part changed. See
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateConnectivityOf`.
-
-        In a model computed whole that is every constraint. A domain-decomposed solver searches only
-        where the constraint is evaluated, since a search is what costs, and nothing but the
-        evaluation reads its outcome; see
-        :meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.constraintsSearchedHere`.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        constraints
-            The constraints to update, by name.
-
-        Returns
-        -------
-        bool
-            Whether any constraint's DOF footprint changed.
-        """
-
-        searched = self.partition.constraintsSearchedHere(model, constraints)
-        with self.partition.agreedOnByAllParts("Updating the constraint connectivity"):
-            changed = super().updateConnectivityOf(model, searched)
-        return self.partition.anyPart(changed)
 
     def _operatorsReusable(self, model: FEModel, stepActions: dict) -> bool:
         """Whether the kept lumped operators still describe this model, so that a rebuild may keep
@@ -1805,16 +1544,36 @@ class NED(NonlinearSolverBase):
             and len(model.scalarVariables) == cache.nScalarVariables
         )
 
-    def _assembleLumpedDiagonal(self, plan: ElementPlan, interfaceAssembly, elementContribution) -> DofVector:
-        """Assemble a lumped operator -- the inertia or the damping -- of the elements computed here,
-        complete at every degree of freedom of the model.
+    def partitionModel(self, model: FEModel, topologyChanged: bool) -> ModelPartition:
+        """Decide which elements, constraints and degrees of freedom this process computes: the whole
+        model.
+
+        Called with every equation system, once its degree-of-freedom layout and its
+        multi-point-constraint transformation are known, and before anything is assembled.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        topologyChanged
+            True for an equation system built afresh; False when only the constraints were
+            re-located by a contact search.
+
+        Returns
+        -------
+        ModelPartition
+            The partition.
+        """
+
+        return ModelPartition.wholeModel(model, self.theDofManager.nDof)
+
+    def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
+        """Assemble a lumped operator -- the inertia or the damping -- of the elements of a plan.
 
         Parameters
         ----------
         plan
-            The plan of the elements computed here.
-        interfaceAssembly
-            What completes the plan's contributions at the shared degrees of freedom.
+            The plan of the elements computed here, with or without kernels.
         elementContribution
             ``elementContribution(element, Ve)`` writes an element's diagonal into the zero ``Ve``.
 
@@ -1826,13 +1585,10 @@ class NED(NonlinearSolverBase):
 
         vector = self.theDofManager.constructDofVector()
         vector[:] = 0.0
-        contributions = computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
-        with performancetiming.timeit("interface forces"):
-            interfaceAssembly.assemble(contributions, vector)
-            self.partition.shareFromOwners(vector)
+        computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
         return vector
 
-    def _planIncrement(self, model: FEModel) -> IncrementPlan:
+    def planIncrement(self, model: FEModel) -> IncrementPlan:
         """Derive what an increment computes here from the current partition and equation system.
 
         The element loop leaves out the entities that have no kernels to call -- contact facets --
@@ -1849,34 +1605,22 @@ class NED(NonlinearSolverBase):
             The plan.
         """
 
-        partition = self.partition
-        kernelElements = {number: element for number, element in partition.elements.items() if element.hasKernels}
-        plan = planElements(
-            kernelElements,
-            self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-            partition.dofs,
-            self.theDofManager.nDof,
-            self.elementLoopThreads(),
-        )
-        elementLoop = ElementLoop(
-            plan,
-            partition.interfaceAssemblyFor(plan),
-            np.zeros(len(kernelElements)) if partition.measuresElementCosts() else None,
-        )
-
-        integratedDofs = np.arange(self.theDofManager.nDof)[partition.dofs]
-        firstOrderDofs = self.ids_1st[partition.integratedEntries(self.ids_1st)]
+        dofs = self.partition.dofs
+        integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
+        integrated[dofs] = True
 
         return IncrementPlan(
-            elementLoop=elementLoop,
-            halfDampingRate=partition.integratedValuesOf(self._halfDampingRate),
-            secondOrderMask=partition.integratedValuesOf(self._secondOrderMask),
-            firstOrderPositions=np.searchsorted(integratedDofs, firstOrderDofs),
-            nodeFieldSlots=self._nodeFieldSlotsOf(model, partition.integratedEntries),
+            elementPlan=planElements(
+                {number: element for number, element in self.partition.elements.items() if element.hasKernels},
+                self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
+                dofs,
+                self.theDofManager.nDof,
+                self.elementLoopThreads(),
+            ),
+            firstOrderDofs=self.ids_1st[integrated[self.ids_1st]],
+            nodeFieldSlots=self._nodeFieldSlotsOf(model, dofs),
             mpcForceFold=(
-                None
-                if self.mpcTransformation is None
-                else self.mpcTransformation.foldExplicitForceOperator(partition.dofs)
+                None if self.mpcTransformation is None else self.mpcTransformation.foldExplicitForceOperator(dofs)
             ),
         )
 
@@ -1913,22 +1657,17 @@ class NED(NonlinearSolverBase):
 
         return M, Minv
 
-    def _assembleLumpedOperators(self, model: FEModel, step, verbosity: int) -> tuple[DofVector, DofVector]:
+    def _assembleLumpedOperators(self, verbosity: int) -> tuple[DofVector, DofVector]:
         """Assemble everything the explicit update divides by, and everything derived from it.
 
         The lumped inertia and the lumped damping are summed from the elements, checked, and used
         to decide which time derivative each field carries; the multi-point-constraint
-        transformation is built alongside them because it folds the slave degrees of freedom's
-        mass onto their masters. Beyond the two vectors returned, this leaves the derived
-        classification, the raw (unfolded) mass, the damping rate and the field index sets on the
-        solver.
+        transformation folds the slave degrees of freedom's mass onto their masters. Beyond the two
+        vectors returned, this leaves the derived classification, the raw (unfolded) mass, the
+        damping rate and the field index sets on the solver.
 
         Parameters
         ----------
-        model
-            The model tree.
-        step
-            The step, for the actions the multi-point-constraint transformation consults.
         verbosity
             The journal level to report at.
 
@@ -1938,21 +1677,8 @@ class NED(NonlinearSolverBase):
             The vector the increment divides by, and its inverse.
         """
 
-        self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
-        self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
-
-        # Which elements, constraints and degrees of freedom this process computes; everything
-        # below that loops over elements loops over those only.
-        self.partition.define(
-            model,
-            self.theDofManager,
-            self.mpcTransformation,
-            topologyChanged=True,
-        )
-
         # The lumped operators are assembled over the elements computed here -- contact facets
-        # included, which have an inertia but no kernels -- and completed at the degrees of freedom
-        # shared with other parts of the model, so that they are complete everywhere.
+        # included, which have an inertia but no kernels.
         operatorPlan = planElements(
             self.partition.elements,
             self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
@@ -1960,16 +1686,15 @@ class NED(NonlinearSolverBase):
             self.theDofManager.nDof,
             nThreads=1,
         )
-        operatorInterfaceAssembly = self.partition.interfaceAssemblyFor(operatorPlan)
 
         # initialize mass and damping matrices
-        M = self._assembleLumpedDiagonal(operatorPlan, operatorInterfaceAssembly, _lumpedInertiaOf)
+        M = self.assembleLumpedDiagonal(operatorPlan, _lumpedInertiaOf)
         Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
         # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
         # always (whether or not that field also has an inertia -- see computeLumpedInertia()
         # above, the SECOND-derivative coefficient).
-        damping = self._assembleLumpedDiagonal(operatorPlan, operatorInterfaceAssembly, _lumpedDampingOf)
+        damping = self.assembleLumpedDiagonal(operatorPlan, _lumpedDampingOf)
 
         # Checked here, because the inertia check below never sees it at a second-order DOF: there
         # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
@@ -2129,15 +1854,6 @@ class NED(NonlinearSolverBase):
                 verbosity,
             )
             self.theDofManager.refreshConstraintIndices(model.constraints.values())
-            # The constraints now couple other degrees of freedom, so the set this process
-            # integrates, and the interface it shares with the other parts of the model, moved with
-            # them.
-            self.partition.define(
-                model,
-                self.theDofManager,
-                self.mpcTransformation,
-                topologyChanged=False,
-            )
         else:
             self.journal.message("Creating monolithic equation system", self.identification, verbosity)
             # An explicit solver assembles no system matrix, so it never reads the sparsity (VIJ)
@@ -2173,8 +1889,16 @@ class NED(NonlinearSolverBase):
 
         if reuseOperators:
             M, Minv = self._restoreLumpedOperators()
+            # The constraints now couple other degrees of freedom, and so may be integrated
+            # elsewhere.
+            self.partition = self.partitionModel(model, topologyChanged=False)
         else:
-            M, Minv = self._assembleLumpedOperators(model, step, verbosity)
+            self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
+            self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
+            # Which elements, constraints and degrees of freedom this process computes; everything
+            # from here on that loops over elements loops over those only.
+            self.partition = self.partitionModel(model, topologyChanged=True)
+            M, Minv = self._assembleLumpedOperators(verbosity)
             self._reusableOperators = _ReusableExplicitOperators(
                 elementKeys=frozenset(model.elements.keys()),
                 multiPointConstraintKeys=frozenset(model.multiPointConstraints.keys()),
@@ -2193,8 +1917,8 @@ class NED(NonlinearSolverBase):
             self._secondOrderMask[self.ids_2nd] = 1.0
         self._halfDampingRate = 0.5 * np.asarray(self._dampingRate) * self._secondOrderMask
 
-        self._nodeFieldSlots = self._nodeFieldSlotsOf(model, lambda indices: slice(None))
-        self._incrementPlan = self._planIncrement(model)
+        self._nodeFieldSlots = self._nodeFieldSlotsOf(model, slice(None))
+        self._incrementPlan = self.planIncrement(model)
 
         U = self.theDofManager.constructDofVector()  # initialize displacement vector
         dU = self.theDofManager.constructDofVector()  # initialize displacement vector
@@ -2284,7 +2008,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         constraints
-            The constraints of the model, by name.
+            The constraints evaluated here, by name, in model order.
         U_np
             The current solution vector.
         dU
@@ -2300,17 +2024,9 @@ class NED(NonlinearSolverBase):
             The augmented net force vector.
         """
 
-        if not constraints:
-            return P
-
-        # Each constraint is evaluated in one part of the model, and its forces are added in every
-        # part integrating its degrees of freedom, in model order.
-        forces = {}
-        with self.partition.agreedOnByAllParts("Evaluating the constraints"):
-            for name, constraint in self.partition.constraints.items():
-                forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
-
-        self.partition.addConstraintForces(forces, P)
+        PPlain = P.asPlainArray()
+        for name, constraint in constraints.items():
+            self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep).addInto(PPlain)
 
         return P
 
@@ -2683,12 +2399,15 @@ class NED(NonlinearSolverBase):
         )
 
     def getCriticalTimeStepForExplicitDynamics(self, model: FEModel, U: DofVector) -> float:
-        """Compute the critical time step for explicit dynamics.
+        """Compute the critical time step for explicit dynamics: the smallest of the elements
+        computed here.
 
         Parameters
         ----------
         model
             The model tree.
+        U
+            The solution vector.
 
         Returns
         -------
@@ -2698,9 +2417,8 @@ class NED(NonlinearSolverBase):
         minTimeStep = np.inf
 
         for element in self.partition.elements.values():
-            elementTimeStep = np.inf
             elementTimeStep = element.computeCriticalTimeStepForExplicitDynamics(U[element])
             if elementTimeStep < minTimeStep:
                 minTimeStep = elementTimeStep
 
-        return self.partition.minAcrossParts(minTimeStep)
+        return minTimeStep
