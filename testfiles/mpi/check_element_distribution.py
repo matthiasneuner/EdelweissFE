@@ -49,6 +49,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDInitialStressPressure",
     "marmot/NEDLiveAMR",
     "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRecoveryErrorDistributed",
     "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDLiveAMRRestartDistributed2Resume",
     "marmot/NEDLiveAMRStepEndsOffInterval",
@@ -61,6 +62,7 @@ EXPECTED_DISTRIBUTED = {
 #: The test cases expected to move elements between processes (a distributed model rebalanced).
 EXPECTED_MIGRATING = {
     "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRecoveryErrorDistributed",
     "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDRebalanceDistributed",
 }

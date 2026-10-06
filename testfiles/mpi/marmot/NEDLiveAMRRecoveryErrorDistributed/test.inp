@@ -1,0 +1,50 @@
+** Live adaptive refinement of a distributed model by the recovery-error marker: as
+** NEDLiveAMRRebalanceDistributed, but marked by the Zienkiewicz-Zhu recovered-gradient error of the
+** displacement field (Doerfler marking), which reads only the node coordinates and the node field at the
+** nodes of the mesh -- global data, the same in every process -- and needs no gather of its own. The
+** children of a refined element are created by the process computing it, and rebalancing with the
+** element numbers as costs moves them. The result is that of a serial run.
+
+*material, name=LinearElastic, id=linearelastic
+**E      nu   density
+20000.0, 0.2, 2.0e-9
+
+*section, name=section1, material=linearelastic, type=solid
+gen_all
+
+*job, name=nedAmrRecoveryErrorJob, domain=3d
+
+** courant-number=0.1: see NEDLiveAMR.
+*solver, solver=NEDMPI, name=theSolver
+courant-number=0.1
+output-frequency=20
+topology-check-frequency=20
+load-balance-costs=elementNumber
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =6
+nY      =1
+nZ      =1
+lX      =60
+lY      =10
+lZ      =10
+elType  =C3D20R
+
+*modelModifier, type=hAdaptivity, name=amrLive
+>>marker, type=recoveryError, nodeField=displacement, markFraction=0.5, maxRefinedFraction=0.5
+refineElSet=gen_all
+maxLevel=1
+
+*fieldOutput
+>>perElement, elSet=gen_all, name=sxx, result=stress, quadraturePoint=0:8, f(x)='np.max(np.abs(x[:,:,0]),axis=1)'
+>>perNode, name=Ux, nSet=gen_right, field=displacement, result=U, f(x)='np.mean(x[:,0])', saveHistory=True
+>>perNode, name=RF, nSet=gen_left, field=displacement, result=P, f(x)='np.sum(x[:,0])', saveHistory=True
+
+*output, type=monitor, name=monitor
+fieldOutput=RF
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-14, maxNumInc=120, maxIter=25, stepLength=1e-3
+>>dirichlet, name=fixLeft,  nSet=gen_left,  field=displacement, 1=0, 2=0, 3=0
+>>dirichlet, name=pullRight, nSet=gen_right, field=displacement, 1=0.05
+>>bodyForce, name=gravity, elSet=gen_all, forceVector='0.0, -1e-6, 0.0', f(t)=t
