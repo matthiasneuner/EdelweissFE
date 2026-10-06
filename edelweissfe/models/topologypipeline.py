@@ -236,9 +236,10 @@ class TopologyPipeline:
         numbers its elements as a pure function of the input file, is re-run identically by a
         resumed run before the checkpoint is read, and is never renumbered afterwards -- so those
         numbers need no allocator. This just makes sure nothing minted later can collide with them.
+        Read from the mesh, not from the created elements, so that it is the same in every process.
         """
 
-        self._nextElementNumber = max(self._nextElementNumber, max(self._model.elements.keys(), default=0) + 1)
+        self._nextElementNumber = max(self._nextElementNumber, max(self._model.mesh.elements.keys(), default=0) + 1)
 
     def reserveNodeNumbers(self, count: int = 1) -> range:
         """Reserve ``count`` fresh node labels. The node-side counterpart of
@@ -442,7 +443,7 @@ class TopologyPipeline:
         replay reproduced the original run.
 
         Covers exactly what a replay must get right and nothing else: every element's number, type
-        and connectivity (in order -- a rotated connectivity is a real difference), and every node's
+        and connectivity as described in the mesh (so the digest is the same in every process) (in order -- a rotated connectivity is a real difference), and every node's
         label and reference coordinates. The surface nodes of a discrete rigid body hold its current
         position instead; the body reports their reference coordinates
         (:meth:`~edelweissfe.rigidbodies.rigidbody.RigidBody.referenceCoordinatesOfMovedNodes`), so that
@@ -473,10 +474,11 @@ class TopologyPipeline:
             referenceCoordinatesOfMovedNodes.update(rigidBody.referenceCoordinatesOfMovedNodes())
 
         digest = hashlib.blake2b(digest_size=16)
-        for elNumber in sorted(self._model.elements):
-            element = self._model.elements[elNumber]
-            digest.update(b"E|%d|%s|" % (elNumber, element.elType.encode()))
-            digest.update(b",".join(b"%d" % node.label for node in element.nodes))
+        meshElements = self._model.mesh.elements
+        for elNumber in sorted(meshElements):
+            record = meshElements[elNumber]
+            digest.update(b"E|%d|%s|" % (elNumber, record.elType.encode()))
+            digest.update(b",".join(b"%d" % label for label in record.nodeLabels.tolist()))
         for label in sorted(self._model.nodes):
             digest.update(b"N|%d|" % label)
             referenceCoordinates = referenceCoordinatesOfMovedNodes.get(label, self._model.nodes[label].coordinates)

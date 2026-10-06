@@ -439,6 +439,9 @@ character before the code is executed, so ``\t\t`` indents a line by two levels.
     model.nodeSets['load'] = NodeSet('load', load_nodes)
 
 Note that ``\t`` is replaced everywhere in the code, including inside string literals.
+
+The code may read any element of the model, so the elements of the mesh described so far are made
+(:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- all of them -- before it runs.
 [executePythoncode] Directly execute Python code to create the model tree.
   required datalines
     Python code to run

@@ -42,7 +42,7 @@ from edelweissfe.adaptivity.refinement import NodeRegistry
 from edelweissfe.modelmodifiers.surfacefacets.surfacefacets import (
     ModelModifier as _SurfaceFacetsModifier,
 )
-from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.femodel import FEModel, everyElement
 from edelweissfe.models.meshdependent import MeshDependent
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
@@ -54,22 +54,25 @@ _REPO_ROOT = _Path(__file__).resolve().parents[1]
 
 class _StubElement:
     """A bare element stand-in: the allocator, the window and the fingerprint only look at
-    ``elNumber``, ``elType`` and ``nodes``."""
+    ``elNumber``, ``elType`` and ``nodes``; describing it in the mesh adds ``fields`` and
+    ``ensightType``."""
 
     elType = "STUB"
     nodes = ()
+    fields = ()
+    ensightType = "stub"
 
     def __init__(self, elNumber: int):
         self.elNumber = elNumber
 
 
 def _modelWithSetupElements(*labels: int) -> FEModel:
-    """A model carrying elements as the base mesh generators leave them -- placed directly, with
-    the allocator not yet raised above them."""
+    """A model carrying elements as the base mesh generators leave them -- described in the mesh,
+    with the allocator not yet raised above them."""
 
     model = FEModel(3)
     for label in labels:
-        model.elements[label] = _StubElement(label)
+        model.mesh.addElement(label, "STUB", "stub", [])
     return model
 
 
@@ -229,6 +232,8 @@ def test_parsed_element_set_keeps_its_declaration_order():
     inputFile["elSet"] = [{"elSet": "declared", "datalines": [", ".join(str(e) for e in range(1, nElements + 1))]}]
 
     model = AbqModelConstructor(Journal(verbose=False)).createGeometryFromInputFile(FEModel(2), inputFile)
+    with model.topology.changes():
+        model.createElementsOfMesh(everyElement)
 
     assert [el.elNumber for el in model.elementSets["declared"]] == list(range(1, nElements + 1))
 
@@ -397,7 +402,6 @@ def _tinyMeshModel(elementNumbers=(1, 2), shiftCoordinate=0.0):
     """Two CPE4s sharing an edge, numbered as asked -- enough to exercise numbering, connectivity
     and coordinates without a solver."""
 
-    from edelweissfe.config.elementlibrary import getElementClass
     from edelweissfe.points.node import Node
 
     model = FEModel(2)
@@ -405,11 +409,10 @@ def _tinyMeshModel(elementNumbers=(1, 2), shiftCoordinate=0.0):
     for label, (x, y) in enumerate(coords, start=1):
         model.nodes[label] = Node(label, np.array([x + shiftCoordinate, y]))
 
-    ElementClass = getElementClass("CPE4", "edelweiss")
     for elNumber, conn in zip(elementNumbers, [(1, 2, 5, 4), (2, 3, 6, 5)]):
-        element = ElementClass("CPE4", elNumber)
-        element.setNodes([model.nodes[label] for label in conn])
-        model.elements[elNumber] = element
+        model.mesh.addElement(elNumber, "CPE4", "edelweiss", conn)
+    with model.topology.changes():
+        model.createElementsOfMesh(everyElement)
     return model
 
 
@@ -426,13 +429,10 @@ def test_fingerprint_is_stable_across_processes():
         "import numpy as np\n"
         "from edelweissfe.models.femodel import FEModel\n"
         "from edelweissfe.points.node import Node\n"
-        "from edelweissfe.config.elementlibrary import getElementClass\n"
         "m = FEModel(2)\n"
         "for label, (x, y) in enumerate([(0.,0.),(1.,0.),(1.,1.),(0.,1.)], start=1):\n"
         "    m.nodes[label] = Node(label, np.array([x, y]))\n"
-        "e = getElementClass('CPE4', 'edelweiss')('CPE4', 1)\n"
-        "e.setNodes([m.nodes[i] for i in (1, 2, 3, 4)])\n"
-        "m.elements[1] = e\n"
+        "m.mesh.addElement(1, 'CPE4', 'edelweiss', [1, 2, 3, 4])\n"
         "print(m.topology.fingerprint())\n"
     )
     digests = set()
@@ -482,7 +482,7 @@ def test_fingerprint_is_insensitive_to_dict_insertion_order():
 
     forward = _tinyMeshModel(elementNumbers=(1, 2))
     backward = _tinyMeshModel(elementNumbers=(1, 2))
-    backward.elements = dict(reversed(list(backward.elements.items())))
+    backward.mesh.elements = dict(reversed(list(backward.mesh.elements.items())))
     backward.nodes = dict(reversed(list(backward.nodes.items())))
     assert forward.topology.fingerprint() == backward.topology.fingerprint()
 
@@ -791,6 +791,8 @@ def test_a_shallow_copy_of_a_model_gets_a_pipeline_acting_on_the_copy():
     model = _tinyMeshModel()
     reduced = copy.copy(model)
     reduced.elements = {number: el for number, el in model.elements.items() if number == 1}
+    reduced.mesh = copy.copy(model.mesh)
+    reduced.mesh.elements = {number: record for number, record in model.mesh.elements.items() if number == 1}
 
     assert reduced.topology is not model.topology
     assert reduced.topology.fingerprint() == _tinyMeshModel(elementNumbers=(1,)).topology.fingerprint()

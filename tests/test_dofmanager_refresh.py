@@ -80,8 +80,9 @@ def _buildTwoElementModel():
     model = FEModel(2)
     for node in n:
         model.nodes[node.label] = node
-    for element in (e1, e2):
-        model.elements[element.elNumber] = element
+    with model.topology.changes():
+        for element in (e1, e2):
+            model.createElement(element)
     model.elementSets["all"] = ElementSet("all", [e1, e2])
     model.nodeSets["all"] = NodeSet("all", n)
     model.materials["linearelastic"] = material

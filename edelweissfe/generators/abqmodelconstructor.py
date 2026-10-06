@@ -45,7 +45,6 @@ import numpy as np
 
 from edelweissfe.config import registry
 from edelweissfe.config.constraints import getConstraintClass
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.config.materiallibrary import getMaterialClass
 from edelweissfe.config.modelmodifiers import getModelModifierClass
 from edelweissfe.constraints.base.multipointconstraintbase import (
@@ -53,9 +52,7 @@ from edelweissfe.constraints.base.multipointconstraintbase import (
 )
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
-from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.caseinsensitivedict import CaseInsensitiveDict
 from edelweissfe.utils.inputfileparser import (
     keywordIdentifier,
@@ -81,6 +78,10 @@ class AbqModelConstructor:
     def createGeometryFromInputFile(self, model: FEModel, inputFile: dict) -> dict:
         """Collects nodes, elements, node sets and element sets from
         the input file.
+
+        Nodes and node sets are created directly. Elements, element sets and surfaces are described
+        in ``model.mesh``; the element objects are made from it by
+        :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.
 
         Parameters
         ----------
@@ -117,33 +118,32 @@ class AbqModelConstructor:
                 setName = nodeDefs["nset"]
                 model.nodeSets[setName] = NodeSet(setName, [nodeDefinitions[x] for x in currNodeDefs.keys()])
 
-        # returns an dict of {element Label: element}
-        elements = model.elements
+        # describe the elements in the mesh; the element objects are created from it afterwards
+        # (FEModel.createElementsOfMesh)
+        mesh = model.mesh
 
         for elDefs in inputFile["element"]:
             elementType = elDefs["type"]
             elementProvider = elDefs.get("provider")
-            ElementClass = getElementClass(elementType, elementProvider)
 
-            currElDefs = {}
+            currElNumbers = []
             for line in elDefs["datalines"]:
                 defLine = [int(i) for i in splitLineAtCommas(line)]
 
-                label = defLine[0]
-                # store nodeObjects in elNodes list
-                elNodes = [nodeDefinitions[n] for n in defLine[1:]]
-                newEl = ElementClass(elementType, label)
-                newEl.setNodes(elNodes)
-                currElDefs[label] = newEl
-            elements.update(currElDefs)
+                number = defLine[0]
+                elNodeLabels = defLine[1:]
+                for label in elNodeLabels:
+                    if label not in nodeDefinitions:
+                        raise KeyError("element {:} refers to node {:}, which is not defined".format(number, label))
+                mesh.addElement(number, elementType, elementProvider, elNodeLabels)
+                currElNumbers.append(number)
 
             if elDefs["elSet"] is not None:
-                setName = elDefs["elset"]
-                model.elementSets[setName] = ElementSet(setName, currElDefs.values())
+                mesh.setElementSet(elDefs["elset"], currElNumbers)
 
-        # generate dictionary of elementObjects belonging to a specified elementset
-        # or generate elementset by generate definition in inputfile
-        elementSets = model.elementSets
+        # element sets, by element numbers (optionally generated, or combined by a boolean operation
+        # with an existing set) or as the union of existing sets
+        elementSets = mesh.elementSets
 
         for elSetDefinition in inputFile["elSet"]:
             name = elSetDefinition["elSet"]
@@ -155,29 +155,20 @@ class AbqModelConstructor:
 
                 if elSetDefinition.get("generate", False):
                     generateDef = elNumbers[0:3]
-                    els = [
-                        elements[n]
-                        for n in np.arange(
-                            generateDef[0],
-                            generateDef[1] + 1,
-                            generateDef[2],
-                            dtype=int,
-                        )
-                    ]
+                    numbers = list(range(generateDef[0], generateDef[1] + 1, generateDef[2]))
 
                 elif elSetDefinition.get("boolean", False):
                     booleanDef = elSetDefinition.get("boolean")
                     if booleanDef == "difference":
-                        els = [n for n in elementSets[name] if n.elNumber not in elNumbers]
+                        removed = set(elNumbers)
+                        numbers = [n for n in elementSets[name] if n not in removed]
 
                     elif booleanDef == "union":
-                        els = [n for n in elementSets[name]]
-                        els += [elements[n] for n in elNumbers]
+                        numbers = elementSets[name] + elNumbers
 
                     elif booleanDef == "intersection":
-                        elNumbersBase = [n.elNumber for n in elementSets[name]]
                         elNumbersSet = set(elNumbers)
-                        els = [elements[n] for n in elNumbersBase if n in elNumbersSet]
+                        numbers = [n for n in elementSets[name] if n in elNumbersSet]
                     else:
                         raise Exception("Undefined boolean operation!")
 
@@ -186,20 +177,13 @@ class AbqModelConstructor:
                     else:
                         del elementSets[name]
                 else:
-                    els = [elements[elNum] for elNum in elNumbers]
-                # dict.fromkeys deduplicates while preserving first-occurrence order -- a plain
-                # set() here would make facet numbering, slave-node order, and closest-facet tie
-                # breaking depend on Python's hash-based set iteration order instead.
-                elementSets[name] = ElementSet(name, list(dict.fromkeys(els)))
+                    numbers = elNumbers
             else:
-                els = []
-                for line in data:
-                    for elSet in line:
-                        els += list(elementSets[elSet])
-                # A name-union *ELSET must also become a proper ElementSet (not a bare list), or
-                # it is unhashable and breaks any consumer that caches by set identity (e.g.
-                # NodeField.subset()).
-                elementSets[name] = ElementSet(name, set(els))
+                # the union of existing sets, in the order of the sets and of their members -- the
+                # member order fixes facet numbering, slave-node order and closest-facet tie breaking
+                # downstream, so it must not depend on hashing
+                numbers = [number for line in data for elSet in line for number in elementSets[elSet]]
+            mesh.setElementSet(name, numbers)
 
         # generate dictionary of nodeObjects belonging to a specified nodeset
         # or generate nodeset by generate definition in inputfile
@@ -230,9 +214,9 @@ class AbqModelConstructor:
                 nodeSets[name] = NodeSet(name, nodes)
 
         model.nodeSets["all"] = NodeSet("all", model.nodes.values())
-        model.elementSets["all"] = ElementSet("all", model.elements.values())
+        mesh.setElementSet("all", mesh.elements.keys())
 
-        # generate surfaces sets
+        # element-based surfaces: per face, the element set exposing it
         for surfaceDef in inputFile["surface"]:
             name = surfaceDef["name"]
             sType = surfaceDef.get("type", "element").lower()
@@ -242,9 +226,9 @@ class AbqModelConstructor:
                 for line in data:
                     elSet, faceNumber = line
                     faceNumber = int(faceNumber.replace("S", ""))
-                    surface[faceNumber] = model.elementSets[elSet]
+                    surface[faceNumber] = elSet
 
-            model.surfaces[name] = EntityBasedSurface(name, surface)
+            mesh.addSurface(name, surface)
 
         return model
 

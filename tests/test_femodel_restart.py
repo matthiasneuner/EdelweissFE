@@ -81,7 +81,8 @@ def _buildSingleElementModel():
     model = FEModel(2)
     for n in (n1, n2, n3, n4):
         model.nodes[n.label] = n
-    model.elements[element.elNumber] = element
+    with model.topology.changes():
+        model.createElement(element)
     model.elementSets["all"] = ElementSet("all", [element])
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
     model.materials["vonmises"] = material

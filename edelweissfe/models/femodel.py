@@ -30,6 +30,7 @@
 # @author: Matthias Neuner
 
 import textwrap
+from collections.abc import Callable
 from operator import attrgetter
 
 import h5py
@@ -38,6 +39,7 @@ import numpy as np
 from edelweissfe.config.phenomena import getFieldSize, phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.models.modelchange import TopologyRecord
 from edelweissfe.models.topologypipeline import TopologyPipeline
 from edelweissfe.numerics.parallelizationutilities import (
@@ -46,16 +48,41 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
+from edelweissfe.sets.elementset import ElementSet
+from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
 from edelweissfe.variables.fieldvariable import FieldVariable
 from edelweissfe.variables.scalarvariable import ScalarVariable
 
 
+def everyElement(number: int) -> bool:
+    """The predicate of :meth:`FEModel.createElementsOfMesh` that creates every element of the mesh,
+    as a serial run does.
+
+    Parameters
+    ----------
+    number
+        The element number.
+
+    Returns
+    -------
+    bool
+        Always True.
+    """
+
+    return True
+
+
 class FEModel:
     """This is is a standard finite element model tree.
     It takes care of the correct number of variables,
     for nodes and scalar degrees of freedem, and it manages the fields.
+
+    The model is built in two stages. First the mesh is described as data in :attr:`mesh`
+    (:class:`~edelweissfe.models.mesh.Mesh`): elements by number, type, provider and node labels,
+    element sets and surfaces. Then :meth:`createElementsOfMesh` creates the element objects from it
+    and resolves the element sets and surfaces to them.
 
 
     Parameters
@@ -69,7 +96,10 @@ class FEModel:
     def __init__(self, dimension: int):
         self.time = 0.0  #: Current time of the model.
         self.nodes = {}  #: Nodes in the model.
-        self.elements = {}  #: Elements in the model.
+        self.mesh = Mesh()  #: The mesh, as data: the elements, element sets and surfaces described for the model.
+        self.elements = {}  #: The element objects created from the mesh, by number, in mesh order.
+        #: The numbers of the elements of the mesh not created in this process; see :meth:`requireCompleteMesh`.
+        self._elementsNotCreatedHere = set()
         self.nodeSets = {}  #: NodeSets in the model.
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
@@ -128,7 +158,11 @@ class FEModel:
         self.nodes[node.label] = node
 
     def createElement(self, element):
-        """Add a freshly created element to the model.
+        """Add an element its owner made itself (a contact facet, the point mass of a rigid body) to
+        the mesh and to the model.
+
+        Every other element is described in :attr:`mesh` first and created from there, by
+        :meth:`createElementOfMesh`.
 
         Parameters
         ----------
@@ -136,21 +170,163 @@ class FEModel:
             The element, already carrying a number obtained from :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`.
         """
 
+        self._checkElementCanBeAdded(element.elNumber)
+        self.mesh.addElementMadeByOwner(element)
+        self.elements[element.elNumber] = element
+
+    def createElementOfMesh(self, number: int):
+        """Create the element object of one element of the mesh, and add it to the model.
+
+        This is how every element described in :attr:`mesh` comes into existence -- at setup through
+        :meth:`createElementsOfMesh`, during a run through a model modifier (e.g. the children of a
+        refinement). It needs nothing but the mesh and the nodes, so an element can be created in any
+        process at any time, e.g. when it migrates between processes. Its section and properties are
+        assigned separately (:meth:`~edelweissfe.sections.base.sectionbase.Section.assignSectionToElement`).
+
+        Parameters
+        ----------
+        number
+            The number of the element in the mesh.
+
+        Returns
+        -------
+        element
+            The new element.
+        """
+
+        self._checkElementCanBeAdded(number)
+        record = self.mesh.elements[number]
+        element = self.mesh.elementClassOf(record)(record.elType, number)
+        nodes = self.nodes
+        element.setNodes([nodes[label] for label in record.nodeLabels.tolist()])
+        self.elements[number] = element
+        self._elementsNotCreatedHere.discard(number)
+        return element
+
+    def createElementsOfMesh(self, isCreatedHere: Callable[[int], bool]):
+        """Create the element objects of the mesh, and resolve its element sets and surfaces to them.
+
+        Elements are created in mesh order, so :attr:`elements` lists them in the order they were
+        described. Each element set of the mesh becomes an
+        :class:`~edelweissfe.sets.elementset.ElementSet` of the elements created here, and each surface
+        an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
+
+        Calling it again is harmless: elements already decided on are kept, and sets and surfaces that
+        already exist are updated in place (references held to them stay valid), so a mesh described
+        in several steps can be made in several steps.
+
+        Parameters
+        ----------
+        isCreatedHere
+            Whether this process creates the element with the given number. A serial run creates
+            every element (:func:`everyElement`); a domain-decomposed run may create only its own.
+        """
+
+        for number in self.mesh.elements:
+            if number in self.elements:
+                continue
+            if isCreatedHere(number):
+                self.createElementOfMesh(number)
+            else:
+                self._elementsNotCreatedHere.add(number)
+
+        for name in self.mesh.elementSets:
+            self.resolveElementSetOfMesh(name)
+
+        for name in self.mesh.surfaces:
+            self._resolveSurfaceOfMesh(name)
+
+    def resolveElementSetOfMesh(self, name: str) -> ElementSet:
+        """Make ``elementSets[name]`` hold the elements of the mesh's element set ``name`` created here.
+
+        An existing :class:`~edelweissfe.sets.elementset.ElementSet` of that name is updated in place,
+        so that references to it stay valid.
+
+        Parameters
+        ----------
+        name
+            The name of the element set in :attr:`mesh`.
+
+        Returns
+        -------
+        ElementSet
+            The elements of the set created here, in set order; complete if that is all of them.
+        """
+
+        numbers = self.mesh.elementSets[name]
+        elements = self.elements
+        created = [elements[number] for number in numbers if number in elements]
+        isComplete = len(created) == len(numbers)
+
+        elementSet = self.elementSets.get(name)
+        if elementSet is None:
+            elementSet = self.elementSets[name] = ElementSet(name, created, isComplete=isComplete)
+        else:
+            if list(elementSet) != created:
+                elementSet.replaceMembers(created)
+            elementSet.isComplete = isComplete
+        return elementSet
+
+    def _resolveSurfaceOfMesh(self, name: str):
+        """Make ``surfaces[name]`` the surface of the mesh with the given name, on the elements created
+        here; an existing surface is updated in place if its faces changed.
+
+        A face given by an element set refers to the resolved set itself, as a surface defined in the
+        input file always did.
+        """
+
+        faces = {}
+        for face, entry in self.mesh.surfaces[name].items():
+            if isinstance(entry, str):
+                faces[face] = self.elementSets[entry]
+            else:
+                faces[face] = [self.elements[number] for number in entry if number in self.elements]
+
+        surface = self.surfaces.get(name)
+        if surface is None:
+            self.surfaces[name] = EntityBasedSurface(name, faces)
+        elif surface.keys() != faces.keys() or any(surface[face] is not faces[face] for face in faces):
+            surface.replaceData(faces)
+
+    def requireCompleteMesh(self, reader: str):
+        """State that ``reader`` needs every element of the mesh, not only those created here; the
+        whole-model counterpart of :meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete`.
+
+        Parameters
+        ----------
+        reader
+            Who reads the whole model, for the error message.
+
+        Raises
+        ------
+        TopologyError
+            If some element of the mesh was not created in this process.
+        """
+
+        if self._elementsNotCreatedHere:
+            raise TopologyError(
+                "{:} needs every element of the model, but {:} of them were not created in this process".format(
+                    reader, len(self._elementsNotCreatedHere)
+                )
+            )
+
+    def _checkElementCanBeAdded(self, elNumber: int):
+        """Raise unless an element with this number may be added to the model now."""
+
         if not self.topology.isOpen:
             raise TopologyError(
                 "element {:} was created outside a topology change: only model modifiers may create "
-                "or delete elements, inside TopologyPipeline.changes()".format(element.elNumber)
+                "or delete elements, inside TopologyPipeline.changes()".format(elNumber)
             )
-        if element.elNumber in self.elements:
+        if elNumber in self.elements:
             raise TopologyError(
                 "element number {:} is already taken -- element numbers are reserved via "
-                "TopologyPipeline.reserveElementNumbers() and never recycled".format(element.elNumber)
+                "TopologyPipeline.reserveElementNumbers() and never recycled".format(elNumber)
             )
 
-        self.elements[element.elNumber] = element
-
     def removeElement(self, elNumber: int):
-        """Remove an element from the model. Its number is retired, never reissued.
+        """Remove an element from the mesh and, if it was created here, from the model. Its number is
+        retired, never reissued.
 
         Parameters
         ----------
@@ -164,7 +340,9 @@ class FEModel:
                 "or delete elements, inside TopologyPipeline.changes()".format(elNumber)
             )
 
-        del self.elements[elNumber]
+        self.mesh.removeElement(elNumber)
+        self.elements.pop(elNumber, None)
+        self._elementsNotCreatedHere.discard(elNumber)
 
     def _populateNodeFieldVariablesFromElements(
         self,
@@ -493,6 +671,8 @@ class FEModel:
         restartFile
             An open, writable :class:`h5py.File` (or group) to write the checkpoint into.
         """
+
+        self.requireCompleteMesh("a restart checkpoint")
 
         f = restartFile
 

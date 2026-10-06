@@ -49,6 +49,7 @@ else:
     MarmotMaterialWrappingElement = None
 
 from edelweissfe.sets.orderedset import OrderedSet
+from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
 
 
@@ -56,18 +57,29 @@ class ElementSet(OrderedSet):
     """A basic element set.
     It has a label, and a list containing unique elements.
 
+    An element set holds the elements of the set that were **created here**: the model describes its
+    mesh as data first and then creates the element objects from it
+    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`). In a serial run that is every
+    element of the set. A domain-decomposed run may create only part of the mesh in each process; a
+    set then holds only its part, and says so through :attr:`isComplete`. Code that needs the whole set
+    -- an output, a checkpoint, a marker -- states it by calling :meth:`requireComplete`.
+
     Parameters
     ----------
     name
         The unique label for this element set.
     elements
         A list of elements.
+    isComplete
+        False if this process created only some of the elements of the set described in the mesh
+        (``model.mesh.elementSets[name]``).
     """
 
     def __init__(
         self,
         label: str,
         elements,
+        isComplete: bool = True,
     ):
         self.allowedObjectTypes = [BaseElement]
         self.allowedObjectTypes.append(MarmotElementWrapper) if MarmotElementWrapper is not None else None
@@ -79,8 +91,35 @@ class ElementSet(OrderedSet):
 
         super().__init__(label, elements)
         self._nodes = None
+        #: True if this set holds every element of the set described in the mesh; see :meth:`requireComplete`.
+        self.isComplete = isComplete
 
         self.elements = self.items
+
+    def requireComplete(self, reader: str):
+        """State that ``reader`` needs every element of this set, not only the part created here.
+
+        A partial set read as if it were whole gives silently wrong results -- an output, a marker
+        or a checkpoint computed from part of the set. Every whole-set reader therefore calls this,
+        so that such a reading fails loudly instead.
+
+        Parameters
+        ----------
+        reader
+            Who reads the set, for the error message.
+
+        Raises
+        ------
+        TopologyError
+            If this process created only some of the elements of the set.
+        """
+
+        if not self.isComplete:
+            raise TopologyError(
+                "{:} needs the whole element set {:}, but only part of it was created in this process".format(
+                    reader, self.name
+                )
+            )
 
     def extractNodeSet(
         self,

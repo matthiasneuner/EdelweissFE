@@ -26,12 +26,14 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 
+from collections.abc import Callable
+
 from edelweissfe.config import registry
 from edelweissfe.config.generators import getGeneratorClass
 from edelweissfe.config.solvers import getSolverByName
 from edelweissfe.generators.abqmodelconstructor import AbqModelConstructor
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel
+from edelweissfe.models.femodel import FEModel, everyElement
 from edelweissfe.steps.stepmanager import (
     StepActionDefinition,
     StepDefinition,
@@ -222,9 +224,19 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
     return fieldOutputController
 
 
-def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) -> FEModel:
+def fillFEModelFromInputFile(
+    model: FEModel, inputfile: dict, journal: Journal, isCreatedHere: Callable[[int], bool] = everyElement
+) -> FEModel:
     """Convenience helper function
     to fill an existing (possibly empty) FEModel using the input file and generators.
+
+    First the mesh generators and the ``*element``/``*elset``/``*surface`` keywords describe the
+    mesh (``model.mesh``); then the elements are made from it
+    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`). Everything that refers to
+    element objects (sections, element properties, contact facets, constraints, model modifiers)
+    comes after. A generator that needs element objects while the mesh is still being described
+    (``executePythonCode``, which runs arbitrary code on the model) makes the elements described so
+    far itself.
 
     Parameters
     ----------
@@ -234,6 +246,8 @@ def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) 
         The processed inputfile in dictionary form.
     journal
         The Journal for logging purposes.
+    isCreatedHere
+        Whether this process creates the element with the given number; every element by default.
 
     Returns
     -------
@@ -244,10 +258,12 @@ def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) 
     # Model setup is a topology change: it is the one phase besides a model modifier's own update in
     # which elements may be created (see TopologyPipeline.changes). Everything below runs inside it.
     with model.topology.changes():
-        return _fillFEModelFromInputFile(model, inputfile, journal)
+        return _fillFEModelFromInputFile(model, inputfile, journal, isCreatedHere)
 
 
-def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) -> FEModel:
+def _fillFEModelFromInputFile(
+    model: FEModel, inputfile: dict, journal: Journal, isCreatedHere: Callable[[int], bool]
+) -> FEModel:
     """The body of :func:`fillFEModelFromInputFile`, run inside an open topology window."""
 
     # call individual optional model generators with executeAfterManualGeneration == True
@@ -271,6 +287,9 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
     # the standard 'Abaqus like' model generator is invoked unconditionally, and it has direct access to the inputfile
     abqModelConstructor = AbqModelConstructor(journal)
     model = abqModelConstructor.createGeometryFromInputFile(model, inputfile)
+
+    # The mesh is described: make the elements.
+    model.createElementsOfMesh(isCreatedHere)
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file
     # rather than from the allocators (see TopologyPipeline.adoptSetupElementNumbers). Raise both allocators
