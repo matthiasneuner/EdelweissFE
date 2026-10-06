@@ -1212,129 +1212,151 @@ class NED(NonlinearSolverBase):
                 PPlain[dofs] = plan.mpcForceFold @ PPlain[dofs]
 
         if timeStep.number % self.options["output-frequency"] == 0:
-            # Every term summed over the parts of the model, each counted once: an element energy
-            # by the part computing the element, a kinetic energy and a work by the part owning the
-            # degree of freedom.
-            #
-            # The kinetic energy only over the degrees of freedom where 0.5 * m * v**2 is an energy.
-            # Summing the whole vector also collected the first-order fields, whose "mass" is a
-            # viscosity and whose "velocity" is that field's rate -- no energy meaning, and orders of
-            # magnitude larger than the real term (eta ~ 1e-4 against a density ~ 1e-9): every
-            # balance then read as 100 % kinetic.
-            nonMechanicalIndices = [
-                self.theDofManager.idcsOfFieldsInDofVector[fieldName]
-                for fieldName in self.nonMechanicalSecondOrderFields
-            ]
-            Wint, twiceWkin, Wext, *twiceNonMechanical = partition.sumAcrossParts(
-                [psi, self._ownedSumOfSquaredRates(self.ids_mechanicalEnergy, V), self._externalWorkOfThisPart]
-                + [self._ownedSumOfSquaredRates(indices, V) for indices in nonMechanicalIndices]
-            )
-            Wkin = 0.5 * twiceWkin
-
-            # Everything the model absorbed that no reported term accounts for: strain energy the
-            # material does not publish, plastic and viscous dissipation, and damage. It must stay
-            # non-negative -- a negative value means the kinetic energy has overtaken the work put
-            # in, i.e. energy is being created.
-            unaccounted = Wext - Wkin - Wint
-
-            def _share(value):
-                return "{:7.2f} %".format(value / Wext * 100) if Wext > 0.0 else "      -- "
-
-            energyRows = [
-                ["energy", "value", "share of W_ext"],
-                ["external work W_ext", "{:+.6e}".format(Wext), _share(Wext)],
-                ["kinetic", "{:+.6e}".format(Wkin), _share(Wkin)],
-                ["internal (strain)", "{:+.6e}".format(Wint), _share(Wint)],
-                ["unaccounted", "{:+.6e}".format(unaccounted), _share(unaccounted)],
-            ]
-
-            # One row per second-order field that is not in the balance, never summed with another
-            # or into the total. For a hyperbolic non-local field the inertia is a time squared, so
-            # 0.5 * m * rate**2 is a volume rather than an energy -- kept on its own line because
-            # it is the energy in the ringing the damping exists to remove.
-            for fieldName, twiceEnergy in zip(self.nonMechanicalSecondOrderFields, twiceNonMechanical):
-                energyRows.append([fieldName, "{:+.6e}".format(0.5 * twiceEnergy), "not an energy"])
-
-            self.journal.printTable(
-                energyRows,
-                self.identification,
-                2,
-            )
-
-            # KE <= W_ext is exact in the continuum, so a violation is energy from nowhere: for an
-            # explicit scheme, a time step above the true stability limit. It catches what dt_crit
-            # does not see -- the nonlocal field, contact penalty stiffness, a misjudged element
-            # shape. The NaN case is checked first because every ordering against a NaN is False,
-            # including the `Wext > 0.0` below, so a diverged run would pass silently and keep
-            # writing NaN. It fails the step rather than reporting it: nothing after it is
-            # meaningful, and an explicit scheme has no cutback to answer it with.
-            if not (np.isfinite(Wext) and np.isfinite(Wkin)):
-                raise StepFailed(
-                    "THE SOLUTION HAS DIVERGED in increment {:}: the energy balance is no longer a "
-                    "finite number (external work {:e}, kinetic {:e}), which means the state itself "
-                    "is not. The time step is above the true stability limit -- and dt_crit does not "
-                    "see all of it: it never sees contact penalty stiffness, and it sees the nonlocal "
-                    "field only where that field carries a non-mechanical inertia, a first-order one "
-                    "having a forward-Euler limit that nothing checks. Resume from a checkpoint with "
-                    "a smaller courant-number.".format(timeStep.number, Wext, Wkin)
-                )
-
-            if Wext > 0.0 and Wkin > Wext * (1.0 + _ENERGY_CREATION_TOLERANCE):
-                self.journal.message(
-                    "ENERGY IS BEING CREATED: the kinetic energy {:e} exceeds the external work "
-                    "{:e} by {:.1f} %. That is impossible -- the unreported terms (strain energy, "
-                    "dissipation, damage) can only add to the balance. The time step is above the "
-                    "true stability limit, which dt_crit does not see in full: it ignores the "
-                    "nonlocal field entirely and never sees contact penalty stiffness. Reduce "
-                    "courant-number, or resume from a checkpoint with a smaller one.".format(
-                        Wkin, Wext, (Wkin / Wext - 1.0) * 100
-                    ),
-                    self.identification,
-                    0,
-                )
-
-            # Said once, loudly, because a silent zero here reads as "no strain energy yet" rather
-            # than "this quantity is not being reported", and the ratio above is the usual way one
-            # decides whether an explicit run is quasi-static enough.
-            # The energy-creation check above is gated on Wext > 0, and _externalWork only
-            # accumulates at PRESCRIBED degrees of freedom. A model whose Dirichlet conditions are
-            # all fixed and whose loading comes from body forces, node forces, a distributed load
-            # or an initial velocity therefore has Wext identically zero, and the check silently
-            # never fires -- on precisely the impact/drop class of problem explicit dynamics
-            # exists for. Say so once rather than printing a table of dashes.
-            #
-            # NEGATIVE is the same case and must be caught by the same branch rather than falling
-            # between the two: a model that has returned more work at its prescribed degrees of
-            # freedom than was put in -- a rebounding or oscillating structure -- satisfies neither
-            # Wext > 0 nor Wext == 0, so gating on equality left the diagnostic disabled with
-            # nothing said at all. That is the failure this check exists to prevent.
-            if Wext <= 0.0 and not self._warnedAboutMissingExternalWork:
-                self._warnedAboutMissingExternalWork = True
-                self.journal.message(
-                    "The external work is {:}: only work done at prescribed degrees of freedom is "
-                    "accumulated, so this model is either not displacement-driven or is currently "
-                    "returning work at its prescribed degrees of freedom. The energy balance above "
-                    "is NOT usable, and in particular the energy-creation check -- the one that "
-                    "catches the stability contributions dt_crit does not see -- cannot fire. "
-                    "Watch the kinetic energy history directly instead.".format(
-                        "identically zero" if Wext == 0.0 else "negative ({:e})".format(Wext)
-                    ),
-                    self.identification,
-                    1,
-                )
-
-            if Wint == 0.0 and not self._warnedAboutMissingInternalEnergy:
-                self._warnedAboutMissingInternalEnergy = True
-                self.journal.message(
-                    "The internal energy is identically zero: no material in this model populates a "
-                    "strain energy, so the internal/kinetic split above is NOT usable as a "
-                    "quasi-static criterion. Integrate a reaction force against its prescribed "
-                    "displacement instead -- both are available as saveHistory field outputs.",
-                    self.identification,
-                    1,
-                )
+            self.reportEnergyBalance(psi, V, timeStep)
 
         return U_n, V, P
+
+    def reportEnergyBalance(self, psi: float, V: DofVector, timeStep: TimeStep):
+        """Report the energy balance of the model -- external work, kinetic and internal energy, and
+        what none of them accounts for -- and stop a run whose balance shows it has diverged.
+
+        Called on every ``output-frequency``-th increment.
+
+        Parameters
+        ----------
+        psi
+            The internal energy the elements computed here report.
+        V
+            The velocity vector.
+        timeStep
+            The increment.
+
+        Raises
+        ------
+        StepFailed
+            If the balance is no longer a finite number.
+        """
+
+        # Every term summed over the parts of the model, each counted once: an element energy
+        # by the part computing the element, a kinetic energy and a work by the part owning the
+        # degree of freedom.
+        #
+        # The kinetic energy only over the degrees of freedom where 0.5 * m * v**2 is an energy.
+        # Summing the whole vector also collected the first-order fields, whose "mass" is a
+        # viscosity and whose "velocity" is that field's rate -- no energy meaning, and orders of
+        # magnitude larger than the real term (eta ~ 1e-4 against a density ~ 1e-9): every
+        # balance then read as 100 % kinetic.
+        nonMechanicalIndices = [
+            self.theDofManager.idcsOfFieldsInDofVector[fieldName] for fieldName in self.nonMechanicalSecondOrderFields
+        ]
+        Wint, twiceWkin, Wext, *twiceNonMechanical = self.partition.sumAcrossParts(
+            [psi, self._ownedSumOfSquaredRates(self.ids_mechanicalEnergy, V), self._externalWorkOfThisPart]
+            + [self._ownedSumOfSquaredRates(indices, V) for indices in nonMechanicalIndices]
+        )
+        Wkin = 0.5 * twiceWkin
+
+        # Everything the model absorbed that no reported term accounts for: strain energy the
+        # material does not publish, plastic and viscous dissipation, and damage. It must stay
+        # non-negative -- a negative value means the kinetic energy has overtaken the work put
+        # in, i.e. energy is being created.
+        unaccounted = Wext - Wkin - Wint
+
+        def _share(value):
+            return "{:7.2f} %".format(value / Wext * 100) if Wext > 0.0 else "      -- "
+
+        energyRows = [
+            ["energy", "value", "share of W_ext"],
+            ["external work W_ext", "{:+.6e}".format(Wext), _share(Wext)],
+            ["kinetic", "{:+.6e}".format(Wkin), _share(Wkin)],
+            ["internal (strain)", "{:+.6e}".format(Wint), _share(Wint)],
+            ["unaccounted", "{:+.6e}".format(unaccounted), _share(unaccounted)],
+        ]
+
+        # One row per second-order field that is not in the balance, never summed with another
+        # or into the total. For a hyperbolic non-local field the inertia is a time squared, so
+        # 0.5 * m * rate**2 is a volume rather than an energy -- kept on its own line because
+        # it is the energy in the ringing the damping exists to remove.
+        for fieldName, twiceEnergy in zip(self.nonMechanicalSecondOrderFields, twiceNonMechanical):
+            energyRows.append([fieldName, "{:+.6e}".format(0.5 * twiceEnergy), "not an energy"])
+
+        self.journal.printTable(
+            energyRows,
+            self.identification,
+            2,
+        )
+
+        # KE <= W_ext is exact in the continuum, so a violation is energy from nowhere: for an
+        # explicit scheme, a time step above the true stability limit. It catches what dt_crit
+        # does not see -- the nonlocal field, contact penalty stiffness, a misjudged element
+        # shape. The NaN case is checked first because every ordering against a NaN is False,
+        # including the `Wext > 0.0` below, so a diverged run would pass silently and keep
+        # writing NaN. It fails the step rather than reporting it: nothing after it is
+        # meaningful, and an explicit scheme has no cutback to answer it with.
+        if not (np.isfinite(Wext) and np.isfinite(Wkin)):
+            raise StepFailed(
+                "THE SOLUTION HAS DIVERGED in increment {:}: the energy balance is no longer a "
+                "finite number (external work {:e}, kinetic {:e}), which means the state itself "
+                "is not. The time step is above the true stability limit -- and dt_crit does not "
+                "see all of it: it never sees contact penalty stiffness, and it sees the nonlocal "
+                "field only where that field carries a non-mechanical inertia, a first-order one "
+                "having a forward-Euler limit that nothing checks. Resume from a checkpoint with "
+                "a smaller courant-number.".format(timeStep.number, Wext, Wkin)
+            )
+
+        if Wext > 0.0 and Wkin > Wext * (1.0 + _ENERGY_CREATION_TOLERANCE):
+            self.journal.message(
+                "ENERGY IS BEING CREATED: the kinetic energy {:e} exceeds the external work "
+                "{:e} by {:.1f} %. That is impossible -- the unreported terms (strain energy, "
+                "dissipation, damage) can only add to the balance. The time step is above the "
+                "true stability limit, which dt_crit does not see in full: it ignores the "
+                "nonlocal field entirely and never sees contact penalty stiffness. Reduce "
+                "courant-number, or resume from a checkpoint with a smaller one.".format(
+                    Wkin, Wext, (Wkin / Wext - 1.0) * 100
+                ),
+                self.identification,
+                0,
+            )
+
+        # Said once, loudly, because a silent zero here reads as "no strain energy yet" rather
+        # than "this quantity is not being reported", and the ratio above is the usual way one
+        # decides whether an explicit run is quasi-static enough.
+        # The energy-creation check above is gated on Wext > 0, and _externalWork only
+        # accumulates at PRESCRIBED degrees of freedom. A model whose Dirichlet conditions are
+        # all fixed and whose loading comes from body forces, node forces, a distributed load
+        # or an initial velocity therefore has Wext identically zero, and the check silently
+        # never fires -- on precisely the impact/drop class of problem explicit dynamics
+        # exists for. Say so once rather than printing a table of dashes.
+        #
+        # NEGATIVE is the same case and must be caught by the same branch rather than falling
+        # between the two: a model that has returned more work at its prescribed degrees of
+        # freedom than was put in -- a rebounding or oscillating structure -- satisfies neither
+        # Wext > 0 nor Wext == 0, so gating on equality left the diagnostic disabled with
+        # nothing said at all. That is the failure this check exists to prevent.
+        if Wext <= 0.0 and not self._warnedAboutMissingExternalWork:
+            self._warnedAboutMissingExternalWork = True
+            self.journal.message(
+                "The external work is {:}: only work done at prescribed degrees of freedom is "
+                "accumulated, so this model is either not displacement-driven or is currently "
+                "returning work at its prescribed degrees of freedom. The energy balance above "
+                "is NOT usable, and in particular the energy-creation check -- the one that "
+                "catches the stability contributions dt_crit does not see -- cannot fire. "
+                "Watch the kinetic energy history directly instead.".format(
+                    "identically zero" if Wext == 0.0 else "negative ({:e})".format(Wext)
+                ),
+                self.identification,
+                1,
+            )
+
+        if Wint == 0.0 and not self._warnedAboutMissingInternalEnergy:
+            self._warnedAboutMissingInternalEnergy = True
+            self.journal.message(
+                "The internal energy is identically zero: no material in this model populates a "
+                "strain energy, so the internal/kinetic split above is NOT usable as a "
+                "quasi-static criterion. Integrate a reaction force against its prescribed "
+                "displacement instead -- both are available as saveHistory field outputs.",
+                self.identification,
+                1,
+            )
 
     def _ownedSumOfSquaredRates(self, indices: np.ndarray, V: DofVector) -> float:
         """:math:`\\sum m \\, v^2` over those of the given degrees of freedom this part owns; see
