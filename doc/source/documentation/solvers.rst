@@ -125,14 +125,13 @@ momentum and kinetic energy in that case.
 The part of the model computed in a process
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The increment of ``NED`` is written for a process that may compute only a part of the model. That
-is one object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`, which
-says which elements, constraints and degrees of freedom are computed here, and how a partial
-result -- a nodal force at a degree of freedom shared with another part, an energy -- becomes a
-result of the whole model. ``NED`` and ``NEDParallel`` compute the whole model, the
-:class:`~edelweissfe.solvers.base.modelpartition.WholeModel`, for which all of that is trivial;
-``NEDMPI`` computes a :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` in each process
-(:doc:`domaindecomposition`).
+The increment of ``NED`` runs over the elements, constraints and degrees of freedom of one small
+object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`: the elements
+computed here, the constraints evaluated here, the degrees of freedom integrated here, and which of
+those are owned here. ``NED`` and ``NEDParallel`` compute the whole model, whose degrees of freedom
+are ``slice(None)``; ``NEDMPI`` computes the subdomain a
+:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines in each process, and adds the
+exchange between the processes in overrides of its own (:doc:`domaindecomposition`).
 
 .. automodule:: edelweissfe.solvers.base.modelpartition
    :members:

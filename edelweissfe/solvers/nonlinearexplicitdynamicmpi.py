@@ -105,8 +105,9 @@ communication, each in an override of a method of ``NED``:
 **Limits of this prototype.** Every process holds the complete model -- every element, with its
 material and state, the sets, the degree-of-freedom layout -- so the memory per process does not
 shrink with the number of processes, and a refinement costs every process what it costs a serial
-run. Holding only the elements a process computes is planned. Constraints are evaluated whole, each by one process. An exception outside the element
-and constraint evaluation -- where it is agreed on by all processes -- aborts all of them.
+run. Holding only the elements a process computes is planned. Constraints are evaluated whole, each
+by one process. An exception outside the steps agreed on by all processes, and an interrupt of any
+process, abort all of them.
 
 Run with, for example::
 

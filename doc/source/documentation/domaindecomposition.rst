@@ -78,16 +78,43 @@ a group therefore integrates all of them.
 An increment
 ------------
 
-An increment is the central-difference increment of ``NED``, unchanged: ``NED`` already computes the
-part of the model its :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` describes,
-which is the whole model there, and ``NEDMPI`` only gives it the subdomain of the process instead
-(:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain`). Each process evaluates the kernels of
-its own elements. At an interior degree of freedom of its subdomain that is every contribution
-there is. At an interface degree of freedom the contributions of the neighbouring subdomains'
-elements are missing, and the neighbours exchange them -- the individual element contributions, not
-their partial sums (:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`).
-Every process then sums all contributions at the degree of freedom in the order of the elements in
-the model, which is the order a single process computing the whole model sums them in.
+An increment is the central-difference increment of ``NED``, unchanged. ``NED`` runs it over the
+elements, constraints and degrees of freedom of its
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` -- four members: the elements
+computed here, the constraints evaluated here, the degrees of freedom integrated here, and which of
+those are owned here. For ``NED`` that is the whole model, and the degrees of freedom are
+``slice(None)``, so that ``V[dofs]`` is the whole vector; for ``NEDMPI`` it is the subdomain of the
+process, as a :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines it, and the
+degrees of freedom are a sorted index array.
+
+Everything a process must exchange with the others, ``NEDMPI`` adds in overrides of a few methods of
+``NED``, each calling the ``NED`` method or the shared function it extends:
+
+==========================================  =========================================================
+``NEDMPI`` method                            adds
+==========================================  =========================================================
+``partitionModel``                          the subdomain, instead of the whole model
+``computeElements``                         the interface exchange of the element forces
+``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
+``assembleLoads``                           restricts the loads to the elements reaching the subdomain
+``assembleConstraintForces``                evaluates the own constraints, shares all forces
+``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
+``energyBalanceTerms``                      the sums over the subdomains
+``acceptIncrement``                         the synchronization and rebalancing of an output increment
+``updateConstraintConnectivity``            the synchronization before a contact search
+``updateConnectivityOf``                    runs a search on the constraint's process only
+``updateTopology``                          the agreement on a topology update
+``writeIncrementOutput``                    the agreement on writing the output
+``applyStepActionsAtStepEnd``               the synchronization at the end of a step
+==========================================  =========================================================
+
+Each process evaluates the kernels of its own elements. At an interior degree of freedom of its
+subdomain that is every contribution there is. At an interface degree of freedom the contributions
+of the neighbouring subdomains' elements are missing, and the neighbours exchange them -- the
+individual element contributions, not their partial sums
+(:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`). Every process
+then sums all contributions at the degree of freedom in the order of the elements in the model,
+which is the order a single process computing the whole model sums them in.
 
 Floating-point addition is not associative, so this order is what makes the result independent of
 the decomposition: the force at every degree of freedom is the same bits as without decomposition,
@@ -97,8 +124,10 @@ the constraint forces, each computed by one process, are shared with all and add
 A run on any number of processes is bit-identical to ``NED`` on the same input.
 
 The volume exchanged per increment is that of the interface and the constraints. The lumped mass
-and damping are assembled by every process from all elements, once per mesh, and the critical time
-step is the minimum over the subdomains.
+and damping are assembled once per mesh by each process from its own elements, completed at the
+interface like the forces and then shared from the owners, so that every process holds them, the
+same bits as without decomposition, at every degree of freedom of the model. The critical time step
+is the minimum over the subdomains.
 
 Where the whole model is read
 -----------------------------
@@ -123,10 +152,14 @@ footprint is decided by the owners and agreed on by all processes.
 Restoring a constraint's state restores it completely -- a contact constraint adopts the owner's
 search, and with it the nodes it couples -- so after a synchronization every process' copy of a
 constraint is its owner's. Between two synchronizations a copy keeps that footprint, with the mesh
-refreshes since applied to it as to the owner's; it names nodes of the model and so leaves the
-degree-of-freedom layout -- compared across processes after every build -- unchanged. A copy's
-degree-of-freedom indices may lag behind its footprint until the next rebuild; they are never read,
-since a constraint is evaluated, and its forces exchanged, with its owner's indices only.
+refreshes since applied to it as to the owner's. Its degree-of-freedom indices are never read, since
+a constraint is evaluated, and its forces exchanged, with its owner's indices only. The footprint
+itself is read in one place: a topology change activates fields on the nodes of every constraint
+copy. That is harmless because a topology update always follows a synchronization -- a topology
+check is due only on an output increment, the start of a step follows the end of the last one or a
+checkpoint -- and it is asserted rather than assumed: before every topology update the nodes and
+fields every constraint couples are compared across processes
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
 
 Adaptive refinement
 -------------------
@@ -134,9 +167,10 @@ Adaptive refinement
 Because every process holds the complete, synchronized model at a topology check, every process runs
 the same refinement -- the same marker on the same field output, the same state transfer from the
 same parent states -- and arrives at the same refined model. That is verified, not assumed: after
-every build of the equation system, a fingerprint of the element numbers, the node order of every
-field and the size of the system is compared across all processes, and the run stops if any two
-differ. The refined model is then partitioned afresh. Nothing migrates, because every process already
+every build of the equation system, a fingerprint of the element numbers, the degrees of freedom of
+every element (its connectivity in the numbering of the layout), the node order of every field, the
+node coordinates and the size of the system is compared across all processes, and the run stops if
+any two differ. The refined model is then partitioned afresh. Nothing migrates, because every process already
 holds every element.
 
 Load balancing
@@ -170,11 +204,46 @@ Failures
 --------
 
 A failure while evaluating the elements or the constraints -- a material that cannot integrate at
-the stable step, above all --, in a constraint's connectivity search, or in finalizing the output
-(a conditional stop, too) is agreed on by all processes before any of them raises
-(:meth:`~edelweissfe.solvers.base.modelpartition.ModelPartition.agreedOnByAllParts`), and every
-process ends the step the same way. A failure anywhere else aborts all processes: the others would
-otherwise wait forever for the one that stopped.
+the stable step, above all --, in a constraint's connectivity search, in a topology update (the
+marker, the refinement, the mesh refresh), or in finalizing the output (a conditional stop, too) is
+agreed on by all processes before any of them raises
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`), and every process
+ends the step the same way; a cutback requested anywhere is raised everywhere, with the smallest
+size requested. A failure anywhere else aborts all processes, and so does an interrupt (``Ctrl+C``)
+of any one of them: the others would otherwise wait forever for the one that stopped
+(:mod:`~edelweissfe.domaindecomposition.mpienvironment`).
+
+A model with an element that exposes no state (``getStateVars``) is refused on more than one
+process: its state could not be sent to the process writing the output and the checkpoints, nor to
+the one computing it after a repartition.
+
+Verifying bit-identity yourself
+-------------------------------
+
+The decks in ``testfiles/mpi`` run the same models as their serial counterparts, with
+``solver=NEDMPI``. Run each set once serially with ``NED`` and once on several processes, let the
+test runner write the final solution of every deck (``--create`` writes ``U.ref`` with 18
+significant digits, which reproduces a double exactly, and only rank 0 writes), and compare the
+files byte for byte:
+
+.. code-block:: console
+
+    cp -r testfiles/mpi serial && cp -r testfiles/mpi decomposed
+    sed -i 's/solver=NEDMPI/solver=NED/' serial/*/*/test.inp
+    export PYTHON_GIL=0 OMP_NUM_THREADS=1
+    run_tests_edelweissfe serial/edelweiss-only --create
+    mpirun -n 3 --bind-to none -x PYTHON_GIL -x OMP_NUM_THREADS \
+        run_tests_edelweissfe decomposed/edelweiss-only --create
+    for reference in serial/*/*/U.ref; do
+        cmp "$reference" "decomposed/${reference#serial/}" || echo "DIFFERS: $reference"
+    done
+
+Nothing printed by the loop means every deck is bit-identical; ``marmot`` in place of
+``edelweiss-only`` runs the decks that need Marmot (some need its private materials). Compare against
+a serial run on the same machine rather than against the committed ``U.ref`` files: those were
+written on another one, and a serial run differs from them in the last digits wherever the two
+machines' math libraries do. ``run_tests_edelweissfe testfiles/mpi/edelweiss-only`` without
+``--create`` compares against the committed files within an absolute tolerance of 1e-6.
 
 Limitations
 -----------
