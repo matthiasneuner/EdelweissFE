@@ -126,6 +126,7 @@ implicit solver reconstructs everything it needs from the displacement, a centra
 does not.
 """
 
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter
@@ -981,6 +982,7 @@ class NED(NonlinearSolverBase):
             # there is no free equilibrium there, so their force P is set to zero,
             # and their velocity is prescribed as (prescribed increment) / (time step).
             prescribedVelocities = []
+            workAtPrescribedDofs = []
             for dirichlet in dirichlets:
                 prescribedIncrement = dirichlet.getPrescribedIncrement(timeStep).flatten()
 
@@ -999,18 +1001,19 @@ class NED(NonlinearSolverBase):
                 #
                 #
                 # Counted where the degree of freedom is owned -- here, in a model computed whole --
-                # so that a degree of freedom shared by two parts of a model is not counted twice.
+                # so that a degree of freedom shared by two parts of a model is not counted twice;
+                # summed once for all Dirichlet conditions, below.
                 if carriesKineticEnergy(dirichlet.field):
                     owned = self.partition.ownedDofMask[dirichlet.constrainedDofIndices]
-                    self._externalWork -= float(
-                        np.dot(P[dirichlet.constrainedDofIndices][owned], prescribedIncrement[owned])
-                    )
+                    workAtPrescribedDofs.append(P[dirichlet.constrainedDofIndices][owned] * prescribedIncrement[owned])
 
                 prescribedVelocity = prescribedIncrement / timeStep.timeIncrement
 
                 P[dirichlet.constrainedDofIndices] = 0.0
                 V[dirichlet.constrainedDofIndices] = prescribedVelocity
                 prescribedVelocities.append((dirichlet.constrainedDofIndices, prescribedVelocity))
+
+            self._externalWork -= self.sumOfWorkAtPrescribedDofs(workAtPrescribedDofs)
 
             # Second-order DOFs: central difference with mass-proportional damping,
             # V = ((1 - h) V + Minv P dt) / (1 + h), h = alpha dt / 2: the rate alpha = C/M enters
@@ -1209,6 +1212,31 @@ class NED(NonlinearSolverBase):
                 self.identification,
                 1,
             )
+
+    def sumOfWorkAtPrescribedDofs(self, workAtPrescribedDofs: list[np.ndarray]) -> float:
+        """The work done at the prescribed degrees of freedom in one increment: the sum of the
+        products of reaction force and prescribed increment, one per degree of freedom owned here.
+
+        Summed with :func:`math.fsum`, which rounds the exact sum once: the result does not depend on
+        the order of the products, nor on how they are split into parts. That makes the external work
+        the same, bit for bit, whether the model is computed whole or split over any number of
+        processes (each contributing the products at the degrees of freedom it owns, see
+        :class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) -- a plain running sum
+        would depend on both, in its last bits.
+
+        Parameters
+        ----------
+        workAtPrescribedDofs
+            The products, per Dirichlet condition carrying a kinetic energy, at the degrees of freedom
+            owned here.
+
+        Returns
+        -------
+        float
+            The work of the increment.
+        """
+
+        return math.fsum(product for products in workAtPrescribedDofs for product in products.tolist())
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of the energy balance: the internal energy, the kinetic energy, the external work,

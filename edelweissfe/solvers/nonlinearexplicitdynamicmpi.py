@@ -78,10 +78,11 @@ order it is formed without decomposition: the element contributions at a node in
 loads and the constraint forces after them in deck order. A run on any number of processes is
 therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same input -- through
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
-depends on measured timings, changes the speed of a run and never its result. Only the sums of the
-energy table -- external work, kinetic and internal energy -- are formed per subdomain and then
-added, and may differ from a serial run's in their last digits; they enter nothing but the table,
-and the external work a checkpoint records.
+depends on measured timings, changes the speed of a run and never its result. The external work is
+summed exactly (:meth:`sumOfWorkAtPrescribedDofs`), so it, too, and the checkpoints recording it,
+are bit-identical. Only the kinetic and internal energy of the energy table are formed per
+subdomain and then added, and may differ from a serial run's in their last digits; they enter
+nothing but the table.
 
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and on an output
@@ -129,6 +130,7 @@ with ``*solver, solver=NEDMPI, name=...`` in the deck. ``OMP_NUM_THREADS`` sets 
 process' element loop, as for ``NEDParallel``.
 """
 
+import math
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -232,10 +234,6 @@ class NEDMPI(NEDParallel):
         self._elementCosts: np.ndarray | None = None
         #: The increments computed with the current increment plan.
         self._nMeasuredIncrements = 0
-        #: The external work of the whole model: :attr:`NED._externalWork` -- here, the work at the
-        #: degrees of freedom this process owns -- summed over all processes at the last
-        #: synchronization. What a checkpoint records.
-        self._externalWorkOfModel = 0.0
         #: The increments of the step done at the last topology change (or 0, at the start of the
         #: step), for the horizon a migration after a topology change is weighed over.
         self._incrementsDoneAtLastTopologyChange = 0
@@ -268,40 +266,8 @@ class NEDMPI(NEDParallel):
             self.identification,
             0,
         )
-        self._externalWorkOfModel = 0.0
         self._incrementsDoneAtLastTopologyChange = 0
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
-
-    # --- Restart ------------------------------------------------------------------------------------
-
-    def getRestartData(self) -> dict[str, np.ndarray]:
-        """The state of :meth:`NED.getRestartData`, with the external work of the whole model, as
-        summed at the synchronization the checkpoint is written after.
-
-        Returns
-        -------
-        dict[str, numpy.ndarray]
-            The state.
-        """
-
-        data = super().getRestartData()
-        data["_externalWork"] = np.array(self._externalWorkOfModel, dtype=float)
-        return data
-
-    def setRestartData(self, data: dict[str, np.ndarray]):
-        """Restore the state :meth:`getRestartData` returned. The external work of the whole model
-        is carried on by rank 0, so that the sum over all processes stays the total.
-
-        Parameters
-        ----------
-        data
-            The state.
-        """
-
-        super().setRestartData(data)
-        self._externalWorkOfModel = self._externalWork
-        if self.subdomain.rank != 0:
-            self._externalWork = 0.0
 
     # --- The subdomain ------------------------------------------------------------------------------
 
@@ -551,12 +517,37 @@ class NEDMPI(NEDParallel):
 
         return self.subdomain.minAcrossParts(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
-    def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
-        """The terms of :meth:`NED.energyBalanceTerms`, each summed over all processes in rank order.
-        Collective.
+    def sumOfWorkAtPrescribedDofs(self, workAtPrescribedDofs: list[np.ndarray]) -> float:
+        """The work done at the prescribed degrees of freedom of the whole model in one increment, the
+        same in every process: the products at the degrees of freedom each process owns are gathered
+        to every process and summed exactly (:func:`math.fsum`), as :meth:`NED.sumOfWorkAtPrescribedDofs`
+        sums them in a serial run -- so the external work is the same, bit for bit, on any number of
+        processes, and every process holds that of the whole model. Collective.
 
-        These sums are formed per subdomain and then added, so they may differ from a serial run's
-        in their last digits; they enter nothing but the energy table.
+        Parameters
+        ----------
+        workAtPrescribedDofs
+            The products, per Dirichlet condition carrying a kinetic energy, at the degrees of freedom
+            owned here.
+
+        Returns
+        -------
+        float
+            The work of the increment, of the whole model.
+        """
+
+        ownedHere = [product for products in workAtPrescribedDofs for product in products.tolist()]
+        return math.fsum(
+            product for products in self.subdomain.communicator.allgather(ownedHere) for product in products
+        )
+
+    def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
+        """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.
+
+        The internal and kinetic energies are formed per subdomain and then added in rank order, so
+        they may differ from a serial run's in their last digits; they enter nothing but the energy
+        table. The external work is that of the whole model already
+        (:meth:`sumOfWorkAtPrescribedDofs`).
 
         Parameters
         ----------
@@ -572,7 +563,7 @@ class NEDMPI(NEDParallel):
         """
 
         Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
-        Wint, Wkin, Wext, *nonMechanical = self.subdomain.sumAcrossParts([Wint, Wkin, Wext] + nonMechanical)
+        Wint, Wkin, *nonMechanical = self.subdomain.sumAcrossParts([Wint, Wkin] + nonMechanical)
         return Wint, Wkin, Wext, nonMechanical
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
@@ -797,8 +788,7 @@ class NEDMPI(NEDParallel):
         timeStep
             The last completed time step, or None before the first one.
         includeStates
-            Whether the element and constraint states, and the external work, are synchronized as
-            well, or only the vectors.
+            Whether the element and constraint states are synchronized as well, or only the vectors.
         """
 
         U, V, P = self._U, self._V, self._P
@@ -808,7 +798,6 @@ class NEDMPI(NEDParallel):
 
         if includeStates:
             self.subdomain.synchronizeStates(includeElements=True)
-            (self._externalWorkOfModel,) = self.subdomain.sumAcrossParts([self._externalWork])
 
         # A rigid body's surface follows its reference node, which only some processes integrated:
         # it was moved in acceptIncrement from what this process integrates, and is moved again now

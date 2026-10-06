@@ -432,20 +432,21 @@ Output and restart
 
 Only rank 0 creates output managers. A restart checkpoint is the last output of an output
 increment, written after the synchronization of that output, so rank 0's copy of the model holds
-every element and every constraint as the process computing it left it, and the external work of
-the whole model. A distributed model gathers the element states to rank 0 for it instead (see
-`Where the whole model is read`_); the file is the same, bit for bit, as a serial run's -- with one
-exception: the solver's external work, an energy diagnostic, is the sum of the work each process
-accumulated at the prescribed degrees of freedom it owns, so where a partition splits them, it may
-differ from a serial run's single running sum in the last bit (seen at 2 processes after a
-refinement and a migration). The solution does not depend on it. It is an ordinary checkpoint of the whole model, so a run can be resumed by
+every element and every constraint as the process computing it left it. A distributed model
+gathers the element states to rank 0 for it instead (see `Where the whole model is read`_); the
+file is the same, bit for bit, as a serial run's. That includes the solver's external work: the
+work at the prescribed degrees of freedom of an increment is gathered from their owners and summed
+exactly (:func:`math.fsum`, which does not depend on the order of the terms nor on how they are
+split among processes), so every process accumulates that of the whole model, as a serial run does
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.sumOfWorkAtPrescribedDofs`). It is an
+ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the
 uninterrupted one does (see :doc:`restart`).
 
 On a resume every process restores the whole model from the checkpoint -- every constraint adopting
-the checkpointed state of its owner -- and so starts from the same model; rank 0 continues with the
-external work of the whole model, the others with none of it. A distributed process restores the
+the checkpointed state of its owner -- and so starts from the same model, and with the external work
+of the whole model. A distributed process restores the
 elements it created and skips the others
 (:meth:`~edelweissfe.models.femodel.FEModel.readRestart`); a checkpoint written by a serial run, by
 the whole model on every process, or by a distributed run can be resumed in either way.
