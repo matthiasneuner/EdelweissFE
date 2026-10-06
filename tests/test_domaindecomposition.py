@@ -430,8 +430,15 @@ def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_who
     # The elements of the left edge, 1 and 2, are computed by the other process: none is held here.
     assert len(model.elementSets["gen_left"]) == 0
     fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["uLeft"]
-    # The nodes of the two elements, not every node of the model.
+    # The nodes of the two elements, read from the mesh -- not every node of the model, and not the
+    # nodes of the element objects held here, of which there are none.
     assert fieldOutput.associatedSet is model.elementSets["gen_left"]
+    nodesOfTheSet = {
+        label for number in model.mesh.elementSets["gen_left"] for label in model.mesh.elements[number].nodeLabels
+    }
+    assert len(nodesOfTheSet) == 6
+    fieldOutput.updateResults(model)
+    assert fieldOutput.getLastResult().shape == (len(nodesOfTheSet), 2)
 
 
 def test_a_repartition_keeps_elements_where_they_were():
