@@ -54,13 +54,15 @@ _REPO_ROOT = _Path(__file__).resolve().parents[1]
 
 class _StubElement:
     """A bare element stand-in: the allocator, the window and the fingerprint only look at
-    ``elNumber``, ``elType`` and ``nodes``; describing it in the mesh adds ``fields`` and
-    ``ensightType``."""
+    ``elNumber``, ``elType`` and ``nodes``; describing it in the mesh adds ``fields``,
+    ``ensightType``, ``nDof`` and ``hasKernels``."""
 
     elType = "STUB"
     nodes = ()
     fields = ()
     ensightType = "stub"
+    nDof = 0
+    hasKernels = False
 
     def __init__(self, elNumber: int):
         self.elNumber = elNumber
