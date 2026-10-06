@@ -49,6 +49,7 @@ from edelweissfe.numerics.parallelizationutilities import (
     isFreeThreadingSupported,
 )
 from edelweissfe.sets.elementset import ElementSet
+from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -241,13 +242,31 @@ class FEModel:
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh, nodes=self.nodes)
+            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh)
         else:
             if list(elementSet) != created:
                 elementSet.replaceMembers(created)
             elementSet.mesh = self.mesh
-            elementSet.modelNodes = self.nodes
         return elementSet
+
+    def nodesOfElementSetOfMesh(self, name: str) -> NodeSet:
+        """The nodes of the mesh's element set ``name``, without duplicates, in the order its elements
+        list them -- the nodes of the whole set, whichever of its elements were created here.
+
+        Parameters
+        ----------
+        name
+            The name of the element set in :attr:`mesh`.
+
+        Returns
+        -------
+        NodeSet
+            The nodes, named like the set.
+        """
+
+        records = self.mesh.elements
+        labels = dict.fromkeys(label for number in self.mesh.elementSets[name] for label in records[number].nodeLabels)
+        return NodeSet(name, [self.nodes[label] for label in labels])
 
     def _resolveSurfaceOfMesh(self, name: str):
         """Make ``surfaces[name]`` the surface of the mesh with the given name, on the elements created

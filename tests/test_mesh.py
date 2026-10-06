@@ -210,9 +210,11 @@ def test_a_predicate_that_skips_elements_keeps_the_dof_layout(tmp_path):
 
     # the nodes of a set are those of the whole set, from the mesh, whatever was created here
     for name in ("picked", "gen_top", "all"):
-        assert [n.label for n in part.elementSets[name].extractNodeSet()] == [
+        assert [n.label for n in part.nodesOfElementSetOfMesh(name)] == [
             n.label for n in whole.elementSets[name].extractNodeSet()
         ]
+    with pytest.raises(TopologyError, match="the nodes of the element set needs the whole element set picked"):
+        part.elementSets["picked"].extractNodeSet()
 
     # every whole-set reader fails loudly on a partial set, and on a partial model
     with pytest.raises(TopologyError, match="the test needs the whole element set picked"):

@@ -133,8 +133,9 @@ make a distributed model possible:
 * **An element set is the part of the set created here.** Each
   :class:`~edelweissfe.sets.elementset.ElementSet` of the model holds the created elements of its set
   in the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
-  The nodes of a set (``extractNodeSet``) are taken from the mesh where only part of it was created,
-  and so are the same in every process.
+  The nodes of the whole set come from the mesh
+  (:meth:`~edelweissfe.models.femodel.FEModel.nodesOfElementSetOfMesh`), and so are the same in
+  every process; ``extractNodeSet`` of a partial set refuses.
 * **Whole-model readers gather, or refuse.** A reader that needs every element of a set or of the
   model either goes through the gather path of the element distribution (see `Where the whole model is
   read`_), or says that it needs the whole set
@@ -258,8 +259,9 @@ element field output over a set         ``resultsOfWholeSet``: each process coll
 (``>>perElement``)                      elements of the set it computes, and they are gathered to every
                                         process, by mesh element number, in set order -- so a field
                                         output is the same in every process, as without decomposition
-node field output over an element set   the nodes of the whole set, from the mesh; the node fields are
-(``>>perNode, elSet=``)                 global-length
+node field output over an element set   the nodes of the whole set, from the mesh
+(``>>perNode, elSet=``)                 (``nodesOfElementSetOfMesh``); the node fields are
+                                        global-length
 Ensight                                 rank 0 draws the geometry of a partial set from the mesh
                                         (``visualizedElementsOf``) and writes the gathered results
 monitor, conditional stop               read field outputs
