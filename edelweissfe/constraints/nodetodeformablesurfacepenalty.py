@@ -327,6 +327,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     whichever facet type populates the given surface element sets.
     """
 
+    #: It reads the contact facets of both surfaces and the nodes, which every process holds whole;
+    #: see ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDeformableSurfacePenaltySchema
 
@@ -457,8 +461,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.elementSets[configuration.slaveSurface],
-            model.elementSets[configuration.masterSurface],
+            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
+            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
             journal,
             configuration=configuration,
         )
@@ -660,7 +664,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         oldTangential = dict(zip(self.slaveNodes, self._tangentialForceConverged))
         oldLambda = dict(zip(self.slaveNodes, self._lambdaN))
 
-        self.slaveFacetElements = list(model.elementSets[self._slaveSurfaceSetName])
+        self.slaveFacetElements = list(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
         tributaryAreaOfSlaveNode = {}
         for slaveFacet in self.slaveFacetElements:
             for node, share in zip(slaveFacet.nodes, slaveFacet.nodalAreaShares):
@@ -685,7 +689,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """Rebuild the master facet list/reference coordinates from the regenerated facet set. Any
         per-slave facet assignment is invalidated, since it indexes into this list."""
 
-        self.facetElements = list(model.elementSets[self._masterSurfaceSetName])
+        self.facetElements = list(model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name))
         self._referenceCoordsFacets = [np.array([n.coordinates for n in el.nodes]) for el in self.facetElements]
         self._validateMasterWeightTransforms()
 

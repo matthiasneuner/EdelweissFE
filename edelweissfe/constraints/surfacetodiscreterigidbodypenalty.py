@@ -196,6 +196,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         The options this constraint accepts, see :class:`SurfaceToDiscreteRigidBodyPenaltySchema`.
     """
 
+    #: It reads the contact facets of its surface, the nodes and the rigid body, which every process
+    #: holds whole; see ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = SurfaceToDiscreteRigidBodyPenaltySchema
 
@@ -262,7 +266,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.elementSets[configuration.slaveSurface],
+            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
             model.rigidBodies[configuration.rigidBody],
             journal,
             configuration=configuration,
@@ -449,7 +453,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not self.slave.isTouchedBy(model, change):
             return False
 
-        self._buildFromSlaveSurface(model.elementSets[self._slaveSurfaceSetName])
+        self._buildFromSlaveSurface(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
         self._searchClosestRigidTriangles(model)
         return True
 

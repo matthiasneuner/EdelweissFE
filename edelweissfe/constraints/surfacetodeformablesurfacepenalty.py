@@ -230,6 +230,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         The options this constraint accepts, see :class:`SurfaceToDeformableSurfacePenaltySchema`.
     """
 
+    #: It reads the contact facets of both surfaces and the nodes, which every process holds whole;
+    #: see ConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = SurfaceToDeformableSurfacePenaltySchema
 
@@ -355,8 +359,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.elementSets[configuration.slaveSurface],
-            model.elementSets[configuration.masterSurface],
+            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
+            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
             journal,
             configuration=configuration,
         )
@@ -531,8 +535,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             return False
 
         self._buildFromSurfaces(
-            model.elementSets[self._slaveSurfaceSetName],
-            model.elementSets[self._masterSurfaceSetName],
+            model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name),
+            model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name),
         )
         return True
 

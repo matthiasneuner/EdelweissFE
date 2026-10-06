@@ -48,7 +48,7 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
-from edelweissfe.sets.elementset import ElementSetOfMesh
+from edelweissfe.sets.elementset import ElementSet, ElementSetOfMesh
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -345,6 +345,34 @@ class FEModel:
                     reader, len(notCreatedHere)
                 )
             )
+
+    def wholeElementSet(self, name: str, reader: str) -> ElementSet:
+        """The element set of the given name, which ``reader`` needs whole -- every element of it in
+        this process, e.g. the contact facets of a surface, which every process makes
+        (:meth:`createElement`).
+
+        Parameters
+        ----------
+        name
+            The name of the element set.
+        reader
+            Who reads the set, for the error message.
+
+        Returns
+        -------
+        ElementSet
+            The element set.
+
+        Raises
+        ------
+        TopologyError
+            If only part of the set was created in this process
+            (:meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete`).
+        """
+
+        elementSet = self.elementSets[name]
+        elementSet.requireComplete(reader)
+        return elementSet
 
     def _checkEveryElementIsCreatedOrDeclined(self):
         """Raise unless every element of the mesh was either created here or declined by

@@ -51,6 +51,15 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: Undeclared, it cannot be checkpointed.
     checkpointedState: dict | None = None
 
+    #: Why this constraint needs every element of the model in every process of a domain-decomposed
+    #: run (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`),
+    #: or None for a constraint that reads only what every process holds -- the mesh, the nodes and
+    #: their fields, contact facets and rigid bodies -- and no element object of the solid mesh. Not
+    #: None unless a constraint says so.
+    wholeModelReason: str | None = (
+        "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
+    )
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None

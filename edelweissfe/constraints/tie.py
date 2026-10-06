@@ -185,6 +185,10 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
     facets) and 2D (Line2 facets).
     """
 
+    #: It reads the contact facets of both surfaces and the nodes, which every process holds whole;
+    #: see MultiPointConstraintBase.wholeModelReason.
+    wholeModelReason = None
+
     #: Schema declared for the registry, per OptionSchemaProvider.
     schema = TieSchema
 
@@ -268,8 +272,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         return cls(
             name,
             model,
-            model.elementSets[configuration.slaveSurface],
-            model.elementSets[configuration.masterSurface],
+            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
+            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
             journal,
             configuration=configuration,
         )
@@ -455,8 +459,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         # The facets themselves were already regenerated, in the topology-update phase, by the
         # implicit surfaceFacets modifier (see TopologyPipeline.ensureSurfaceFacetModifier). This constraint
         # is a pure reader: it re-projects onto whatever now tiles the surface.
-        slaveFacetElements = list(model.elementSets[self._slaveSurfaceSetName])
-        masterFacetElements = list(model.elementSets[self._masterSurfaceSetName])
+        slaveFacetElements = list(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
+        masterFacetElements = list(model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name))
         self.tiedRecords, self.untiedSlaveNodes = self._buildTiedRecords(
             slaveFacetElements, masterFacetElements, adjust=False
         )

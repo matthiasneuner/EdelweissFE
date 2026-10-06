@@ -71,6 +71,12 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
     #: to False, and a dropped record is then an error, not a log line.
     mayYieldSlaveToEarlierClaim: bool = True
 
+    #: Why this constraint needs every element of the model in every process of a domain-decomposed
+    #: run; see :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`.
+    wholeModelReason: str | None = (
+        "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
+    )
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None
