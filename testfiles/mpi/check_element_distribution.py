@@ -12,9 +12,11 @@ copy) and checks, from the model each process ends with, that it ran in the mode
 * whole model: every process created every element.
 
 The test cases expected to **migrate** -- to rebalance a distributed model, moving elements between
-processes -- are checked further: some element must end on another process than the first partition
-gave it, and no process may still hold an object of an element it dropped (the element objects alive
-in the process, counted by the garbage collector, are exactly those of the model).
+processes -- are checked further: some element must have been received by another process than the
+one computing it before (counted by the distribution over the run, so that it also counts the
+children of a refinement, which no first partition knew), and no process may still hold an object of
+an element it dropped (the element objects alive in the process, counted by the garbage collector,
+are exactly those of the model).
 
 Run it under the MPI launcher, from anywhere::
 
@@ -32,7 +34,6 @@ import sys
 import tempfile
 
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
-from edelweissfe.domaindecomposition.partitioning import partitionElementsOfMesh
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.utils.inputfileparser import parseInputFile
 
@@ -47,6 +48,9 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NED",
     "marmot/NEDInitialStressPressure",
     "marmot/NEDLiveAMR",
+    "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRestartDistributed1Write",
+    "marmot/NEDLiveAMRRestartDistributed2Resume",
     "marmot/NEDLiveAMRStepEndsOffInterval",
     "marmot/NEDParallel",
     "marmot/NEDRestartDistributed1Write",
@@ -56,6 +60,8 @@ EXPECTED_DISTRIBUTED = {
 
 #: The test cases expected to move elements between processes (a distributed model rebalanced).
 EXPECTED_MIGRATING = {
+    "marmot/NEDLiveAMRRebalanceDistributed",
+    "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDRebalanceDistributed",
 }
 
@@ -75,11 +81,10 @@ def modeOf(model, communicator) -> str:
 
 
 def migrationOf(model, communicator) -> str:
-    """How many elements of a distributed model ended on another process than the first partition
-    gave them, and whether every process holds exactly the element objects of its model."""
+    """How many elements of a distributed model moved between the processes over the run, and whether
+    every process holds exactly the element objects of its model."""
 
-    firstOwners = partitionElementsOfMesh(model.mesh, communicator.Get_size(), model.domainSize, communicator)
-    moved = sum(firstOwners[number] != owner for number, owner in model.elementDistribution.owners.items())
+    moved = sum(communicator.allgather(model.elementDistribution.receivedElements))
 
     gc.collect()
     elementClasses = {type(element) for element in model.elements.values()}

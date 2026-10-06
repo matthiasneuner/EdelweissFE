@@ -1,0 +1,50 @@
+** Restart of a distributed model refined live, resumed: reads the checkpoint
+** NEDLiveAMRRestartDistributed1Write wrote at increment 60 and continues to increment 120. The replay of
+** the recorded refinements creates the children where the replayed partition computes their parents --
+** not where the written run had moved them -- and every process restores the states of the elements it
+** created, by number, from the one checkpoint. The result is that of an uninterrupted run.
+
+*material, name=LinearElastic, id=linearelastic
+**E      nu   density
+20000.0, 0.2, 2.0e-9
+
+*section, name=section1, material=linearelastic, type=solid
+gen_all
+
+*job, name=nedAmrRestartJob, domain=3d
+
+** courant-number=0.1: see NEDLiveAMR.
+*solver, solver=NEDMPI, name=theSolver
+courant-number=0.1
+output-frequency=20
+topology-check-frequency=20
+load-balance-costs=elementNumber
+
+*modelGenerator, generator=boxGen, name=gen
+nX      =6
+nY      =1
+nZ      =1
+lX      =60
+lY      =10
+lZ      =10
+elType  =C3D20R
+
+*modelModifier, type=hAdaptivity, name=amrLive
+>>marker, type=fieldOutput, fieldOutput=sxx, operator='>=', threshold=0.15
+refineElSet=gen_all
+maxLevel=1
+
+*fieldOutput
+>>perElement, elSet=gen_all, name=sxx, result=stress, quadraturePoint=0:8, f(x)='np.max(np.abs(x[:,:,0]),axis=1)'
+>>perNode, name=Ux, nSet=gen_right, field=displacement, result=U, f(x)='np.mean(x[:,0])', saveHistory=True
+>>perNode, name=RF, nSet=gen_left, field=displacement, result=P, f(x)='np.sum(x[:,0])', saveHistory=True
+
+*output, type=monitor, name=monitor
+fieldOutput=RF
+
+*restart, readFrom=../NEDLiveAMRRestartDistributed1Write/restart_0.h5
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-14, maxNumInc=120, maxIter=25, stepLength=1e-3
+>>dirichlet, name=fixLeft,  nSet=gen_left,  field=displacement, 1=0, 2=0, 3=0
+>>dirichlet, name=pullRight, nSet=gen_right, field=displacement, 1=0.05
