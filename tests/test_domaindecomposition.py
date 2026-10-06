@@ -414,3 +414,36 @@ def test_an_element_moves_with_its_state_and_its_section(tmp_path):
         7,
         8,
     ] + list(range(11, 17))
+
+
+def test_a_random_thickness_is_the_same_wherever_and_whenever_an_element_is_created(tmp_path):
+    pytest.importorskip("gstools")
+    from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK.replace(
+            "*section, name=section1, thickness=1.0, material=linearelastic, type=plane",
+            "*section, name=section1, thickness=1.0, material=linearelastic, type=planeRandomThickness, "
+            "variance=0.1, lengthScale=2.0, seed=7",
+        )
+    )
+    model = fillFEModelFromInputFile(FEModel(2), parseInputFile(str(deck)), Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    thicknesses = {number: element._t for number, element in model.elements.items()}
+    assert len(set(thicknesses.values())) == len(thicknesses)
+
+    # Dropped and created again, as when it moves to another process, alone and in another order.
+    with model.topology.changes():
+        for number in (12, 3):
+            model.dropElementOfMesh(number)
+        model.resolveSetsAndSurfacesOfMesh()
+        created = {number: model.createElementOfMesh(number) for number in (12, 3)}
+    model.putElementsInMeshOrder()
+    model.resolveSetsAndSurfacesOfMesh()
+    model.assignSectionsAndPropertiesToElements(created)
+
+    assert {number: element._t for number, element in model.elements.items()} == thicknesses

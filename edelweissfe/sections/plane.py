@@ -110,6 +110,22 @@ class Section(SectionBase):
         )
         self.thickness = configuration.thickness
 
+    def thicknessOf(self, element) -> float:
+        """The thickness of an element of this section: the same for all of them.
+
+        Parameters
+        ----------
+        element
+            The element.
+
+        Returns
+        -------
+        float
+            The thickness.
+        """
+
+        return self.thickness
+
     def assignSectionPropertiesToElement(self, element, **kwargs):
         material = kwargs.get("material", self.material)
 
@@ -117,9 +133,7 @@ class Section(SectionBase):
         if nSpatialDimensions != 2:
             raise Exception(f"Plane section is incompatible with {nSpatialDimensions}-dimensional finite elements.")
 
-        thickness = self.thickness
-
-        elProperties = np.array([thickness], dtype=float)
+        elProperties = np.array([self.thicknessOf(element)], dtype=float)
 
         element.setProperties(elProperties)
         element.initializeElement()
