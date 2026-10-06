@@ -26,6 +26,8 @@
 #  ---------------------------------------------------------------------
 # Created on Sat Jan  21 12:18:10 2017
 
+import math
+
 from edelweissfe.journal.journal import Journal
 from edelweissfe.timesteppers.base.timestepperbase import TimeStepperBase
 from edelweissfe.timesteppers.timestep import TimeStep
@@ -111,6 +113,10 @@ class AdaptiveTimeStepper(TimeStepperBase):
 
     def numberOfIncrementsDone(self) -> int:
         return self.incrementCounter
+
+    def incrementsLeftEstimate(self) -> int:
+        untilStepEnd = math.ceil(max(1.0 - self.finishedStepProgress, 0.0) / max(self.increment, 1e-300))
+        return int(max(0, min(self.maxNumberIncrements - self.incrementCounter, untilStepEnd)))
 
     def proposeTimeStep(self) -> TimeStep:
         if self.incrementCounter > self.maxNumberIncrements:

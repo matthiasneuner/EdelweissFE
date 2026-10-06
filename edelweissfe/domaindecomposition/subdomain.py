@@ -43,6 +43,7 @@ bit-identical to one in a single process.
 
 import hashlib
 from contextlib import contextmanager
+from time import perf_counter
 
 import numpy as np
 from mpi4py import MPI
@@ -190,6 +191,12 @@ class Subdomain:
         self.loadBalanceTolerance = loadBalanceTolerance
         #: What the last repartition cost, in seconds, in the slowest process; None before the first.
         self._lastRepartitionCost = None
+        #: What moving the elements of the last migration cost alone, in seconds, in the slowest
+        #: process -- without building the equation system again; None before the first.
+        self._lastMigrationCost = None
+        #: The mean measured kernel time of one element per increment, at the last rebalancing check
+        #: that measured times; None before.
+        self._meanElementCost = None
 
         #: The rank of every element and of every constraint, and the element keys the partition was
         #: made for.
@@ -1032,6 +1039,9 @@ class Subdomain:
 
         busyTimes = np.array(self.communicator.allgather(float(costs.sum())))
         imbalance = busyTimes.max() / max(busyTimes.mean(), 1e-300)
+        if incrementsUntilNextCheck is not None:
+            nElements = self.communicator.allreduce(costs.shape[0])
+            self._meanElementCost = float(busyTimes.sum()) / max(nElements, 1) / nIncrements
         if imbalance <= 1.0 + tolerance:
             self.journal.message(
                 "Load imbalance {:.3f} (the costliest process / the mean of all) within 1 + {:}".format(
@@ -1092,6 +1102,83 @@ class Subdomain:
 
         self._lastRepartitionCost = self.communicator.allreduce(seconds, op=MPI.MAX)
 
+    def rebalanceAfterTopologyChange(self, model: FEModel, horizon: int):
+        """After a model modifier changed the mesh of a distributed model, move elements if the
+        partition it inherited -- the children of a refined element are computed where their parent
+        was -- is out of balance, and if that pays. Collective; right after the topology update,
+        before the equation system is built again, which it is anyway: a migration here costs only
+        the moving of the elements.
+
+        No measurement is needed for the imbalance: it is estimated from the number of elements with
+        kernels each process computes. It pays if the time it is expected to save -- the imbalance
+        beyond ``loadBalanceTolerance``, times the elements of a mean process, times the mean
+        measured cost of an element per increment, times ``horizon`` increments -- exceeds what moving
+        the elements cost last time (only the moving, see :meth:`moveElements`). Before the first
+        migration, or before any element cost was measured, the tolerance alone decides. The new
+        partition is the estimate-weighted partition of the changed mesh, with every element that can
+        stay where it is kept there (:func:`keepElementsWhereTheyWere`). The decision is logged at
+        level 2. A model held whole on every process is partitioned afresh anyway.
+
+        Parameters
+        ----------
+        model
+            The model tree, its mesh changed.
+        horizon
+            The increments over which the gain is expected: until the end of the step, or as many as
+            passed since the previous topology change, whichever is fewer.
+        """
+
+        distribution = model.elementDistribution
+        tolerance = self.loadBalanceTolerance
+        if distribution.createsEveryElement or not tolerance or self.nProcesses == 1:
+            return
+
+        mesh = model.mesh
+        inherited = distribution.owners
+        counts = np.zeros(self.nProcesses)
+        for number, owner in inherited.items():
+            counts[owner] += mesh.typeOf(mesh.elements[number]).hasKernels
+        imbalance = counts.max() / max(counts.mean(), 1e-300)
+        if imbalance <= 1.0 + tolerance:
+            self.journal.message(
+                "After the topology change: element imbalance {:.3f} within 1 + {:}".format(imbalance, tolerance),
+                self.identification,
+                2,
+            )
+            return
+
+        if self._meanElementCost is not None and self._lastMigrationCost is not None:
+            expectedGain = (imbalance - 1.0 - tolerance) * counts.mean() * self._meanElementCost * horizon
+            if expectedGain <= self._lastMigrationCost:
+                self.journal.message(
+                    "After the topology change: element imbalance {:.3f} exceeds 1 + {:}, but moving elements would "
+                    "save an expected {:.3g} s over {:} increments, less than the {:.3g} s moving them cost last time: "
+                    "not moving".format(imbalance, tolerance, expectedGain, horizon, self._lastMigrationCost),
+                    self.identification,
+                    2,
+                )
+                return
+            reason = "an expected {:.3g} s saved over {:} increments, more than the {:.3g} s moving them cost".format(
+                expectedGain, horizon, self._lastMigrationCost
+            )
+        else:
+            reason = "no migration or element cost measured yet"
+
+        self.journal.message(
+            "After the topology change: element imbalance {:.3f} exceeds 1 + {:}, repartitioning and moving "
+            "elements ({:})".format(imbalance, tolerance, reason),
+            self.identification,
+            2,
+        )
+        with performancetiming.timeit("partition"):
+            owners = partitionElementsOfMesh(mesh, self.nProcesses, model.domainSize, self.communicator)
+            owners = keepElementsWhereTheyWere(owners, inherited, self.nProcesses)
+        self._model = model
+        self._elementOwners = owners
+        self.moveElements()
+        # the next definition adopts the partition the elements were moved to
+        self._partitionedElementKeys = None
+
     def elementsMustMove(self) -> bool:
         """Whether the current partition computes elements in processes that do not hold them: after
         a :meth:`rebalance` of a distributed model that changed the partition. The same in every
@@ -1114,14 +1201,17 @@ class Subdomain:
 
         The subdomain forgets the elements it computed first, so that a process holds no reference
         to an element it drops; the solver must have released its own (its degree-of-freedom indices
-        and plans), and define the subdomain afresh afterwards (:meth:`define`), for the elements
-        it now holds.
+        and plans) or build them afresh right afterwards, and define the subdomain afresh
+        (:meth:`define`), for the elements it now holds. What the moving alone costs -- without
+        anything built again -- is recorded, for :meth:`rebalanceAfterTopologyChange` to weigh.
         """
 
+        startOfMoving = perf_counter()
         self._forgetElements()
 
         model = self._model
-        counts = model.elementDistribution.moveElementsTo(model, self._elementOwners)
+        counts = model.elementDistribution.moveElementsTo(model, dict(self._elementOwners))
+        self._lastMigrationCost = self.communicator.allreduce(perf_counter() - startOfMoving, op=MPI.MAX)
 
         allCounts = self.communicator.gather(counts, root=0)
         if allCounts is not None:

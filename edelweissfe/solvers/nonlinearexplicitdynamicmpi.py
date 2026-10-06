@@ -236,6 +236,9 @@ class NEDMPI(NEDParallel):
         #: degrees of freedom this process owns -- summed over all processes at the last
         #: synchronization. What a checkpoint records.
         self._externalWorkOfModel = 0.0
+        #: The increments of the step done at the last topology change (or 0, at the start of the
+        #: step), for the horizon a migration after a topology change is weighed over.
+        self._incrementsDoneAtLastTopologyChange = 0
 
     def beginStep(
         self,
@@ -266,6 +269,7 @@ class NEDMPI(NEDParallel):
             0,
         )
         self._externalWorkOfModel = 0.0
+        self._incrementsDoneAtLastTopologyChange = 0
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     # --- Restart ------------------------------------------------------------------------------------
@@ -744,6 +748,11 @@ class NEDMPI(NEDParallel):
         every process, on the same synchronized model, agreed on by all processes; and check that
         every process arrived at the same outcome. Collective.
 
+        If the topology changed, the subdomains are rebalanced for the changed mesh if that pays
+        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalanceAfterTopologyChange`),
+        over the increments until the end of the step or since the previous topology change,
+        whichever are fewer.
+
         Parameters
         ----------
         model
@@ -765,6 +774,15 @@ class NEDMPI(NEDParallel):
         self.subdomain.requireSameOnAllParts(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
         )
+        if changed[0]:
+            # The children of a refined element are computed where it was; move elements now if that
+            # unbalances the subdomains enough to pay, inside the rebuild that follows anyway.
+            incrementsDone = step.timeStepper.numberOfIncrementsDone()
+            horizon = min(
+                step.timeStepper.incrementsLeftEstimate(), incrementsDone - self._incrementsDoneAtLastTopologyChange
+            )
+            self._incrementsDoneAtLastTopologyChange = incrementsDone
+            self.subdomain.rebalanceAfterTopologyChange(model, horizon)
         return changed
 
     def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool):
