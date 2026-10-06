@@ -280,6 +280,8 @@ class ModelModifier(ModelModifierBase):
         quality-vetoed candidates -- a small minority of a wall's own new nodes in practice), not
         because it is cheap in the general case.
         """
+        # any element containing the node must be findable, so every element must exist here
+        model.requireCompleteMesh("surfaceSnap")
         for el in model.elements.values():
             if len(el.nodes) == 20 and any(n.label == label for n in el.nodes):
                 return el

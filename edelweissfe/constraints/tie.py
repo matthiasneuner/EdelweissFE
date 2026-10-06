@@ -393,6 +393,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
             return
 
         snapped = set(self._snappedNodes)
+        # The elements created here suffice: setNodes refreshes an element's cached coordinates, and
+        # an element not created here has no cache to refresh -- it is made from the moved nodes.
         for element in model.elements.values():
             if not snapped.isdisjoint(element.nodes):
                 element.setNodes(element.nodes)

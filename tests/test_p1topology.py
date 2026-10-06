@@ -62,6 +62,9 @@ class _FakeModel:
         self.nodeFields = nodeFields
         self.elements = {i: e for i, e in enumerate(elements)}
 
+    def requireCompleteMesh(self, reader):
+        """Every element of the fake model exists here."""
+
 
 def test_quad8_isolated_element():
     # local numbering: 0,1,2,3 corners; 4,5,6,7 midsides of edges (0,1),(1,2),(2,3),(3,0)

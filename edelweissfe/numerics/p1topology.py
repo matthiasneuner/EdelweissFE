@@ -152,6 +152,8 @@ def buildP1Map(model, fieldName: str):
         One entry per node demoted to a corner because of a genuine edge-endpoint disagreement
         between two elements (empty on an ordinary, conforming mesh).
     """
+    # a node is a corner if it is a corner of any element: the classification needs every element
+    model.requireCompleteMesh("the P1 topology classification")
     field = model.nodeFields[fieldName]
     nodeRows = {node: i for i, node in enumerate(field.nodes)}
     nNodes = len(field.nodes)
