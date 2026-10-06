@@ -28,9 +28,41 @@
 
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider, buildSchemaFromOptions
+
+
+def isNodeOfElements(nodeGrid: np.ndarray, model: FEModel, elementNodeLabels) -> np.ndarray:
+    """Which entries of a generator's grid of nodes are nodes of the elements it described.
+
+    A structured generator lays out a full grid of node positions, of which only some become nodes
+    of the model (e.g. no centre nodes for 20-node hexahedra), and only some of those belong to an
+    element. Its node sets keep exactly the nodes of its elements -- the nodes that carry fields --
+    which this mask selects without any element object.
+
+    Parameters
+    ----------
+    nodeGrid
+        The grid of :class:`~edelweissfe.points.node.Node` objects.
+    model
+        The model holding the nodes that were created.
+    elementNodeLabels
+        The node labels of every element the generator described.
+
+    Returns
+    -------
+    np.ndarray
+        A boolean array shaped like ``nodeGrid``.
+    """
+
+    referenced = {label for labels in elementNodeLabels for label in labels}
+    nodes = model.nodes
+    return np.vectorize(lambda node: node.label in referenced and nodes.get(node.label) is node, otypes=[bool])(
+        nodeGrid
+    )
 
 
 class GeneratorBase(OptionSchemaProvider, ABC):

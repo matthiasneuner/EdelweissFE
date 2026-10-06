@@ -64,18 +64,15 @@ are automatically generated
 """
 
 from dataclasses import dataclass
-from operator import attrgetter
 
 import numpy as np
 
 from edelweissfe.config.elementlibrary import getElementClass
-from edelweissfe.generators.base.generatorbase import GeneratorBase
+from edelweissfe.generators.base.generatorbase import GeneratorBase, isNodeOfElements
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
-from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.schema import schemaField
 
 
@@ -202,6 +199,7 @@ class Generator(GeneratorBase):
         # fmt: off
 
         elements = []
+        connectivity = []
         # Element numbers come from the model's monotonic allocator (TopologyPipeline.reserveElementNumbers),
         # not from max(model.elements). Reserved one at a time so the count need not be predicted;
         # nothing else mints during this loop, so the numbers are consecutive exactly as before.
@@ -342,20 +340,14 @@ class Generator(GeneratorBase):
 
                     # plotNodeList( nodeList )
 
-                    # newEl = elType(options["elType"], nodeList, currentElementLabel)
                     (currentElementLabel,) = model.topology.reserveElementNumbers(1)
-                    newEl = elType(configuration.elType, currentElementLabel)
-                    newEl.setNodes(nodeList)
+                    nodeLabels = [node.label for node in nodeList]
+                    model.mesh.addElement(currentElementLabel, configuration.elType, configuration.elProvider, nodeLabels)
 
-                    elements.append(newEl)
-                    model.createElement(newEl)
-
-                    # for i, node in enumerate(newEl.nodes):
-                    #     node.fields.update([(f, True) for f in newEl.fields[i]])
+                    elements.append(currentElementLabel)
+                    connectivity.append(nodeLabels)
 
         # fmt: on
-        # model.initializeNodeFields()
-        model._populateNodeFieldVariablesFromElements()
 
         nG = np.asarray(nodes).reshape(nNodesX, nNodesY, nNodesZ)
 
@@ -363,9 +355,7 @@ class Generator(GeneratorBase):
         nodeSets = []
 
         # 6 faces
-        getFields = np.vectorize(attrgetter("fields"))
-        getLength = np.vectorize(len)
-        filterGrid = getLength(getFields(nG)) > 0
+        filterGrid = isNodeOfElements(nG, model, connectivity)
 
         def getFilteredNodes(s):
             return nG[s][filterGrid[s]]
@@ -414,26 +404,26 @@ class Generator(GeneratorBase):
 
         # element sets
         elementSets = []
-        elementSets.append(ElementSet("{:}_all".format(name), elements))
+        elementSets.append(("{:}_all".format(name), elements))
 
         elGrid = np.asarray(elements).reshape(nX, nY, nZ)
-        elementSets.append(ElementSet("{:}_bottom".format(name), np.ravel(elGrid[:, 0, :])))
-        elementSets.append(ElementSet("{:}_top".format(name), np.ravel(elGrid[:, -1, :])))
-        elementSets.append(ElementSet("{:}_right".format(name), np.ravel(elGrid[-1, :, :])))
-        elementSets.append(ElementSet("{:}_left".format(name), np.ravel(elGrid[0, :, :])))
-        elementSets.append(ElementSet("{:}_front".format(name), np.ravel(elGrid[:, :, -1])))
-        elementSets.append(ElementSet("{:}_back".format(name), np.ravel(elGrid[:, :, 0])))
+        elementSets.append(("{:}_bottom".format(name), np.ravel(elGrid[:, 0, :])))
+        elementSets.append(("{:}_top".format(name), np.ravel(elGrid[:, -1, :])))
+        elementSets.append(("{:}_right".format(name), np.ravel(elGrid[-1, :, :])))
+        elementSets.append(("{:}_left".format(name), np.ravel(elGrid[0, :, :])))
+        elementSets.append(("{:}_front".format(name), np.ravel(elGrid[:, :, -1])))
+        elementSets.append(("{:}_back".format(name), np.ravel(elGrid[:, :, 0])))
 
         elementSets.append(
-            ElementSet(
+            (
                 "{:}_centralFrontToBack".format(name),
                 np.ravel(elGrid[int(nX / 2), int(nY / 2), 0:nZ]),
             )
         )
 
-        elementSets.append(ElementSet("{:}_centerSliceX".format(name), np.ravel(elGrid[int(nX / 2), :, :])))
-        elementSets.append(ElementSet("{:}_centerSliceY".format(name), np.ravel(elGrid[:, int(nY / 2), :])))
-        elementSets.append(ElementSet("{:}_centerSliceZ".format(name), np.ravel(elGrid[:, :, int(nZ / 2)])))
+        elementSets.append(("{:}_centerSliceX".format(name), np.ravel(elGrid[int(nX / 2), :, :])))
+        elementSets.append(("{:}_centerSliceY".format(name), np.ravel(elGrid[:, int(nY / 2), :])))
+        elementSets.append(("{:}_centerSliceZ".format(name), np.ravel(elGrid[:, :, int(nZ / 2)])))
 
         nShearBand = min(nX, nY)
         if nShearBand > 3:
@@ -448,9 +438,9 @@ class Generator(GeneratorBase):
                         ]
                     )
                 )
-            elementSets.append(ElementSet("{:}_shearBandFrontToBack".format(name), [e for e in shearBand]))
+            elementSets.append(("{:}_shearBandFrontToBack".format(name), [e for e in shearBand]))
             elementSets.append(
-                ElementSet(
+                (
                     "{:}_shearBandCenterFrontToBack".format(name),
                     [e for e in shearBand[(int(nShearBand / 2) - 1) * nZ : (int(nShearBand / 2) + 2) * nZ]],
                 )
@@ -471,21 +461,21 @@ class Generator(GeneratorBase):
         #     for e in elList:
         #         model.elementSets["{:}_core".format(name)].append(e)
 
-        for elementSet in elementSets:
-            model.elementSets[elementSet.name] = elementSet
+        for setName, numbers in elementSets:
+            model.mesh.setElementSet(setName, numbers)
 
         # surfaces
         surfaceName = "{:}_bottom".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {1: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {1: surfaceName})
         surfaceName = "{:}_top".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {2: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {2: surfaceName})
 
         surfaceName = "{:}_right".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {5: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {5: surfaceName})
         surfaceName = "{:}_left".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {3: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {3: surfaceName})
 
         surfaceName = "{:}_front".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {4: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {4: surfaceName})
         surfaceName = "{:}_back".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {6: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {6: surfaceName})
