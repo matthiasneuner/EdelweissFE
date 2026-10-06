@@ -59,6 +59,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDLiveAMRRestartDistributed1Write",
     "marmot/NEDLiveAMRRestartDistributed2Resume",
     "marmot/NEDLiveAMRStepEndsOffInterval",
+    "marmot/NEDLiveAMRTieDistributed",
     "marmot/NEDParallel",
     "marmot/NEDRestartDistributed1Write",
     "marmot/NEDRestartDistributed2Resume",
