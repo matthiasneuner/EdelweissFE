@@ -585,9 +585,10 @@ class Subdomain:
         A search -- a contact search above all -- is run by the constraint's owner alone, at the
         periodic contact update and at a topology check alike: only the owner's evaluation reads its
         outcome. Another process' copy keeps the footprint of the last state synchronization, with
-        the mesh refreshes since applied to it as to the owner's; such a footprint names nodes of
-        the model, so a degree-of-freedom layout built with it is complete, and the layout
-        fingerprint compared after every build makes sure of that.
+        the mesh refreshes since applied to it as to the owner's. Such a stale footprint is read by
+        one thing, the degree-of-freedom layout of the next equation system, and it is harmless
+        there because every copy equals its owner whenever the mesh, and with it the activation of
+        fields on nodes, changes; :meth:`requireConstraintCopiesCurrent` makes sure of that.
 
         Parameters
         ----------
@@ -604,6 +605,35 @@ class Subdomain:
 
         owners = self._constraintOwnersOf(model)
         return {name: constraint for name, constraint in constraints.items() if owners[name] == self.rank}
+
+    def requireConstraintCopiesCurrent(self, model: FEModel):
+        """Refuse to change the mesh unless every process' copy of every constraint couples the
+        nodes and fields its owner's couples. Collective.
+
+        A topology change activates fields on nodes for every constraint of the model -- every copy,
+        in every process -- and a copy differing from its owner would give its process a different
+        degree-of-freedom layout. The solver calls this right before a topology update, where every
+        copy has just been synchronized (:meth:`synchronizeStates`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Raises
+        ------
+        RuntimeError
+            In every process, if a copy differs from its owner.
+        """
+
+        digest = hashlib.sha1()
+        for name, constraint in model.constraints.items():
+            digest.update(name.encode())
+            digest.update(np.asarray([node.label for node in constraint.nodes], dtype=np.int64).tobytes())
+            digest.update(repr(constraint.fieldsOnNodes).encode())
+        self.requireSameOnAllParts(
+            digest.hexdigest(), "the nodes and fields the constraints couple before a topology update"
+        )
 
     # --- Completing the results of the whole model ------------------------------------------------
 

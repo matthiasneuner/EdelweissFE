@@ -99,7 +99,7 @@ communication, each in an override of a method of ``NED``:
   :meth:`NEDMPI.applyStepActionsAtStepEnd` at the end of a step;
 * :meth:`NEDMPI.updateConnectivityOf` runs a contact search on the constraint's process only;
 * and every step that can fail in one process alone -- the element and constraint evaluation, a
-  contact search, writing the output -- is agreed on by all of them
+  contact search, a topology update, writing the output -- is agreed on by all of them
   (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`).
 
 **Limits of this prototype.** Every process holds the complete model -- every element, with its
@@ -600,8 +600,8 @@ class NEDMPI(NEDParallel):
     def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
         """Run the model modifiers and the mesh refresh of
         :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopology` in
-        every process, on the same synchronized model, and check that every process arrived at the
-        same outcome. Collective.
+        every process, on the same synchronized model, agreed on by all processes; and check that
+        every process arrived at the same outcome. Collective.
 
         Parameters
         ----------
@@ -618,7 +618,9 @@ class NEDMPI(NEDParallel):
             Whether the topology changed, and whether a mesh-dependent consumer was refreshed.
         """
 
-        changed = super().updateTopology(model, step, offerModelModifiers)
+        self.subdomain.requireConstraintCopiesCurrent(model)
+        with self.subdomain.agreedOnByAllParts("Updating the topology"):
+            changed = super().updateTopology(model, step, offerModelModifiers)
         self.subdomain.requireSameOnAllParts(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
         )
