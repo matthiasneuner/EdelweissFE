@@ -109,7 +109,7 @@ def _syntheticField(model, monkeypatch):
         centroids = np.array([np.mean([node.coordinates for node in element.nodes], axis=0) for element in elements])
         band = np.exp(-((centroids[:, 0] - 2.3) ** 2))
         bump = np.exp(-(centroids[:, 1] ** 2)) * (centroids[:, 2] < 1.0)
-        return elements, np.stack([band, bump], axis=1)
+        return [element.elNumber for element in elements], np.stack([band, bump], axis=1)
 
     monkeypatch.setattr(marking, "_perElementFieldOutputResult", fieldOutputResult)
 
@@ -126,17 +126,18 @@ def _referenceMark(model, marker, candidatePool):
     if marker.halo <= 0 or not marked:
         return marked
 
+    nodeLabelsOf = {number: model.mesh.elements[number].nodeLabels for number in model.mesh.elements}
     elementsAtNode = defaultdict(list)
-    for element in candidatePool:
-        for node in element.nodes:
-            elementsAtNode[node.label].append(element)
+    for number in candidatePool:
+        for label in nodeLabelsOf[number]:
+            elementsAtNode[label].append(number)
     grown = set(marked)
     frontier = set(marked)
     for _ in range(marker.halo):
         nextFrontier = set()
-        for element in frontier:
-            for node in element.nodes:
-                for neighbor in elementsAtNode[node.label]:
+        for number in frontier:
+            for label in nodeLabelsOf[number]:
+                for neighbor in elementsAtNode[label]:
                     if neighbor not in grown:
                         grown.add(neighbor)
                         nextFrontier.add(neighbor)
@@ -156,13 +157,13 @@ _MARKERS = [
 def _assertMarksMatchReference(model, amr):
     for marker in _MARKERS:
         marked = marker.mark(model, amr._refineableElements, amr._mesh)
-        reference = _referenceMark(model, marker, list(amr._eidToEl.values()))
+        reference = _referenceMark(model, marker, list(amr._eidToNumber.values()))
         assert marked, "the synthetic field must mark something, or the comparison proves nothing"
         assert marked == reference
 
 
-def _elementNumbers(elements):
-    return sorted(element.elNumber for element in elements)
+def _elementNumbers(numbers):
+    return sorted(numbers)
 
 
 @pytest.mark.parametrize("nRefinements", [1, 2])
@@ -177,8 +178,8 @@ def test_kept_adjacency_marks_exactly_what_a_fresh_build_marks(tmp_path, monkeyp
     _assertMarksMatchReference(model, amr)
     for _ in range(nRefinements):
         marked = _MARKERS[0].mark(model, amr._refineableElements, amr._mesh)
-        elForEid = {element: eid for eid, element in amr._eidToEl.items()}
-        plan = RefinementPlan(eids=[elForEid[element] for element in sorted(marked, key=lambda e: e.elNumber)])
+        eidOf = {number: eid for eid, number in amr._eidToNumber.items()}
+        plan = RefinementPlan(eids=[eidOf[number] for number in sorted(marked)])
         with model.topology.changes():
             amr.apply(model, plan)
         _assertMarksMatchReference(model, amr)
@@ -200,8 +201,8 @@ def test_replayed_refinement_marks_what_the_live_run_marked(tmp_path, monkeypatc
     plans = []
     for _ in range(2):
         marked = _MARKERS[0].mark(live, liveAmr._refineableElements, liveAmr._mesh)
-        elForEid = {element: eid for eid, element in liveAmr._eidToEl.items()}
-        plans.append(RefinementPlan(eids=[elForEid[element] for element in sorted(marked, key=lambda e: e.elNumber)]))
+        eidOf = {number: eid for eid, number in liveAmr._eidToNumber.items()}
+        plans.append(RefinementPlan(eids=[eidOf[number] for number in sorted(marked)]))
         with live.topology.changes():
             liveAmr.apply(live, plans[-1])
 
@@ -216,4 +217,4 @@ def test_replayed_refinement_marks_what_the_live_run_marked(tmp_path, monkeypatc
         liveMarks = marker.mark(live, liveAmr._refineableElements, liveAmr._mesh)
         replayedMarks = marker.mark(replayed, replayedAmr._refineableElements, replayedAmr._mesh)
         assert _elementNumbers(replayedMarks) == _elementNumbers(liveMarks)
-        assert replayedMarks == _referenceMark(replayed, marker, list(replayedAmr._eidToEl.values()))
+        assert replayedMarks == _referenceMark(replayed, marker, list(replayedAmr._eidToNumber.values()))

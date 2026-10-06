@@ -30,7 +30,13 @@
 
 Each marker is a small, registry-resolved policy object (see :mod:`edelweissfe.config.markerlibrary`)
 implementing :meth:`MarkerBase.mark`. Topological markers select from a set/surface; the
-:class:`FieldOutputMarker` thresholds a per-element quantity. Deliberately, a marker never re-derives
+:class:`FieldOutputMarker` thresholds a per-element quantity.
+
+A marker reads only what every process of a domain-decomposed run holds whole: the mesh (element
+numbers, node labels, sets and surfaces), the nodes and the node fields, and the results of field
+outputs, which are results of the whole element set in every process. It never reads an element
+object, of which a process may hold only its own; it marks element numbers. So every process marks
+the same elements, and refines the same mesh. Deliberately, a marker never re-derives
 a field quantity itself: the reduction (a magnitude, a principal stress via ``eigVal``, a norm, ...)
 lives in the referenced fieldOutput's own ``f(x)`` -- one first-class, reusable quantity -- and the
 marker only applies the refinement decision (a threshold) on top of it.
@@ -99,11 +105,14 @@ class MarkerOptionsBase:
 
 
 class RefineableElements:
-    """The elements a marker may mark, together with the node adjacency a refinement halo grows over.
+    """The elements a marker may mark, by number, with their node labels and the node adjacency a
+    refinement halo grows over.
 
-    A live view of the refineable mesh: iterating it walks the wrapped collection (typically the
-    adaptivity mechanism's ``dict.values()`` of its active elements) in that collection's own order,
-    so a marker sees exactly the elements, in exactly the order, it would see without this wrapper.
+    A live view of the refineable mesh: iterating it walks the wrapped collection of element numbers
+    (typically the adaptivity mechanism's ``dict.values()`` of its active elements) in that
+    collection's own order, so a marker sees exactly the elements, in exactly the order, it would see
+    without this wrapper. The node labels of an element are read from the mesh
+    (:meth:`nodeLabelsOf`), which every process holds whole.
 
     What it adds is :meth:`elementsAtNode`, the map from a node label to the refineable elements
     touching that node. Building it walks every node of every element, which on a large mesh costs
@@ -114,20 +123,40 @@ class RefineableElements:
 
     Parameters
     ----------
-    elements
-        The refineable elements; read again on every iteration and on every rebuild of the
-        adjacency, so a live view stays current.
+    numbers
+        The numbers of the refineable elements; read again on every iteration and on every rebuild
+        of the adjacency, so a live view stays current.
+    mesh
+        The :class:`~edelweissfe.models.mesh.Mesh` describing them.
     """
 
-    def __init__(self, elements: Collection):
-        self._elements = elements
+    def __init__(self, numbers: Collection, mesh):
+        self._numbers = numbers
+        self._mesh = mesh
         self._elementsAtNode = None
 
     def __iter__(self) -> Iterator:
-        return iter(self._elements)
+        """The numbers of the refineable elements, in the order of the wrapped collection."""
+        return iter(self._numbers)
 
     def __len__(self) -> int:
-        return len(self._elements)
+        """The number of refineable elements."""
+        return len(self._numbers)
+
+    def nodeLabelsOf(self, number: int) -> tuple:
+        """The labels of the nodes of an element of the mesh, in its node order.
+
+        Parameters
+        ----------
+        number
+            The element number; any element of the mesh, refineable or not.
+
+        Returns
+        -------
+        tuple
+            The node labels.
+        """
+        return self._mesh.elements[number].nodeLabels
 
     def elementsAtNode(self) -> dict:
         """The refineable elements touching each node, built once per mesh.
@@ -135,15 +164,16 @@ class RefineableElements:
         Returns
         -------
         dict
-            Node label -> list of the refineable elements having that node, each list in the order
-            of iteration. Shared with every later caller until :meth:`invalidateNodeAdjacency`, so
-            it must not be modified.
+            Node label -> list of the numbers of the refineable elements having that node, each list
+            in the order of iteration. Shared with every later caller until
+            :meth:`invalidateNodeAdjacency`, so it must not be modified.
         """
         if self._elementsAtNode is None:
             elementsAtNode = defaultdict(list)
-            for element in self._elements:
-                for node in element.nodes:
-                    elementsAtNode[node.label].append(element)
+            meshElements = self._mesh.elements
+            for number in self._numbers:
+                for label in meshElements[number].nodeLabels:
+                    elementsAtNode[label].append(number)
             self._elementsAtNode = dict(elementsAtNode)
         return self._elementsAtNode
 
@@ -185,7 +215,7 @@ class MarkerBase(OptionSchemaProvider):
         Returns
         -------
         set
-            The elements to refine.
+            The numbers of the elements to refine.
         """
         raise NotImplementedError()
 
@@ -202,8 +232,10 @@ class MarkerBase(OptionSchemaProvider):
 
 
 def _perElementFieldOutputResult(model, fieldOutputName):
-    """Resolve an already-declared ``perElement`` fieldOutput and return ``(elements, values)`` --
-    the element list (its associated set) and the last per-element result array ``(nElem, ...)``.
+    """Resolve an already-declared ``perElement`` fieldOutput and return ``(numbers, values)`` --
+    the numbers of the elements of its associated set, in set order, and the last per-element result
+    array ``(nElem, ...)``. Both are of the whole set, also in a process that created only part of it
+    (see :class:`~edelweissfe.utils.fieldoutput.ElementFieldOutput`).
 
     The fieldOutput *may* carry an ``f(x)``: that is precisely how a marker consumes a shaped
     quantity -- a magnitude ``abs(x)``, a principal stress ``eigVal(...)``, a norm -- computed once in
@@ -229,7 +261,7 @@ def _perElementFieldOutputResult(model, fieldOutputName):
             "row per element, as required for marking."
         )
 
-    elements = list(fieldOutput.associatedSet)
+    elements = fieldOutput.associatedSet.elementNumbersOfWholeSet()
     values = np.asarray(fieldOutput.getLastResult())
 
     if values.ndim < 1 or values.shape[0] != len(elements):
@@ -343,7 +375,7 @@ class FieldOutputMarker(MarkerBase):
 
     def mark(self, model, refineElements, mesh):
         elements, values = _perElementFieldOutputResult(model, self.fieldOutputName)
-        if not elements:
+        if not len(elements):
             return set()
         # one comparison over all entries at once; an element is marked if any entry of its row holds
         entryHolds = self._compare(values.reshape(len(elements), -1), self.threshold)
@@ -380,9 +412,7 @@ class ElementSetMarker(MarkerBase):
     def mark(self, model, refineElements, mesh):
         if self.elSetName not in model.elementSets:
             return set()
-        elementSet = model.elementSets[self.elSetName]
-        elementSet.requireComplete("the element set marker")
-        return set(elementSet)
+        return set(model.elementSets[self.elSetName].elementNumbersOfWholeSet())
 
 
 @dataclass(frozen=True)
@@ -412,12 +442,8 @@ class NodeSetMarker(MarkerBase):
     def mark(self, model, refineElements, mesh):
         if self.nSetName not in model.nodeSets:
             return set()
-        ns_nodes = set(model.nodeSets[self.nSetName].nodes)
-        marked = set()
-        for el in refineElements:
-            if any(n in ns_nodes for n in el.nodes):
-                marked.add(el)
-        return marked
+        labelsInSet = {node.label for node in model.nodeSets[self.nSetName].nodes}
+        return {number for number in refineElements if not labelsInSet.isdisjoint(refineElements.nodeLabelsOf(number))}
 
 
 @dataclass(frozen=True)
@@ -445,14 +471,12 @@ class SurfaceMarker(MarkerBase):
         return cls(opts.surface, initialOnly=opts.initialOnly)
 
     def mark(self, model, refineElements, mesh):
-        if self.surfaceName not in model.surfaces:
+        if self.surfaceName not in model.mesh.surfaces:
             return set()
-        marked = set()
-        # model.surfaces[name] is a dict of faceID -> list of elements
-        for elements in model.surfaces[self.surfaceName].values():
-            for el in elements:
-                marked.add(el)
-        return marked
+        # every face of the surface in the mesh: per face number, the element numbers
+        return {
+            number for numbers in model.mesh.elementNumbersOfSurface(self.surfaceName).values() for number in numbers
+        }
 
 
 # A predictive Rankine (max-principal-stress) criterion needs no dedicated marker: the expression
@@ -622,7 +646,8 @@ def _recoveryIndicators(coordsAll, valuesAll, connectivity, nGlobalNodes, recove
 
 
 def _growByNeighbors(seed, candidatePool: RefineableElements, layers):
-    """Dilate ``seed`` by ``layers`` rings of node-adjacent elements drawn from ``candidatePool``.
+    """Dilate ``seed`` -- element numbers -- by ``layers`` rings of node-adjacent elements drawn from
+    ``candidatePool``.
 
     Two elements are neighbours if they share at least one node (a node-adjacency, so it also picks up
     edge/corner touches, not only shared faces -- the coarser stencil is what a refinement halo wants).
@@ -638,9 +663,9 @@ def _growByNeighbors(seed, candidatePool: RefineableElements, layers):
     frontier = set(seed)
     for _ in range(layers):
         nextFrontier = set()
-        for element in frontier:
-            for node in element.nodes:
-                for neighbor in elementsAtNode.get(node.label, noElements):
+        for number in frontier:
+            for label in candidatePool.nodeLabelsOf(number):
+                for neighbor in elementsAtNode.get(label, noElements):
                     if neighbor not in grown:
                         grown.add(neighbor)
                         nextFrontier.add(neighbor)
@@ -852,6 +877,7 @@ class RecoveryErrorMarker(MarkerBase):
             return set()
         values = nodeField[self.entry]
         indexOf = nodeField._indicesOfNodesInArray
+        nodes = model.nodes
 
         # gather, for every eligible element, its node coordinates and field values plus a compact
         # global node index (so shared nodes accumulate into the same recovery slot). Elements with a
@@ -861,21 +887,23 @@ class RecoveryErrorMarker(MarkerBase):
         valuesList = []
         connectivity = []
         nodeToIndex = {}
-        for element in refineElements:
-            if len(element.nodes) != N_NODES:
+        for number in refineElements:
+            labels = refineElements.nodeLabelsOf(number)
+            if len(labels) != N_NODES:
                 continue
-            rows = [indexOf.get(node, -1) for node in element.nodes]
+            elementNodes = [nodes[label] for label in labels]
+            rows = [indexOf.get(node, -1) for node in elementNodes]
             if -1 in rows:
                 continue
             localConnectivity = []
-            for node in element.nodes:
+            for node in elementNodes:
                 globalIndex = nodeToIndex.get(node)
                 if globalIndex is None:
                     globalIndex = len(nodeToIndex)
                     nodeToIndex[node] = globalIndex
                 localConnectivity.append(globalIndex)
-            elements.append(element)
-            coordsList.append([node.coordinates for node in element.nodes])
+            elements.append(number)
+            coordsList.append([node.coordinates for node in elementNodes])
             valuesList.append(values[rows])
             connectivity.append(localConnectivity)
 

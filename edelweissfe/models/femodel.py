@@ -257,7 +257,7 @@ class FEModel:
             self.resolveElementSetOfMesh(name)
 
         for name in self.mesh.surfaces:
-            self._resolveSurfaceOfMesh(name)
+            self.resolveSurfaceOfMesh(name)
 
     def resolveElementSetOfMesh(self, name: str) -> ElementSet:
         """Make ``elementSets[name]`` hold the elements of the mesh's element set ``name`` created here.
@@ -308,12 +308,17 @@ class FEModel:
         labels = dict.fromkeys(label for number in self.mesh.elementSets[name] for label in records[number].nodeLabels)
         return NodeSet(name, [self.nodes[label] for label in labels])
 
-    def _resolveSurfaceOfMesh(self, name: str):
+    def resolveSurfaceOfMesh(self, name: str):
         """Make ``surfaces[name]`` the surface of the mesh with the given name, on the elements created
         here; an existing surface is updated in place if its faces changed.
 
         A face given by an element set refers to the resolved set itself, as a surface defined in the
         input file always did.
+
+        Parameters
+        ----------
+        name
+            The name of the surface in :attr:`mesh`.
         """
 
         faces = {}

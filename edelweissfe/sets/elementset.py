@@ -107,6 +107,21 @@ class ElementSet(OrderedSet):
         numbers = self.mesh.elementSets.get(self.name)
         return numbers is None or len(self.data) == len(numbers)
 
+    def elementNumbersOfWholeSet(self) -> list:
+        """The numbers of every element of the set, in set order -- also of those not created here,
+        read from the mesh; for a set not resolved from a mesh, which is complete, the numbers of its
+        elements.
+
+        Returns
+        -------
+        list
+            The element numbers.
+        """
+
+        if self.mesh is None or self.name not in self.mesh.elementSets:
+            return [element.elNumber for element in self]
+        return list(self.mesh.elementSets[self.name])
+
     def requireComplete(self, reader: str):
         """State that ``reader`` needs every element of this set, not only the part created here.
 

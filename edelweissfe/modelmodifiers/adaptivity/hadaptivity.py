@@ -26,7 +26,13 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 
-"""Dynamic h-adaptivity model modifier for HEX20 hanging-node AMR."""
+"""Dynamic h-adaptivity model modifier for HEX20 hanging-node AMR.
+
+The modifier works on the mesh, not on element objects: its octree mirror, the marking, the 2:1
+balance, the hanging nodes and the numbering of the new nodes and elements are derived from the
+mesh, the nodes and the node fields. Element objects are touched only to create a child and to
+transfer its parent's state to it.
+"""
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -191,7 +197,7 @@ def _buildStateTransferStrategy(defaultName, overridesSpec):
     return PerStateVarStateTransfer(default, overrides) if overrides else default
 
 
-def _connectedComponents(elements: list) -> dict:
+def _connectedComponents(numbers: list, mesh) -> dict:
     """Partition elements into connected bodies via union-find over shared node labels.
 
     Two elements belong to the same body if they share at least one node label. The resulting
@@ -202,15 +208,17 @@ def _connectedComponents(elements: list) -> dict:
 
     Parameters
     ----------
-    elements
-        The refineable elements, in the order in which they become octree roots.
+    numbers
+        The numbers of the refineable elements, in the order in which they become octree roots.
+    mesh
+        The mesh describing them.
 
     Returns
     -------
     dict
-        element -> component id, densely numbered from 0 in order of first appearance.
+        element number -> component id, densely numbered from 0 in order of first appearance.
     """
-    parentOf = list(range(len(elements)))
+    parentOf = list(range(len(numbers)))
 
     def find(i):
         while parentOf[i] != i:
@@ -224,14 +232,14 @@ def _connectedComponents(elements: list) -> dict:
             parentOf[max(rootI, rootJ)] = min(rootI, rootJ)
 
     firstElementAtNode = {}
-    for i, element in enumerate(elements):
-        for node in element.nodes:
-            union(i, firstElementAtNode.setdefault(node.label, i))
+    for i, number in enumerate(numbers):
+        for label in mesh.elements[number].nodeLabels:
+            union(i, firstElementAtNode.setdefault(label, i))
 
     componentOfElement = {}
     denseIds = {}
-    for i, element in enumerate(elements):
-        componentOfElement[element] = denseIds.setdefault(find(i), len(denseIds))
+    for i, number in enumerate(numbers):
+        componentOfElement[number] = denseIds.setdefault(find(i), len(denseIds))
     return componentOfElement
 
 
@@ -276,6 +284,9 @@ class ModelModifier(ModelModifierBase):
         # the octree mirror, the marking and the 2:1 balance work on the whole mesh, and the children
         # are created where their parents are: every element must exist in this process
         model.requireCompleteMesh("hAdaptivity")
+        # Everything below reads the mesh, the nodes and the sets of element numbers, never an
+        # element object (see the module documentation).
+        mesh = model.mesh
 
         self._name = name
         self._model = model
@@ -318,12 +329,13 @@ class ModelModifier(ModelModifierBase):
         self.splitFactor = options.splitFactor
         self._stateTransfer = _buildStateTransferStrategy(options.stateTransfer, options.stateTransferOverrides)
         self._provider = options.elementProvider
-        # element -> its section, so children inherit the parent's material (multi-material meshes)
+        # element number -> its section, so children inherit the parent's material (multi-material
+        # meshes)
         self._sectionOf = {}
         for section in model.sections.values():
             for elementSet in section.elSets:
-                for element in elementSet:
-                    self._sectionOf[element] = section
+                for number in elementSet.elementNumbersOfWholeSet():
+                    self._sectionOf[number] = section
 
         # element -> its named properties, for the same reason. A named property is assigned when
         # the model is prepared, which a child created here never went through, so without this it
@@ -334,8 +346,8 @@ class ModelModifier(ModelModifierBase):
         # cannot be lost here at all.)
         self._elementPropertiesOf = {}
         for elementProperty in model.elementProperties:
-            for element in model.elementSets[elementProperty.elSetName]:
-                self._elementPropertiesOf.setdefault(element, []).append(elementProperty)
+            for number in model.elementSets[elementProperty.elSetName].elementNumbersOfWholeSet():
+                self._elementPropertiesOf.setdefault(number, []).append(elementProperty)
 
         # restrict the octree mirror to the refineable solid elements: a model that also contains
         # e.g. contact-facet elements (2/3 nodes) must not have those become octree roots. Prefer an
@@ -343,9 +355,9 @@ class ModelModifier(ModelModifierBase):
         # the only family this modifier supports anyway.
         refineSetName = options.refineElSet or options.elSet
         if refineSetName is not None:
-            refineElements = list(model.elementSets[refineSetName])
+            refineElements = model.elementSets[refineSetName].elementNumbersOfWholeSet()
         else:
-            refineElements = [el for el in model.elements.values() if len(el.nodes) == 20]
+            refineElements = [number for number, record in mesh.elements.items() if len(record.nodeLabels) == 20]
         if not refineElements:
             raise ValueError(
                 "hAdaptivity found no refineable (20-node) elements in the model; specify "
@@ -356,7 +368,7 @@ class ModelModifier(ModelModifierBase):
         # TopologyPipeline.checkModelModifierDomains at the end of setup -- two hAdaptivity instances cannot
         # independently own overlapping elements, since each maintains its own AdaptiveMesh mirror
         # and materializes/deletes elements directly in the model.
-        self._refineElementNumbers = {el.elNumber for el in refineElements}
+        self._refineElementNumbers = set(refineElements)
 
         # element type of the children: the one given, or else each child is of its own parent's
         # type -- a multi-material mesh (e.g. GC3D20R concrete next to C3D20R steel) keeps each
@@ -366,7 +378,7 @@ class ModelModifier(ModelModifierBase):
         # bodies of the refineable mesh: node labels are namespaced per body, so coincident nodes of
         # two bodies (a tied interface -- 'adjust' makes it flush by default --, a zero-gap contact
         # pair, a duplicated-node crack plane) are never deduplicated into one label
-        componentOfElement = _connectedComponents(refineElements)
+        componentOfElement = _connectedComponents(refineElements, mesh)
 
         # build the AdaptiveMesh mirror, sharing node labels with the live model: the roots are the
         # refineable elements with the model's own connectivity. Only their nodes are seeded -- with
@@ -377,19 +389,22 @@ class ModelModifier(ModelModifierBase):
         self._mesh = AdaptiveMesh(
             splitFactor=self.splitFactor, topology=self._topology, reserve_labels=model.topology.reserveNodeNumbers
         )
-        self._eidToEl = {}  # mesh element id -> live element
+        #: octree element id -> the number of its element in the mesh, for every active cell
+        self._eidToNumber = {}
         #: Diagnostics only, parallel to _committedOccasions; see there.
         self._committedOccasionEids = []
-        for el in refineElements:
-            componentId = componentOfElement[el]
-            for n in el.nodes:
-                self._mesh.registry.seed(n.label, n.coordinates, componentId)
-            coords = np.array([n.coordinates for n in el.nodes])
-            eid = self._mesh.add_root(coords, [n.label for n in el.nodes], componentId)
-            self._eidToEl[eid] = el
+        nodes = model.nodes
+        for number in refineElements:
+            componentId = componentOfElement[number]
+            labels = mesh.elements[number].nodeLabels
+            for label in labels:
+                self._mesh.registry.seed(label, nodes[label].coordinates, componentId)
+            coords = np.array([nodes[label].coordinates for label in labels])
+            eid = self._mesh.add_root(coords, list(labels), componentId)
+            self._eidToNumber[eid] = number
         # what the markers see: a live view of the active elements, whose node adjacency (for a
         # marker's halo) is kept across planning passes until _materialize changes the mesh
-        self._refineableElements = RefineableElements(self._eidToEl.values())
+        self._refineableElements = RefineableElements(self._eidToNumber.values(), mesh)
         # nodes outside the refineable mesh are not seeded, but their labels are taken:
         # keep the registry's high-water mark above them so new nodes never collide with them
         self._mesh.registry.reserve_labels_up_to(max(model.nodes.keys(), default=0))
@@ -404,23 +419,27 @@ class ModelModifier(ModelModifierBase):
                 self._mesh.define_node_set(setName, [n.label for n in nodeSet])
 
         # track element sets so user element sets propagate child elements on refinement
-        elToEid = {el: eid for eid, el in self._eidToEl.items()}
+        numberToEid = {number: eid for eid, number in self._eidToNumber.items()}
         # passengers of a tracked set: members the octree mirror does not know (non-refineable
         # elements, e.g. HEX8, interface elements, contact facets). A mixed set would lose them on
         # the first refinement, since _materialize rebuilds the set from mesh element ids only
-        self._untrackedOfElementSet = {}  # element set name -> list of non-mirrored members
+        self._untrackedOfElementSet = {}  # element set name -> numbers of the non-mirrored members
         for setName, elementSet in model.elementSets.items():
-            eids = [elToEid[el] for el in elementSet if el in elToEid]
+            numbers = elementSet.elementNumbersOfWholeSet()
+            eids = [numberToEid[number] for number in numbers if number in numberToEid]
             # a set with no refineable member (e.g. a contact-facet-only set) is left untracked, so
             # _materialize never overwrites it with an emptied-out ElementSet
             if eids:
                 self._mesh.define_element_set(setName, eids)
-                self._untrackedOfElementSet[setName] = [el for el in elementSet if el not in elToEid]
+                self._untrackedOfElementSet[setName] = [number for number in numbers if number not in numberToEid]
 
         # track element-based surfaces so surface loads stay consistent under refinement
-        for surfaceName, surface in model.surfaces.items():
+        for surfaceName in model.surfaces:
             pairs = [
-                (elToEid[el], faceID) for faceID, elementSet in surface.items() for el in elementSet if el in elToEid
+                (numberToEid[number], faceID)
+                for faceID, numbers in mesh.elementNumbersOfSurface(surfaceName).items()
+                for number in numbers
+                if number in numberToEid
             ]
             if pairs:
                 self._mesh.define_surface(surfaceName, pairs)
@@ -526,7 +545,7 @@ class ModelModifier(ModelModifierBase):
         if change is not None:
             return None
 
-        elForEid = {v: k for k, v in self._eidToEl.items()}
+        eidOfNumber = {number: eid for eid, number in self._eidToNumber.items()}
         marked_elements = set()
 
         if self._isFirstCall:
@@ -554,9 +573,9 @@ class ModelModifier(ModelModifierBase):
         # keep only active elements below maxLevel
         with timeit("marking filter"):
             eligible = [
-                el
-                for el in sorted(marked_elements, key=lambda e: e.elNumber)
-                if el in elForEid and self._mesh.elements[elForEid[el]]["level"] < self.maxLevel
+                number
+                for number in sorted(marked_elements)
+                if number in eidOfNumber and self._mesh.elements[eidOfNumber[number]]["level"] < self.maxLevel
             ]
 
         if len(eligible) < self.minMarkedElements:
@@ -570,7 +589,7 @@ class ModelModifier(ModelModifierBase):
                 )
             return None
 
-        return RefinementPlan(eids=[elForEid[el] for el in eligible])
+        return RefinementPlan(eids=[eidOfNumber[number] for number in eligible])
 
     @timeit("AMR")
     def apply(self, model: FEModel, plan: "RefinementPlan"):
@@ -599,9 +618,9 @@ class ModelModifier(ModelModifierBase):
         """
 
         markedEids = list(plan.eids)
-        # Captured now, not at the end: the refined parents are popped from _eidToEl during
+        # Captured now, not at the end: the refined parents are popped from _eidToNumber during
         # materialisation, so afterwards their element numbers are no longer resolvable here.
-        markedElementNumbers = [self._eidToEl[eid].elNumber for eid in markedEids if eid in self._eidToEl]
+        markedElementNumbers = [self._eidToNumber[eid] for eid in markedEids if eid in self._eidToNumber]
 
         # refine + 2:1 balance in the mirror
         nBefore = len(self._mesh.active())
@@ -643,8 +662,8 @@ class ModelModifier(ModelModifierBase):
 
         1. snapshot the converged nodal values, for the warm start;
         2. create the new nodes;
-        3. create the child elements, level by level, with state transfer and interpolated nodal
-           values;
+        3. describe the child elements in the mesh, level by level, and create them (with state
+           transfer from their parents), interpolating the nodal values;
         4. remove the refined parents, and check that octree and model agree;
         5. update the surfaces and the node and element sets;
         6. resize the node fields and write the warm-start values.
@@ -753,9 +772,9 @@ class ModelModifier(ModelModifierBase):
 
         mesh = self._mesh
         pending = set()
-        for eid in active - set(self._eidToEl):
+        for eid in active - set(self._eidToNumber):
             ancestor = eid
-            while ancestor is not None and ancestor not in self._eidToEl and ancestor not in pending:
+            while ancestor is not None and ancestor not in self._eidToNumber and ancestor not in pending:
                 pending.add(ancestor)
                 ancestor = mesh.elements[ancestor]["parent"]
         return pending
@@ -798,7 +817,7 @@ class ModelModifier(ModelModifierBase):
             # which element number is then a pure function of this sorted list of eids -- not of the
             # order an unordered set happened to iterate in, and not of what else claimed a number
             # partway through the loop.
-            levelEids = sorted(eid for eid in pending if mesh.elements[eid]["parent"] in self._eidToEl)
+            levelEids = sorted(eid for eid in pending if mesh.elements[eid]["parent"] in self._eidToNumber)
             if not levelEids:
                 raise TopologyError(
                     "AMR: {:} active octree cell(s) (e.g. {:}) have no materialised ancestor, so "
@@ -827,25 +846,28 @@ class ModelModifier(ModelModifierBase):
         newValues: dict,
         change: ModelChange,
     ):
-        """Create the model element of one octree child cell, inheriting section, properties and
-        state from its parent, and interpolate the nodal values at its new nodes."""
+        """Describe the element of one octree child cell in the mesh and create it, inheriting
+        section, properties and state from its parent; and interpolate the nodal values at its new
+        nodes."""
 
         mesh = self._mesh
         e = mesh.elements[eid]
         parentEid = e["parent"]
-        parentEl = self._eidToEl[parentEid]
+        parentNumber = self._eidToNumber[parentEid]
+        parentRecord = model.mesh.elements[parentNumber]
         # the child is described in the mesh and created from it, as every element of the model is
-        model.mesh.addElement(elNumber, self._elementType or parentEl.elType, self._provider, e["conn"])
+        model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, e["conn"])
         child = model.createElementOfMesh(elNumber)
-        self._sectionOf[parentEl].assignSectionToElement(child, model)
-        for elementProperty in self._elementPropertiesOf.get(parentEl, ()):
+        self._sectionOf[parentNumber].assignSectionToElement(child, model)
+        for elementProperty in self._elementPropertiesOf.get(parentNumber, ()):
             child.assignProperty(elementProperty.propertyName, elementProperty.values)
-        self._stateTransfer.transferState(parentEl, [child], self._topology)
+        self._stateTransfer.transferState(model.elements[parentNumber], [child], self._topology)
 
         # warm start: interpolate each NEW node's field values from the parent via the HEX20
         # isoparametric map, so the increment restarts from a consistent state, not zero
         octant = mesh.elements[parentEid]["children"].index(eid)
         childParams = self._octantParams[octant]
+        parentNodes = [model.nodes[label] for label in parentRecord.nodeLabels]
         for i, label in enumerate(e["conn"]):
             node = model.nodes[label]
             if label in newNodes and any(node not in newValues[f] for f in oldValues):
@@ -855,28 +877,28 @@ class ModelModifier(ModelModifierBase):
                     # pre-mutation snapshot -- the level above interpolated them, and the next
                     # level down interpolates from that in turn.
                     interpolated = newValues[key]
-                    parentVals = [vals[pn] if pn in vals else interpolated.get(pn) for pn in parentEl.nodes]
+                    parentVals = [vals[pn] if pn in vals else interpolated.get(pn) for pn in parentNodes]
                     if all(v is not None for v in parentVals):
                         newValues[key][node] = N @ np.array(parentVals)
 
-        self._eidToEl[eid] = child
-        self._sectionOf[child] = self._sectionOf[parentEl]
-        if parentEl in self._elementPropertiesOf:
-            self._elementPropertiesOf[child] = self._elementPropertiesOf[parentEl]
+        self._eidToNumber[eid] = elNumber
+        self._sectionOf[elNumber] = self._sectionOf[parentNumber]
+        if parentNumber in self._elementPropertiesOf:
+            self._elementPropertiesOf[elNumber] = self._elementPropertiesOf[parentNumber]
 
-        change.addedElements.add(child.elNumber)
-        change.parentToChildren.setdefault(parentEl.elNumber, []).append(child.elNumber)
+        change.addedElements.add(elNumber)
+        change.parentToChildren.setdefault(parentNumber, []).append(elNumber)
 
     def _recordFaceMap(self, levelEids: list, change: ModelChange):
         """Record which child faces tile each parent face, while the parents still exist."""
 
         mesh = self._mesh
         for parentEid in {mesh.elements[eid]["parent"] for eid in levelEids}:
-            parentLabel = self._eidToEl[parentEid].elNumber
+            parentLabel = self._eidToNumber[parentEid]
             childEids = mesh.elements[parentEid]["children"]
             for faceID, faceIndex in self._topology.faceid_to_face.items():
                 childLabels = [
-                    self._eidToEl[childEids[j]].elNumber
+                    self._eidToNumber[childEids[j]]
                     for j in self._topology.face_child_indices(faceIndex, self.splitFactor)
                 ]
                 change.faceMap[(parentLabel, faceID)] = [(label, faceID) for label in childLabels]
@@ -886,10 +908,12 @@ class ModelModifier(ModelModifierBase):
         transient intermediates included (sorted, so the changeset is built in a reproducible
         order)."""
 
-        for eid in sorted(set(self._eidToEl) - active):
-            el = self._eidToEl.pop(eid)
-            model.removeElement(el.elNumber)
-            change.removedElements.add(el.elNumber)
+        for eid in sorted(set(self._eidToNumber) - active):
+            number = self._eidToNumber.pop(eid)
+            model.removeElement(number)
+            self._sectionOf.pop(number, None)
+            self._elementPropertiesOf.pop(number, None)
+            change.removedElements.add(number)
 
     def _checkOctreeMatchesModel(self, active: set):
         """Raise unless every active octree cell has exactly one model element, and vice versa.
@@ -898,11 +922,11 @@ class ModelModifier(ModelModifierBase):
         consumer downstream is reading a mesh that is not the one being refined.
         """
 
-        if set(self._eidToEl) != active:
+        if set(self._eidToNumber) != active:
             raise TopologyError(
                 "AMR: the octree mirror and the model disagree after materialisation -- {:} active "
                 "cell(s) without an element, {:} element(s) without an active cell".format(
-                    len(active - set(self._eidToEl)), len(set(self._eidToEl) - active)
+                    len(active - set(self._eidToNumber)), len(set(self._eidToNumber) - active)
                 )
             )
 
@@ -917,12 +941,10 @@ class ModelModifier(ModelModifierBase):
                 # Sorted: this fixes the member order of the rebuilt surface, and a contact/tie
                 # facet generator hands out facet element labels in exactly that order.
                 for meid, faceID in sorted(pairs):
-                    if meid in self._eidToEl:
-                        byFace[faceID].append(self._eidToEl[meid])
-                model.surfaces[surfaceName].replaceData({f: els for f, els in byFace.items()})
-                model.mesh.setSurfaceElements(
-                    surfaceName, {f: [el.elNumber for el in els] for f, els in byFace.items()}
-                )
+                    if meid in self._eidToNumber:
+                        byFace[faceID].append(self._eidToNumber[meid])
+                model.mesh.setSurfaceElements(surfaceName, byFace)
+                model.resolveSurfaceOfMesh(surfaceName)
 
     def _updateSets(self, model: FEModel, records: dict, newNodes: dict, newChildEids: set, change: ModelChange):
         """Add the new nodes and elements to the node and element sets they belong to."""
@@ -949,15 +971,15 @@ class ModelModifier(ModelModifierBase):
                     change.changedElementSets.add(setName)
                 # sorted, for the same reason as the surface update: this order becomes the
                 # element set's member order, which downstream generators number entities by
-                elements = [self._eidToEl[eid] for eid in sorted(eids) if eid in self._eidToEl]
+                numbers = [self._eidToNumber[eid] for eid in sorted(eids) if eid in self._eidToNumber]
                 # carry the non-mirrored members along: the octree only knows refineable elements,
-                # so a mixed set would silently drop them here. Members deleted from the model in
-                # the meantime are filtered out by their label
-                elements += [el for el in self._untrackedOfElementSet[setName] if el.elNumber in model.elements]
-                model.elementSets[setName].replaceMembers(elements)
-                model.mesh.setElementSet(setName, [el.elNumber for el in elements])
-        model.elementSets["all"].replaceMembers(list(model.elements.values()))
+                # so a mixed set would silently drop them here. Members deleted from the mesh in
+                # the meantime are filtered out by their number
+                numbers += [number for number in self._untrackedOfElementSet[setName] if number in model.mesh.elements]
+                model.mesh.setElementSet(setName, numbers)
+                model.resolveElementSetOfMesh(setName)
         model.mesh.setElementSet("all", model.mesh.elements.keys())
+        model.resolveElementSetOfMesh("all")
         change.changedElementSets.add("all")
 
     def _resizeNodeFieldsAndWarmStart(self, model: FEModel, oldValues: dict, newValues: dict):

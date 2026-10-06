@@ -146,8 +146,8 @@ def test_a_cascade_materialises_every_level_it_produced(tmp_path):
 
     # the model and the mirror must describe the same mesh
     active = set(mesh.active())
-    assert set(amr._eidToEl) == active
-    assert {el.elNumber for el in amr._eidToEl.values()} == set(model.elements)
+    assert set(amr._eidToNumber) == active
+    assert set(amr._eidToNumber.values()) == set(model.elements)
 
     # no element may be reported as both created and destroyed: the intermediate cells are internal
     # bookkeeping, and a consumer must never be handed one
@@ -182,8 +182,8 @@ def test_a_fully_resplit_parent_leaves_nothing_behind(tmp_path):
     with model.topology.changes():
         amr.apply(model, RefinementPlan(eids=[]))
 
-    assert set(amr._eidToEl) == set(mesh.active())
-    assert {el.elNumber for el in amr._eidToEl.values()} == set(model.elements)
+    assert set(amr._eidToNumber) == set(mesh.active())
+    assert set(amr._eidToNumber.values()) == set(model.elements)
 
 
 def test_an_orphaned_active_cell_is_reported_rather_than_dropped(tmp_path):
@@ -195,8 +195,8 @@ def test_an_orphaned_active_cell_is_reported_rather_than_dropped(tmp_path):
     amr = model.modelModifiers["amr"]
 
     # drop a materialised root from the modifier's map while the mirror keeps it active
-    orphan = sorted(amr._eidToEl)[0]
-    amr._eidToEl.pop(orphan)
+    orphan = sorted(amr._eidToNumber)[0]
+    amr._eidToNumber.pop(orphan)
 
     with pytest.raises(TopologyError, match="no materialised ancestor"):
         with model.topology.changes():

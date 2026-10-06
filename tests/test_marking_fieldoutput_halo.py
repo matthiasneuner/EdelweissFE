@@ -28,10 +28,10 @@
 """Unit tests for FieldOutputMarker's ``halo`` option (mirrors RecoveryErrorMarker's own halo,
 via the shared edelweissfe.adaptivity.marking._growByNeighbors helper).
 
-Builds a tiny 5-element chain (E0-E1-E2-E3-E4, each pair sharing one node) rather than a real .inp
-model: FieldOutputMarker.mark() only needs `_perElementFieldOutputResult(model, name)` -> (elements,
-values), which is monkeypatched directly, and a `refineElements` candidate pool for the halo to grow
-within -- nothing else about the model is touched.
+Builds a tiny 5-element chain (elements 0-1-2-3-4, each pair sharing one node) as a mesh rather than
+a real .inp model: FieldOutputMarker.mark() only needs `_perElementFieldOutputResult(model, name)` ->
+(element numbers, values), which is monkeypatched directly, and a `refineElements` candidate pool for
+the halo to grow within -- nothing else about the model is touched.
 """
 
 import numpy as np
@@ -42,28 +42,24 @@ from edelweissfe.adaptivity.marking import (
     FieldOutputMarkerSchema,
     RefineableElements,
 )
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.utils.schema import buildSchemaFromOptions
 
-
-class _FakeNode:
-    def __init__(self, label):
-        self.label = label
-
-
-class _FakeElement:
-    def __init__(self, number, nodes):
-        self.number = number
-        self.nodes = nodes
-
-    def __repr__(self):
-        return f"E{self.number}"
+#: The mesh of the chain: element i has the nodes i and i + 1.
+_CHAIN = Mesh()
+for _number in range(5):
+    _CHAIN.addElement(_number, "T2D2", None, [_number, _number + 1])
 
 
 def _chainOfFive():
-    """5 elements in a row, each sharing exactly one node with its immediate neighbor(s)."""
-    nodes = [_FakeNode(i) for i in range(6)]
-    elements = [_FakeElement(i, [nodes[i], nodes[i + 1]]) for i in range(5)]
-    return elements
+    """5 elements in a row, each sharing exactly one node with its immediate neighbor(s): their
+    numbers."""
+    return list(range(5))
+
+
+def _pool(numbers):
+    """The refineable elements of the chain with the given numbers."""
+    return RefineableElements(numbers, _CHAIN)
 
 
 def _markMiddleOnly(monkeypatch, elements, halo):
@@ -77,7 +73,7 @@ def _markMiddleOnly(monkeypatch, elements, halo):
 
     monkeypatch.setattr(marking, "_perElementFieldOutputResult", fakeResult)
     m = FieldOutputMarker("dummy", threshold=1.0, operator=">=", halo=halo)
-    return m.mark(model=None, refineElements=RefineableElements(elements), mesh=None)
+    return m.mark(model=None, refineElements=_pool(elements), mesh=None)
 
 
 def test_halo_zero_is_the_bare_threshold_set_backward_compatible(monkeypatch):
@@ -112,7 +108,7 @@ def test_halo_never_leaks_outside_the_refineable_candidate_pool(monkeypatch):
     m = FieldOutputMarker("dummy", threshold=1.0, operator=">=", halo=5)
     # candidate pool excludes element 4 entirely
     restrictedPool = elements[:4]
-    marked = m.mark(model=None, refineElements=RefineableElements(restrictedPool), mesh=None)
+    marked = m.mark(model=None, refineElements=_pool(restrictedPool), mesh=None)
     assert elements[4] not in marked
     assert marked == {elements[0], elements[1], elements[2], elements[3]}
 
@@ -125,7 +121,7 @@ def test_halo_is_a_noop_when_nothing_is_marked(monkeypatch):
 
     monkeypatch.setattr(marking, "_perElementFieldOutputResult", fakeResult)
     m = FieldOutputMarker("dummy", threshold=1.0, operator=">=", halo=3)
-    assert m.mark(model=None, refineElements=RefineableElements(elements), mesh=None) == set()
+    assert m.mark(model=None, refineElements=_pool(elements), mesh=None) == set()
 
 
 def test_schema_default_halo_is_zero():
