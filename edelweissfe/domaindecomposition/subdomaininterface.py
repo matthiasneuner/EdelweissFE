@@ -175,6 +175,134 @@ class SubdomainInterface:
         plain[self._gatheredOrder] = self._gatherBuffer
 
 
+class _TaggedContributions:
+    """The exchange of individual nodal contributions with the neighbouring processes, each tagged
+    with its degree of freedom and its place in the order in which a single process computing the
+    whole model adds it; what the assemblies at the interface have in common.
+
+    Each process holds its contributions in one buffer, an entry per contribution. It sends each
+    neighbour the entries at the degrees of freedom the two share -- the tags once, when this
+    exchange is built, the values every increment -- and receives the neighbour's in turn. The
+    *merged* buffer holds the selected own entries first, then those received from each neighbour,
+    in neighbour order; its entries are summed per degree of freedom in the order of their tags.
+    A pair of neighbours with nothing to exchange in one direction sends no message that way.
+
+    Constructed collectively among neighbours.
+
+    Parameters
+    ----------
+    interface
+        The subdomain interface.
+    entryDofs
+        The degree of freedom of every entry of this process' contribution buffer.
+    entryOrder
+        The place of every entry in the order a single process adds the contributions in.
+    ownEntries
+        The entries of the buffer that are summed here, as indices into it.
+    """
+
+    def __init__(self, interface: SubdomainInterface, entryDofs, entryOrder, ownEntries: np.ndarray):
+        self.interface = interface
+        communicator = interface.communicator
+        entryDofs = np.asarray(entryDofs, dtype=np.int64)
+        entryOrder = np.asarray(entryOrder, dtype=np.int64)
+        interfaceEntries = self.entriesAtInterface(interface, entryDofs)
+
+        #: The entries of the contribution buffer summed here, in buffer order.
+        self.ownEntries = ownEntries
+        #: Whether this process takes part in an exchange at all.
+        self.hasNeighbours = bool(interface.neighbours)
+
+        sendEntries = {
+            neighbour: interfaceEntries[np.isin(entryDofs[interfaceEntries], interface.sharedDofsWith(neighbour))]
+            for neighbour in interface.neighbours
+        }
+
+        # The tags of what each neighbour will send: exchanged once, here.
+        sendCounts = {
+            neighbour: np.array([entries.shape[0]], dtype=np.int64) for neighbour, entries in sendEntries.items()
+        }
+        receiveCounts = {neighbour: np.empty(1, dtype=np.int64) for neighbour in interface.neighbours}
+        _exchange(communicator, sendCounts, receiveCounts)
+
+        self._sendEntries = {neighbour: entries for neighbour, entries in sendEntries.items() if entries.shape[0]}
+        receiveCounts = {neighbour: int(count[0]) for neighbour, count in receiveCounts.items() if count[0]}
+
+        sendTags = {
+            neighbour: np.ascontiguousarray(np.stack([entryDofs[entries], entryOrder[entries]], axis=1).ravel())
+            for neighbour, entries in self._sendEntries.items()
+        }
+        receiveTags = {neighbour: np.empty(2 * count, dtype=np.int64) for neighbour, count in receiveCounts.items()}
+        _exchange(communicator, sendTags, receiveTags)
+
+        tagDofs = [entryDofs[ownEntries]]
+        tagOrder = [entryOrder[ownEntries]]
+        begin = ownEntries.shape[0]
+        self._receiveSlices = {}
+        for neighbour in receiveCounts:
+            tags = receiveTags[neighbour].reshape(-1, 2)
+            tagDofs.append(tags[:, 0])
+            tagOrder.append(tags[:, 1])
+            self._receiveSlices[neighbour] = slice(begin, begin + tags.shape[0])
+            begin += tags.shape[0]
+
+        #: The degree of freedom and the order tag of every entry of the merged buffer.
+        self.tagDofs = np.concatenate(tagDofs)
+        self.tagOrder = np.concatenate(tagOrder)
+        #: The merged buffer: the own entries, then what each neighbour sends.
+        self.merged = np.empty(begin)
+        #: The merged entries sorted by degree of freedom, and at each in the order they are added.
+        self.order = np.lexsort((self.tagOrder, self.tagDofs))
+        self._sendBuffers = {neighbour: np.empty(entries.shape[0]) for neighbour, entries in self._sendEntries.items()}
+
+        sortedDofs, sortedOrder = self.tagDofs[self.order], self.tagOrder[self.order]
+        if np.any((sortedDofs[1:] == sortedDofs[:-1]) & (sortedOrder[1:] == sortedOrder[:-1])):
+            raise RuntimeError("A nodal contribution at the subdomain interface was received twice.")
+
+    @staticmethod
+    def entriesAtInterface(interface: SubdomainInterface, entryDofs: np.ndarray) -> np.ndarray:
+        """The entries of a contribution buffer at a degree of freedom another process integrates too.
+
+        Parameters
+        ----------
+        interface
+            The subdomain interface.
+        entryDofs
+            The degree of freedom of every entry.
+
+        Returns
+        -------
+        np.ndarray
+            The entries, as indices into the buffer, ascending.
+        """
+
+        isInterface = np.zeros(interface.nDof, dtype=bool)
+        isInterface[interface.interfaceDofs] = True
+        return np.flatnonzero(isInterface[np.asarray(entryDofs, dtype=np.int64)])
+
+    def exchange(self, contributions: np.ndarray):
+        """Fill the merged buffer: this process' own entries, and the neighbours' at the degrees of
+        freedom shared with them. Collective among neighbours.
+
+        Parameters
+        ----------
+        contributions
+            This process' contribution buffer.
+        """
+
+        communicator = self.interface.communicator
+        requests = [
+            communicator.Irecv(self.merged[receiveSlice], source=neighbour, tag=_INTERFACE_TAG)
+            for neighbour, receiveSlice in self._receiveSlices.items()
+        ]
+        for neighbour, entries in self._sendEntries.items():
+            np.take(contributions, entries, out=self._sendBuffers[neighbour])
+            requests.append(communicator.Isend(self._sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG))
+
+        np.take(contributions, self.ownEntries, out=self.merged[: self.ownEntries.shape[0]])
+        MPI.Request.Waitall(requests)
+
+
 class InterfaceForceAssembly:
     """The element contributions to the interface degrees of freedom of one subdomain, and how to
     sum them in the order of the elements in the model.
@@ -186,7 +314,7 @@ class InterfaceForceAssembly:
     are missing: each neighbour sends the entries of its elements at the degrees of freedom the two
     share, tagged once, when this assembly is built, with the degree of freedom and the position of
     the element in the model. Every increment the received entries and the own ones are merged in
-    that order and summed.
+    that order and summed, from zero, as the element forces are summed without decomposition.
 
     Constructed collectively among neighbours, whenever the elements of a subdomain or the degree-of-
     freedom layout change.
@@ -202,67 +330,13 @@ class InterfaceForceAssembly:
     """
 
     def __init__(self, interface: SubdomainInterface, entryDofs: np.ndarray, entryElementPositions: np.ndarray):
-        self.interface = interface
-        communicator = interface.communicator
-        interfaceDofs = interface.interfaceDofs
-        entryDofs = np.asarray(entryDofs, dtype=np.int64)
-        entryElementPositions = np.asarray(entryElementPositions, dtype=np.int64)
-
-        isInterface = np.zeros(interface.nDof, dtype=bool)
-        isInterface[interfaceDofs] = True
-        self._ownEntries = np.flatnonzero(isInterface[entryDofs])
-
-        self._neighbours = interface.neighbours
-        self._sendEntries = {}
-        for neighbour in self._neighbours:
-            candidates = self._ownEntries
-            self._sendEntries[neighbour] = candidates[
-                np.isin(entryDofs[candidates], interface.sharedDofsWith(neighbour), assume_unique=False)
-            ]
-
-        # The tags of what each neighbour will send: exchanged once, here.
-        sendCounts = {
-            neighbour: np.array([self._sendEntries[neighbour].shape[0]], dtype=np.int64)
-            for neighbour in self._neighbours
-        }
-        receiveCounts = {neighbour: np.empty(1, dtype=np.int64) for neighbour in self._neighbours}
-        _exchange(communicator, sendCounts, receiveCounts)
-
-        sendTags = {
-            neighbour: np.ascontiguousarray(
-                np.stack([entryDofs[entries], entryElementPositions[entries]], axis=1).ravel()
-            )
-            for neighbour, entries in self._sendEntries.items()
-        }
-        receiveTags = {
-            neighbour: np.empty(2 * int(receiveCounts[neighbour][0]), dtype=np.int64) for neighbour in self._neighbours
-        }
-        _exchange(communicator, sendTags, receiveTags)
-
-        # The merged buffer: the own interface entries, then what each neighbour sends, in neighbour
-        # order; received directly into their slices.
-        tagDofs = [entryDofs[self._ownEntries]]
-        tagElements = [entryElementPositions[self._ownEntries]]
-        begin = self._ownEntries.shape[0]
-        self._receiveSlices = {}
-        for neighbour in self._neighbours:
-            tags = receiveTags[neighbour].reshape(-1, 2)
-            tagDofs.append(tags[:, 0])
-            tagElements.append(tags[:, 1])
-            self._receiveSlices[neighbour] = slice(begin, begin + tags.shape[0])
-            begin += tags.shape[0]
-        tagDofs = np.concatenate(tagDofs)
-        tagElements = np.concatenate(tagElements)
-
-        self._merged = np.empty(begin)
-        self._order = np.lexsort((tagElements, tagDofs))
-        self._targets = np.searchsorted(interfaceDofs, tagDofs[self._order])
-        self._sendBuffers = {neighbour: np.empty(entries.shape[0]) for neighbour, entries in self._sendEntries.items()}
-
-        if tagDofs.size and np.any(
-            np.diff(tagDofs[self._order] * (tagElements.max() + 1) + tagElements[self._order]) == 0
-        ):
-            raise RuntimeError("An element contribution at the subdomain interface was received twice.")
+        self._contributions = _TaggedContributions(
+            interface,
+            entryDofs,
+            entryElementPositions,
+            _TaggedContributions.entriesAtInterface(interface, entryDofs),
+        )
+        self._targets = np.searchsorted(interface.interfaceDofs, self._contributions.tagDofs[self._contributions.order])
 
     def assemble(self, contributions: np.ndarray, vector: np.ndarray):
         """Overwrite the interface entries of ``vector`` with the complete sums of all element
@@ -276,23 +350,14 @@ class InterfaceForceAssembly:
             The vector to complete; only the interface entries are written.
         """
 
-        if not self._neighbours:
+        exchange = self._contributions
+        if not exchange.hasNeighbours:
             return
 
-        communicator = self.interface.communicator
-        requests = [
-            communicator.Irecv(self._merged[self._receiveSlices[neighbour]], source=neighbour, tag=_INTERFACE_TAG)
-            for neighbour in self._neighbours
-        ]
-        for neighbour in self._neighbours:
-            np.take(contributions, self._sendEntries[neighbour], out=self._sendBuffers[neighbour])
-            requests.append(communicator.Isend(self._sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG))
-
-        np.take(contributions, self._ownEntries, out=self._merged[: self._ownEntries.shape[0]])
-        MPI.Request.Waitall(requests)
-
-        vector.view(np.ndarray)[self.interface.interfaceDofs] = np.bincount(
-            self._targets, weights=self._merged[self._order], minlength=self.interface.interfaceDofs.shape[0]
+        exchange.exchange(contributions)
+        interfaceDofs = exchange.interface.interfaceDofs
+        vector.view(np.ndarray)[interfaceDofs] = np.bincount(
+            self._targets, weights=exchange.merged[exchange.order], minlength=interfaceDofs.shape[0]
         )
 
 
