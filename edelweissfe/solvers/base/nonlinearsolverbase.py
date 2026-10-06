@@ -240,6 +240,89 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         return any([constraint.updateConnectivity(model) for constraint in constraints.values()])
 
+    def distributedLoadsOfElements(
+        self,
+        distributedLoads: list[StepActionBase],
+        U_np: DofVector,
+        K: VIJSystemMatrix | None,
+        timeStep: TimeStep,
+    ):
+        """Evaluate the distributed loads element by element, in the order they are assembled: the
+        loads in the order given, the faces of each load's surface, the elements of each face.
+
+        Parameters
+        ----------
+        distributedLoads
+            The list of distributed loads.
+        U_np
+            The current solution vector.
+        K
+            The system matrix the load stiffness is assembled into; None for an explicit solver,
+            which needs no tangent.
+        timeStep
+            The current time step.
+
+        Yields
+        ------
+        tuple[ElementBase, np.ndarray]
+            Each loaded element, and the nodal forces of its load.
+        """
+
+        time = timeStep.totalTime
+        dT = timeStep.timeIncrement
+
+        for dLoad in distributedLoads:
+            load = dLoad.getCurrentLoad(timeStep)
+            for faceID, elementSet in dLoad.surface.items():
+                for el in elementSet:
+                    Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
+                    Pe = np.zeros(el.nDof)
+
+                    el.computeDistributedLoad(dLoad.loadType, Pe, Ke, faceID, load, U_np[el], time, dT)
+
+                    yield el, Pe
+
+    def bodyForcesOfElements(
+        self,
+        bodyForces: list[StepActionBase],
+        U_np: DofVector,
+        K: VIJSystemMatrix | None,
+        timeStep: TimeStep,
+    ):
+        """Evaluate the body forces element by element, in the order they are assembled: the loads in
+        the order given, the elements of each load's element set.
+
+        Parameters
+        ----------
+        bodyForces
+            The list of body forces.
+        U_np
+            The current solution vector.
+        K
+            The system matrix the load stiffness is assembled into; None for an explicit solver,
+            which needs no tangent.
+        timeStep
+            The current time step.
+
+        Yields
+        ------
+        tuple[ElementBase, np.ndarray]
+            Each loaded element, and the nodal forces of its load.
+        """
+
+        time = timeStep.totalTime
+        dT = timeStep.timeIncrement
+
+        for bForce in bodyForces:
+            force = bForce.getCurrentLoad(timeStep)
+            for el in bForce.elementSet:
+                Pe = np.zeros(el.nDof)
+                Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
+
+                el.computeBodyForce(Pe, Ke, force, U_np[el], time, dT)
+
+                yield el, Pe
+
     @performancetiming.timeit("distributed loads")
     def computeDistributedLoads(
         self,
@@ -271,19 +354,8 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             The updated load vector and system matrix.
         """
 
-        time = timeStep.totalTime
-        dT = timeStep.timeIncrement
-
-        for dLoad in distributedLoads:
-            load = dLoad.getCurrentLoad(timeStep)
-            for faceID, elementSet in dLoad.surface.items():
-                for el in elementSet:
-                    Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
-                    Pe = np.zeros(el.nDof)
-
-                    el.computeDistributedLoad(dLoad.loadType, Pe, Ke, faceID, load, U_np[el], time, dT)
-
-                    PExt[el] += Pe
+        for el, Pe in self.distributedLoadsOfElements(distributedLoads, U_np, K, timeStep):
+            PExt[el] += Pe
 
         return PExt, K
 
@@ -301,16 +373,16 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         Parameters
         ----------
-        distributedLoads
-            The list of distributed loads.
+        bodyForces
+            The list of body forces.
         U_np
             The current solution vector.
         PExt
             The external load vector to assemble into.
         K
             The system matrix to assemble into; None for an explicit solver, which needs no tangent.
-        increment
-            The increment.
+        timeStep
+            The current time step.
 
         Returns
         -------
@@ -318,20 +390,36 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             The updated load vector and system matrix.
         """
 
-        time = timeStep.totalTime
-        dT = timeStep.timeIncrement
-
-        for bForce in bodyForces:
-            force = bForce.getCurrentLoad(timeStep)
-            for el in bForce.elementSet:
-                Pe = np.zeros(el.nDof)
-                Ke = K[el] if K is not None else np.zeros(el.nDof * el.nDof)
-
-                el.computeBodyForce(Pe, Ke, force, U_np[el], time, dT)
-
-                PExt[el] += Pe
+        for el, Pe in self.bodyForcesOfElements(bodyForces, U_np, K, timeStep):
+            PExt[el] += Pe
 
         return PExt, K
+
+    def assembleConcentratedLoads(
+        self, nodeForces: list[StepActionBase], PExt: DofVector, timeStep: TimeStep
+    ) -> DofVector:
+        """Add the concentrated (nodal) loads into a right hand side vector, in the order given.
+
+        Parameters
+        ----------
+        nodeForces
+            The list of concentrated (nodal) loads.
+        PExt
+            The external load vector.
+        timeStep
+            The current time step.
+
+        Returns
+        -------
+        DofVector
+            The updated external load vector.
+        """
+
+        for cLoad in nodeForces:
+            PExt[
+                self.theDofManager.idcsOfFieldsOnNodeSetsInDofVector[cLoad.field][cLoad.nodeSet]
+            ] += cLoad.getCurrentLoad(timeStep).flatten()
+        return PExt
 
     @performancetiming.timeit("assemble loads")
     def assembleLoads(
@@ -344,7 +432,8 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         K: VIJSystemMatrix | None,
         timeStep: TimeStep,
     ) -> tuple[DofVector, VIJSystemMatrix]:
-        """Assemble all loads into a right hand side vector.
+        """Assemble all loads into a right hand side vector: the concentrated loads, then the
+        distributed loads, then the body forces, each added onto what is there.
 
         Parameters
         ----------
@@ -369,10 +458,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             - The updated external load vector.
             - The updated system matrix.
         """
-        for cLoad in nodeForces:
-            PExt[
-                self.theDofManager.idcsOfFieldsOnNodeSetsInDofVector[cLoad.field][cLoad.nodeSet]
-            ] += cLoad.getCurrentLoad(timeStep).flatten()
+        PExt = self.assembleConcentratedLoads(nodeForces, PExt, timeStep)
         PExt, K = self.computeDistributedLoads(distributedLoads, U_np, PExt, K, timeStep)
         PExt, K = self.computeBodyForces(bodyForces, U_np, PExt, K, timeStep)
 
