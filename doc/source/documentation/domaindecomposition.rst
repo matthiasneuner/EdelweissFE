@@ -454,6 +454,14 @@ elements it created and skips the others
 (:meth:`~edelweissfe.models.femodel.FEModel.readRestart`); a checkpoint written by a serial run, by
 the whole model on every process, or by a distributed run can be resumed in either way.
 
+What a resumed run does not restore is how the processes shared the elements: it starts from the
+partition of the mesh it builds (with a replayed refinement's children where their parents are),
+and the count of increments since the last topology change, which weighs a migration after the
+next one, restarts at the start of the step. Recording them would make a checkpoint of ``NEDMPI``
+differ from one of ``NED``, which a resume in either way relies on not doing. So a resumed run may
+place elements differently from the uninterrupted one -- which changes where they are computed,
+never the result.
+
 Failures
 --------
 
