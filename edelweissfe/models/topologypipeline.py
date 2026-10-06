@@ -478,7 +478,7 @@ class TopologyPipeline:
         for elNumber in sorted(meshElements):
             record = meshElements[elNumber]
             digest.update(b"E|%d|%s|" % (elNumber, record.elType.encode()))
-            digest.update(b",".join(b"%d" % label for label in record.nodeLabels.tolist()))
+            digest.update(b",".join(b"%d" % label for label in record.nodeLabels))
         for label in sorted(self._model.nodes):
             digest.update(b"N|%d|" % label)
             referenceCoordinates = referenceCoordinatesOfMovedNodes.get(label, self._model.nodes[label].coordinates)

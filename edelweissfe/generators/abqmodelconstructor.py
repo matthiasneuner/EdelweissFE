@@ -131,10 +131,11 @@ class AbqModelConstructor:
                 defLine = [int(i) for i in splitLineAtCommas(line)]
 
                 number = defLine[0]
-                elNodeLabels = defLine[1:]
-                for label in elNodeLabels:
-                    if label not in nodeDefinitions:
-                        raise KeyError("element {:} refers to node {:}, which is not defined".format(number, label))
+                try:
+                    # the labels of the nodes themselves: one int object per node, shared by its elements
+                    elNodeLabels = [nodeDefinitions[label].label for label in defLine[1:]]
+                except KeyError as missing:
+                    raise KeyError("element {:} refers to node {:}, which is not defined".format(number, missing))
                 mesh.addElement(number, elementType, elementProvider, elNodeLabels)
                 currElNumbers.append(number)
 

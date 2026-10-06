@@ -251,9 +251,7 @@ class _SourceElement:
 
         record = model.mesh.elements[number]
         nodes = model.nodes
-        return cls(
-            number, model.mesh.typeOf(record).ensightType, [nodes[label] for label in record.nodeLabels.tolist()]
-        )
+        return cls(number, model.mesh.typeOf(record).ensightType, [nodes[label] for label in record.nodeLabels])
 
 
 def _stampParentFace(facet, sourceElement, faceType: str, canonicalIndices: tuple):

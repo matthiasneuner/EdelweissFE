@@ -32,7 +32,10 @@ A model can be built the same way from Python:
 
 .. code-block:: python
 
+    import numpy as np
+
     from edelweissfe.models.femodel import FEModel, everyElement
+    from edelweissfe.points.node import Node
 
     model = FEModel(2)
     for label, coordinates in enumerate([(0, 0), (1, 0), (1, 1), (0, 1)], start=1):

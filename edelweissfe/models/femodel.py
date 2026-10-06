@@ -83,7 +83,7 @@ class FEModel:
     (:class:`~edelweissfe.models.mesh.Mesh`): elements by number, type, provider and node labels,
     element sets and surfaces. Then :meth:`createElementsOfMesh` creates the element objects from it
     and resolves the element sets and surfaces to them. The fields at the nodes, and with them the
-    layout of the degrees of freedom, follow from the mesh alone (:meth:`_activateNodeFieldsFromMesh`).
+    layout of the degrees of freedom, follow from the mesh alone (see :meth:`~edelweissfe.models.mesh.Mesh.typeOf`).
 
 
     Parameters
@@ -201,7 +201,7 @@ class FEModel:
         record = self.mesh.elements[number]
         element = self.mesh.elementClassOf(record)(record.elType, number)
         nodes = self.nodes
-        element.setNodes([nodes[label] for label in record.nodeLabels.tolist()])
+        element.setNodes([nodes[label] for label in record.nodeLabels])
         self.elements[number] = element
         return element
 
@@ -276,11 +276,13 @@ class FEModel:
         """
 
         faces = {}
-        for face, entry in self.mesh.surfaces[name].items():
-            if isinstance(entry, str):
-                faces[face] = self.elementSets[entry]
+        for face, surfaceFace in self.mesh.surfaces[name].items():
+            if surfaceFace.elementSetName is not None:
+                faces[face] = self.elementSets[surfaceFace.elementSetName]
             else:
-                faces[face] = [self.elements[number] for number in entry if number in self.elements]
+                faces[face] = [
+                    self.elements[number] for number in surfaceFace.elementNumbers if number in self.elements
+                ]
 
         surface = self.surfaces.get(name)
         if surface is None:
@@ -380,7 +382,7 @@ class FEModel:
         nodes = self.nodes
         typeOf = self.mesh.typeOf
         for record in self.mesh.elements.values():
-            for label, elementNodeFields in zip(record.nodeLabels.tolist(), typeOf(record).fields):
+            for label, elementNodeFields in zip(record.nodeLabels, typeOf(record).fields):
                 node = nodes[label]
                 nodeFields = node.fields
                 for field in elementNodeFields:

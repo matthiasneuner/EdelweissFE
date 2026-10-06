@@ -190,7 +190,7 @@ class Generator(GeneratorBase):
 
         # nodesets:
         model.nodeSets["{:}_all".format(name)] = NodeSet(
-            "{:}_all".format(name), np.ravel(nG)[np.ravel(isNodeOfElements(nG, model, connectivity))]
+            "{:}_all".format(name), np.ravel(nG)[np.ravel(isNodeOfElements(nG, connectivity))]
         )
 
         model.nodeSets["{:}_left".format(name)] = NodeSet("{:}_left".format(name), np.ravel(nG[0, :]))

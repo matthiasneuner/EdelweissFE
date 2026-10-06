@@ -256,7 +256,7 @@ def replicateMesh(
     """
 
     mesh = model.mesh
-    all_elements_to_copy = [[label - 1 for label in record.nodeLabels.tolist()] for record in mesh.elements.values()]
+    all_elements_to_copy = [[label - 1 for label in record.nodeLabels] for record in mesh.elements.values()]
     all_nodes_to_copy = [model.nodes[i + 1].coordinates for i in range(len(model.nodes))]
 
     elements_in_block = {}

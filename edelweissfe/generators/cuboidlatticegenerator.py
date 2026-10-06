@@ -188,7 +188,7 @@ class Generator(GeneratorBase):
 
         keptElementNodes = []
         for record in boxmodel.mesh.elements.values():
-            elNodes = [boxmodel.nodes[label] for label in record.nodeLabels.tolist()]
+            elNodes = [boxmodel.nodes[label] for label in record.nodeLabels]
             nodeCoords = np.array([node.coordinates for node in elNodes])
             xCoords = nodeCoords[:, 0]
             yCoords = nodeCoords[:, 1]

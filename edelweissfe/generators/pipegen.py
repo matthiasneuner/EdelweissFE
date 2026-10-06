@@ -32,7 +32,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.config.elementlibrary import getElementClass
-from edelweissfe.generators.base.generatorbase import GeneratorBase, isNodeOfElements
+from edelweissfe.generators.base.generatorbase import (
+    GRID_POSITION_WITHOUT_NODE,
+    GeneratorBase,
+    isNodeOfElements,
+)
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
@@ -193,9 +197,13 @@ class Generator(GeneratorBase):
             for it in range(nNodesT):
                 for ic in range(nNodesC - extraNode):
                     # use reduced radius to keep element planar if exG is True
+                    if carriesElementNode(it, iy, ic):
+                        label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
+                    else:
+                        label = GRID_POSITION_WITHOUT_NODE
                     if testEl.nNodes == 20 and (ic % 2 != 0):
                         node = Node(
-                            currentNodeLabel,
+                            label,
                             np.array(
                                 [
                                     x0 + tLayersRed[it] * np.sin(cLayers[ic]),
@@ -206,7 +214,7 @@ class Generator(GeneratorBase):
                         )
                     else:
                         node = Node(
-                            currentNodeLabel,
+                            label,
                             np.array(
                                 [
                                     x0 + tLayers[it] * np.sin(cLayers[ic]),
@@ -216,9 +224,8 @@ class Generator(GeneratorBase):
                             ),
                         )
                     nodes.append(node)
-                    if carriesElementNode(it, iy, ic):
+                    if label != GRID_POSITION_WITHOUT_NODE:
                         model.createNode(node)
-                        currentNodeLabel += 1
 
         # # 3d plot of nodes; for debugging
         # import os
@@ -313,7 +320,7 @@ class Generator(GeneratorBase):
         nodeSets = []
 
         # 6 faces
-        filterGrid = isNodeOfElements(nG, model, connectivity)
+        filterGrid = isNodeOfElements(nG, connectivity)
 
         def getFilteredNodes(s):
             return nG[s][filterGrid[s]]

@@ -43,6 +43,7 @@ from edelweissfe.config.phenomena import domainMapping
 from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.mesh import SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.points.node import Node
 from edelweissfe.utils.exceptions import TopologyError
@@ -133,7 +134,7 @@ def test_mesh_describes_elements_sets_and_surfaces(tmp_path):
     # the generator's elements first (numbers from the allocator), then the *element blocks
     assert list(mesh.elements) == [1, 2, 3, 4, 5, 6, 7, 8, 1001, 1002]
     assert mesh.elements[1002].elType == "CPE4" and mesh.elements[1002].provider == "edelweiss"
-    assert mesh.elements[1002].nodeLabels.tolist() == [102, 105, 106, 103]
+    assert mesh.elements[1002].nodeLabels == (102, 105, 106, 103)
 
     # sets by number, generated, deduplicated in first-occurrence order, and unions of sets in order
     assert mesh.elementSets["odd"] == [1, 3, 5, 7]
@@ -142,7 +143,7 @@ def test_mesh_describes_elements_sets_and_surfaces(tmp_path):
     assert mesh.elementSets["all"] == list(mesh.elements)
 
     # a surface is described by the element sets of its faces
-    assert mesh.surfaces["right"] == {2: "extra"}
+    assert mesh.surfaces["right"] == {2: SurfaceFace(elementSetName="extra")}
     assert mesh.elementNumbersOfSurface("gen_bottom") == {1: [1, 3, 5, 7]}
 
 
@@ -153,7 +154,7 @@ def test_elements_are_made_from_the_mesh_in_mesh_order(tmp_path):
     for number, record in model.mesh.elements.items():
         element = model.elements[number]
         assert element.elType == record.elType
-        assert [node.label for node in element.nodes] == record.nodeLabels.tolist()
+        assert tuple(node.label for node in element.nodes) == record.nodeLabels
 
     # every set and surface of the mesh resolves to the created elements, complete
     for name, numbers in model.mesh.elementSets.items():
@@ -170,7 +171,7 @@ def test_fields_follow_from_the_element_type(tmp_path):
     # the nodes of the CPE8's repeated corner list and the CPE4s carry displacement; the fields come
     # from the type, asked once per (type, provider)
     for record in model.mesh.elements.values():
-        for label, fields in zip(record.nodeLabels.tolist(), model.mesh.typeOf(record).fields):
+        for label, fields in zip(record.nodeLabels, model.mesh.typeOf(record).fields):
             assert set(fields) <= set(model.nodes[label].fields)
     assert set(model.mesh._types) == {("CPE4", "edelweiss"), ("CPE8", "edelweiss")}
 
@@ -232,7 +233,7 @@ def test_an_element_made_by_its_owner_is_described_from_the_object():
         model.createElement(pointMass)
 
     record = model.mesh.elements[number]
-    assert record.isMadeByOwner and record.nodeLabels.tolist() == [1]
+    assert record.isMadeByOwner and record.nodeLabels == (1,)
     assert model.mesh.typeOf(record).fields == [["displacement", "rotation"]]
     with pytest.raises(TopologyError, match="made by its owner"):
         model.mesh.elementClassOf(record)

@@ -68,7 +68,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.config.elementlibrary import getElementClass
-from edelweissfe.generators.base.generatorbase import GeneratorBase, isNodeOfElements
+from edelweissfe.generators.base.generatorbase import (
+    GRID_POSITION_WITHOUT_NODE,
+    GeneratorBase,
+    isNodeOfElements,
+)
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
@@ -171,11 +175,14 @@ class Generator(GeneratorBase):
         for ix in range(nNodesX):
             for iy in range(nNodesY):
                 for iz in range(nNodesZ):
-                    node = Node(currentNodeLabel, np.array([xLayers[ix], yLayers[iy], zLayers[iz]]))
-                    nodes.append(node)
                     if carriesElementNode(ix, iy, iz):
+                        label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
+                    else:
+                        label = GRID_POSITION_WITHOUT_NODE
+                    node = Node(label, np.array([xLayers[ix], yLayers[iy], zLayers[iz]]))
+                    nodes.append(node)
+                    if label != GRID_POSITION_WITHOUT_NODE:
                         model.createNode(node)
-                        currentNodeLabel += 1
 
         # # 3d plot of nodes; for debugging
         # def plotNodeList( nodeList ):
@@ -355,7 +362,7 @@ class Generator(GeneratorBase):
         nodeSets = []
 
         # 6 faces
-        filterGrid = isNodeOfElements(nG, model, connectivity)
+        filterGrid = isNodeOfElements(nG, connectivity)
 
         def getFilteredNodes(s):
             return nG[s][filterGrid[s]]

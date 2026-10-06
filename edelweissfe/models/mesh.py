@@ -48,8 +48,6 @@ nodes -- and so lay out its degrees of freedom -- from the mesh alone.
 
 from dataclasses import dataclass
 
-import numpy as np
-
 from edelweissfe.utils.exceptions import TopologyError
 
 
@@ -69,6 +67,45 @@ class ElementTypeInfo:
     ensightType: str
 
 
+@dataclass(frozen=True)
+class SurfaceFace:
+    """The elements exposing one face (by face number) of an element-based surface.
+
+    A surface is described by the element set of each face, so a face names an element set of the
+    mesh. A model modifier that refines the surface replaces the elements of a face by their children,
+    which form no named set: such a face lists its element numbers instead. Exactly one of the two is
+    given.
+
+    Parameters
+    ----------
+    elementSetName
+        The name of the element set of the mesh whose elements expose the face.
+    elementNumbers
+        The numbers of the elements exposing the face, in order.
+    """
+
+    elementSetName: str = None
+    elementNumbers: tuple = None
+
+    def elementNumbersIn(self, mesh: "Mesh") -> list:
+        """The numbers of the elements exposing the face.
+
+        Parameters
+        ----------
+        mesh
+            The mesh holding the element set the face may name.
+
+        Returns
+        -------
+        list
+            The element numbers, in order.
+        """
+
+        if self.elementSetName is not None:
+            return mesh.elementSets[self.elementSetName]
+        return list(self.elementNumbers)
+
+
 class MeshElement:
     """One element of the mesh, as data.
 
@@ -82,7 +119,7 @@ class MeshElement:
         The element provider, e.g. ``marmot``; ``None`` for an element its owner made itself (see
         :meth:`Mesh.addElementMadeByOwner`), which cannot be created from this record.
     nodeLabels
-        The labels of the element's nodes, in the element's node order.
+        The labels of the element's nodes, in the element's node order, as a tuple of ints.
     ownTypeInfo
         The type information of an element made by its owner; ``None`` for an element whose type
         alone determines it.
@@ -90,9 +127,7 @@ class MeshElement:
 
     __slots__ = ("number", "elType", "provider", "nodeLabels", "ownTypeInfo")
 
-    def __init__(
-        self, number: int, elType: str, provider: str, nodeLabels: np.ndarray, ownTypeInfo: ElementTypeInfo = None
-    ):
+    def __init__(self, number: int, elType: str, provider: str, nodeLabels: tuple, ownTypeInfo: ElementTypeInfo = None):
         self.number = number
         self.elType = elType
         self.provider = provider
@@ -119,8 +154,7 @@ class Mesh:
         self.elements = {}
         #: The element sets, by name: ordered lists of element numbers without duplicates.
         self.elementSets = {}
-        #: The element-based surfaces, by name: per face number, either the name of an element set
-        #: of this mesh or (once a model modifier has refined it) the list of element numbers.
+        #: The element-based surfaces, by name: per face number, a :class:`SurfaceFace`.
         self.surfaces = {}
         #: Element class and type information per (type, provider), asked once per type.
         self._types = {}
@@ -151,7 +185,7 @@ class Mesh:
                 "and numbers from TopologyPipeline.reserveElementNumbers() are never recycled".format(number)
             )
 
-        record = MeshElement(number, elType, provider, np.asarray(nodeLabels, dtype=np.int64))
+        record = MeshElement(number, elType, provider, tuple(nodeLabels))
         self.elements[number] = record
         return record
 
@@ -225,7 +259,9 @@ class Mesh:
         for setName in faceToElementSetName.values():
             if setName not in self.elementSets:
                 raise KeyError("surface {:}: element set {:} is not in the mesh".format(name, setName))
-        self.surfaces[name] = dict(faceToElementSetName)
+        self.surfaces[name] = {
+            face: SurfaceFace(elementSetName=setName) for face, setName in faceToElementSetName.items()
+        }
 
     def setSurfaceElements(self, name: str, faceToElementNumbers: dict):
         """Redefine a surface by the element numbers of each face, e.g. after a refinement replaced
@@ -239,7 +275,9 @@ class Mesh:
             Per face number, the element numbers, in order.
         """
 
-        self.surfaces[name] = {face: list(numbers) for face, numbers in faceToElementNumbers.items()}
+        self.surfaces[name] = {
+            face: SurfaceFace(elementNumbers=tuple(numbers)) for face, numbers in faceToElementNumbers.items()
+        }
 
     def elementNumbersOfSurface(self, name: str) -> dict:
         """The element numbers of each face of a surface.
@@ -255,10 +293,7 @@ class Mesh:
             Per face number, the element numbers, in order.
         """
 
-        return {
-            face: self.elementSets[entry] if isinstance(entry, str) else entry
-            for face, entry in self.surfaces[name].items()
-        }
+        return {face: surfaceFace.elementNumbersIn(self) for face, surfaceFace in self.surfaces[name].items()}
 
     def elementClassOf(self, record: MeshElement) -> type:
         """The class that creates the element of a record.
