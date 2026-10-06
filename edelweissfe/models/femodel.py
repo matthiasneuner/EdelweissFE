@@ -630,20 +630,18 @@ class FEModel:
         journal
             The journal instance.
         """
+        self.assignSectionsAndPropertiesToElements(self.elements)
+
         for section in self.sections.values():
-            section.assignSectionPropertiesToModel(self)
-
-        for elementProperty in self.elementProperties:
-            elementProperty.assignElementPropertiesToModel(self)
-
-        self._requireMaterialAssigned(self.elements)
+            if section.writeMaterialPropertiesToFile:
+                section.exportMaterialPropertiesToFile(section.elSets)
 
     def assignSectionsAndPropertiesToElements(self, elements: dict):
-        """Assign sections and element properties to elements created after the model was prepared,
-        e.g. elements that moved here from another process.
+        """Assign sections and element properties to elements: to every element when the model is
+        prepared, and to elements created later, e.g. elements that moved here from another process.
 
-        Each element receives exactly what :meth:`prepareYourself` assigned to it, in the same order:
-        every section whose element sets contain it, then every element property of such a set.
+        Each element receives the same in either case, in the same order: every section whose
+        element sets contain it, then every element property of such a set.
 
         Parameters
         ----------

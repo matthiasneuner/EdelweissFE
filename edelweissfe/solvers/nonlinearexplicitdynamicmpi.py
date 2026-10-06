@@ -604,10 +604,10 @@ class NEDMPI(NEDParallel):
         distributed model, and build the equation system again for the elements now held here.
         Collective.
 
-        Everything indexed by the elements held here -- the degree-of-freedom indices, the vectors
-        carrying them, the subdomain, the lumped operators, the increment plan -- is released
-        before the elements move, so that no element a process drops stays alive, and built again
-        afterwards, as after a change of the topology. The solution, the velocity and the net force,
+        Everything indexed by the elements held here -- the equation system
+        (:meth:`releaseEquationSystem`) and the subdomain -- is released before the elements move,
+        so that no element a process drops stays alive, and built again afterwards, as after a
+        change of the topology. The solution, the velocity and the net force,
         just made complete in every process by the output synchronization, are carried over.
 
         Parameters
@@ -618,22 +618,24 @@ class NEDMPI(NEDParallel):
             The step being solved.
         """
 
-        carried = ExplicitSystem(
-            Minv=None,
-            U=np.array(self._system.U),
-            dU=None,
-            V=np.array(self._system.V),
-            P=np.array(self._system.P),
-            criticalTimeStep=self._system.criticalTimeStep,
-        )
-        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
-        self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
-        self._reusableOperators = None
-        self.theDofManager = None
-        self.partition = self._incrementPlan = self._interfaceAssembly = self._elementCosts = None
-
+        carried = self.releaseEquationSystem()
         self.subdomain.moveElements()
         self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
+
+    def releaseEquationSystem(self) -> ExplicitSystem:
+        """Release the equation system as :meth:`NED.releaseEquationSystem` does, and the interface
+        assembly and the element timing built with its increment plan.
+
+        Returns
+        -------
+        ExplicitSystem
+            The carried state; see :meth:`NED.releaseEquationSystem`.
+        """
+
+        carried = super().releaseEquationSystem()
+        self._interfaceAssembly = None
+        self._elementCosts = None
+        return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
         """Write the output of an accepted increment, agreed on by all processes: a conditional stop

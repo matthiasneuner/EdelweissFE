@@ -195,7 +195,6 @@ class Subdomain:
         self._partitionedElementKeys = None
         self._constraintOwners = None
 
-        self._ownedElements = {}
         self._ownedConstraints = {}
 
         self._interface = None
@@ -205,19 +204,28 @@ class Subdomain:
         #: The position of every element in the model, by number: the order interface forces are
         #: summed in.
         self._elementPositions = {}
+
+        #: What the last definition was made for; a rebalance redefines from it.
+        self._model = None
+        self._mpcTransformation = None
+
+        self._forgetElements()
+
+    def _forgetElements(self):
+        """Hold no element and nothing indexed by the elements: the state before the first
+        definition, and the one :meth:`moveElements` starts from, so that no element a process drops
+        is kept alive here."""
+
+        self._ownedElements = {}
         #: The elements whose degrees of freedom reach into this subdomain, and the loads acting on
         #: them, by load; see distributedLoadsOnSubdomain and bodyLoadsOnSubdomain.
         self._elementsTouchingSubdomain = set()
         self._loadsOnSubdomain = {}
-
         #: The elements, constraints and degrees of freedom this process computes, as of the last
         #: definition.
         self.partition = None
-
-        #: What the last definition was made for; a rebalance redefines from it.
-        self._model = None
+        #: The degree-of-freedom layout of the last definition; its entity indices hold the elements.
         self._dofManager = None
-        self._mpcTransformation = None
 
     # --- Defining the subdomain -------------------------------------------------------------------
 
@@ -1064,11 +1072,7 @@ class Subdomain:
         it now holds.
         """
 
-        self._ownedElements = {}
-        self._elementsTouchingSubdomain = set()
-        self._loadsOnSubdomain = {}
-        self.partition = None
-        self._dofManager = None
+        self._forgetElements()
 
         model = self._model
         counts = model.elementDistribution.moveElementsTo(model, self._elementOwners)

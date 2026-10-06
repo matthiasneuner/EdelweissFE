@@ -1806,6 +1806,44 @@ class NED(NonlinearSolverBase):
 
         return M, Minv
 
+    def releaseEquationSystem(self) -> ExplicitSystem:
+        """Release the equation system and everything built with it -- the counterpart of
+        :meth:`buildEquationSystem`, listing what it builds -- keeping only plain copies of the
+        solution, the velocity and the net force, and the critical time step.
+
+        Everything released is indexed by the elements and constraints the system was built for:
+        the DofManager (whose entity indices hold the elements themselves), every vector carrying
+        those indices, the lumped operators, the partition and the increment plan. A caller that
+        removes elements from the model -- a domain-decomposed run moving them to another process
+        -- releases the system first, so that nothing keeps a removed element alive, and then
+        builds it again, with the returned system as ``previous``.
+
+        Returns
+        -------
+        ExplicitSystem
+            The carried state: plain copies of ``U``, ``V`` and ``P``, and the critical time step;
+            no ``Minv`` and no ``dU``.
+        """
+
+        carried = ExplicitSystem(
+            Minv=None,
+            U=np.array(self._system.U),
+            dU=None,
+            V=np.array(self._system.V),
+            P=np.array(self._system.P),
+            criticalTimeStep=self._system.criticalTimeStep,
+        )
+        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
+        self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
+        self._secondOrderMask = self._halfDampingRate = None
+        self._reusableOperators = None
+        self._constraintForces = {}
+        self._nodeFieldSlots = []
+        self.theDofManager = None
+        self.partition = None
+        self._incrementPlan = None
+        return carried
+
     @performancetiming.timeit("build equation system")
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
         """Build the equation system and everything sized by it.
