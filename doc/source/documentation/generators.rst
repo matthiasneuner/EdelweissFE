@@ -1,6 +1,13 @@
 Generators
 ==========
 
+A mesh generator creates nodes and node sets, and *describes* its elements, element sets and surfaces
+in ``model.mesh``; the element objects are made from the mesh once it is complete (see
+:ref:`mesh_to_elements`). The exceptions read element objects themselves and therefore make the
+elements described so far before they run: ``executePythonCode`` (arbitrary code may read any element)
+and ``cubit`` (its generated file brings sections and constraints along). The surface element
+generator cuts its facets from a surface as described in the mesh, and adds them to it.
+
 Relevant module: ``edelweissfe.config.generators``
 
 .. automodule:: edelweissfe.config.generators

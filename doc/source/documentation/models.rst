@@ -7,6 +7,16 @@ Models
 .. automodule:: edelweissfe.models.femodel
    :members:
 
+``Mesh`` - The mesh of a model, as data
+---------------------------------------
+
+Held by every model as ``model.mesh``: the elements by number, type, provider and node labels, the
+element sets as lists of element numbers, and the surfaces. The element objects of the model are made
+from it; see :ref:`mesh_to_elements`.
+
+.. automodule:: edelweissfe.models.mesh
+   :members:
+
 ``TopologyPipeline`` - How the mesh may change during a run
 -----------------------------------------------------------
 

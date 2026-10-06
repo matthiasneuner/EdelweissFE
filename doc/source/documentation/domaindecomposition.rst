@@ -53,8 +53,51 @@ The elements are ordinary elements -- they know nothing of the decomposition.
 
 This is what makes adaptive refinement tractable (see below), and it is the main limitation: the
 memory each process needs does not shrink as processes are added, and a refinement costs every
-process what it costs a serial run. Holding only the elements a process computes, with the mesh
-itself replicated as lightweight data, is planned.
+process what it costs a serial run.
+
+.. _domaindecomposition_mesh_to_elements:
+
+Mesh to elements
+~~~~~~~~~~~~~~~~
+
+Every model is built in two stages (see :doc:`mesh`): the input file and the mesh generators
+*describe* the mesh as data -- ``model.mesh``, a :class:`~edelweissfe.models.mesh.Mesh` with every
+element's number, type, provider and node labels, the element sets as lists of element numbers and
+the surfaces by their element sets -- and the element objects are then *made* from it by
+:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`, for every element a predicate
+``isCreatedHere(number)`` accepts. The mesh, the nodes, the node sets and every definition (materials,
+sections, constraints) are the same in every process. Today every process creates every element; the
+predicate is where a process will create only the elements it computes, so that the memory of the
+elements -- most of a model's memory -- is divided among the processes instead of replicated.
+
+Three properties make that possible, and hold already:
+
+* **The layout of the degrees of freedom follows from the mesh.** Which fields an element has at
+  which node depends on its type only, so the fields at the nodes are activated from the mesh, not
+  from element objects (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). The global numbering of the
+  degrees of freedom is therefore the same in every process *by construction*, whichever elements it
+  created.
+* **An element set is the part of the set created here.** Each
+  :class:`~edelweissfe.sets.elementset.ElementSet` of the model holds the created elements of its set
+  in the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
+  A partial set read as if it were whole would give silently wrong results, so every reader that needs
+  the whole set says so: :meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete` (field
+  outputs over element sets, the Ensight output, the element set marker) or, for the whole model,
+  :meth:`~edelweissfe.models.femodel.FEModel.requireCompleteMesh` (restart checkpoints, the Ensight
+  output, the mesh plot, ``meshDataToFile``, adaptive refinement). These checks cost nothing and
+  never fail while every element is created; they turn every reader not yet converted into a loud
+  error instead of a wrong result.
+* **An element can be created at any time, anywhere.** An element is completely described by the
+  mesh, its section (assigned through its sets) and its state vector, so
+  :meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`,
+  :meth:`~edelweissfe.sections.base.sectionbase.Section.assignSectionToElement` and
+  ``setStateVars`` recreate it in another process -- which is what moving an element between
+  processes needs.
+
+Contact facets and the point masses of rigid bodies are made by their owners in every process; they
+are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), and the
+facets are cut from the surface as described in the mesh, not from element objects. A refinement
+adds its children to the mesh and creates them from it.
 
 Subdomains, interface, ownership
 --------------------------------
@@ -248,7 +291,8 @@ machines' math libraries do. ``run_tests_edelweissfe testfiles/mpi/edelweiss-onl
 Limitations
 -----------
 
-* Memory: every process holds the complete model.
+* Memory: every process holds the complete model; the predicate of
+  :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` accepts every element.
 * Adaptive refinement is computed by every process, in full.
 * A constraint is evaluated whole, by one process; a single large contact constraint is not split.
 * Only the explicit dynamic solver is decomposed.
