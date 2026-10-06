@@ -50,6 +50,7 @@ from edelweissfe.constraints.base.rigidbodycontactstiffness import (
 from edelweissfe.constraints.base.surfacecontactpenaltyschema import (
     SurfaceContactPenaltySchema,
 )
+from edelweissfe.constraints.base.wholemodel import wholeFacetSet
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -266,7 +267,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
+            wholeFacetSet(model, configuration.slaveSurface, name),
             model.rigidBodies[configuration.rigidBody],
             journal,
             configuration=configuration,
@@ -453,7 +454,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not self.slave.isTouchedBy(model, change):
             return False
 
-        self._buildFromSlaveSurface(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
+        self._buildFromSlaveSurface(wholeFacetSet(model, self._slaveSurfaceSetName, self.name))
         self._searchClosestRigidTriangles(model)
         return True
 

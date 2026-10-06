@@ -34,6 +34,7 @@ from scipy.spatial import cKDTree
 from edelweissfe.constraints.base.multipointconstraintbase import (
     MultiPointConstraintBase,
 )
+from edelweissfe.constraints.base.wholemodel import wholeFacetSet
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -272,8 +273,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         return cls(
             name,
             model,
-            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
-            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
+            wholeFacetSet(model, configuration.slaveSurface, name),
+            wholeFacetSet(model, configuration.masterSurface, name),
             journal,
             configuration=configuration,
         )
@@ -459,8 +460,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         # The facets themselves were already regenerated, in the topology-update phase, by the
         # implicit surfaceFacets modifier (see TopologyPipeline.ensureSurfaceFacetModifier). This constraint
         # is a pure reader: it re-projects onto whatever now tiles the surface.
-        slaveFacetElements = list(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
-        masterFacetElements = list(model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name))
+        slaveFacetElements = list(wholeFacetSet(model, self._slaveSurfaceSetName, self.name))
+        masterFacetElements = list(wholeFacetSet(model, self._masterSurfaceSetName, self.name))
         self.tiedRecords, self.untiedSlaveNodes = self._buildTiedRecords(
             slaveFacetElements, masterFacetElements, adjust=False
         )

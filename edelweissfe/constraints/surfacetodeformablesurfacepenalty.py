@@ -52,6 +52,7 @@ from edelweissfe.constraints.base.penaltylaw import (
 from edelweissfe.constraints.base.surfacecontactpenaltyschema import (
     SurfaceContactPenaltySchema,
 )
+from edelweissfe.constraints.base.wholemodel import wholeFacetSet
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -359,8 +360,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
-            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
+            wholeFacetSet(model, configuration.slaveSurface, name),
+            wholeFacetSet(model, configuration.masterSurface, name),
             journal,
             configuration=configuration,
         )
@@ -535,8 +536,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             return False
 
         self._buildFromSurfaces(
-            model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name),
-            model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name),
+            wholeFacetSet(model, self._slaveSurfaceSetName, self.name),
+            wholeFacetSet(model, self._masterSurfaceSetName, self.name),
         )
         return True
 

@@ -30,6 +30,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
+from edelweissfe.constraints.base.wholemodel import NOT_YET_VERIFIED
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.vijentitybase import VIJEntityBase
@@ -56,9 +57,7 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: or None for a constraint that reads only what every process holds -- the mesh, the nodes and
     #: their fields, contact facets and rigid bodies -- and no element object of the solid mesh. Not
     #: None unless a constraint says so.
-    wholeModelReason: str | None = (
-        "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
-    )
+    wholeModelReason: str | None = NOT_YET_VERIFIED
 
     @classmethod
     def fromConstraintDefinition(

@@ -45,6 +45,7 @@ from edelweissfe.constraints.base.penaltylaw import (
     normalPenaltyForce,
     validatedContactType,
 )
+from edelweissfe.constraints.base.wholemodel import wholeFacetSet
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -461,8 +462,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return cls(
             name,
             model,
-            model.wholeElementSet(configuration.slaveSurface, "constraint " + name),
-            model.wholeElementSet(configuration.masterSurface, "constraint " + name),
+            wholeFacetSet(model, configuration.slaveSurface, name),
+            wholeFacetSet(model, configuration.masterSurface, name),
             journal,
             configuration=configuration,
         )
@@ -664,7 +665,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         oldTangential = dict(zip(self.slaveNodes, self._tangentialForceConverged))
         oldLambda = dict(zip(self.slaveNodes, self._lambdaN))
 
-        self.slaveFacetElements = list(model.wholeElementSet(self._slaveSurfaceSetName, "constraint " + self.name))
+        self.slaveFacetElements = list(wholeFacetSet(model, self._slaveSurfaceSetName, self.name))
         tributaryAreaOfSlaveNode = {}
         for slaveFacet in self.slaveFacetElements:
             for node, share in zip(slaveFacet.nodes, slaveFacet.nodalAreaShares):
@@ -689,7 +690,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """Rebuild the master facet list/reference coordinates from the regenerated facet set. Any
         per-slave facet assignment is invalidated, since it indexes into this list."""
 
-        self.facetElements = list(model.wholeElementSet(self._masterSurfaceSetName, "constraint " + self.name))
+        self.facetElements = list(wholeFacetSet(model, self._masterSurfaceSetName, self.name))
         self._referenceCoordsFacets = [np.array([n.coordinates for n in el.nodes]) for el in self.facetElements]
         self._validateMasterWeightTransforms()
 

@@ -28,6 +28,7 @@
 
 from abc import ABC, abstractmethod
 
+from edelweissfe.constraints.base.wholemodel import NOT_YET_VERIFIED
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider
@@ -73,9 +74,7 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
 
     #: Why this constraint needs every element of the model in every process of a domain-decomposed
     #: run; see :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`.
-    wholeModelReason: str | None = (
-        "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
-    )
+    wholeModelReason: str | None = NOT_YET_VERIFIED
 
     @classmethod
     def fromConstraintDefinition(
