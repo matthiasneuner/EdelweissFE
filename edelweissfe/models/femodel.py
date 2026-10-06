@@ -143,22 +143,28 @@ class FEModel:
 
         self.nodes[node.label] = node
 
-    def createElement(self, element):
+    def createElement(self, element, besideElement: int | None = None):
         """Add an element its owner made itself (a contact facet, the point mass of a rigid body) to
         the mesh and to the model.
 
         Every other element is described in :attr:`mesh` first and created from there, by
-        :meth:`createElementOfMesh`.
+        :meth:`createElementOfMesh`. An element made by its owner is made in every process -- it is
+        surface-sized -- and :attr:`elementDistribution` decides which process computes it
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeElementMadeByOwner`).
 
         Parameters
         ----------
         element
             The element, already carrying a number obtained from :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`.
+        besideElement
+            The number of the element of the mesh it lies on (the solid element whose face a facet
+            tiles), or None if it lies on none.
         """
 
         self._checkElementCanBeAdded(element.elNumber)
-        self.mesh.addElementMadeByOwner(element)
+        record = self.mesh.addElementMadeByOwner(element, besideElement)
         self.elements[element.elNumber] = element
+        self.elementDistribution.placeElementMadeByOwner(record)
 
     def createElementOfMesh(self, number: int):
         """Create the element object of one element of the mesh, and add it to the model.

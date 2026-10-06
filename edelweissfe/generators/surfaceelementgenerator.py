@@ -484,6 +484,8 @@ def buildContactFacets(
     # the deletion history, which a restart replay cannot reproduce. See
     # TopologyPipeline.reserveElementNumbers.
     newElements = {}
+    # The solid element each facet tiles a face of, by facet number.
+    sourceOfFacet = {}
 
     for faceNumber, sourceElements in sourceElementsOfFace.items():
         for sourceElement in sourceElements:
@@ -529,6 +531,7 @@ def buildContactFacets(
 
                 faceFacets.append(facetElement)
                 newElements[elNumber] = facetElement
+                sourceOfFacet[elNumber] = sourceElement.elNumber
 
             if len(faceFacets) == 2 and all(len(f.nodes) == 3 for f in faceFacets):
                 # Two Tria3 from a linear quad face (fixed diagonal split): the per-triangle
@@ -556,8 +559,8 @@ def buildContactFacets(
                 if nodalWeights == "serendipityOptimal":
                     _applyModifiedSerendipityShares(faceFacets[:4])
 
-    for facetElement in newElements.values():
-        model.createElement(facetElement)
+    for elNumber, facetElement in newElements.items():
+        model.createElement(facetElement, besideElement=sourceOfFacet[elNumber])
 
     # this function is the one that mutates the mesh outside the mesh modifier (removing the
     # stale facets above and inserting newElements here), so the element set "all" must be

@@ -130,16 +130,29 @@ class MeshElement:
     ownTypeInfo
         The type information of an element made by its owner; ``None`` for an element whose type
         alone determines it.
+    besideElement
+        For an element made by its owner, the number of the element of the mesh it lies on (the
+        solid element whose face a contact facet tiles); ``None`` if it lies on none (the point mass
+        of a rigid body), and for every other element.
     """
 
-    __slots__ = ("number", "elType", "provider", "nodeLabels", "ownTypeInfo")
+    __slots__ = ("number", "elType", "provider", "nodeLabels", "ownTypeInfo", "besideElement")
 
-    def __init__(self, number: int, elType: str, provider: str, nodeLabels: tuple, ownTypeInfo: ElementTypeInfo = None):
+    def __init__(
+        self,
+        number: int,
+        elType: str,
+        provider: str,
+        nodeLabels: tuple,
+        ownTypeInfo: ElementTypeInfo = None,
+        besideElement: int = None,
+    ):
         self.number = number
         self.elType = elType
         self.provider = provider
         self.nodeLabels = nodeLabels
         self.ownTypeInfo = ownTypeInfo
+        self.besideElement = besideElement
 
     @property
     def isMadeByOwner(self) -> bool:
@@ -196,7 +209,7 @@ class Mesh:
         self.elements[number] = record
         return record
 
-    def addElementMadeByOwner(self, element) -> MeshElement:
+    def addElementMadeByOwner(self, element, besideElement: int = None) -> MeshElement:
         """Describe an element its owner made itself, from the element object.
 
         Contact facets and the point masses of rigid bodies are made by the code that owns them
@@ -208,6 +221,8 @@ class Mesh:
         ----------
         element
             The element object.
+        besideElement
+            The number of the element of the mesh it lies on, or None if it lies on none.
 
         Returns
         -------
@@ -217,6 +232,7 @@ class Mesh:
 
         record = self.addElement(element.elNumber, element.elType, None, [node.label for node in element.nodes])
         record.ownTypeInfo = ElementTypeInfo(element.fields, element.ensightType, element.nDof, element.hasKernels)
+        record.besideElement = besideElement
         return record
 
     def removeElement(self, number: int):

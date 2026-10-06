@@ -45,7 +45,7 @@ from collections.abc import Iterator
 
 import numpy as np
 
-from edelweissfe.models.mesh import Mesh
+from edelweissfe.models.mesh import Mesh, MeshElement
 
 
 class ElementDistribution:
@@ -84,6 +84,19 @@ class ElementDistribution:
             The number of the new element, already described in the mesh.
         parentNumber
             The number of the element it replaces (in part), still described in the mesh.
+        """
+
+    def placeElementMadeByOwner(self, record: MeshElement):
+        """Decide where an element its owner made itself (a contact facet, the point mass of a rigid
+        body; see :meth:`~edelweissfe.models.femodel.FEModel.createElement`) is computed. Such an
+        element is surface-sized and made in every process, by the same code, with the same number.
+        Here: every element is computed here, so there is nothing to decide.
+
+        Parameters
+        ----------
+        record
+            The element as described in the mesh, with the element it lies on
+            (:attr:`~edelweissfe.models.mesh.MeshElement.besideElement`).
         """
 
     def createAndDropElementsOfChangedMesh(self, model):

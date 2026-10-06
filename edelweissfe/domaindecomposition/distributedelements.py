@@ -54,10 +54,13 @@ from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
     worldCommunicator,
 )
-from edelweissfe.domaindecomposition.partitioning import partitionElementsOfMesh
+from edelweissfe.domaindecomposition.partitioning import (
+    partitionElementsOfMesh,
+    processOfElementMadeByOwner,
+)
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
-from edelweissfe.models.mesh import Mesh
+from edelweissfe.models.mesh import Mesh, MeshElement
 from edelweissfe.utils.exceptions import TopologyError
 
 
@@ -267,8 +270,9 @@ class DistributedElements(ElementDistribution):
         return loaded
 
     def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
-        """The numbers of the elements this process creates under a partition: its own, and the
-        loaded elements sharing a node with one of them; see :meth:`decideWhichElementsAreCreatedHere`.
+        """The numbers of the elements this process creates under a partition: its own, the loaded
+        elements sharing a node with one of them (see :meth:`decideWhichElementsAreCreatedHere`), and
+        every element made by its owner (see :meth:`placeElementMadeByOwner`).
 
         Parameters
         ----------
@@ -291,7 +295,8 @@ class DistributedElements(ElementDistribution):
             for number in self._loadedElements - own
             if not nodesOfOwnElements.isdisjoint(mesh.elements[number].nodeLabels)
         }
-        return own | loadedNeighbours
+        madeByOwners = {number for number, record in mesh.elements.items() if record.isMadeByOwner}
+        return own | loadedNeighbours | madeByOwners
 
     def moveElementsTo(self, model, owners: dict) -> tuple[int, int, int]:
         """Adopt a new partition: move every element whose process changes to its new process
@@ -408,6 +413,24 @@ class DistributedElements(ElementDistribution):
         self.owners[childNumber] = owner
         if owner == self.rank:
             self._createdHere.add(childNumber)
+
+    def placeElementMadeByOwner(self, record: MeshElement):
+        """An element its owner made itself -- a contact facet, the point mass of a rigid body -- is
+        made in every process: it is surface-sized, and a constraint evaluated in any process may
+        read it (a contact search reads the facets of a whole surface). It is computed, and reported,
+        by one process, the one :func:`~.partitioning.processOfElementMadeByOwner` names. Made before
+        the mesh is partitioned, the partition places it. See
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeElementMadeByOwner`.
+
+        Parameters
+        ----------
+        record
+            The element as described in the mesh, with the element it lies on.
+        """
+
+        self._createdHere.add(record.number)
+        if self.owners is not None:
+            self.owners[record.number] = processOfElementMadeByOwner(record, self.owners)
 
     def createAndDropElementsOfChangedMesh(self, model):
         """After a model modifier changed the mesh -- every process changes it identically -- forget

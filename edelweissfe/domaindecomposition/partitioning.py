@@ -33,8 +33,10 @@ numbers, connectivity and element types -- and not on element objects, so that a
 made before any element exists, and every process can make it without holding every element. METIS
 runs on the root process, which broadcasts the result, so every process holds the same partition
 regardless of whether METIS itself would reproduce it. The partition covers every element of the
-mesh -- the kernel-less contact facets included, whose lumped operators are zero but whose owner
-must still be unique.
+mesh. The elements made by their owners -- contact facets, the point masses of rigid bodies, which
+every process makes itself -- are not given to METIS: each is computed by the process computing the
+element it lies on (a facet's degrees of freedom are those of its solid element), or by rank 0 if it
+lies on none (:func:`processOfElementMadeByOwner`). Their owner is still unique.
 
 Constraints are not partitioned by geometry: each is one object, evaluated by one process, and is
 dealt out round-robin in name order. The assignment depends on the constraint names only, so it
@@ -45,7 +47,7 @@ state.
 import numpy as np
 
 from edelweissfe.domaindecomposition.metis import partitionMeshDual
-from edelweissfe.models.mesh import ElementTypeInfo, Mesh
+from edelweissfe.models.mesh import ElementTypeInfo, Mesh, MeshElement
 
 
 def _elementWeight(typeInfo: ElementTypeInfo) -> int:
@@ -83,7 +85,7 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
         The rank of every element, by element number.
     """
 
-    numbers = list(mesh.elements.keys())
+    numbers = [number for number, record in mesh.elements.items() if not record.isMadeByOwner]
     parts = np.zeros(len(numbers), dtype=np.int64)
 
     if nParts > 1:
@@ -107,7 +109,35 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
 
         communicator.Bcast(parts, root=0)
 
-    return dict(zip(numbers, parts.tolist()))
+    owners = dict(zip(numbers, parts.tolist()))
+    for number, record in mesh.elements.items():
+        if record.isMadeByOwner:
+            owners[number] = processOfElementMadeByOwner(record, owners)
+    # in mesh order, as the elements are listed everywhere else
+    return {number: owners[number] for number in mesh.elements}
+
+
+def processOfElementMadeByOwner(record: MeshElement, owners: dict) -> int:
+    """The process computing an element made by its owner (a contact facet, the point mass of a
+    rigid body): the process computing the element of the mesh it lies on, or rank 0 if it lies on
+    none.
+
+    Parameters
+    ----------
+    record
+        The element, as described in the mesh.
+    owners
+        The rank of every element of the mesh made from the mesh, by number.
+
+    Returns
+    -------
+    int
+        The rank.
+    """
+
+    if record.besideElement is None:
+        return 0
+    return owners[record.besideElement]
 
 
 def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -> dict:
