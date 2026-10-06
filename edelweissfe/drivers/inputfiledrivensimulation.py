@@ -39,7 +39,7 @@ from time import time as getCurrentTime
 from edelweissfe.config.configurator import loadConfiguration, updateConfiguration
 from edelweissfe.config.phenomena import carriesLinearMomentum, domainMapping
 from edelweissfe.config.solvers import getSolverByName
-from edelweissfe.domaindecomposition.elementdistribution import (
+from edelweissfe.domaindecomposition.distributedelements import (
     elementDistributionOfThisJob,
 )
 from edelweissfe.domaindecomposition.mpienvironment import (
@@ -129,7 +129,7 @@ def finiteElementSimulation(
     tic = getCurrentTime()
     model = FEModel(domainSize)
     # Which elements of the mesh this process creates: every one, unless the job is distributed over
-    # several MPI processes, which then each create only their own part (see elementdistribution).
+    # several MPI processes, which then each create only their own part (see domaindecomposition.distributedelements).
     model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
     model = fillFEModelFromInputFile(model, inputfile, journal)
     model.prepareYourself(journal)

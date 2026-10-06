@@ -50,7 +50,7 @@ Which process creates which element
 Every process reads the same input file and builds the same mesh, nodes, node sets and definitions
 (materials, sections, constraints, steps). The element objects -- with their materials and states,
 most of a model's memory -- are created in one of two ways, decided once per job, in one place
-(:func:`~edelweissfe.domaindecomposition.elementdistribution.elementDistributionOfThisJob`), and
+(:func:`~edelweissfe.domaindecomposition.distributedelements.elementDistributionOfThisJob`), and
 reported once on rank 0:
 
 * **Distributed** -- ``Distributed model: each of the N processes creates only the elements it
@@ -65,7 +65,7 @@ reported once on rank 0:
 The fallback rule
 ~~~~~~~~~~~~~~~~~
 
-:func:`~edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel` reads the input
+:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel` reads the input
 file and names every reason to hold the whole model on every process; the job is distributed only if
 there is none:
 
@@ -86,7 +86,7 @@ elements, contact through surface-sized exchanges -- removes them from the rule 
 What a distributed process creates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:class:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements` partitions the mesh
+:class:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements` partitions the mesh
 with the same function and the same weights the subdomain uses
 (:func:`~edelweissfe.domaindecomposition.partitioning.partitionElementsOfMesh`), right after the
 mesh is described and before the elements are made
@@ -419,7 +419,7 @@ Package reference
 .. automodule:: edelweissfe.domaindecomposition.subdomain
    :members:
 
-.. automodule:: edelweissfe.domaindecomposition.elementdistribution
+.. automodule:: edelweissfe.domaindecomposition.distributedelements
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.partitioning

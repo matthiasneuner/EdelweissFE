@@ -289,7 +289,7 @@ class _SecondOfTwoProcesses:
 
 
 def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
-    from edelweissfe.domaindecomposition.elementdistribution import (
+    from edelweissfe.domaindecomposition.distributedelements import (
         reasonsForTheWholeModel,
     )
     from edelweissfe.utils.inputfileparser import parseInputFile
@@ -314,7 +314,7 @@ print("hello")
 
 
 def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
-    from edelweissfe.domaindecomposition.elementdistribution import (
+    from edelweissfe.domaindecomposition.distributedelements import (
         DistributedElements,
         _loadedSurfacesAndElementSets,
     )

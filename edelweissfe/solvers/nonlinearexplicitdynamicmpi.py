@@ -30,7 +30,7 @@
 
 Started by an MPI launcher, every process reads the same input file and builds the same mesh --
 creating either every element, or only those of its own subdomain (see
-:mod:`edelweissfe.domaindecomposition.elementdistribution`); this solver then has each of them
+:mod:`edelweissfe.domaindecomposition.distributedelements`); this solver then has each of them
 compute one *subdomain* of it -- the elements METIS assigns to it and the constraints dealt to it --
 and integrate the degrees of freedom those touch.
 An increment is the increment of :class:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED`, with

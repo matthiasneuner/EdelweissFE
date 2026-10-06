@@ -35,7 +35,7 @@ state transfer carrying the history of a refined element onto its children -- th
 synchronization first: every process sends the states it owns to every other. That is for a model
 held whole on every process; a distributed model holds no element it would have to synchronize, and
 synchronizes its constraints only (see
-:mod:`edelweissfe.domaindecomposition.elementdistribution`).
+:mod:`edelweissfe.domaindecomposition.distributedelements`).
 
 It uses the interface the restart checkpoints use (``getStateVars``/``setStateVars`` on elements,
 ``getRestartData``/``setRestartData`` on constraints): whatever a checkpoint must carry to resume a

@@ -83,7 +83,7 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     """
 
     #: Why this generator needs every element of the model in every process of a domain-decomposed
-    #: run (see :func:`~edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel`),
+    #: run (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`),
     #: or None for a generator that only describes the mesh -- nodes, elements, sets and surfaces --
     #: and reads no element object. Not None unless a generator says so, since a generator is free
     #: to read and change the model.

@@ -3,7 +3,7 @@
 
 A test case either runs **distributed** -- each process creates only the elements it computes -- or
 with the **whole model** in every process, by the rule of
-:func:`edelweissfe.domaindecomposition.elementdistribution.reasonsForTheWholeModel`. Both give the
+:func:`edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`. Both give the
 same result, so comparing results cannot tell which one ran; this script runs every test case (in a
 copy) and checks, from the model each process ends with, that it ran in the mode expected below:
 

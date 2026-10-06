@@ -296,7 +296,7 @@ class Subdomain:
 
         A model whose processes each created only their own elements was partitioned before its
         elements were created (see
-        :meth:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements.decideWhichElementsAreCreatedHere`),
+        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`),
         on the same mesh and by the same estimate: that partition is adopted, since an element can
         only be computed where it exists.
 
@@ -664,7 +664,7 @@ class Subdomain:
         Each process adds the loads at its subdomain degrees of freedom itself, from the loaded
         elements reaching into the subdomain. A distributed model creates those that share a node
         with an element of the subdomain (see
-        :meth:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements.decideWhichElementsAreCreatedHere`);
+        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`);
         a subdomain reaching further -- through a constraint or a multi-point constraint -- could miss
         a load silently, and is refused instead.
 

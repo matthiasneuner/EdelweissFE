@@ -35,7 +35,7 @@ from here, and a result over an element set is simply the result of its elements
 
 A domain-decomposed run that computes each subdomain in its own process may create only the
 elements of its subdomain; its distribution
-(:class:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements`) then also says
+(:class:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements`) then also says
 how a result of a whole element set, or the state of the whole model, is gathered from the
 processes that computed it. Code that reads results of a whole element set or of the whole model
 goes through the methods below, and so reads the same thing in both cases.

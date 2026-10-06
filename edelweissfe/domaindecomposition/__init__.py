@@ -37,7 +37,7 @@ the partial forces of every subdomain touching it (:mod:`.subdomaininterface`). 
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the explicit increment runs over,
 in place of the whole model -- and carries out every exchange between the processes.
 
-Which elements a process *creates* is decided once per job (:mod:`.elementdistribution`): a
+Which elements a process *creates* is decided once per job (:mod:`.distributedelements`): a
 **distributed** model is partitioned before its elements exist, and each process creates only its
 own elements (and the loaded elements touching them), so that the memory of the elements falls with
 the number of processes; whole-model readers gather what they read. A model with something that
@@ -48,6 +48,6 @@ change every process first receives the current state of the parts it did not co
 the model is partitioned afresh (:mod:`.partitioning`).
 
 Nothing here is imported by a serial run except :mod:`.mpienvironment`, which decides whether the
-process was started by an MPI launcher, and :mod:`.elementdistribution`, which then asks it; only
+process was started by an MPI launcher, and :mod:`.distributedelements`, which then asks it; only
 under a launcher is ``mpi4py`` imported.
 """
