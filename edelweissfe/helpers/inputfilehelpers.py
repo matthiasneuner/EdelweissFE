@@ -320,6 +320,10 @@ def _fillFEModelFromInputFile(
         generatorClass = getGeneratorClass(generatorType)
         model = generatorClass.fromGeneratorDefinition(generatorDefinition["name"], model, journal, args, kwargs)
 
+    # A late generator may describe further elements (e.g. a boxgen with executeAfterManualGeneration):
+    # make them too, before anything refers to element objects again.
+    model.createElementsOfMesh(isCreatedHere)
+
     model = abqModelConstructor.createConstraintsFromInputFile(model, inputfile)
     model = abqModelConstructor.createModelModifiersFromInputFile(model, inputfile)
     return model

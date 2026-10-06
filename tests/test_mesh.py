@@ -248,3 +248,39 @@ def test_a_number_is_described_once():
         model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
     with pytest.raises(KeyError, match="not in the mesh"):
         model.mesh.setElementSet("broken", [1, 2])
+
+
+def test_elements_described_by_a_late_generator_are_created(tmp_path):
+    """A generator run after the *element keywords (executeAfterManualGeneration=True) describes
+    elements after the elements were made; they must be made too, not silently left out. No section
+    can refer to their sets, so preparing the model then fails loudly, as it always did."""
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        DECK
+        + """
+*modelGenerator, generator=planeRectQuad, name=late, executeAfterManualGeneration=True
+x0=10, l=3
+y0=0, h=1
+elType=CPE4
+elProvider=edelweiss
+nX=3
+nY=1
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    journal = Journal(verbose=False)
+    model = fillFEModelFromInputFile(FEModel(2), inputFile, journal)
+
+    assert list(model.elements) == list(model.mesh.elements)
+    assert [e.elNumber for e in model.elementSets["late_all"]] == [1003, 1004, 1005]
+    # (a Marmot element reports "No material was assigned"; a Python element has no material attribute yet)
+    with pytest.raises(Exception, match="No material was assigned|_hasMaterial"):
+        model.prepareYourself(journal)
+
+
+def test_an_element_described_but_never_created_is_refused(tmp_path):
+    model = _buildModel(tmp_path)
+    model.mesh.addElement(5000, "CPE4", "edelweiss", [1, 2, 3, 4])
+    with pytest.raises(TopologyError, match="described but never created"):
+        model.prepareYourself(Journal(verbose=False))

@@ -99,8 +99,10 @@ class FEModel:
         self.nodes = {}  #: Nodes in the model.
         self.mesh = Mesh()  #: The mesh, as data: the elements, element sets and surfaces described for the model.
         self.elements = {}  #: The element objects created from the mesh, by number, in mesh order.
-        #: The numbers of the elements of the mesh not created in this process; see :meth:`requireCompleteMesh`.
-        self._elementsNotCreatedHere = set()
+        #: Whether this process creates the element with the given number: the predicate last passed to
+        #: :meth:`createElementsOfMesh`. An element of the mesh that is not created here must have been
+        #: declined by it; see :meth:`_checkEveryElementIsCreatedOrDeclined`.
+        self._isCreatedHere = everyElement
         self.nodeSets = {}  #: NodeSets in the model.
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
@@ -201,7 +203,6 @@ class FEModel:
         nodes = self.nodes
         element.setNodes([nodes[label] for label in record.nodeLabels.tolist()])
         self.elements[number] = element
-        self._elementsNotCreatedHere.discard(number)
         return element
 
     def createElementsOfMesh(self, isCreatedHere: Callable[[int], bool]):
@@ -215,6 +216,8 @@ class FEModel:
         Calling it again is harmless: elements already created are kept (the predicate is asked again
         for the others), and sets and surfaces that already exist are updated in place (references
         held to them stay valid), so a mesh described in several steps can be made in several steps.
+        The predicate is kept: :meth:`prepareYourself` checks that every element of the mesh was either
+        created or declined by it.
 
         Parameters
         ----------
@@ -223,13 +226,10 @@ class FEModel:
             every element (:func:`everyElement`); a domain-decomposed run may create only its own.
         """
 
+        self._isCreatedHere = isCreatedHere
         for number in self.mesh.elements:
-            if number in self.elements:
-                continue
-            if isCreatedHere(number):
+            if number not in self.elements and isCreatedHere(number):
                 self.createElementOfMesh(number)
-            else:
-                self._elementsNotCreatedHere.add(number)
 
         for name in self.mesh.elementSets:
             self.resolveElementSetOfMesh(name)
@@ -304,10 +304,33 @@ class FEModel:
             If some element of the mesh was not created in this process.
         """
 
-        if self._elementsNotCreatedHere:
+        notCreatedHere = self.mesh.elements.keys() - self.elements.keys()
+        if notCreatedHere:
             raise TopologyError(
                 "{:} needs every element of the model, but {:} of them were not created in this process".format(
-                    reader, len(self._elementsNotCreatedHere)
+                    reader, len(notCreatedHere)
+                )
+            )
+
+    def _checkEveryElementIsCreatedOrDeclined(self):
+        """Raise unless every element of the mesh was either created here or declined by the predicate
+        of :meth:`createElementsOfMesh` -- an element described after the elements were made, and
+        never made, would otherwise silently be missing from the model.
+
+        Raises
+        ------
+        TopologyError
+            If some element of the mesh was neither created nor declined.
+        """
+
+        neverCreated = sorted(
+            number for number in self.mesh.elements.keys() - self.elements.keys() if self._isCreatedHere(number)
+        )
+        if neverCreated:
+            raise TopologyError(
+                "{:} element(s) of the mesh (e.g. {:}) were described but never created -- elements described "
+                "after FEModel.createElementsOfMesh must be made by calling it again".format(
+                    len(neverCreated), neverCreated[:5]
                 )
             )
 
@@ -343,7 +366,6 @@ class FEModel:
 
         self.mesh.removeElement(elNumber)
         self.elements.pop(elNumber, None)
-        self._elementsNotCreatedHere.discard(elNumber)
 
     def _activateNodeFieldsFromMesh(
         self,
@@ -588,6 +610,7 @@ class FEModel:
             The journal instance.
         """
 
+        self._checkEveryElementIsCreatedOrDeclined()
         self.topology.adoptSetupElementNumbers()
         self.topology.ensureSurfaceFacetModifier(journal)
         self.topology.checkModelModifierDomains()
