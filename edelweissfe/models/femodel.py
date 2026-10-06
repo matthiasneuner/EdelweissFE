@@ -82,7 +82,8 @@ class FEModel:
     The model is built in two stages. First the mesh is described as data in :attr:`mesh`
     (:class:`~edelweissfe.models.mesh.Mesh`): elements by number, type, provider and node labels,
     element sets and surfaces. Then :meth:`createElementsOfMesh` creates the element objects from it
-    and resolves the element sets and surfaces to them.
+    and resolves the element sets and surfaces to them. The fields at the nodes, and with them the
+    layout of the degrees of freedom, follow from the mesh alone (:meth:`_activateNodeFieldsFromMesh`).
 
 
     Parameters
@@ -344,17 +345,26 @@ class FEModel:
         self.elements.pop(elNumber, None)
         self._elementsNotCreatedHere.discard(elNumber)
 
-    def _populateNodeFieldVariablesFromElements(
+    def _activateNodeFieldsFromMesh(
         self,
     ):
-        """Creates FieldVariables on Nodes depending on the all
-        elements.
+        """Create the FieldVariables at the nodes, for the fields every element of the mesh has at
+        its nodes.
+
+        Which fields an element has at which node depends on its type only, so this needs the mesh
+        and no element object: the fields -- and hence the layout of the degrees of freedom -- are
+        the same in every process, whichever elements it created.
         """
-        for element in self.elements.values():
-            for node, elementNodeFields in zip(element.nodes, element.fields):
+
+        nodes = self.nodes
+        typeOf = self.mesh.typeOf
+        for record in self.mesh.elements.values():
+            for label, elementNodeFields in zip(record.nodeLabels.tolist(), typeOf(record).fields):
+                node = nodes[label]
+                nodeFields = node.fields
                 for field in elementNodeFields:
-                    if field not in node.fields:
-                        node.fields[field] = FieldVariable(node, field)
+                    if field not in nodeFields:
+                        nodeFields[field] = FieldVariable(node, field)
 
     def _populateNodeFieldVariablesFromConstraints(
         self,
@@ -475,10 +485,10 @@ class FEModel:
             The journal instance.
         """
         journal.message(
-            "Activating fields on nodes from Elements and Constraints",
+            "Activating fields on nodes from the mesh and the constraints",
             self.identification,
         )
-        self._populateNodeFieldVariablesFromElements()
+        self._activateNodeFieldsFromMesh()
         self._populateNodeFieldVariablesFromConstraints()
 
         journal.message("Bundling fields on nodes to NodeFields", self.identification)
@@ -513,10 +523,10 @@ class FEModel:
             return
 
         journal.message(
-            "Activating fields on nodes from Elements and Constraints",
+            "Activating fields on nodes from the mesh and the constraints",
             self.identification,
         )
-        self._populateNodeFieldVariablesFromElements()
+        self._activateNodeFieldsFromMesh()
         self._populateNodeFieldVariablesFromConstraints()
 
         journal.message("Resizing NodeFields", self.identification)
