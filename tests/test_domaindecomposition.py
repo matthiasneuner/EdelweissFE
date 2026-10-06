@@ -308,18 +308,27 @@ def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
 print("hello")
 *modelGenerator, generator=boxGen, name=late, executeAfterManualGeneration=True
 nX=1
+*modelGenerator, generator=surfaceElementGenerator, name=facets, executeAfterManualGeneration=True
+surface=gen_top
+name=top
+*constraint, type=tie, name=tie
+slaveSurface=top_facets, masterSurface=top_facets
+*constraint, type=rigidBody, name=rigid
+nSet=gen_left, referencePoint=gen_leftBottom
 *fieldOutput
 >>fromExpression, name=fromElements, elSet=gen_all, expression='np.zeros(len(model.elementSets["gen_all"]))'
 """
     )
     reasons = reasonsForTheWholeModel(parseInputFile(str(deck)))
-    # adaptive refinement reads the mesh only and runs distributed; the surface snap does not
-    assert len(reasons) == 4
+    # adaptive refinement reads the mesh only and runs distributed, and so do a tie and contact facets
+    # made by a late generator; the surface snap and an unverified constraint do not
+    assert len(reasons) == 5
     assert "model modifier snap (surfaceSnap) changes the mesh during the run" in reasons[0]
-    assert not any("amr" in reason for reason in reasons)
-    assert "generator code (executePythonCode)" in reasons[1]
-    assert "generator late (boxGen) runs after the mesh is partitioned" in reasons[2]
-    assert "expression field output fromElements reads the elements of element set gen_all" in reasons[3]
+    assert not any(name in reason for name in ("amr", "constraint tie ", "generator facets ") for reason in reasons)
+    assert "constraint rigid (rigidBody) is not yet known to read only what every process holds" in reasons[1]
+    assert "generator code (executePythonCode)" in reasons[2]
+    assert "generator late (boxGen) runs after the mesh is partitioned" in reasons[3]
+    assert "expression field output fromElements reads the elements of element set gen_all" in reasons[4]
 
 
 def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
@@ -347,6 +356,48 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     assert set(model.elements) == own | {8}
     assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == sorted(own)
     assert not model.elementSets["gen_top"].isComplete
+
+
+def test_contact_facets_are_made_everywhere_and_computed_beside_their_solid_element(tmp_path):
+    from edelweissfe.domaindecomposition.distributedelements import (
+        DistributedElements,
+        _stepActionDefinitions,
+        reasonsForTheWholeModel,
+    )
+    from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*modelGenerator, generator=surfaceElementGenerator, name=facets, executeAfterManualGeneration=True
+surface=gen_top
+name=top
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    assert reasonsForTheWholeModel(inputFile) == []
+
+    model = FEModel(2)
+    distribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
+    model.elementDistribution = distribution
+    model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
+
+    facets = model.wholeElementSet("top_facets", "this test")
+    assert len(facets) == 8
+    for facet in facets:
+        besideElement = model.mesh.elements[facet.elNumber].besideElement
+        assert distribution.owners[facet.elNumber] == distribution.owners[besideElement]
+    # The facets on the top row (the even numbers) of elements 9-16 are computed here.
+    reported = [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())]
+    assert [
+        model.mesh.elements[number].besideElement
+        for number in reported
+        if number in model.mesh.elementSets["top_facets"]
+    ] == [10, 12, 14, 16]
 
 
 def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_whole_set(tmp_path):
