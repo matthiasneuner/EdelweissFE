@@ -395,10 +395,8 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
 
         return PExt, K
 
-    def assembleConcentratedLoads(
-        self, nodeForces: list[StepActionBase], PExt: DofVector, timeStep: TimeStep
-    ) -> DofVector:
-        """Add the concentrated (nodal) loads into a right hand side vector, in the order given.
+    def computeNodeForces(self, nodeForces: list[StepActionBase], PExt: DofVector, timeStep: TimeStep) -> DofVector:
+        """Add the concentrated (nodal) loads into the global external load vector, in the order given.
 
         Parameters
         ----------
@@ -458,7 +456,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             - The updated external load vector.
             - The updated system matrix.
         """
-        PExt = self.assembleConcentratedLoads(nodeForces, PExt, timeStep)
+        PExt = self.computeNodeForces(nodeForces, PExt, timeStep)
         PExt, K = self.computeDistributedLoads(distributedLoads, U_np, PExt, K, timeStep)
         PExt, K = self.computeBodyForces(bodyForces, U_np, PExt, K, timeStep)
 

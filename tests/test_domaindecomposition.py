@@ -29,11 +29,19 @@
 """The building blocks of the domain decomposition that one process can test: the METIS binding,
 the element partitioning, and the subdomain interface of a single process. What only several
 processes can test -- the interface exchange and the independence of the result from the
-decomposition -- is covered by the decks in ``testfiles/mpi``, run under ``mpirun``."""
+decomposition -- is covered by the decks in ``testfiles/mpi``, run under ``mpirun``; a failure in one
+process, which must not leave the others waiting, by a test starting ``mpirun`` itself."""
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
 
 import numpy as np
 import pytest
 
+import edelweissfe
 from edelweissfe.domaindecomposition import mpienvironment
 
 
@@ -283,6 +291,89 @@ def test_a_single_subdomain_agrees_with_itself():
     with pytest.raises(StepFailed, match="testing failed"):
         with subdomain.agreedOnByAllParts("testing"):
             raise KeyError("a failure")
+
+
+_FAILING_LOAD_DECK = """
+*material, name=LinearElastic, id=linearelastic, provider=edelweiss
+30000.0, 0.15, 1.0
+*modelGenerator, generator=planeRectQuad, name=gen
+elType=CPE4
+elProvider=edelweiss
+nX=6
+nY=6
+l=100
+h=100
+*section, name=section1, thickness=1.0, material=linearelastic, type=plane
+all
+*job, name=failingloadjob, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=5, maxIter=25, stepLength=1
+>>dirichlet, name=bottom, nSet=gen_bottom, field=displacement, 1=0.0, 2=0.0
+>>bodyForce, name=gravity, elSet=all, forceVector='0.0, -0.01'
+"""
+
+#: Runs _FAILING_LOAD_DECK with a body force kernel failing in process 1 only, and prints, per process,
+#: the failures the simulation reported.
+_FAILING_LOAD_SCRIPT = """
+import contextlib, io
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.elements.base.displacementelementbase import DisplacementElementBase
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+computeBodyForce = DisplacementElementBase.computeBodyForce
+
+
+def failingInProcessOne(self, *args):
+    if rank == 1:
+        raise RuntimeError("load kernel failed")
+    return computeBodyForce(self, *args)
+
+
+DisplacementElementBase.computeBodyForce = failingInProcessOne
+journal = io.StringIO()
+with contextlib.redirect_stdout(journal):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.getvalue().splitlines() if "failed" in line]
+print("PROCESS", rank, failures, flush=True)
+"""
+
+
+def test_a_load_failing_in_one_process_fails_in_every_process(tmp_path):
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+
+    (tmp_path / "test.inp").write_text(_FAILING_LOAD_DECK)
+    (tmp_path / "run.py").write_text(_FAILING_LOAD_SCRIPT)
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    # Without the agreement, process 1 leaves the evaluation alone: uncaught, its exception aborts the
+    # job with no failure reported; caught, the others wait for it in the exchange forever (the timeout).
+    launched = subprocess.Popen(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = launched.communicate(timeout=180)
+    except subprocess.TimeoutExpired:
+        # the launcher and every process it started, which would otherwise wait on
+        os.killpg(launched.pid, signal.SIGKILL)
+        launched.communicate()
+        pytest.fail("a load failing in one process left the others waiting")
+
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    expected = "['Simulation failed: Evaluating the loads failed in process 1: RuntimeError: load kernel failed']"
+    assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
 
 
 _DISTRIBUTION_DECK = """

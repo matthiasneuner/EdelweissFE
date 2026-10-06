@@ -168,8 +168,8 @@ class BodyLoadOnSubdomain:
 
 class LoadsOnSubdomain:
     """The distributed and body loads of a step, restricted to the elements computed in a subdomain,
-    and the assembly completing their nodal forces at the interface; see
-    :meth:`Subdomain.loadsOnSubdomain`.
+    and the tags of their nodal forces for the assembly completing them at the interface; see
+    :meth:`Subdomain.loadsOnSubdomain` and :meth:`Subdomain.loadAssemblyFor`.
 
     Parameters
     ----------
@@ -181,8 +181,11 @@ class LoadsOnSubdomain:
         The distributed loads, restricted to the elements computed here.
     restrictedBodyLoads
         The body loads, restricted to the elements computed here.
-    assembly
-        The assembly of their nodal forces, entries in the order the restricted loads are evaluated.
+    entryDofs
+        The degree of freedom of every entry of their nodal forces, in the order the restricted loads
+        are evaluated.
+    entryLoadOrder
+        The place of every entry in the order of all load contributions of the model.
     """
 
     def __init__(
@@ -191,15 +194,20 @@ class LoadsOnSubdomain:
         bodyLoads: list,
         restrictedDistributedLoads: list[DistributedLoadOnSubdomain],
         restrictedBodyLoads: list[BodyLoadOnSubdomain],
-        assembly: InterfaceLoadAssembly,
+        entryDofs: np.ndarray,
+        entryLoadOrder: np.ndarray,
     ):
         self._loads = (distributedLoads, bodyLoads)
         #: The distributed loads, restricted to the elements computed here.
         self.distributedLoads = restrictedDistributedLoads
         #: The body loads, restricted to the elements computed here.
         self.bodyLoads = restrictedBodyLoads
-        #: The assembly of their nodal forces.
-        self.assembly = assembly
+        #: The degree of freedom of every entry of their nodal forces.
+        self.entryDofs = entryDofs
+        #: The place of every entry in the order of all load contributions of the model.
+        self.entryLoadOrder = entryLoadOrder
+        #: The assembly of their nodal forces, once built (:meth:`Subdomain.loadAssemblyFor`).
+        self.assembly = None
 
     def isFor(self, distributedLoads: list, bodyLoads: list) -> bool:
         """Whether these are the restrictions of the given loads.
@@ -648,9 +656,10 @@ class Subdomain:
     # --- What is computed here ----------------------------------------------------------------
 
     def loadsOnSubdomain(self, distributedLoads, bodyLoads) -> LoadsOnSubdomain:
-        """The given loads, restricted to the elements computed here, and how their nodal forces are
-        completed at the interface; built when the loads or the subdomain changed. Collective among
-        neighbours when built: every process asks for the same loads at the same time.
+        """The given loads, restricted to the elements computed here, with their nodal forces tagged
+        for the assembly at the interface (:meth:`loadAssemblyFor`); made again when the loads or the
+        subdomain changed. Local: it reads the mesh, which every process holds whole, and so may be
+        called where a process can fail alone (:meth:`agreedOnByAllParts`).
 
         A load acting on an element is a contribution of that element: it is evaluated by the
         process computing the element, with that process' current solution -- the element's degrees
@@ -671,7 +680,12 @@ class Subdomain:
         Returns
         -------
         LoadsOnSubdomain
-            The restricted loads and their assembly.
+            The restricted loads.
+
+        Raises
+        ------
+        TopologyError
+            If a loaded element held here is not where the mesh describes it in its surface or set.
         """
 
         distributedLoads, bodyLoads = list(distributedLoads), list(bodyLoads)
@@ -732,13 +746,31 @@ class Subdomain:
             bodyLoads,
             restrictedDistributedLoads,
             restrictedBodyLoads,
-            InterfaceLoadAssembly(
-                self._interface,
-                np.concatenate(entryDofs) if entryDofs else np.empty(0, dtype=np.int64),
-                np.concatenate(entryOrder) if entryOrder else np.empty(0, dtype=np.int64),
-            ),
+            np.concatenate(entryDofs) if entryDofs else np.empty(0, dtype=np.int64),
+            np.concatenate(entryOrder) if entryOrder else np.empty(0, dtype=np.int64),
         )
         return self._loadsOnSubdomain
+
+    def loadAssemblyFor(self, loads: LoadsOnSubdomain) -> InterfaceLoadAssembly:
+        """The assembly of the nodal forces of loads restricted to this subdomain at the interface;
+        built the first time it is asked for. Collective among neighbours when built: every process
+        asks for it after the same :meth:`loadsOnSubdomain`, which is made again in every process at
+        the same time.
+
+        Parameters
+        ----------
+        loads
+            The loads, as :meth:`loadsOnSubdomain` restricted them.
+
+        Returns
+        -------
+        InterfaceLoadAssembly
+            The assembly.
+        """
+
+        if loads.assembly is None:
+            loads.assembly = InterfaceLoadAssembly(self._interface, loads.entryDofs, loads.entryLoadOrder)
+        return loads.assembly
 
     def constraintsSearchedHere(self, model: FEModel, constraints: dict) -> dict:
         """Those of the given constraints whose connectivity search is run here: those this process

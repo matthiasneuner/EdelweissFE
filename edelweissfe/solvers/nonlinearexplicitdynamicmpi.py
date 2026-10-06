@@ -437,9 +437,9 @@ class NEDMPI(NEDParallel):
     ) -> tuple[DofVector, None]:
         """Assemble the loads of :meth:`NED.assembleLoads` in the same order, those acting on
         elements as the element forces are: each process evaluates the loads of the elements it
-        computes, and the contributions are completed at the interface and added in the order of the
-        loads of the model; see :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`.
-        Collective among neighbours.
+        computes, agreed on by all processes, and the contributions are completed at the interface
+        and added in the order of the loads of the model; see
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`. Collective.
 
         Parameters
         ----------
@@ -466,15 +466,21 @@ class NEDMPI(NEDParallel):
 
         # A concentrated load acts on degrees of freedom, not on elements: every process integrating
         # one adds it, onto the same complete net force.
-        PExt = self.assembleConcentratedLoads(nodeForces, PExt, timeStep)
+        PExt = self.computeNodeForces(nodeForces, PExt, timeStep)
         if not distributedLoads and not bodyForces:
             return PExt, K
 
-        loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
-        forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
-        forces += [Pe for _, Pe in self.bodyForcesOfElements(loads.bodyLoads, U_np, K, timeStep)]
+        # A load kernel -- or a load not where the mesh describes it -- may fail in one process alone,
+        # which would leave its neighbours waiting in the exchange below.
+        with self.subdomain.agreedOnByAllParts("Evaluating the loads"):
+            loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
+            with performancetiming.timeit("distributed loads"):
+                forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
+            with performancetiming.timeit("body forces"):
+                forces += [Pe for _, Pe in self.bodyForcesOfElements(loads.bodyLoads, U_np, K, timeStep)]
+
         with performancetiming.timeit("interface loads"):
-            loads.assembly.assemble(np.concatenate(forces) if forces else np.empty(0), PExt)
+            self.subdomain.loadAssemblyFor(loads).assemble(np.concatenate(forces) if forces else np.empty(0), PExt)
         return PExt, K
 
     @performancetiming.timeit("assemble constraints")
