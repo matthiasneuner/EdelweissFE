@@ -48,7 +48,7 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
-from edelweissfe.sets.elementset import ElementSet
+from edelweissfe.sets.elementset import ElementSetOfMesh
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -193,7 +193,7 @@ class FEModel:
 
         Elements are created in mesh order, so :attr:`elements` lists them in the order they were
         described. Each element set of the mesh becomes an
-        :class:`~edelweissfe.sets.elementset.ElementSet` of the elements created here, and each surface
+        :class:`~edelweissfe.sets.elementset.ElementSetOfMesh` of the elements created here, and each surface
         an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
 
         Which elements are created here, :attr:`elementDistribution` decides
@@ -258,10 +258,10 @@ class FEModel:
         for name in self.mesh.surfaces:
             self.resolveSurfaceOfMesh(name)
 
-    def resolveElementSetOfMesh(self, name: str) -> ElementSet:
+    def resolveElementSetOfMesh(self, name: str) -> ElementSetOfMesh:
         """Make ``elementSets[name]`` hold the elements of the mesh's element set ``name`` created here.
 
-        An existing :class:`~edelweissfe.sets.elementset.ElementSet` of that name is updated in place,
+        An existing :class:`~edelweissfe.sets.elementset.ElementSetOfMesh` of that name is updated in place,
         so that references to it stay valid.
 
         Parameters
@@ -271,7 +271,7 @@ class FEModel:
 
         Returns
         -------
-        ElementSet
+        ElementSetOfMesh
             The elements of the set created here, in set order; complete if that is all of them.
         """
 
@@ -281,15 +281,12 @@ class FEModel:
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh, nodesOfModel=self.nodes)
+            elementSet = self.elementSets[name] = ElementSetOfMesh(name, created, self.mesh, self.nodes)
         else:
             if list(elementSet) != created:
                 elementSet.replaceMembers(created)
-            # its nodes are those of the whole set in the mesh, which may have changed even where the
-            # part created here did not
-            elementSet.forgetNodes()
-            elementSet.mesh = self.mesh
-            elementSet.nodesOfModel = self.nodes
+            # the set may have changed in the mesh even where the part created here did not
+            elementSet.describedBy(self.mesh, self.nodes)
         return elementSet
 
     def resolveSurfaceOfMesh(self, name: str):

@@ -134,11 +134,11 @@ make a distributed model possible:
   degrees of freedom is therefore the same in every process *by construction*, whichever elements it
   created. Vectors stay global-length: a process holds the solution at every node, and receives it
   from the owners of the degrees of freedom whenever the whole model is read.
-* **An element set is the part of the set created here.** Each
-  :class:`~edelweissfe.sets.elementset.ElementSet` of the model holds the created elements of its set
-  in the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
+* **An element set is the part of the set created here.** Each element set of the model, an
+  :class:`~edelweissfe.sets.elementset.ElementSetOfMesh`, holds the created elements of its set in
+  the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
   What the mesh describes is known for the whole set in every process: its element numbers
-  (:meth:`~edelweissfe.sets.elementset.ElementSet.elementNumbersOfWholeSet`) and its nodes
+  (:meth:`~edelweissfe.sets.elementset.ElementSetOfMesh.elementNumbersOfWholeSet`) and its nodes
   (:meth:`~edelweissfe.sets.elementset.ElementSet.extractNodeSet`), read from the mesh.
 * **Whole-model readers gather, or refuse.** A reader that needs every element of a set or of the
   model either goes through the gather path of the element distribution (see `Where the whole model is
@@ -264,7 +264,7 @@ element field output over a set         ``resultsOfWholeSet``: each process coll
                                         process, by mesh element number, in set order -- so a field
                                         output is the same in every process, as without decomposition
 node field output over an element set   the nodes of the whole set, from the mesh
-(``>>perNode, elSet=``)                 (``ElementSet.extractNodeSet``, also of a partial set, and
+(``>>perNode, elSet=``)                 (``extractNodeSet`` of the set, also of a partial set, and
                                         again after a refinement); the node fields are global-length
 Ensight                                 rank 0 draws the geometry of a partial set from the mesh
                                         (``visualizedElementsOf``) and writes the gathered results

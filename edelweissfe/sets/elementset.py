@@ -58,14 +58,11 @@ class ElementSet(OrderedSet):
     """A basic element set.
     It has a label, and a list containing unique elements.
 
-    An element set holds the elements of the set that were **created here**: the model describes its
-    mesh as data first and then creates the element objects from it
-    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`). In a serial run that is every
-    element of the set. A domain-decomposed run may create only part of the mesh in each process; a
-    set then holds only its part, and says so through :attr:`isComplete`. Code that needs the whole set
-    -- an output, a checkpoint, a marker -- states it by calling :meth:`requireComplete`. What the mesh
-    and the nodes describe is known for the whole set in every process: its element numbers
-    (:meth:`elementNumbersOfWholeSet`) and its nodes (:meth:`extractNodeSet`).
+    A set of element objects: complete by definition, since it holds the elements it was given. An
+    element set of a model resolved from its mesh is an :class:`ElementSetOfMesh`, which may hold only
+    the part of its set created in this process. Code that needs the whole set -- an output, a
+    checkpoint, a marker -- states it by calling :meth:`requireComplete`; what is known of the whole
+    set in every process is read through :meth:`elementNumbersOfWholeSet` and :meth:`extractNodeSet`.
 
     Parameters
     ----------
@@ -73,20 +70,12 @@ class ElementSet(OrderedSet):
         The unique label for this element set.
     elements
         A list of elements.
-    mesh
-        The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name, if the set
-        was resolved from a mesh; :attr:`isComplete` is derived from it.
-    nodesOfModel
-        The nodes of the model, by label, if the set was resolved from a mesh; the nodes of the whole
-        set (:meth:`extractNodeSet`) are taken from them.
     """
 
     def __init__(
         self,
         label: str,
         elements,
-        mesh=None,
-        nodesOfModel: dict = None,
     ):
         self.allowedObjectTypes = [BaseElement]
         self.allowedObjectTypes.append(MarmotElementWrapper) if MarmotElementWrapper is not None else None
@@ -98,28 +87,18 @@ class ElementSet(OrderedSet):
 
         super().__init__(label, elements)
         self._nodes = None
-        #: The mesh describing this set, or None for a set not resolved from a mesh.
-        self.mesh = mesh
-        #: The nodes of the model, by label, or None for a set not resolved from a mesh.
-        self.nodesOfModel = nodesOfModel
 
         self.elements = self.items
 
     @property
     def isComplete(self) -> bool:
-        """True if this set holds every element of its set in the mesh (always, for a set not resolved
-        from a mesh). Derived, not stored, so that no change of the members can leave it stale. Counting
-        suffices, since a set resolved from the mesh holds only elements of its set there."""
+        """Whether this set holds every element of its set: always, for a set of the element objects
+        it was given."""
 
-        if self.mesh is None:
-            return True
-        numbers = self.mesh.elementSets.get(self.name)
-        return numbers is None or len(self.data) == len(numbers)
+        return True
 
     def elementNumbersOfWholeSet(self) -> list:
-        """The numbers of every element of the set, in set order -- also of those not created here,
-        read from the mesh; for a set not resolved from a mesh, which is complete, the numbers of its
-        elements.
+        """The numbers of every element of the set, in set order: here, of its elements.
 
         Returns
         -------
@@ -127,9 +106,7 @@ class ElementSet(OrderedSet):
             The element numbers.
         """
 
-        if self.mesh is None or self.name not in self.mesh.elementSets:
-            return [element.elNumber for element in self]
-        return list(self.mesh.elementSets[self.name])
+        return [element.elNumber for element in self]
 
     def requireComplete(self, reader: str):
         """State that ``reader`` needs every element of this set, not only the part created here.
@@ -161,29 +138,27 @@ class ElementSet(OrderedSet):
     ):
         """The nodes of the set, without duplicates, in the order the elements list them.
 
-        The nodes of the whole set, also of a set of which only part was created here: a set resolved
-        from a mesh reads its elements' node labels from the mesh, which every process holds whole.
-        A set not resolved from a mesh is complete, and reads its elements.
-
         Returns
         -------
         NodeSet
             The nodes, named like the set.
         """
         if not self._nodes:
-            if self.nodesOfModel is not None and self.mesh is not None and self.name in self.mesh.elementSets:
-                records = self.mesh.elements
-                labels = dict.fromkeys(
-                    label for number in self.mesh.elementSets[self.name] for label in records[number].nodeLabels
-                )
-                self._nodes = NodeSet(self.name, [self.nodesOfModel[label] for label in labels])
-            else:
-                self._nodes = extractNodesFromElementSet(self)
+            self._nodes = self._findNodes()
         return self._nodes
 
+    def _findNodes(self) -> NodeSet:
+        """The nodes of the set, for :meth:`extractNodeSet`: here, those of its elements.
+
+        Returns
+        -------
+        NodeSet
+            The nodes, named like the set.
+        """
+        return extractNodesFromElementSet(self)
+
     def forgetNodes(self):
-        """Forget the nodes :meth:`extractNodeSet` found, because the set changed in the mesh -- also
-        where the part of it created here did not."""
+        """Forget the nodes :meth:`extractNodeSet` found, because the set changed."""
         self._nodes = None
 
     def replaceMembers(self, item_s):
@@ -192,3 +167,86 @@ class ElementSet(OrderedSet):
         membership changes."""
         super().replaceMembers(item_s)
         self.forgetNodes()
+
+
+class ElementSetOfMesh(ElementSet):
+    """An element set of a model, resolved from its mesh: it holds the elements of the set that were
+    **created here**.
+
+    The model describes its mesh as data first and then creates the element objects from it
+    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`), which resolves every element
+    set of the mesh to such a set (:meth:`~edelweissfe.models.femodel.FEModel.resolveElementSetOfMesh`,
+    the only place one is made). In a serial run that is every element of the set. A domain-decomposed
+    run may create only part of the mesh in each process; a set then holds only its part, and says so
+    through :attr:`isComplete`. What the mesh and the nodes describe is known for the whole set in
+    every process: its element numbers (:meth:`elementNumbersOfWholeSet`) and its nodes
+    (:meth:`extractNodeSet`).
+
+    Parameters
+    ----------
+    name
+        The name of the set, in the mesh as here.
+    elements
+        The elements of the set created here, in set order.
+    mesh
+        The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name.
+    nodesOfModel
+        The nodes of the model, by label; the nodes of the whole set are taken from them.
+    """
+
+    def __init__(self, label: str, elements, mesh, nodesOfModel: dict):
+        super().__init__(label, elements)
+        self.describedBy(mesh, nodesOfModel)
+
+    def describedBy(self, mesh, nodesOfModel: dict):
+        """Read the whole set from the given mesh and nodes from now on, and forget the nodes found
+        before: the set may have changed in the mesh, also where the part of it created here did not.
+
+        Parameters
+        ----------
+        mesh
+            The mesh describing this set under the same name.
+        nodesOfModel
+            The nodes of the model, by label.
+        """
+
+        #: The mesh describing this set.
+        self.mesh = mesh
+        #: The nodes of the model, by label.
+        self.nodesOfModel = nodesOfModel
+        self.forgetNodes()
+
+    @property
+    def isComplete(self) -> bool:
+        """True if this set holds every element of its set in the mesh. Derived, not stored, so that no
+        change of the members can leave it stale. Counting suffices, since the set holds only elements
+        of its set in the mesh."""
+
+        return len(self.data) == len(self.mesh.elementSets[self.name])
+
+    def elementNumbersOfWholeSet(self) -> list:
+        """The numbers of every element of the set, in set order -- also of those not created here,
+        read from the mesh.
+
+        Returns
+        -------
+        list
+            The element numbers.
+        """
+
+        return list(self.mesh.elementSets[self.name])
+
+    def _findNodes(self) -> NodeSet:
+        """The nodes of the whole set, also where only part of it was created here: the node labels of
+        its elements, read from the mesh, which every process holds whole.
+
+        Returns
+        -------
+        NodeSet
+            The nodes, named like the set.
+        """
+        records = self.mesh.elements
+        labels = dict.fromkeys(
+            label for number in self.mesh.elementSets[self.name] for label in records[number].nodeLabels
+        )
+        return NodeSet(self.name, [self.nodesOfModel[label] for label in labels])
