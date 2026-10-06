@@ -40,6 +40,8 @@ from edelweissfe.config.configurator import loadConfiguration, updateConfigurati
 from edelweissfe.config.phenomena import carriesLinearMomentum, domainMapping
 from edelweissfe.config.solvers import getSolverByName
 from edelweissfe.domaindecomposition.mpienvironment import (
+    abortAllProcesses,
+    abortAllProcessesOnUncaughtException,
     isRootProcess,
     numberOfProcesses,
 )
@@ -97,7 +99,11 @@ def finiteElementSimulation(
     # Started by an MPI launcher, every process runs this function on the same input, and each
     # builds the complete model; a domain-decomposed solver then has each compute a subdomain of it.
     # Only rank 0 reports and writes output -- the others would write the same files concurrently.
+    # A process stopping alone, by an uncaught exception or an interrupt, aborts all of them: the
+    # others would wait for it forever.
     writesOutput = isRootProcess()
+    abortAllProcessesOnUncaughtException()
+    interrupted = False
 
     journal = Journal(verbose=verbose and writesOutput)
 
@@ -279,6 +285,7 @@ def finiteElementSimulation(
     except KeyboardInterrupt:
         print("")
         journal.errorMessage("Interrupted by user", identification)
+        interrupted = True
 
     except StepFailed as e:
         print("")
@@ -316,5 +323,8 @@ def finiteElementSimulation(
 
         if resumeCheckpoint is not None:
             resumeCheckpoint.close()
+
+        if interrupted:
+            abortAllProcesses("interrupted")
 
     return model, fieldOutputController

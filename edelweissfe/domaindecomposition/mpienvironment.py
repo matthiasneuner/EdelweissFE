@@ -34,8 +34,10 @@ and Intel MPI, MVAPICH, and Slurm's ``srun`` with PMI or PMIx). A serial run nev
 installation without MPI is unaffected. ``EDELWEISSFE_MPI=0`` forces a serial run under a launcher,
 ``EDELWEISSFE_MPI=1`` forces the import without one.
 
-When there is more than one process, an uncaught exception in any of them aborts all of them: the
-others would otherwise wait forever in their next collective operation for a process that is gone.
+When there is more than one process, a process that stops alone must stop all of them: the others
+would otherwise wait forever in their next collective operation for a process that is gone. The
+driver therefore installs :func:`abortAllProcessesOnUncaughtException` for a run, and calls
+:func:`abortAllProcesses` when a process is interrupted.
 """
 
 import os
@@ -62,30 +64,6 @@ def _startedByMPILauncher() -> bool:
     return any(variable in os.environ for variable in _LAUNCHER_VARIABLES)
 
 
-def _abortAllProcessesOnUncaughtException(communicator):
-    """Replace the exception hook so that an uncaught exception aborts every process.
-
-    Parameters
-    ----------
-    communicator
-        The communicator whose processes are aborted.
-    """
-
-    previousHook = sys.excepthook
-
-    def abortingHook(exceptionType, exception, traceback):
-        previousHook(exceptionType, exception, traceback)
-        sys.stderr.write(
-            "EdelweissFE: uncaught exception in MPI process {:} of {:}; aborting all processes.\n".format(
-                communicator.Get_rank(), communicator.Get_size()
-            )
-        )
-        sys.stderr.flush()
-        communicator.Abort(1)
-
-    sys.excepthook = abortingHook
-
-
 @cache
 def worldCommunicator():
     """The communicator of all processes of this job, or None for a serial run.
@@ -105,8 +83,46 @@ def worldCommunicator():
     if communicator.Get_size() == 1:
         return None
 
-    _abortAllProcessesOnUncaughtException(communicator)
     return communicator
+
+
+def abortAllProcesses(reason: str):
+    """Abort every process of this job, from any one of them; nothing in a serial run.
+
+    Parameters
+    ----------
+    reason
+        Why, for the message on standard error.
+    """
+
+    communicator = worldCommunicator()
+    if communicator is None:
+        return
+
+    sys.stderr.write(
+        "EdelweissFE: {:} in MPI process {:} of {:}; aborting all processes.\n".format(
+            reason, communicator.Get_rank(), communicator.Get_size()
+        )
+    )
+    sys.stderr.flush()
+    communicator.Abort(1)
+
+
+def abortAllProcessesOnUncaughtException():
+    """Replace the exception hook so that an uncaught exception in any process aborts every process
+    of this job, after the exception was reported; nothing in a serial run. Installed once, however
+    often it is called.
+    """
+
+    if worldCommunicator() is not None:
+        sys.excepthook = _reportAndAbortAllProcesses
+
+
+def _reportAndAbortAllProcesses(exceptionType, exception, traceback):
+    """Report an uncaught exception as Python does, then abort every process."""
+
+    sys.__excepthook__(exceptionType, exception, traceback)
+    abortAllProcesses("uncaught exception")
 
 
 def numberOfProcesses() -> int:
