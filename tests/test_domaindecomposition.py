@@ -349,6 +349,42 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     assert not model.elementSets["gen_top"].isComplete
 
 
+def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_whole_set(tmp_path):
+    from edelweissfe.domaindecomposition.distributedelements import (
+        DistributedElements,
+        _stepActionDefinitions,
+    )
+    from edelweissfe.helpers.inputfilehelpers import (
+        createFieldOutputFromInputFile,
+        fillFEModelFromInputFile,
+    )
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*fieldOutput
+>>perNode, name=uLeft, elSet=gen_left, field=displacement, result=U
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    model = FEModel(2)
+    model.elementDistribution = DistributedElements(_SecondOfTwoProcesses(), _stepActionDefinitions(inputFile))
+    model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    for nodeField in model.nodeFields.values():
+        nodeField.createFieldValueEntry("U")
+
+    # The elements of the left edge, 1 and 2, are computed by the other process: none is held here.
+    assert len(model.elementSets["gen_left"]) == 0
+    fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["uLeft"]
+    # The nodes of the two elements, not every node of the model.
+    assert fieldOutput.associatedSet is model.elementSets["gen_left"]
+
+
 def test_a_repartition_keeps_elements_where_they_were():
     from edelweissfe.domaindecomposition.partitioning import keepElementsWhereTheyWere
 

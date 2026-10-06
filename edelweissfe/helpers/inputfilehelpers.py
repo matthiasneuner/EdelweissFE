@@ -154,7 +154,9 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
                 # set; from the mesh, also where a domain-decomposed process created only part of it.
                 subset = model.elementSets[definition["elSet"]]
 
-            if subset:
+            # An element set may hold none of its elements in this process, and is then empty -- but its
+            # nodes are still those of the whole set.
+            if subset is not None:
                 nodeField = nodeField.subset(subset)
 
             fieldOutputController.addPerNodeFieldOutput(
