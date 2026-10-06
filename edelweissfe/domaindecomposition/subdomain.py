@@ -1036,6 +1036,13 @@ class Subdomain:
         busyTimes = np.array(self.communicator.allgather(float(costs.sum())))
         imbalance = busyTimes.max() / max(busyTimes.mean(), 1e-300)
         if imbalance <= 1.0 + tolerance:
+            self.journal.message(
+                "Load imbalance {:.3f} (the costliest process / the mean of all) within 1 + {:}".format(
+                    imbalance, tolerance
+                ),
+                self.identification,
+                2,
+            )
             return False
 
         measured = dict(zip(plan.elements.keys(), (costs / nIncrements).tolist()))
