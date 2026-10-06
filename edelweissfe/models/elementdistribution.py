@@ -106,7 +106,7 @@ class ElementDistribution:
 
         return list(elements)
 
-    def resultsOfWholeSet(self, elementSet, reportedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(self, elementSet, numbersReportedHere: list, results: np.ndarray | None) -> np.ndarray:
         """The results of every element of a set, in set order, from the results of the elements
         reported here. Here: the results given, since every element is reported here.
 
@@ -114,8 +114,9 @@ class ElementDistribution:
         ----------
         elementSet
             The element set.
-        reportedHere
-            The elements of the set reported here (:meth:`elementsReportedHere`), in set order.
+        numbersReportedHere
+            The numbers of the elements of the set reported here (:meth:`elementsReportedHere`), in set
+            order.
         results
             Their results, one row per element; None if there are none.
 

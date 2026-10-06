@@ -283,7 +283,8 @@ class DistributedElements(ElementDistribution):
         2. each process drops the objects of the elements it no longer needs, and creates those it
            now needs -- its new elements, and new loaded neighbours
            (:meth:`decideWhichElementsAreCreatedHere`) -- from the mesh, in mesh order;
-        3. the element sets and surfaces are resolved to the elements now created here, the new
+        3. the element sets and surfaces are resolved to the elements now created here (and, before
+           the new elements are created, to those kept), the new
            elements receive their sections and element properties, as at setup, and every element
            this process now computes, but did not compute before, receives the state its previous
            process sent.
@@ -322,10 +323,12 @@ class DistributedElements(ElementDistribution):
         toDrop = [number for number in model.elements if number not in createdHere]
         toCreate = [number for number in mesh.elements if number in createdHere and number not in model.elements]
 
-        # Element objects change process; the mesh does not change.
+        # Element objects change process; the mesh does not change. The dropped elements leave
+        # their sets and surfaces before the new ones are created, so that they are released first.
         with model.topology.changes():
             for number in toDrop:
                 model.dropElementOfMesh(number)
+            model.resolveSetsAndSurfacesOfMesh()
             created = {number: model.createElementOfMesh(number) for number in toCreate}
         model.putElementsInMeshOrder()
         model.resolveSetsAndSurfacesOfMesh()
@@ -389,7 +392,7 @@ class DistributedElements(ElementDistribution):
 
         return [element for element in elements if self.owners[element.elNumber] == self.rank]
 
-    def resultsOfWholeSet(self, elementSet, reportedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(self, elementSet, numbersReportedHere: list, results: np.ndarray | None) -> np.ndarray:
         """The results of every element of a set, in the order of the set in the mesh, gathered from
         the processes computing them -- to every process, so that a field output is the same in
         every process, as without decomposition. Collective.
@@ -398,8 +401,8 @@ class DistributedElements(ElementDistribution):
         ----------
         elementSet
             The element set; resolved from the mesh.
-        reportedHere
-            The elements of the set computed here, in set order.
+        numbersReportedHere
+            The numbers of the elements of the set computed here, in set order.
         results
             Their results, one row per element; None if there are none.
 
@@ -421,7 +424,7 @@ class DistributedElements(ElementDistribution):
                 "processes".format(elementSet.name)
             )
         numbers = elementSet.mesh.elementSets[elementSet.name]
-        pieces = self.communicator.allgather(([element.elNumber for element in reportedHere], results))
+        pieces = self.communicator.allgather((list(numbersReportedHere), results))
 
         rowOf = {number: row for row, number in enumerate(numbers)}
         whole = None

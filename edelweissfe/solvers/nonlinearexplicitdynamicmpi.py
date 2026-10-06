@@ -148,7 +148,12 @@ from edelweissfe.solvers.base.parallelelementcomputation import (
     computeElementsForExplicit,
     computeLumpedDiagonalForExplicit,
 )
-from edelweissfe.solvers.nonlinearexplicitdynamic import NED, IncrementPlan, NEDSchema
+from edelweissfe.solvers.nonlinearexplicitdynamic import (
+    NED,
+    ExplicitSystem,
+    IncrementPlan,
+    NEDSchema,
+)
 from edelweissfe.solvers.nonlinearexplicitdynamicparallel import NEDParallel
 from edelweissfe.stepactions.base.stepactionbase import StepActionBase
 from edelweissfe.timesteppers.timestep import TimeStep
@@ -610,17 +615,48 @@ class NEDMPI(NEDParallel):
             # Right after every element state was synchronized -- or, where each process holds
             # only its own elements, accepted by the process computing it -- because an element
             # computed by another process from now on must arrive there with its current state.
-            ownershipVersion = model.elementDistribution.ownershipVersion
             if self.subdomain.rebalance(self._incrementPlan.elementPlan, *self._elementCostsForRebalancing()):
-                if model.elementDistribution.ownershipVersion != ownershipVersion:
-                    # Elements moved between processes: everything indexed by the elements held
-                    # here is built again for them, as after a change of the topology -- the
-                    # degree-of-freedom indices, the subdomain, the lumped operators and the plan --
-                    # carrying the solution, which was just made complete, over.
-                    self._buildSystem(self.buildEquationSystem(model, step, previous=self._system))
+                if self.subdomain.elementsMustMove():
+                    self._moveElements(model, step)
                 else:
                     self.partition = self.subdomain.partition
                     self._incrementPlan = self.planIncrement(model)
+
+    def _moveElements(self, model: FEModel, step):
+        """Move elements between the processes, after a rebalance changed the partition of a
+        distributed model, and build the equation system again for the elements now held here.
+        Collective.
+
+        Everything indexed by the elements held here -- the degree-of-freedom indices, the vectors
+        carrying them, the subdomain, the lumped operators, the increment plan -- is released
+        before the elements move, so that no element a process drops stays alive, and built again
+        afterwards, as after a change of the topology. The solution, the velocity and the net force,
+        just made complete in every process by the output synchronization, are carried over.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        step
+            The step being solved.
+        """
+
+        carried = ExplicitSystem(
+            Minv=None,
+            U=np.array(self._system.U),
+            dU=None,
+            V=np.array(self._system.V),
+            P=np.array(self._system.P),
+            criticalTimeStep=self._system.criticalTimeStep,
+        )
+        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
+        self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
+        self._reusableOperators = None
+        self.theDofManager = None
+        self.partition = self._incrementPlan = self._interfaceAssembly = self._elementCosts = None
+
+        self.subdomain.moveElements()
+        self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
         """Write the output of an accepted increment, agreed on by all processes: a conditional stop

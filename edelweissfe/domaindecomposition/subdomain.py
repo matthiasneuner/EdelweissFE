@@ -277,7 +277,7 @@ class Subdomain:
         :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`),
         on the same mesh and by the same estimate: that partition is adopted, since an element can
         only be computed where it exists. Repartitioned with measured costs, its elements are then
-        moved to their new processes (:meth:`_moveElements`).
+        to be moved to their new processes (:meth:`moveElements`).
 
         Parameters
         ----------
@@ -309,41 +309,10 @@ class Subdomain:
                 if byMeasuredCosts:
                     # A repartition of the same elements: those that can stay in their process do.
                     owners = keepElementsWhereTheyWere(owners, self._elementOwners, self.nProcesses)
-            # The same decision in every process: the partitions are the same everywhere.
-            elementsMove = not distribution.createsEveryElement and owners != self._elementOwners
             self._elementOwners = owners
-            if elementsMove:
-                self._moveElements(model)
         else:
             self._elementOwners = distribution.owners
         self._partitionedElementKeys = set(model.mesh.elements.keys())
-
-    @performancetiming.timeit("element migration")
-    def _moveElements(self, model: FEModel):
-        """Move the elements of a distributed model to their processes under the new partition
-        (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
-        and report the migration. Collective.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        """
-
-        counts = model.elementDistribution.moveElementsTo(model, self._elementOwners)
-
-        allCounts = self.communicator.gather(counts, root=0)
-        if allCounts is not None:
-            self.journal.message(
-                "Element migration: {:} element(s) changed process; element objects created {:}, dropped {:} "
-                "per process".format(
-                    sum(entry[2] for entry in allCounts),
-                    "/".join(str(entry[0]) for entry in allCounts),
-                    "/".join(str(entry[1]) for entry in allCounts),
-                ),
-                self.identification,
-                1,
-            )
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:
         """The rank of every constraint of the model: the current assignment while the model has the
@@ -1004,11 +973,14 @@ class Subdomain:
         return bool(self.loadBalanceTolerance)
 
     def rebalance(self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int) -> bool:
-        """Repartition with the measured element costs if the slowest process has fallen more than
+        """Repartition with the measured element costs if the costliest process has fallen more than
         ``loadBalanceTolerance`` behind the mean. Collective; only right after an increment was
         accepted and, where every process holds the whole model, every element state synchronized,
-        since an element changing process must arrive with its current state. A distributed model
-        moves its elements to their new processes (:meth:`_moveElements`).
+        since an element changing process must arrive with its current state.
+
+        Where every process holds the whole model, the subdomain is defined afresh at once. A
+        distributed model has to move its elements to their new processes first
+        (:meth:`elementsMustMove`, :meth:`moveElements`).
 
         Parameters
         ----------
@@ -1023,10 +995,7 @@ class Subdomain:
         -------
         bool
             Whether the partition changed; then everything derived from :attr:`partition` must be
-            derived again -- and, if elements moved
-            (:attr:`~edelweissfe.models.elementdistribution.ElementDistribution.ownershipVersion`
-            changed), the equation system built for the elements now held here, which defines the
-            subdomain afresh.
+            derived again.
         """
 
         tolerance = self.loadBalanceTolerance
@@ -1062,13 +1031,57 @@ class Subdomain:
 
         model = self._model
         self._partition(model, measuredCosts, byMeasuredCosts=True)
-        if model.elementDistribution.createsEveryElement:
+        if not self.elementsMustMove():
             self._adoptOwnership(model)
             with performancetiming.timeit("subdomain definition"):
                 self._defineInterface(model, ownershipChanged=True)
             self._reportSubdomains(topologyChanged=True)
-        # Otherwise elements moved between processes, and everything indexed by the elements held
-        # here -- the degree-of-freedom layout of the elements, and with it the subdomain -- is
-        # derived again by the equation system the solver builds for them, which defines the
-        # subdomain (define).
         return True
+
+    def elementsMustMove(self) -> bool:
+        """Whether the current partition computes elements in processes that do not hold them: after
+        a :meth:`rebalance` of a distributed model that changed the partition. The same in every
+        process.
+
+        Returns
+        -------
+        bool
+            Whether :meth:`moveElements` must be called before anything else is computed.
+        """
+
+        distribution = self._model.elementDistribution
+        return not distribution.createsEveryElement and self._elementOwners != distribution.owners
+
+    @performancetiming.timeit("element migration")
+    def moveElements(self):
+        """Move the elements of a distributed model to their processes under the current partition
+        (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
+        and report the migration. Collective.
+
+        The subdomain forgets the elements it computed first, so that a process holds no reference
+        to an element it drops; the solver must have released its own (its degree-of-freedom indices
+        and plans), and define the subdomain afresh afterwards (:meth:`define`), for the elements
+        it now holds.
+        """
+
+        self._ownedElements = {}
+        self._elementsTouchingSubdomain = set()
+        self._loadsOnSubdomain = {}
+        self.partition = None
+        self._dofManager = None
+
+        model = self._model
+        counts = model.elementDistribution.moveElementsTo(model, self._elementOwners)
+
+        allCounts = self.communicator.gather(counts, root=0)
+        if allCounts is not None:
+            self.journal.message(
+                "Element migration: {:} element(s) changed process; element objects created {:}, dropped {:} "
+                "per process".format(
+                    sum(entry[2] for entry in allCounts),
+                    "/".join(str(entry[0]) for entry in allCounts),
+                    "/".join(str(entry[1]) for entry in allCounts),
+                ),
+                self.identification,
+                1,
+            )

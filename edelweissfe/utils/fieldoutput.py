@@ -672,11 +672,11 @@ class ElementFieldOutput(_FieldOutputBase):
 
         self._seenSetVersion = self.associatedSet._version
         self._seenOwnershipVersion = model.elementDistribution.ownershipVersion
-        self._elementsReportedHere = model.elementDistribution.elementsReportedHere(self.associatedSet)
+        reportedHere = model.elementDistribution.elementsReportedHere(self.associatedSet)
+        # Numbers, not the elements: an element moving to another process must not be kept alive here.
+        self._numbersReportedHere = [element.elNumber for element in reportedHere]
         self.elementResultCollector = (
-            ElementResultCollector(self._elementsReportedHere, self.quadraturePoints, self.resultName)
-            if self._elementsReportedHere
-            else None
+            ElementResultCollector(reportedHere, self.quadraturePoints, self.resultName) if reportedHere else None
         )
 
     def _rebuildCollectorIfSetChanged(self):
@@ -684,9 +684,10 @@ class ElementFieldOutput(_FieldOutputBase):
         list at construction -- if the associated ElementSet was mutated in-place (e.g. AMR
         replacing a refined parent element with its children), or elements moved between the
         processes of a domain-decomposed run, since the last check. Unlike a plain iteration over
-        the set, this pinned snapshot does not see new elements on its own, and it holds views into
-        the state of the elements it was made for: a moved element's views would read an element
-        this process no longer computes, or no longer holds."""
+        the set, this pinned snapshot does not see new elements on its own, and it holds pointers
+        into the state of the elements it was made for, without keeping them alive: after elements
+        moved, a pointer would read an element this process no longer computes, or no longer holds.
+        Every read of the collector therefore comes after this check."""
         if (
             self.associatedSet._version != self._seenSetVersion
             or self.model.elementDistribution.ownershipVersion != self._seenOwnershipVersion
@@ -705,9 +706,7 @@ class ElementFieldOutput(_FieldOutputBase):
 
         self._rebuildCollectorIfSetChanged()
         resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
-        result = model.elementDistribution.resultsOfWholeSet(
-            self.associatedSet, self._elementsReportedHere, resultsHere
-        )
+        result = model.elementDistribution.resultsOfWholeSet(self.associatedSet, self._numbersReportedHere, resultsHere)
 
         super()._applyResultsPipleline(result)
 

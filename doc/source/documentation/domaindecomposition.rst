@@ -355,8 +355,11 @@ process -- over, and with it the degree-of-freedom indices of the elements, the 
 interface, the loaded elements reaching into it, the lumped inertia and damping (assembled from the
 elements now computed here, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
-element results again for the elements now reported here. A sender keeps no reference to a dropped
-element, so its memory is released. A migrated element is bit for bit the element its previous
+element results again for the elements now reported here. All of these are released *before* the
+elements move -- the solver keeps only plain copies of the three vectors it carries over, the field
+outputs keep element numbers, not elements -- so that a dropped element is freed before the new ones
+are created, and a migration does not raise the memory of a process beyond what its elements need. A
+migrated element is bit for bit the element its previous
 process held -- exactly as a resumed restart's element is -- and every sum is still formed in model
 order, so a run that migrates elements is bit-identical to a serial run too. The journal reports
 every migration (``Element migration: ... element(s) changed process``).
