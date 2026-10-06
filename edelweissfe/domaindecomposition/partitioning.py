@@ -34,9 +34,10 @@ made before any element exists, and every process can make it without holding ev
 runs on the root process, which broadcasts the result, so every process holds the same partition
 regardless of whether METIS itself would reproduce it. The partition covers every element of the
 mesh. The elements made by their owners -- contact facets, the point masses of rigid bodies, which
-every process makes itself -- are not given to METIS: each is computed by the process computing the
-element it lies on (a facet's degrees of freedom are those of its solid element), or by rank 0 if it
-lies on none (:func:`processOfElementMadeByOwner`). Their owner is still unique.
+every process makes itself -- are not given to METIS: each is computed by the process computing its
+host element (the solid element a facet lies on, whose degrees of freedom are the facet's), or, if it
+has none, by the process given part 0 of the partition (:func:`processOfElementMadeByOwner`). Their
+owner is still unique.
 
 Constraints are not partitioned by geometry: each is one object, evaluated by one process, and is
 dealt out round-robin in name order. The assignment depends on the constraint names only, so it
@@ -119,8 +120,9 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
 
 def processOfElementMadeByOwner(record: MeshElement, owners: dict) -> int:
     """The process computing an element made by its owner (a contact facet, the point mass of a
-    rigid body): the process computing the element of the mesh it lies on, or rank 0 if it lies on
-    none.
+    rigid body): the process computing its host element, or part 0 if it has none (a point mass).
+    That is rank 0 in a first partition; a repartition renumbers its parts to keep elements where
+    they were (:func:`keepElementsWhereTheyWere`), and a point mass then moves with part 0.
 
     Parameters
     ----------
@@ -132,12 +134,12 @@ def processOfElementMadeByOwner(record: MeshElement, owners: dict) -> int:
     Returns
     -------
     int
-        The rank.
+        The rank (or, inside :func:`partitionElementsOfMesh`, the part).
     """
 
-    if record.besideElement is None:
+    if record.hostElement is None:
         return 0
-    return owners[record.besideElement]
+    return owners[record.hostElement]
 
 
 def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -> dict:

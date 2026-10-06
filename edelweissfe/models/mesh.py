@@ -130,13 +130,13 @@ class MeshElement:
     ownTypeInfo
         The type information of an element made by its owner; ``None`` for an element whose type
         alone determines it.
-    besideElement
-        For an element made by its owner, the number of the element of the mesh it lies on (the
-        solid element whose face a contact facet tiles); ``None`` if it lies on none (the point mass
+    hostElement
+        For an element made by its owner, the number of its host element: the element of the mesh
+        it lies on (the solid element whose face a contact facet tiles); ``None`` if it has none (the point mass
         of a rigid body), and for every other element.
     """
 
-    __slots__ = ("number", "elType", "provider", "nodeLabels", "ownTypeInfo", "besideElement")
+    __slots__ = ("number", "elType", "provider", "nodeLabels", "ownTypeInfo", "hostElement")
 
     def __init__(
         self,
@@ -145,14 +145,14 @@ class MeshElement:
         provider: str,
         nodeLabels: tuple,
         ownTypeInfo: ElementTypeInfo = None,
-        besideElement: int = None,
+        hostElement: int | None = None,
     ):
         self.number = number
         self.elType = elType
         self.provider = provider
         self.nodeLabels = nodeLabels
         self.ownTypeInfo = ownTypeInfo
-        self.besideElement = besideElement
+        self.hostElement = hostElement
 
     @property
     def isMadeByOwner(self) -> bool:
@@ -209,7 +209,7 @@ class Mesh:
         self.elements[number] = record
         return record
 
-    def addElementMadeByOwner(self, element, besideElement: int = None) -> MeshElement:
+    def addElementMadeByOwner(self, element, hostElement: int | None = None) -> MeshElement:
         """Describe an element its owner made itself, from the element object.
 
         Contact facets and the point masses of rigid bodies are made by the code that owns them
@@ -221,8 +221,8 @@ class Mesh:
         ----------
         element
             The element object.
-        besideElement
-            The number of the element of the mesh it lies on, or None if it lies on none.
+        hostElement
+            The number of its host element, the element of the mesh it lies on, or None if it has none.
 
         Returns
         -------
@@ -232,7 +232,7 @@ class Mesh:
 
         record = self.addElement(element.elNumber, element.elType, None, [node.label for node in element.nodes])
         record.ownTypeInfo = ElementTypeInfo(element.fields, element.ensightType, element.nDof, element.hasKernels)
-        record.besideElement = besideElement
+        record.hostElement = hostElement
         return record
 
     def removeElement(self, number: int):

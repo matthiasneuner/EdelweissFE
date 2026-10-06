@@ -95,8 +95,8 @@ class ElementDistribution:
         Parameters
         ----------
         record
-            The element as described in the mesh, with the element it lies on
-            (:attr:`~edelweissfe.models.mesh.MeshElement.besideElement`).
+            The element as described in the mesh, with its host element
+            (:attr:`~edelweissfe.models.mesh.MeshElement.hostElement`).
         """
 
     def createAndDropElementsOfChangedMesh(self, model):

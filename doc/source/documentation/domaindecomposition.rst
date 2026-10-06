@@ -166,7 +166,7 @@ make a distributed model possible:
 
 Contact facets and the point masses of rigid bodies are made by their owners in every process; they
 are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), with
-the element of the mesh they lie on, and the facets are cut from the surface as described in the
+their host element -- the element of the mesh they lie on --, and the facets are cut from the surface as described in the
 mesh, not from element objects. A refinement adds its children to the mesh and creates them from it.
 
 Subdomains, interface, ownership
@@ -178,8 +178,9 @@ mesh -- elements adjacent when they share a face, or an edge in 2D -- is split i
 weight, minimising the total communication volume. The partition is computed on the mesh -- element
 numbers, connectivity, and the size of each element type -- not on element objects, on rank 0, and
 broadcast. The elements made by their owners are not given to METIS: each is computed by the process
-of the element it lies on -- a facet by that of the solid element whose face it tiles, so that its
-degrees of freedom are already in that subdomain -- or by rank 0 if it lies on none, as a point mass
+of its host element -- a facet by that of the solid element whose face it tiles, so that its degrees
+of freedom are already in that subdomain -- or, if it has none, as a point mass, by the process given
+part 0 of the partition (rank 0, unless a repartition renumbered the parts)
 (:func:`~edelweissfe.domaindecomposition.partitioning.processOfElementMadeByOwner`). The constraints
 are dealt out by name, one process each.
 
@@ -350,7 +351,7 @@ Where a tie couples nodes of several subdomains, the multi-point-constraint clos
 `Subdomains, interface, ownership`_) makes the process integrating any of its degrees of freedom
 integrate the whole group; the forces at those degrees of freedom are completed by degree of freedom,
 whichever element objects a process holds. A refinement of a contact or tie surface retiles it with
-new facets, made by every process and computed by the process of the child element they lie on, and
+new facets, made by every process and computed by the process of their host element, a child, and
 the constraint projects onto them afresh. A restart checkpoint carries the constraint states as
 before: they are synchronized from their owners before every output.
 

@@ -439,7 +439,7 @@ class DistributedElements(ElementDistribution):
         Parameters
         ----------
         record
-            The element as described in the mesh, with the element it lies on.
+            The element as described in the mesh, with its host element.
         """
 
         self._createdHere.add(record.number)

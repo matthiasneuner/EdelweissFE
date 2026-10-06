@@ -560,7 +560,7 @@ def buildContactFacets(
                     _applyModifiedSerendipityShares(faceFacets[:4])
 
     for elNumber, facetElement in newElements.items():
-        model.createElement(facetElement, besideElement=sourceOfFacet[elNumber])
+        model.createElement(facetElement, hostElement=sourceOfFacet[elNumber])
 
     # this function is the one that mutates the mesh outside the mesh modifier (removing the
     # stale facets above and inserting newElements here), so the element set "all" must be

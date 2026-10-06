@@ -358,7 +358,7 @@ def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_pa
     assert not model.elementSets["gen_top"].isComplete
 
 
-def test_contact_facets_are_made_everywhere_and_computed_beside_their_solid_element(tmp_path):
+def test_contact_facets_are_made_everywhere_and_computed_with_their_host_element(tmp_path):
     from edelweissfe.domaindecomposition.distributedelements import (
         DistributedElements,
         _stepActionDefinitions,
@@ -389,14 +389,12 @@ name=top
     facets = model.wholeElementSet("top_facets", "this test")
     assert len(facets) == 8
     for facet in facets:
-        besideElement = model.mesh.elements[facet.elNumber].besideElement
-        assert distribution.owners[facet.elNumber] == distribution.owners[besideElement]
+        hostElement = model.mesh.elements[facet.elNumber].hostElement
+        assert distribution.owners[facet.elNumber] == distribution.owners[hostElement]
     # The facets on the top row (the even numbers) of elements 9-16 are computed here.
     reported = [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())]
     assert [
-        model.mesh.elements[number].besideElement
-        for number in reported
-        if number in model.mesh.elementSets["top_facets"]
+        model.mesh.elements[number].hostElement for number in reported if number in model.mesh.elementSets["top_facets"]
     ] == [10, 12, 14, 16]
 
 
