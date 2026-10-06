@@ -39,6 +39,7 @@ import numpy as np
 from edelweissfe.config.phenomena import getFieldSize, phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.mesh import Mesh
 from edelweissfe.models.modelchange import TopologyRecord
 from edelweissfe.models.topologypipeline import TopologyPipeline
@@ -103,6 +104,10 @@ class FEModel:
         #: :meth:`createElementsOfMesh`. An element of the mesh that is not created here must have been
         #: declined by it; see :meth:`_checkEveryElementIsCreatedOrDeclined`.
         self._isCreatedHere = everyElement
+        #: Which elements of the mesh this process creates, and how results of the whole model are
+        #: read from the processes that computed them; every element, here, unless a
+        #: domain-decomposed run sets another (see :mod:`~edelweissfe.models.elementdistribution`).
+        self.elementDistribution = ElementDistribution()
         self.nodeSets = {}  #: NodeSets in the model.
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
@@ -260,11 +265,12 @@ class FEModel:
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh)
+            elementSet = self.elementSets[name] = ElementSet(name, created, mesh=self.mesh, nodes=self.nodes)
         else:
             if list(elementSet) != created:
                 elementSet.replaceMembers(created)
             elementSet.mesh = self.mesh
+            elementSet.modelNodes = self.nodes
         return elementSet
 
     def _resolveSurfaceOfMesh(self, name: str):
@@ -706,8 +712,6 @@ class FEModel:
             An open, writable :class:`h5py.File` (or group) to write the checkpoint into.
         """
 
-        self.requireCompleteMesh("a restart checkpoint")
-
         f = restartFile
 
         f.attrs["time"] = self.time
@@ -724,9 +728,11 @@ class FEModel:
 
         writeRestartDataOf(f.create_group("modelModifiers"), self.modelModifiers)
 
+        # Every element of the model: in a domain-decomposed run, also those created and computed in
+        # other processes (see ElementDistribution.statesOfElements).
         elementsGroup = f.create_group("elements")
-        for elNumber, element in self.elements.items():
-            elementsGroup.create_dataset(str(elNumber), data=element.getStateVars())
+        for elNumber, stateVars in self.elementDistribution.statesOfElements(self.elements):
+            elementsGroup.create_dataset(str(elNumber), data=stateVars)
 
         writeRestartDataOf(f.create_group("constraints"), self.constraints)
 
@@ -808,13 +814,17 @@ class FEModel:
         for name, scalarVariable in self.scalarVariables.items():
             scalarVariable.value = f["scalarVariables"].attrs[name]
 
-        # One uniform loop, by element number, with no skip set and nothing swallowed -- sound only
-        # because the replay above reproduces the original numbering exactly, verified against the
-        # recorded fingerprint. A missing element here means the replayed model does not match the
-        # one checkpointed, which must be reported, not silently skipped.
+        # One uniform loop, by element number, with nothing swallowed -- sound only because the replay
+        # above reproduces the original numbering exactly, verified against the recorded fingerprint.
+        # The one element skipped is an element of the mesh this process declined to create (a
+        # domain-decomposed run creates only its own); its process restores it. Any other missing
+        # element means the replayed model does not match the one checkpointed, which must be
+        # reported, not silently skipped.
         for elementKey, stateVars in f["elements"].items():
             elNumber = int(elementKey)
             element = self.elements.get(elNumber)
+            if element is None and elNumber in self.mesh.elements and not self._isCreatedHere(elNumber):
+                continue
             if element is None:
                 raise RestartError(
                     "the checkpoint holds state for element {:}, which does not exist after the "

@@ -48,6 +48,7 @@ if checkSuccessfulExtension("edelweissfe.materials.marmot.marmothypoelastic") or
 else:
     MarmotMaterialWrappingElement = None
 
+from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.sets.orderedset import OrderedSet
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
@@ -73,6 +74,10 @@ class ElementSet(OrderedSet):
     mesh
         The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name, if the set
         was resolved from a mesh; :attr:`isComplete` is derived from it.
+    nodes
+        The nodes of the model, by label, if the set was resolved from a mesh: the nodes of the whole
+        set (:meth:`extractNodeSet`) are found from them even where only part of the set was
+        created.
     """
 
     def __init__(
@@ -80,6 +85,7 @@ class ElementSet(OrderedSet):
         label: str,
         elements,
         mesh=None,
+        nodes: dict = None,
     ):
         self.allowedObjectTypes = [BaseElement]
         self.allowedObjectTypes.append(MarmotElementWrapper) if MarmotElementWrapper is not None else None
@@ -93,6 +99,8 @@ class ElementSet(OrderedSet):
         self._nodes = None
         #: The mesh describing this set, or None for a set not resolved from a mesh.
         self.mesh = mesh
+        #: The nodes of the model, by label, for a set resolved from a mesh.
+        self.modelNodes = nodes
 
         self.elements = self.items
 
@@ -135,8 +143,26 @@ class ElementSet(OrderedSet):
     def extractNodeSet(
         self,
     ):
+        """The nodes of the whole set, without duplicates, in the order the elements list them.
+
+        For a set of which only part was created here, they are taken from the mesh, which
+        describes the whole set: the nodes are the same in every process.
+
+        Returns
+        -------
+        NodeSet
+            The nodes.
+        """
         if not self._nodes:
-            self._nodes = extractNodesFromElementSet(self)
+            if self.isComplete:
+                self._nodes = extractNodesFromElementSet(self)
+            else:
+                labels = dict.fromkeys(
+                    label
+                    for number in self.mesh.elementSets[self.name]
+                    for label in self.mesh.elements[number].nodeLabels
+                )
+                self._nodes = NodeSet(self.name, [self.modelNodes[label] for label in labels])
         return self._nodes
 
     def replaceMembers(self, item_s):

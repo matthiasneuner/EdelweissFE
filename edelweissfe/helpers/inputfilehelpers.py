@@ -26,14 +26,13 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 
-from collections.abc import Callable
 
 from edelweissfe.config import registry
 from edelweissfe.config.generators import getGeneratorClass
 from edelweissfe.config.solvers import getSolverByName
 from edelweissfe.generators.abqmodelconstructor import AbqModelConstructor
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.femodel import FEModel, everyElement
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.steps.stepmanager import (
     StepActionDefinition,
     StepDefinition,
@@ -196,6 +195,9 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
                 associatedSet = model.nodeSets[definition["nSet"]]
             elif definition["elSet"]:
                 associatedSet = model.elementSets[definition["elSet"]]
+                # An expression over an element set reads the elements themselves, which cannot be
+                # gathered from other processes.
+                associatedSet.requireComplete("expression field output {:}".format(definition["name"]))
             else:
                 raise Exception(
                     f"During parsing of keyword {keywordIdentifier}fieldOutput ({moduleLevelKeywordIdentifier}fromExpression): All fieldOuputs must be associated with a set!"
@@ -224,15 +226,15 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
     return fieldOutputController
 
 
-def fillFEModelFromInputFile(
-    model: FEModel, inputfile: dict, journal: Journal, isCreatedHere: Callable[[int], bool] = everyElement
-) -> FEModel:
+def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) -> FEModel:
     """Convenience helper function
     to fill an existing (possibly empty) FEModel using the input file and generators.
 
     First the mesh generators and the ``*element``/``*elset``/``*surface`` keywords describe the
     mesh (``model.mesh``); then the elements are made from it
-    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`). Everything that refers to
+    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- those of them the model's
+    :attr:`~edelweissfe.models.femodel.FEModel.elementDistribution` creates in this process: every
+    element, unless a domain-decomposed run distributes them. Everything that refers to
     element objects (sections, element properties, contact facets, constraints, model modifiers)
     comes after. A generator that needs element objects while the mesh is still being described
     (``executePythonCode``, which runs arbitrary code on the model) makes the elements described so
@@ -246,8 +248,6 @@ def fillFEModelFromInputFile(
         The processed inputfile in dictionary form.
     journal
         The Journal for logging purposes.
-    isCreatedHere
-        Whether this process creates the element with the given number; every element by default.
 
     Returns
     -------
@@ -258,12 +258,10 @@ def fillFEModelFromInputFile(
     # Model setup is a topology change: it is the one phase besides a model modifier's own update in
     # which elements may be created (see TopologyPipeline.changes). Everything below runs inside it.
     with model.topology.changes():
-        return _fillFEModelFromInputFile(model, inputfile, journal, isCreatedHere)
+        return _fillFEModelFromInputFile(model, inputfile, journal)
 
 
-def _fillFEModelFromInputFile(
-    model: FEModel, inputfile: dict, journal: Journal, isCreatedHere: Callable[[int], bool]
-) -> FEModel:
+def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) -> FEModel:
     """The body of :func:`fillFEModelFromInputFile`, run inside an open topology window."""
 
     # call individual optional model generators with executeAfterManualGeneration == True
@@ -288,8 +286,11 @@ def _fillFEModelFromInputFile(
     abqModelConstructor = AbqModelConstructor(journal)
     model = abqModelConstructor.createGeometryFromInputFile(model, inputfile)
 
-    # The mesh is described: make the elements.
-    model.createElementsOfMesh(isCreatedHere)
+    # The mesh is described: decide which of its elements this process creates -- every one, unless
+    # a domain-decomposed run distributes them over its processes -- and make them.
+    elementDistribution = model.elementDistribution
+    elementDistribution.decideWhichElementsAreCreatedHere(model.mesh, model.domainSize)
+    model.createElementsOfMesh(elementDistribution.isCreatedHere)
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file
     # rather than from the allocators (see TopologyPipeline.adoptSetupElementNumbers). Raise both allocators
@@ -322,7 +323,7 @@ def _fillFEModelFromInputFile(
 
     # A late generator may describe further elements (e.g. a boxgen with executeAfterManualGeneration):
     # make them too, before anything refers to element objects again.
-    model.createElementsOfMesh(isCreatedHere)
+    model.createElementsOfMesh(elementDistribution.isCreatedHere)
 
     model = abqModelConstructor.createConstraintsFromInputFile(model, inputfile)
     model = abqModelConstructor.createModelModifiersFromInputFile(model, inputfile)

@@ -615,6 +615,12 @@ class ElementFieldOutput(_FieldOutputBase):
     This is a Element based FieldOutput.
     It operates on ElementSets.
 
+    Its result is a result of the whole element set, one row per element in set order. Where a
+    domain-decomposed run created only part of the set in this process, the rows of the other
+    elements are gathered from the processes computing them
+    (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`), so that
+    the result is the same in every process.
+
     Parameters
     ----------
     name
@@ -652,18 +658,25 @@ class ElementFieldOutput(_FieldOutputBase):
         fExport_x: Callable = None,
         quadraturePoints: Union[int, slice, list[int]] = 0,
     ):
-        # an element result over a set is a result of the whole set
-        elSet.requireComplete("element field output {:}".format(name))
         self.associatedSet = elSet
         self.resultName = resultName
         self.quadraturePoints = quadraturePoints
 
-        self._seenSetVersion = elSet._version
-        self.elementResultCollector = ElementResultCollector(
-            list(self.associatedSet), self.quadraturePoints, self.resultName
-        )
+        self._collectFromElementsReportedHere(model)
 
         super().__init__(name, model, journal, saveHistory, f_x, export, fExport_x)
+
+    def _collectFromElementsReportedHere(self, model: FEModel):
+        """Set up the element result collector for the elements of the set this process reports --
+        all of them, unless a domain-decomposed run computes some of them elsewhere."""
+
+        self._seenSetVersion = self.associatedSet._version
+        self._elementsReportedHere = model.elementDistribution.elementsReportedHere(self.associatedSet)
+        self.elementResultCollector = (
+            ElementResultCollector(self._elementsReportedHere, self.quadraturePoints, self.resultName)
+            if self._elementsReportedHere
+            else None
+        )
 
     def _rebuildCollectorIfSetChanged(self):
         """Rebuild the element result collector -- which pins a fixed snapshot of the element
@@ -671,10 +684,7 @@ class ElementFieldOutput(_FieldOutputBase):
         replacing a refined parent element with its children) since the last check. Unlike a plain
         iteration over the set, this pinned snapshot does not see new elements on its own."""
         if self.associatedSet._version != self._seenSetVersion:
-            self.elementResultCollector = ElementResultCollector(
-                list(self.associatedSet), self.quadraturePoints, self.resultName
-            )
-            self._seenSetVersion = self.associatedSet._version
+            self._collectFromElementsReportedHere(self.model)
 
     def updateResults(self, model: FEModel):
         """Update the field output.
@@ -687,7 +697,10 @@ class ElementFieldOutput(_FieldOutputBase):
         """
 
         self._rebuildCollectorIfSetChanged()
-        result = self.elementResultCollector.getCurrentResults()
+        resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
+        result = model.elementDistribution.resultsOfWholeSet(
+            self.associatedSet, self._elementsReportedHere, resultsHere
+        )
 
         super()._applyResultsPipleline(result)
 

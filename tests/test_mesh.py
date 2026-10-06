@@ -42,6 +42,7 @@ import pytest
 from edelweissfe.config.phenomena import domainMapping
 from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.femodel import FEModel, everyElement
 from edelweissfe.models.mesh import SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
@@ -95,6 +96,17 @@ all
 """
 
 
+class _ElementsByPredicate(ElementDistribution):
+    """A distribution creating the elements for which a predicate holds, as a process of a
+    domain-decomposed run creates only some."""
+
+    def __init__(self, predicate):
+        self._predicate = predicate
+
+    def isCreatedHere(self, number: int) -> bool:
+        return self._predicate(number)
+
+
 def _buildModel(tmp_path, isCreatedHere=everyElement) -> FEModel:
     """Build the model of :data:`DECK`, creating the elements for which ``isCreatedHere`` holds."""
 
@@ -103,7 +115,8 @@ def _buildModel(tmp_path, isCreatedHere=everyElement) -> FEModel:
     inputFile = parseInputFile(str(deck))
     journal = Journal(verbose=False)
     model = FEModel(domainMapping[inputFile["job"][0]["domain"]])
-    model = fillFEModelFromInputFile(model, inputFile, journal, isCreatedHere)
+    model.elementDistribution = _ElementsByPredicate(isCreatedHere)
+    model = fillFEModelFromInputFile(model, inputFile, journal)
     model.prepareYourself(journal)
     return model
 
@@ -194,6 +207,12 @@ def test_a_predicate_that_skips_elements_keeps_the_dof_layout(tmp_path):
     assert [e.elNumber for e in part.elementSets["gen_top"]] == [2, 4, 6, 8]
     assert part.elementSets["gen_top"].isComplete
     assert [e.elNumber for e in part.surfaces["gen_bottom"][1]] == []
+
+    # the nodes of a set are those of the whole set, from the mesh, whatever was created here
+    for name in ("picked", "gen_top", "all"):
+        assert [n.label for n in part.elementSets[name].extractNodeSet()] == [
+            n.label for n in whole.elementSets[name].extractNodeSet()
+        ]
 
     # every whole-set reader fails loudly on a partial set, and on a partial model
     with pytest.raises(TopologyError, match="the test needs the whole element set picked"):
