@@ -1,0 +1,36 @@
+** Load balancing of a distributed model: each process creates only the elements it computes, and the model
+** is repartitioned with the element numbers as element costs (load-balance-costs=elementNumber) -- uneven and
+** deterministic -- so that at the output increment 20, once the material has yielded, elements move between
+** the processes (migration): the new process creates them and receives their state. A body force on every
+** element makes each process create the loaded elements touching its own as well, before and after. The
+** result, and the restart checkpoint written after the migration, are those of a serial run.
+*modelGenerator, generator=planeRectQuad, name=gen
+l=40
+h=10
+nX=16
+nY=4
+elType=CPE4
+
+*material, name=VonMises, id=myMaterial
+210000, 0.3, 550, 1000, 200, 1400, 1, 7.8e-9
+
+*section, name=section1, material=myMaterial, type=plane, thickness=1
+all
+
+*job, name=rebalanceJob, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=20
+load-balance-costs=elementNumber
+
+*fieldOutput
+>>perNode, name=uRight, nSet=gen_right, field=displacement, result=U, f(x)='np.mean(x[:,0])', saveHistory=True
+>>perElement, elSet=all, result=stress, name=S11, quadraturePoint=0, f(x)='x[:,0]'
+
+*output, type=restart, name=restart
+writeInterval=2, baseName=restart, numberOfFilesToKeep=1
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-12, maxNumInc=1000, maxIter=25, stepLength=0.4
+>>dirichlet, name=left, nSet=gen_left, field=displacement, 1=0, 2=0
+>>dirichlet, name=right, nSet=gen_right, field=displacement, 1=1.0
+>>bodyForce, name=gravity, elSet=all, forceVector='0.0, -1e-2', f(t)=t

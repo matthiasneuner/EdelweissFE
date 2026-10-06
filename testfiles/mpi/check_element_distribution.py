@@ -11,6 +11,11 @@ copy) and checks, from the model each process ends with, that it ran in the mode
   mesh was computed by exactly one process;
 * whole model: every process created every element.
 
+The test cases expected to **migrate** -- to rebalance a distributed model, moving elements between
+processes -- are checked further: some element must end on another process than the first partition
+gave it, and no process may still hold an object of an element it dropped (the element objects alive
+in the process, counted by the garbage collector, are exactly those of the model).
+
 Run it under the MPI launcher, from anywhere::
 
     mpirun -n 2 python testfiles/mpi/check_element_distribution.py
@@ -19,6 +24,7 @@ It prints one line per test case and exits with 1 if any test case ran in an une
 """
 
 import contextlib
+import gc
 import io
 import os
 import shutil
@@ -26,6 +32,7 @@ import sys
 import tempfile
 
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.domaindecomposition.partitioning import partitionElementsOfMesh
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.utils.inputfileparser import parseInputFile
 
@@ -40,6 +47,12 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDParallel",
     "marmot/NEDRestartDistributed1Write",
     "marmot/NEDRestartDistributed2Resume",
+    "marmot/NEDRebalanceDistributed",
+}
+
+#: The test cases expected to move elements between processes (a distributed model rebalanced).
+EXPECTED_MIGRATING = {
+    "marmot/NEDRebalanceDistributed",
 }
 
 
@@ -55,6 +68,20 @@ def modeOf(model, communicator) -> str:
         return "whole model"
     everyElementComputedOnce = sorted(number for numbers in computed for number in numbers) == sorted(meshElements)
     return "distributed" if everyElementComputedOnce else "inconsistent"
+
+
+def migrationOf(model, communicator) -> str:
+    """How many elements of a distributed model ended on another process than the first partition
+    gave them, and whether every process holds exactly the element objects of its model."""
+
+    firstOwners = partitionElementsOfMesh(model.mesh, communicator.Get_size(), model.domainSize, communicator)
+    moved = sum(firstOwners[number] != owner for number, owner in model.elementDistribution.owners.items())
+
+    gc.collect()
+    elementClasses = {type(element) for element in model.elements.values()}
+    alive = sum(type(candidate) in elementClasses for candidate in gc.get_objects())
+    heldExactly = all(communicator.allgather(alive == len(model.elements)))
+    return "{:} moved, {:}".format(moved, "no dropped element alive" if heldExactly else "DROPPED ELEMENTS ALIVE")
 
 
 def main() -> int:
@@ -91,9 +118,21 @@ def main() -> int:
             continue
         mode = modeOf(model, communicator)
         expected = "distributed" if case in EXPECTED_DISTRIBUTED else "whole model"
+        failed = mode != expected
+        migration = ""
+        if case in EXPECTED_MIGRATING and not failed:
+            migration = migrationOf(model, communicator)
+            failed = migration.startswith("0 moved") or "ALIVE" in migration
         if rank == 0:
-            print("{:<50} {:<12} {:}".format(case, mode, "OK" if mode == expected else "EXPECTED " + expected))
-        failures += mode != expected
+            print(
+                "{:<50} {:<12} {:}{:}".format(
+                    case,
+                    mode,
+                    "EXPECTED " + expected if mode != expected else "FAILED" if failed else "OK",
+                    " ({:})".format(migration) if migration else "",
+                )
+            )
+        failures += failed
 
     communicator.Barrier()
     if rank == 0:
