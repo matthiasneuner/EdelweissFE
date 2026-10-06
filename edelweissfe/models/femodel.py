@@ -213,6 +213,46 @@ class FEModel:
             if number not in self.elements and isCreatedHere(number):
                 self.createElementOfMesh(number)
 
+        self.resolveSetsAndSurfacesOfMesh()
+
+    def dropElementOfMesh(self, number: int):
+        """Drop the element object of an element of the mesh from this process; the counterpart of
+        :meth:`createElementOfMesh`. The mesh keeps the element.
+
+        Used when an element moves to another process (load balancing in a domain-decomposed run):
+        the element still exists, only no longer here. Its sets and surfaces are updated by
+        :meth:`resolveSetsAndSurfacesOfMesh`.
+
+        Parameters
+        ----------
+        number
+            The number of the element in the mesh.
+        """
+
+        if not self.topology.isOpen:
+            raise TopologyError(
+                "element {:} was dropped outside a topology change: element objects are created and dropped "
+                "only inside TopologyPipeline.changes()".format(number)
+            )
+        del self.elements[number]
+
+    def putElementsInMeshOrder(self):
+        """Order :attr:`elements` as the mesh lists them, in place, after elements were created later
+        than the others (e.g. when they moved here from another process).
+
+        The order of :attr:`elements` is the order their contributions are summed in, and a serial
+        run sums them in mesh order.
+        """
+
+        position = {number: index for index, number in enumerate(self.mesh.elements)}
+        ordered = sorted(self.elements.items(), key=lambda item: position[item[0]])
+        self.elements.clear()
+        self.elements.update(ordered)
+
+    def resolveSetsAndSurfacesOfMesh(self):
+        """Make every element set and surface of the mesh hold the elements created here; sets and
+        surfaces that already exist are updated in place, so references held to them stay valid."""
+
         for name in self.mesh.elementSets:
             self.resolveElementSetOfMesh(name)
 
@@ -596,10 +636,48 @@ class FEModel:
         for elementProperty in self.elementProperties:
             elementProperty.assignElementPropertiesToModel(self)
 
-        # check if all elements are assigned a material
-        materialAssigned = np.fromiter(map(attrgetter("hasMaterial"), self.elements.values()), dtype=bool)
+        self._requireMaterialAssigned(self.elements)
+
+    def assignSectionsAndPropertiesToElements(self, elements: dict):
+        """Assign sections and element properties to elements created after the model was prepared,
+        e.g. elements that moved here from another process.
+
+        Each element receives exactly what :meth:`prepareYourself` assigned to it, in the same order:
+        every section whose element sets contain it, then every element property of such a set.
+
+        Parameters
+        ----------
+        elements
+            The elements, by number; members of the element sets already (see
+            :meth:`resolveSetsAndSurfacesOfMesh`).
+        """
+
+        for section in self.sections.values():
+            for elementSet in section.elSets:
+                for element in elementSet:
+                    if element.elNumber in elements:
+                        section.assignSectionToElement(element, self)
+
+        for elementProperty in self.elementProperties:
+            for element in self.elementSets[elementProperty.elSetName]:
+                if element.elNumber in elements:
+                    elementProperty.assignToElement(element)
+
+        self._requireMaterialAssigned(elements)
+
+    @staticmethod
+    def _requireMaterialAssigned(elements: dict):
+        """Raise unless every given element was assigned a material.
+
+        Parameters
+        ----------
+        elements
+            The elements, by number.
+        """
+
+        materialAssigned = np.fromiter(map(attrgetter("hasMaterial"), elements.values()), dtype=bool)
         if not materialAssigned.all():
-            elementIds = np.array([str(elId) for elId in self.elements.keys()])[np.logical_not(materialAssigned)]
+            elementIds = np.array([str(elId) for elId in elements.keys()])[np.logical_not(materialAssigned)]
             raise Exception(f"No material was assigned to element(s) with id(s) {', '.join(elementIds)}.")
 
     def prepareYourself(self, journal: Journal):

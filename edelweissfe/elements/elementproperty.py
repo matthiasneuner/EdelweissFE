@@ -58,4 +58,14 @@ class ElementProperty:
             The model object.
         """
         for el in model.elementSets[self.elSetName]:
-            el.assignProperty(self.propertyName, self.values)
+            self.assignToElement(el)
+
+    def assignToElement(self, element):
+        """Assign this property to one element.
+
+        Parameters
+        ----------
+        element
+            The element; a member of the referenced element set.
+        """
+        element.assignProperty(self.propertyName, self.values)
