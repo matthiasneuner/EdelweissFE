@@ -86,6 +86,13 @@ cdef class ElementResultCollector:
         self.nSize = resultsPointerList[0][0].shape[0]
 
         # allocate an equivalent 2D C-array for the pointers to each elements results
+        #
+        # These are raw pointers into the elements' state buffers, and this collector keeps neither
+        # the elements nor their buffers alive. Once an element is dropped -- replaced by a refinement,
+        # or moved to another process by a domain-decomposed run -- its pointers dangle. The owner of
+        # a collector must therefore make it afresh before every read whenever the elements may have
+        # changed: ElementFieldOutput checks the version of its element set and the ownership version
+        # of the element distribution before each read (_rebuildCollectorIfSetChanged).
         self.resultPointers = <double**> malloc (sizeof(double*) * self.nEls * self.nGauss)
 
         cdef double* ptr
