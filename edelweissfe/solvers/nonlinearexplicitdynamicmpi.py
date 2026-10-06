@@ -205,8 +205,6 @@ class NEDMPI(NEDParallel):
         #: over :attr:`_nMeasuredIncrements` increments, if the subdomain balances load; else None.
         self._elementCosts: np.ndarray | None = None
         self._nMeasuredIncrements = 0
-        #: Whether rank 0 writes restart checkpoints in the current step.
-        self._writesCheckpoints = False
         #: The external work of the whole model: :attr:`NED._externalWork` -- here, the work at the
         #: degrees of freedom this process owns -- summed over all processes at the last
         #: synchronization. What a checkpoint records.
@@ -241,10 +239,6 @@ class NEDMPI(NEDParallel):
             0,
         )
         self._externalWorkOfModel = 0.0
-        # Only rank 0 has output managers; every process takes part in gathering what they write.
-        self._writesCheckpoints = self.subdomain.communicator.bcast(
-            any(manager.writesRestartCheckpoints for manager in outputmanagers), root=0
-        )
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     # --- Restart ------------------------------------------------------------------------------------
@@ -555,16 +549,21 @@ class NEDMPI(NEDParallel):
 
         # A checkpoint holds the state of every element. Where each process created only its own
         # elements, they are gathered to rank 0 first -- outside the agreed context, in which nothing
-        # may communicate -- and released once written.
-        elementDistribution = fieldOutputController.model.elementDistribution
-        if self._writesCheckpoints:
+        # may communicate -- if a checkpoint is written now, which only rank 0, holding the output
+        # managers, knows; and released once written, however the output ended.
+        model = fieldOutputController.model
+        writesCheckpoint = self.subdomain.communicator.bcast(
+            any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
+        )
+        if writesCheckpoint:
             with performancetiming.timeit("gather states"):
-                elementDistribution.gatherStatesForCheckpoint(fieldOutputController.model.elements)
+                model.elementDistribution.gatherStatesForCheckpoint(model.elements)
 
-        with performancetiming.timeit("finalize output"), self.subdomain.agreedOnByAllParts("Writing the output"):
-            super().writeIncrementOutput(fieldOutputController, outputManagers)
-
-        elementDistribution.forgetGatheredStates()
+        try:
+            with performancetiming.timeit("finalize output"), self.subdomain.agreedOnByAllParts("Writing the output"):
+                super().writeIncrementOutput(fieldOutputController, outputManagers)
+        finally:
+            model.elementDistribution.forgetGatheredStates()
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
         """Make the whole model current in every process, then let the step actions finish the step.

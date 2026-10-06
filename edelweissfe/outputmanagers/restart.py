@@ -197,6 +197,18 @@ class OutputManager(OutputManagerBase):
     def initializeStep(self, step):
         self._currentStep = step
 
+    def writesCheckpointAtNextIncrement(self) -> bool:
+        """Whether the next :meth:`finalizeIncrement` completes ``writeInterval`` increments, and so
+        writes a checkpoint.
+
+        Returns
+        -------
+        bool
+            Whether it does.
+        """
+
+        return self._incrementsSinceLastWrite + 1 >= self.writeInterval
+
     def finalizeIncrement(self, **kwargs):
         self._incrementsSinceLastWrite += 1
         if self._incrementsSinceLastWrite < self.writeInterval:

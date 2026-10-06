@@ -267,9 +267,10 @@ Ensight                                 rank 0 draws the geometry of a partial s
 monitor, conditional stop               read field outputs
 restart checkpoint                      before the output of an output increment, every process sends
                                         the states of the elements it computes to rank 0
-                                        (``gatherStatesForCheckpoint``, only if rank 0 writes
-                                        checkpoints); rank 0 writes them in the format of a serial
-                                        checkpoint and releases them
+                                        (``gatherStatesForCheckpoint``, only on an increment rank 0
+                                        writes one: ``writesCheckpointAtNextIncrement``, broadcast);
+                                        rank 0 writes them in the format of a serial checkpoint and
+                                        releases them, however the output ended
 ======================================  =================================================================
 
 Still guarded, and refused loudly on a partial model: an expression field output over an element

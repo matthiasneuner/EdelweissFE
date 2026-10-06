@@ -144,6 +144,18 @@ class OutputManagerBase(OptionSchemaProvider, ABC):
             A dictionary containing the step definition.
         """
 
+    def writesCheckpointAtNextIncrement(self) -> bool:
+        """Whether the next :meth:`finalizeIncrement` writes a restart checkpoint, which reads the
+        state of every element. None of them, unless the manager writes checkpoints.
+
+        Returns
+        -------
+        bool
+            Whether it does.
+        """
+
+        return False
+
     @abstractmethod
     def finalizeIncrement(self, timeStep: TimeStep, **kwargs):
         """Finalize the output at the end of a time increment.

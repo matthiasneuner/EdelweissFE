@@ -100,3 +100,36 @@ def test_crash_resume_chain_never_overwrites_a_checkpoint_before_its_slot_is_due
     newProcessGeneration(2)
     assert all(os.path.exists(f) for f in liveFiles)
     assert {_readSerial(f) for f in liveFiles} == {2, 3, 4}, "the rotation did not replace the oldest first"
+
+
+def test_the_writer_says_ahead_whether_its_next_increment_writes(tmp_path, monkeypatch):
+    """A domain-decomposed run gathers the element states for a checkpoint only when one is written:
+    the writer says so before finalizing the increment."""
+
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.outputmanagers import restart
+    from edelweissfe.outputmanagers.restart import (
+        OutputManager,
+        RestartOutputManagerSchema,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    written = []
+    monkeypatch.setattr(restart, "writeCheckpoint", lambda fileName, *args, **kwargs: written.append(fileName))
+    from types import SimpleNamespace
+
+    writer = OutputManager(
+        "restart",
+        SimpleNamespace(outputManagers={}),
+        None,
+        Journal(verbose=False),
+        None,
+        configuration=RestartOutputManagerSchema(writeInterval=3, baseName="restart", numberOfFilesToKeep=1),
+    )
+
+    for _ in range(7):
+        announced = writer.writesCheckpointAtNextIncrement()
+        before = len(written)
+        writer.finalizeIncrement()
+        assert announced == (len(written) > before)
+    assert len(written) == 2

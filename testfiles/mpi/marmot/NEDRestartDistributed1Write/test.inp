@@ -24,7 +24,7 @@ output-frequency=50
 >>perElement, elSet=all, result=stress, name=S22, quadraturePoint=1, f(x)='x[:,1]'
 
 *output, type=restart, name=restart
-writeInterval=1, baseName=restart, numberOfFilesToKeep=1
+writeInterval=4, baseName=restart, numberOfFilesToKeep=1
 
 *step, type=adaptiveForExplicitSimulations, solver=theSolver
 maxInc=1, minInc=1e-12, maxNumInc=300, maxIter=25, stepLength=1e-3
