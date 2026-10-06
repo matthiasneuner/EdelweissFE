@@ -138,6 +138,7 @@ import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesKineticEnergy, carriesLinearMomentum
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.numerics.assembly import addNodalForces
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
@@ -147,11 +148,7 @@ from edelweissfe.solvers.base.conservationchecks import (
     formatMomentumAndKineticEnergy,
     linearMomentum,
 )
-from edelweissfe.solvers.base.modelpartition import (
-    ModelPartition,
-    WholeModel,
-    addNodalForces,
-)
+from edelweissfe.solvers.base.modelpartition import ModelPartition, WholeModel
 from edelweissfe.solvers.base.nonlinearsolverbase import (
     NonlinearSolverBase,
     TopologyUpdate,
@@ -458,7 +455,7 @@ class ConstraintForce:
         The degrees of freedom they act on.
     namesDofMoreThanOnce
         Whether a degree of freedom appears in ``dofs`` more than once; see
-        :func:`~edelweissfe.solvers.base.modelpartition.addNodalForces`.
+        :func:`~edelweissfe.numerics.assembly.addNodalForces`.
     """
 
     forces: np.ndarray

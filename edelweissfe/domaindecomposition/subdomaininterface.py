@@ -49,7 +49,7 @@ which process counts a quantity that must be counted once -- a concentrated load
 import numpy as np
 from mpi4py import MPI
 
-from edelweissfe.solvers.base.modelpartition import addNodalForces
+from edelweissfe.numerics.assembly import addNodalForces
 
 _INTERFACE_TAG = 7
 
