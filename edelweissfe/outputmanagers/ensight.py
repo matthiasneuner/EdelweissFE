@@ -732,15 +732,50 @@ class EnsightChunkWiseCase:
                     )
 
 
-def createUnstructuredPartFromElementSet(setName, elementSet: list, partID: int):
+def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
+    """The number, shape and visualization nodes of every element of a set.
+
+    Taken from the element objects; where only part of the set was created in this process (a
+    domain-decomposed run), from the mesh instead, which describes the whole set -- the
+    visualization nodes of an element described in the mesh are its nodes.
+
+    Parameters
+    ----------
+    elementSet
+        The element set.
+    model
+        The model tree.
+
+    Returns
+    -------
+    list[tuple]
+        ``(number, ensightType, nodes)`` of every element of the set, in set order.
+    """
+
+    if elementSet.isComplete:
+        return [(element.elNumber, element.ensightType, element.visualizationNodes) for element in elementSet]
+
+    mesh, nodes = model.mesh, model.nodes
+    return [
+        (
+            number,
+            mesh.typeOf(mesh.elements[number]).ensightType,
+            [nodes[label] for label in mesh.elements[number].nodeLabels],
+        )
+        for number in mesh.elementSets[elementSet.name]
+    ]
+
+
+def createUnstructuredPartFromElementSet(setName, elements: list, partID: int):
     """Determines the element and node list for an Ensightpart from an
     element set. The reduced, unique node set is generated, as well as
     the element to node index mapping for the ensight part.
 
     Parameters
     ----------
-    elementSet
-        The list of elements defining this part.
+    elements
+        The elements defining this part, as ``(number, ensightType, nodes)``; see
+        :func:`visualizedElementsOf`.
     partID
         The id of this part.
     """
@@ -748,12 +783,11 @@ def createUnstructuredPartFromElementSet(setName, elementSet: list, partID: int)
     nodeCounter = 0
     partNodes = dict()
     elementDict = dict()
-    for element in elementSet:
-        elShape = element.ensightType
+    for elNumber, elShape, visualizationNodes in elements:
         if elShape not in elementDict:
             elementDict[elShape] = dict()
         elNodeIndices = []
-        for node in element.visualizationNodes:
+        for node in visualizationNodes:
             # if the node is already in the dict, get its index,
             # else insert it, and get the current idx = counter. increase the counter
             idx = partNodes.setdefault(node, nodeCounter)
@@ -761,7 +795,7 @@ def createUnstructuredPartFromElementSet(setName, elementSet: list, partID: int)
             if idx == nodeCounter:
                 # the node was just inserted, so increase the counter of inserted nodes
                 nodeCounter += 1
-        elementDict[elShape][element.elNumber] = elNodeIndices
+        elementDict[elShape][elNumber] = elNodeIndices
 
     return EnsightUnstructuredPart(setName, partID, partNodes.keys(), elementDict)
 
@@ -921,9 +955,9 @@ class OutputManager(OutputManagerBase):
         self._configPart = None
         self._resolveConfigPart()
         self._transientCfg = transient
-        # the geometry and the results cover the whole model
-        self.model.requireCompleteMesh("the Ensight output")
-        self._initialMeshSignature = (len(self.model.elements), len(self.model.nodes))
+        # The geometry and the results cover the whole model: the geometry from the mesh where a
+        # process created only part of it, the results from the field outputs, which gather theirs.
+        self._initialMeshSignature = (len(self.model.mesh.elements), len(self.model.nodes))
         self._meshSignature = None
         self._buildVariableJobs()
 
@@ -1005,7 +1039,8 @@ class OutputManager(OutputManagerBase):
             part = self._getTargetPartForFieldOutput(fieldOutput)
         variableJob["part"] = part
 
-        if nEntries != len(fieldOutput.associatedSet):
+        elements = visualizedElementsOf(fieldOutput.associatedSet, self.model)
+        if nEntries != len(elements):
             raise Exception(
                 "Variable {:} result size ({:}) does not match the number of nodes ({:})".format(
                     variableJob["name"], nEntries, len(variableJob["part"].nodes)
@@ -1016,7 +1051,7 @@ class OutputManager(OutputManagerBase):
             varSize = varSizeFp
         variableJob["varSize"] = varSize
 
-        variableJob["elementsOfShape"] = disassembleElsetToEnsightShapes(fieldOutput.associatedSet)
+        variableJob["elementsOfShape"] = disassembleElsetToEnsightShapes(elements)
 
         if transient:
             self._transientPerElementVariableJobs[variableJob["name"]].append(variableJob)
@@ -1142,7 +1177,7 @@ class OutputManager(OutputManagerBase):
         self.timeAtLastOutput = model.time
 
         # rebuild parts + variable jobs if the mesh changed (AMR), so geometry and variables match
-        signature = (len(model.elements), len(model.nodes))
+        signature = (len(model.mesh.elements), len(model.nodes))
         mesh_changed = False
 
         if self._meshSignature is None:
@@ -1300,8 +1335,7 @@ class OutputManager(OutputManagerBase):
         elSetParts = []
         partCounter = firstPartID
         for setName, elSet in elementSets.items():
-            elSet.requireComplete("the Ensight output")
-            elSetPart = createUnstructuredPartFromElementSet(setName, elSet, partCounter)
+            elSetPart = createUnstructuredPartFromElementSet(setName, visualizedElementsOf(elSet, model), partCounter)
             self.elSetToEnsightPartMappings[setName] = elSetPart
             elSetParts.append(elSetPart)
             partCounter += 1

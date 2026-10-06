@@ -58,14 +58,20 @@ def extractNodesFromElementSet(elementSet):
     return NodeSet(elementSet.name, partNodes.keys())
 
 
-def disassembleElsetToEnsightShapes(elementSet):
+def disassembleElsetToEnsightShapes(elements):
     """
     elset -> {shape : [element-index in elset, ... ], }
+
+    Parameters
+    ----------
+    elements
+        The elements of the set, as ``(number, ensightType, nodes)``; see
+        :func:`~edelweissfe.outputmanagers.ensight.visualizedElementsOf`.
     """
-    elements = defaultdict(list)
-    for i, el in enumerate(elementSet):
-        elements[el.ensightType].append(i)
-    return elements
+    elementsOfShape = defaultdict(list)
+    for i, (_, ensightType, _) in enumerate(elements):
+        elementsOfShape[ensightType].append(i)
+    return elementsOfShape
 
 
 def transferElsetResultsToElset(elsetTarget, elsetOrigin, resultsTarget, resultsOrigin):
