@@ -376,29 +376,6 @@ class NEDMPI(NEDParallel):
             return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements
         return self._elementCosts, self._nMeasuredIncrements
 
-    def _operatorsReusable(self, model: FEModel, stepActions: dict) -> bool:
-        """Whether the kept lumped operators may be reused by a rebuild of the equation system; see
-        :meth:`NED._operatorsReusable` -- in every process, or in none. Collective.
-
-        Each process decides from the elements it holds, which a migration changes in some processes
-        only, and a rebuild that reuses them takes another path -- with other exchanges -- than one
-        that does not.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        stepActions
-            The step's actions.
-
-        Returns
-        -------
-        bool
-            Whether every process may reuse them.
-        """
-
-        return not self.subdomain.anyPart(not super()._operatorsReusable(model, stepActions))
-
     def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
         freedom of the model: completed at the interface like the forces, and shared from the
