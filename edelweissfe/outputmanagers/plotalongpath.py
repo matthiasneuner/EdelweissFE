@@ -160,7 +160,7 @@ class OutputManager(OutputManagerBase):
             nodes = theSet
             # 1) distances between nodes:
             distances = [np.linalg.norm(nodes[i + 1].coordinates - nodes[i].coordinates) for i in range(len(nodes) - 1)]
-        elif type(theSet) is ElementSet:
+        elif isinstance(theSet, ElementSet):
             # except AttributeError:  # no, its an elSet!
             elements = entry["fieldOutput"].elSet
             # dirty computation of centroid by taking the mean (not correct, but fast)

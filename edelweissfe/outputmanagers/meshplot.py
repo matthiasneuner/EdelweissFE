@@ -449,7 +449,7 @@ class OutputManager(OutputManagerBase):
         elif isinstance(job, MeshPlotPerNodeJob):
             fieldOutput = fieldOutputs[job.fieldOutput]
 
-            if type(fieldOutput.associatedSet) is not ElementSet:
+            if not isinstance(fieldOutput.associatedSet, ElementSet):
                 raise Exception("perNode job must be defined on a perElement fieldOutput")
 
             perNodeJob = {
