@@ -115,18 +115,13 @@ mesh is described and before the elements are made
 (:func:`~edelweissfe.helpers.inputfilehelpers.fillFEModelFromInputFile`). A process then creates
 
 * the elements it **computes** -- its part of the partition; and
-* every element carrying a **load** -- on the surface of a distributed load, or in the element set
-  of a body load, of any step -- that shares a node with one of its own elements; and
 * every **element made by its owner** -- the contact facets and the point masses of rigid bodies
   (see `Contact, ties and rigid bodies`_).
 
-The second kind exists for its loads only: a load is not exchanged between processes, each process
-adds the loads at the degrees of freedom it integrates itself, in the order of the load's elements,
-which is what keeps the result bit-identical to a serial run (see `An increment`_). Such an element
-is neither computed nor reported by the process. A subdomain reaching a loaded element in another way
--- through a multi-point constraint, say -- would miss its load, and is refused
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.distributedLoadsOnSubdomain`). An
-element described after the partition, which no process would compute, is refused as well.
+A load acting on an element -- a distributed load on its face, a body force -- is evaluated by the
+process computing the element and exchanged like its forces (see `An increment`_), so no process
+needs another one's element for it. An element described after the partition, which no process
+would compute, is refused.
 
 The subdomain of the solver adopts this partition instead of computing its own.
 
@@ -220,7 +215,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``partitionModel``                          the subdomain, instead of the whole model
 ``computeElements``                         the interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
-``assembleLoads``                           restricts the loads to the elements reaching the subdomain
+``assembleLoads``                           the loads of the own elements, completed at the interface
 ``assembleConstraintForces``                evaluates the own constraints, shares all forces
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the sums over the subdomains
@@ -242,10 +237,27 @@ which is the order a single process computing the whole model sums them in.
 
 Floating-point addition is not associative, so this order is what makes the result independent of
 the decomposition: the force at every degree of freedom is the same bits as without decomposition,
-and so is everything computed from it. The loads are added in the same way -- a distributed load or
-body force on a neighbour's element is evaluated wherever it reaches, rather than exchanged -- and
-the constraint forces, each computed by one process, are shared with all and added in model order.
-A run on any number of processes is bit-identical to ``NED`` on the same input.
+and so is everything computed from it. The constraint forces, each computed by one process, are
+shared with all and added in model order. A run on any number of processes is bit-identical to
+``NED`` on the same input.
+
+**Loads.** A distributed load or a body force acting on an element is a contribution of that element,
+and is assembled like its forces
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`): the process
+computing the element evaluates its load, with its own solution -- current at every degree of
+freedom of the element, since the process integrates all of them -- and sends the contributions at
+the degrees of freedom a neighbour integrates too, tagged with their place in the order a single
+process adds the loads in: the loads in deck order, the faces of each surface, the elements of each
+face or set as the mesh describes them, distributed loads before body forces
+(:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceLoadAssembly`). Serially, the
+loads are not part of the element sum: ``NED`` sums the element forces, negates them, adds the
+concentrated loads, and then adds every load contribution onto that, one after another. Every
+process does the same at each of its degrees of freedom -- the net force of the elements and the
+concentrated loads, the same bits everywhere, then the first load contribution, the second, and so
+on -- so the result is the same bits as serially. A concentrated load acts on degrees of freedom,
+not on elements, and is added by every process integrating them. A configuration-dependent load --
+a follower pressure on a finite-strain element, say -- therefore reads the current solution, not the
+one of the last synchronization, which a load evaluated on another process' element would.
 
 The volume exchanged per increment is that of the interface and the constraints. The lumped mass
 and damping are assembled once per mesh by each process from its own elements, completed at the
@@ -270,8 +282,8 @@ is what another process must receive to continue it. Every reader then reads the
 run does. This synchronization happens every ``output-frequency`` increments, at every
 ``contact-update-frequency`` search, and at the end of a step.
 
-**Distributed.** No element state is synchronized -- a process holds no element it does not compute,
-apart from the loaded elements above, which nothing reads -- and each whole-model reader goes through
+**Distributed.** No element state is synchronized -- a process holds no element it does not compute
+-- and each whole-model reader goes through
 the *gather path* of the element distribution
 (:class:`~edelweissfe.models.elementdistribution.ElementDistribution`, whose serial base answers with
 what is here):
@@ -400,8 +412,7 @@ and transfers its parent's state to it; the parent is then dropped. Every proces
 the nodes, the element and node sets, the surfaces and the node fields identically. After the
 modifier, the topology pipeline lets the distribution create and drop the elements of the changed
 mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`): a
-process creates the loaded children touching its own elements (a body force on a refined set, a
-distributed load on a refined surface) and drops loaded elements it no longer needs. The equation
+process drops the elements no longer in the mesh. The equation
 system is then built again, as after any topology change, adopting this partition; the next
 rebalancing check may move the children like any other element (`Load balancing`_). The hanging-node
 constraints of the refinement are multi-point constraints, closed over in the subdomain by degree of
@@ -449,9 +460,8 @@ the increment was accepted, in every process:
 1. the process that computed an element until now sends its state (``getStateVars``, the converged
    state) to the element's new process, all of them in one exchange;
 2. each process drops the element objects it no longer needs, and creates from the mesh those it
-   now needs (:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`) -- its new elements,
-   and the loaded elements touching them (see `The fallback rule`_) -- keeping the elements in mesh
-   order;
+   now needs (:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`) -- its new elements
+   -- keeping the elements in mesh order;
 3. the element sets and surfaces are resolved to the elements now held, in place; the new elements
    receive their sections and element properties as at setup
    (:meth:`~edelweissfe.models.femodel.FEModel.assignSectionsAndPropertiesToElements`), and every
@@ -461,7 +471,7 @@ Everything indexed by the elements a process holds is then built again, as after
 topology: the solver rebuilds the equation system for the elements now held, carrying the solution,
 the velocity and the force -- which the output synchronization has just made complete in every
 process -- over, and with it the degree-of-freedom indices of the elements, the subdomain and its
-interface, the loaded elements reaching into it, the lumped inertia and damping (assembled from the
+interface, the loads of the elements computed here, the lumped inertia and damping (assembled from the
 elements now computed here, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
 element results again for the elements now reported here. All of these are released *before* the
