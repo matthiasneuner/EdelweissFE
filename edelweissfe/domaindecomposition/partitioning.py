@@ -28,10 +28,13 @@
 #  ---------------------------------------------------------------------
 """Which process computes which element and which constraint.
 
-The elements are partitioned by METIS on the root process, which broadcasts the result, so every
-process holds the same partition regardless of whether METIS itself would reproduce it. The
-partition covers every element of the model -- the kernel-less contact facets included, whose
-lumped operators are zero but whose owner must still be unique.
+The elements are partitioned on the mesh (:class:`~edelweissfe.models.mesh.Mesh`) -- its element
+numbers, connectivity and element types -- and not on element objects, so that a partition can be
+made before any element exists, and every process can make it without holding every element. METIS
+runs on the root process, which broadcasts the result, so every process holds the same partition
+regardless of whether METIS itself would reproduce it. The partition covers every element of the
+mesh -- the kernel-less contact facets included, whose lumped operators are zero but whose owner
+must still be unique.
 
 Constraints are not partitioned by geometry: each is one object, evaluated by one process, and is
 dealt out round-robin in name order. The assignment depends on the constraint names only, so it
@@ -42,25 +45,26 @@ state.
 import numpy as np
 
 from edelweissfe.domaindecomposition.metis import partitionMeshDual
+from edelweissfe.models.mesh import ElementTypeInfo, Mesh
 
 
-def _elementWeight(element) -> int:
+def _elementWeight(typeInfo: ElementTypeInfo) -> int:
     """The expected cost of one element's increment, as a positive integer.
 
     Its number of degrees of freedom: a proxy for both its quadrature-point count and its kernel's
     arithmetic, and zero-cost facets (no kernels) weigh 1 so that METIS still places them.
     """
 
-    return max(1, element.nDof) if element.hasKernels else 1
+    return max(1, typeInfo.nDof) if typeInfo.hasKernels else 1
 
 
-def partitionElements(elements: dict, nParts: int, domainSize: int, communicator, measuredCosts: dict = None) -> dict:
-    """Assign every element to one of ``nParts`` processes.
+def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicator, measuredCosts: dict = None) -> dict:
+    """Assign every element of the mesh to one of ``nParts`` processes.
 
     Parameters
     ----------
-    elements
-        The elements of the model, by number.
+    mesh
+        The mesh; its elements are partitioned in mesh order.
     nParts
         The number of processes.
     domainSize
@@ -79,24 +83,24 @@ def partitionElements(elements: dict, nParts: int, domainSize: int, communicator
         The rank of every element, by element number.
     """
 
-    numbers = list(elements.keys())
+    numbers = list(mesh.elements.keys())
     parts = np.zeros(len(numbers), dtype=np.int64)
 
     if nParts > 1:
         if communicator.Get_rank() == 0:
+            typeInfos = [mesh.typeOf(mesh.elements[number]) for number in numbers]
             nodeIndex = {}
             offsets = np.zeros(len(numbers) + 1, dtype=np.int64)
             connectivity = []
             for position, number in enumerate(numbers):
-                element = elements[number]
-                for node in element.nodes:
-                    connectivity.append(nodeIndex.setdefault(node.label, len(nodeIndex)))
+                for label in mesh.elements[number].nodeLabels:
+                    connectivity.append(nodeIndex.setdefault(label, len(nodeIndex)))
                 offsets[position + 1] = len(connectivity)
 
             if measuredCosts:
-                weights = _measuredWeights(elements, numbers, measuredCosts)
+                weights = _measuredWeights(numbers, typeInfos, measuredCosts)
             else:
-                weights = np.array([_elementWeight(elements[number]) for number in numbers], dtype=np.int64)
+                weights = np.array([_elementWeight(typeInfo) for typeInfo in typeInfos], dtype=np.int64)
             parts[:] = partitionMeshDual(
                 offsets, np.array(connectivity, dtype=np.int64), len(nodeIndex), nParts, weights, max(1, domainSize)
             )
@@ -106,15 +110,15 @@ def partitionElements(elements: dict, nParts: int, domainSize: int, communicator
     return dict(zip(numbers, parts.tolist()))
 
 
-def _measuredWeights(elements: dict, numbers: list, measuredCosts: dict) -> np.ndarray:
+def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.ndarray:
     """Integer METIS weights from measured element costs, 1000 per median measured element.
 
     Parameters
     ----------
-    elements
-        The elements, by number.
     numbers
         The element numbers, in partition order.
+    typeInfos
+        The type information of each of those elements, in the same order.
     measuredCosts
         The measured cost of elements, by number.
 
@@ -126,19 +130,19 @@ def _measuredWeights(elements: dict, numbers: list, measuredCosts: dict) -> np.n
 
     measured = np.array([cost for cost in measuredCosts.values() if cost > 0.0])
     if not measured.size:
-        return np.array([_elementWeight(elements[number]) for number in numbers], dtype=np.int64)
+        return np.array([_elementWeight(typeInfo) for typeInfo in typeInfos], dtype=np.int64)
 
+    nDofOf = {number: typeInfo.nDof for number, typeInfo in zip(numbers, typeInfos)}
     costPerDof = np.median(
-        [measuredCosts[n] / max(1, elements[n].nDof) for n in measuredCosts if measuredCosts[n] > 0.0]
+        [measuredCosts[n] / max(1, nDofOf[n]) for n in measuredCosts if measuredCosts[n] > 0.0 and n in nDofOf]
     )
     unit = np.median(measured) / 1000.0
 
     weights = np.empty(len(numbers), dtype=np.int64)
-    for position, number in enumerate(numbers):
+    for position, (number, typeInfo) in enumerate(zip(numbers, typeInfos)):
         cost = measuredCosts.get(number, 0.0)
         if cost <= 0.0:
-            element = elements[number]
-            cost = costPerDof * element.nDof if element.hasKernels else unit
+            cost = costPerDof * typeInfo.nDof if typeInfo.hasKernels else unit
         weights[position] = max(1, int(round(cost / unit)))
     return weights
 

@@ -61,10 +61,17 @@ class ElementTypeInfo:
         The fields of the element, per node: ``fields[i]`` lists the fields at its ``i``-th node.
     ensightType
         The element shape, e.g. ``hexa20``; it determines the faces of the element.
+    nDof
+        The number of degrees of freedom of the element.
+    hasKernels
+        Whether the element computes forces and carries a state (see
+        :attr:`~edelweissfe.elements.base.baseelement.BaseElement.hasKernels`); a contact facet does not.
     """
 
     fields: list
     ensightType: str
+    nDof: int
+    hasKernels: bool
 
 
 @dataclass(frozen=True)
@@ -209,7 +216,7 @@ class Mesh:
         """
 
         record = self.addElement(element.elNumber, element.elType, None, [node.label for node in element.nodes])
-        record.ownTypeInfo = ElementTypeInfo(element.fields, element.ensightType)
+        record.ownTypeInfo = ElementTypeInfo(element.fields, element.ensightType, element.nDof, element.hasKernels)
         return record
 
     def removeElement(self, number: int):
@@ -318,7 +325,8 @@ class Mesh:
         return self._typeEntry(record.elType, record.provider)[0]
 
     def typeOf(self, record: MeshElement) -> ElementTypeInfo:
-        """The fields per node and the shape of an element, without an element object of the model.
+        """The fields per node, the shape and the size of an element, without an element object of the
+        model.
 
         Parameters
         ----------
@@ -346,7 +354,10 @@ class Mesh:
 
             elementClass = getElementClass(elType, provider)
             prototype = elementClass(elType, 0)
-            entry = (elementClass, ElementTypeInfo(prototype.fields, prototype.ensightType))
+            entry = (
+                elementClass,
+                ElementTypeInfo(prototype.fields, prototype.ensightType, prototype.nDof, prototype.hasKernels),
+            )
             self._types[key] = entry
         return entry
 

@@ -253,3 +253,90 @@ def test_a_single_subdomain_agrees_with_itself():
     with pytest.raises(StepFailed, match="testing failed"):
         with subdomain.agreedOnByAllParts("testing"):
             raise KeyError("a failure")
+
+
+_DISTRIBUTION_DECK = """
+*job, name=distributionjob, domain=2d
+*material, name=linearelastic, id=linearelastic, provider=edelweiss
+210000.0, 0.15
+*modelGenerator, generator=planeRectQuad, name=gen
+x0=0, l=8
+y0=0, h=2
+elType=CPE4
+elProvider=edelweiss
+nX=8
+nY=2
+*section, name=section1, thickness=1.0, material=linearelastic, type=plane
+all
+*solver, solver=NEDMPI, name=theSolver
+*step, solver=theSolver
+>>bodyForce, name=gravity, elSet=gen_top, forceVector='0.0, -1.0'
+"""
+
+
+class _SecondOfTwoProcesses:
+    """What the partition asks of a communicator, as rank 1 of 2 sees it once rank 0 broadcast a
+    partition: here, elements 1-8 to rank 0 and 9-16 to rank 1."""
+
+    def Get_size(self):
+        return 2
+
+    def Get_rank(self):
+        return 1
+
+    def Bcast(self, parts, root):
+        parts[:] = np.arange(parts.shape[0]) >= parts.shape[0] // 2
+
+
+def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
+    from edelweissfe.domaindecomposition.elementdistribution import (
+        reasonsForTheWholeModel,
+    )
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(_DISTRIBUTION_DECK)
+    assert reasonsForTheWholeModel(parseInputFile(str(deck))) == []
+
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*modelModifier, type=hAdaptivity, name=amr
+>>marker, type=elementSet, elSet=gen_all
+*modelGenerator, generator=executePythonCode, name=code
+print("hello")
+"""
+    )
+    reasons = reasonsForTheWholeModel(parseInputFile(str(deck)))
+    assert len(reasons) == 2
+    assert "model modifier amr (hAdaptivity)" in reasons[0]
+    assert "generator code (executePythonCode)" in reasons[1]
+
+
+def test_a_process_creates_its_elements_and_the_loaded_ones_touching_them(tmp_path):
+    from edelweissfe.domaindecomposition.elementdistribution import (
+        DistributedElements,
+        _loadedSurfacesAndElementSets,
+    )
+    from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(_DISTRIBUTION_DECK)
+    inputFile = parseInputFile(str(deck))
+    assert _loadedSurfacesAndElementSets(inputFile) == ([], ["gen_top"])
+
+    model = FEModel(2)
+    distribution = DistributedElements(_SecondOfTwoProcesses(), *_loadedSurfacesAndElementSets(inputFile))
+    model.elementDistribution = distribution
+    model = fillFEModelFromInputFile(model, inputFile, Journal(verbose=False))
+
+    own = {number for number, owner in distribution.owners.items() if owner == 1}
+    assert own == set(range(9, 17))
+    # The planeRectQuad grid is numbered column by column (two elements each): of the loaded top
+    # row (the even numbers), element 8 shares nodes with element 9, which this process computes.
+    assert set(model.elements) == own | {8}
+    assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == sorted(own)
+    assert not model.elementSets["gen_top"].isComplete

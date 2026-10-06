@@ -52,6 +52,29 @@ import numpy as np
 from mpi4py import MPI
 
 
+def elementsWithoutState(elements: dict) -> list:
+    """The numbers of those of the given elements that expose no state through ``getStateVars``.
+
+    Parameters
+    ----------
+    elements
+        Elements, by number.
+
+    Returns
+    -------
+    list
+        Their numbers, in the order given.
+    """
+
+    numbers = []
+    for number, element in elements.items():
+        try:
+            element.getStateVars()
+        except NotImplementedError:
+            numbers.append(number)
+    return numbers
+
+
 class ModelStateSynchronization:
     """The layout of one exchange of element and constraint states, for one partition of a model.
 
@@ -77,17 +100,16 @@ class ModelStateSynchronization:
         size = communicator.Get_size()
         self._rank = rank
 
-        #: Elements that expose no state through getStateVars; their state is not synchronized.
-        self.elementsWithoutState = []
+        # An element exposing no state (see elementsWithoutState) is not synchronized; the subdomain
+        # refuses a model with such elements.
+        withoutState = set(elementsWithoutState(elements))
 
         elementsOfRank = [[] for _ in range(size)]
         stateSizesOfRank = [[] for _ in range(size)]
         for number, element in elements.items():
-            try:
-                stateSize = element.getStateVars().shape[0]
-            except NotImplementedError:
-                self.elementsWithoutState.append(number)
+            if number in withoutState:
                 continue
+            stateSize = element.getStateVars().shape[0]
             if stateSize:
                 owner = elementOwners[number]
                 elementsOfRank[owner].append(element)

@@ -52,10 +52,11 @@ from scipy.sparse.csgraph import connected_components
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.partitioning import (
     assignConstraints,
-    partitionElements,
+    partitionElementsOfMesh,
 )
 from edelweissfe.domaindecomposition.statesynchronization import (
     ModelStateSynchronization,
+    elementsWithoutState,
 )
 from edelweissfe.domaindecomposition.subdomaininterface import (
     ConstraintForceExchange,
@@ -70,7 +71,12 @@ from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
 from edelweissfe.stepactions.base.bodyloadbase import BodyLoadBase
 from edelweissfe.stepactions.base.distributedloadbase import DistributedLoadBase
 from edelweissfe.timesteppers.timestep import TimeStep
-from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
+from edelweissfe.utils.exceptions import (
+    ConditionalStop,
+    CutbackRequest,
+    StepFailed,
+    TopologyError,
+)
 
 #: How :meth:`Subdomain.agreedOnByAllParts` ranks what went wrong: the most severe outcome of any
 #: process is the one every process raises.
@@ -207,6 +213,8 @@ class Subdomain:
         #: definition.
         self.partition = None
 
+        self._reportedFixedPartition = False
+
         #: What the last definition was made for; a rebalance redefines from it.
         self._model = None
         self._dofManager = None
@@ -251,7 +259,7 @@ class Subdomain:
             if topologyChanged:
                 self._checkReplicatedLayout(model, dofManager)
 
-                if self._elementOwners is None or model.elements.keys() != self._partitionedElementKeys:
+                if self._elementOwners is None or model.mesh.elements.keys() != self._partitionedElementKeys:
                     self._partition(model, measuredCosts=None)
 
                 self._constraintOwners = self._constraintOwnersOf(model)
@@ -261,9 +269,36 @@ class Subdomain:
             self._defineInterface(model, ownershipChanged=topologyChanged)
 
         self._reportSubdomains(topologyChanged)
+        if self._elementOwners is not None and not self._reportedFixedPartition:
+            self._reportFixedPartition(model)
+
+    def _reportFixedPartition(self, model: FEModel):
+        """Report once that a distributed model keeps its first partition although load balancing is
+        enabled; see :meth:`measuresElementCosts`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        if self.loadBalanceTolerance and not model.elementDistribution.createsEveryElement:
+            self.journal.message(
+                "Load balancing is off: the elements were created in their processes, and moving them between "
+                "processes (migration) is not implemented yet",
+                self.identification,
+                0,
+            )
+        self._reportedFixedPartition = True
 
     def _partition(self, model: FEModel, measuredCosts: dict | None):
-        """Partition the elements, by estimated or by measured cost. Collective.
+        """Partition the elements of the mesh, by estimated or by measured cost. Collective.
+
+        A model whose processes each created only their own elements was partitioned before its
+        elements were created (see
+        :meth:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements.decideWhichElementsAreCreatedHere`),
+        on the same mesh and by the same estimate: that partition is adopted, since an element can
+        only be computed where it exists.
 
         Parameters
         ----------
@@ -271,13 +306,27 @@ class Subdomain:
             The model tree.
         measuredCosts
             The measured cost per increment of elements, by number, on rank 0; None to estimate.
+
+        Raises
+        ------
+        TopologyError
+            If the mesh of a distributed model changed since it was partitioned.
         """
 
-        with performancetiming.timeit("partition"):
-            self._elementOwners = partitionElements(
-                model.elements, self.nProcesses, model.domainSize, self.communicator, measuredCosts
-            )
-        self._partitionedElementKeys = set(model.elements.keys())
+        distribution = model.elementDistribution
+        if distribution.createsEveryElement:
+            with performancetiming.timeit("partition"):
+                self._elementOwners = partitionElementsOfMesh(
+                    model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts
+                )
+        else:
+            if measuredCosts is not None or model.mesh.elements.keys() != distribution.owners.keys():
+                raise TopologyError(
+                    "the elements of this model were partitioned over the processes before they were created, "
+                    "and cannot be repartitioned"
+                )
+            self._elementOwners = distribution.owners
+        self._partitionedElementKeys = set(model.mesh.elements.keys())
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:
         """The rank of every constraint of the model: the current assignment while the model has the
@@ -310,7 +359,9 @@ class Subdomain:
             The model tree.
         """
 
-        self._elementPositions = {number: position for position, number in enumerate(model.elements)}
+        # The order of the mesh, which is the order of the elements in a model that created all of
+        # them, and so the order a serial run sums their contributions in.
+        self._elementPositions = {number: position for position, number in enumerate(model.mesh.elements)}
 
         self._ownedElements = {
             number: element for number, element in model.elements.items() if self._elementOwners[number] == self.rank
@@ -352,8 +403,14 @@ class Subdomain:
         }
 
         if ownershipChanged:
+            # The states of the elements other processes compute are kept current only where every
+            # element was created; a distributed model gathers what it reads instead.
             self._stateSynchronization = ModelStateSynchronization(
-                self.communicator, model.elements, self._elementOwners, model.constraints, self._constraintOwners
+                self.communicator,
+                model.elements if model.elementDistribution.createsEveryElement else {},
+                self._elementOwners,
+                model.constraints,
+                self._constraintOwners,
             )
             self._refuseElementsWithoutState(model)
 
@@ -371,7 +428,7 @@ class Subdomain:
 
         Such an element's state cannot be sent to another process: the output and a checkpoint
         written by rank 0 would read the state its copy was built with, and a repartition would
-        continue it from there. Every process holds the same model, so every process refuses it.
+        continue it from there. Each process checks the elements it created.
 
         Parameters
         ----------
@@ -384,7 +441,7 @@ class Subdomain:
             If an element does not implement ``getStateVars``.
         """
 
-        withoutState = self._stateSynchronization.elementsWithoutState
+        withoutState = elementsWithoutState(model.elements)
         if withoutState and self.nProcesses > 1:
             raise NotImplementedError(
                 "{:} element(s) of the model, e.g. element {:} ({:}), expose no state (getStateVars), "
@@ -434,14 +491,15 @@ class Subdomain:
         return np.concatenate([touched, np.flatnonzero(linked & np.isin(group, groupsTouched))])
 
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
-        """Refuse to continue unless every process built the same model and degree-of-freedom layout.
+        """Refuse to continue unless every process built the same mesh and degree-of-freedom layout.
 
         The interface exchange addresses degrees of freedom by index, which is only meaningful if
         every process numbered them identically; after a refinement that rests on every process
-        having refined identically. A fingerprint of the element numbers, the degrees of freedom of
-        every element (its connectivity, in the numbering of the layout), the node order of every
-        field, the node coordinates and the size of the system is compared across all processes.
-        Collective.
+        having refined identically. A fingerprint of the mesh -- the element numbers and the node
+        labels of every element -- the degree of freedom of every node of every field, the node
+        coordinates and the size of the system is compared across all processes. It is made from
+        the mesh and the nodes, which every process holds whole, and not from the element objects,
+        of which a process may hold only its own. Collective.
 
         Parameters
         ----------
@@ -457,18 +515,26 @@ class Subdomain:
         """
 
         digest = hashlib.sha1()
-        digest.update(np.asarray(list(model.elements.keys()), dtype=np.int64).tobytes())
-        if model.elements:
+        meshElements = model.mesh.elements
+        digest.update(np.asarray(list(meshElements.keys()), dtype=np.int64).tobytes())
+        if meshElements:
+            digest.update(
+                np.concatenate([np.asarray(record.nodeLabels, dtype=np.int64) for record in meshElements.values()])
+                .astype(np.int64)
+                .tobytes()
+            )
+        dofsOfFieldVariables = dofManager.idcsOfFieldVariablesInDofVector
+        for name, field in model.nodeFields.items():
+            digest.update(name.encode())
+            digest.update(np.asarray([node.label for node in field.nodes], dtype=np.int64).tobytes())
             digest.update(
                 np.concatenate(
-                    [np.asarray(dofManager.idcsOfElementsInDofVector[element]) for element in model.elements.values()]
+                    [np.atleast_1d(dofsOfFieldVariables[node.fields[name]]) for node in field.nodes]
+                    or [np.empty(0, dtype=np.int64)]
                 )
                 .astype(np.int64)
                 .tobytes()
             )
-        for name, field in model.nodeFields.items():
-            digest.update(name.encode())
-            digest.update(np.asarray([node.label for node in field.nodes], dtype=np.int64).tobytes())
         if model.nodes:
             digest.update(
                 np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()]).tobytes()
@@ -498,6 +564,7 @@ class Subdomain:
                 self._interface.subdomainDofs.shape[0],
                 self._interface.nInterfaceDofs,
                 len(self._interface.neighbours),
+                len(self._model.elements),
             ),
             root=0,
         )
@@ -508,12 +575,14 @@ class Subdomain:
         imbalance = elementCounts.max() / max(elementCounts.mean(), 1e-300)
         self.journal.message(
             "Subdomains: {:} element(s) per process (max/mean {:.3f}); subdomain DOFs {:}; interface DOFs {:}; "
-            "neighbours {:}".format(
+            "neighbours {:}; elements created {:} of {:}".format(
                 "/".join(str(count) for count in elementCounts),
                 imbalance,
                 "/".join(str(entry[1]) for entry in statistics),
                 "/".join(str(entry[2]) for entry in statistics),
                 "/".join(str(entry[3]) for entry in statistics),
+                "/".join(str(entry[4]) for entry in statistics),
+                len(self._model.mesh.elements),
             ),
             self.identification,
             0 if topologyChanged else 2,
@@ -541,6 +610,14 @@ class Subdomain:
         for load in distributedLoads:
             onSubdomain = self._loadsOnSubdomain.get(load)
             if onSubdomain is None:
+                self._requireLoadedElementsCreatedHere(
+                    load.surface.name,
+                    [
+                        number
+                        for numbers in self._model.mesh.elementNumbersOfSurface(load.surface.name).values()
+                        for number in numbers
+                    ],
+                )
                 onSubdomain = DistributedLoadOnSubdomain(
                     load,
                     {
@@ -571,12 +648,56 @@ class Subdomain:
         for load in bodyLoads:
             onSubdomain = self._loadsOnSubdomain.get(load)
             if onSubdomain is None:
+                self._requireLoadedElementsCreatedHere(
+                    load.elementSet.name, self._model.mesh.elementSets[load.elementSet.name]
+                )
                 onSubdomain = BodyLoadOnSubdomain(
                     load, [element for element in load.elementSet if element in self._elementsTouchingSubdomain]
                 )
                 self._loadsOnSubdomain[load] = onSubdomain
             restricted.append(onSubdomain)
         return restricted
+
+    def _requireLoadedElementsCreatedHere(self, loadedSetName: str, numbers: list):
+        """Refuse a load whose elements reaching into the subdomain were not all created here.
+
+        Each process adds the loads at its subdomain degrees of freedom itself, from the loaded
+        elements reaching into the subdomain. A distributed model creates those that share a node
+        with an element of the subdomain (see
+        :meth:`~edelweissfe.domaindecomposition.elementdistribution.DistributedElements.decideWhichElementsAreCreatedHere`);
+        a subdomain reaching further -- through a constraint or a multi-point constraint -- could miss
+        a load silently, and is refused instead.
+
+        Parameters
+        ----------
+        loadedSetName
+            The name of the loaded surface or element set, for the message.
+        numbers
+            The numbers of the loaded elements, as described in the mesh.
+
+        Raises
+        ------
+        TopologyError
+            If a loaded element reaches into the subdomain without having been created here.
+        """
+
+        model = self._model
+        if model.elementDistribution.createsEveryElement:
+            return
+
+        dofsOf = self._dofManager.idcsOfFieldVariablesInDofVector
+        nodes = model.nodes
+        for number in numbers:
+            if number in model.elements:
+                continue
+            for label in model.mesh.elements[number].nodeLabels:
+                if any(
+                    self._inSubdomain[dofsOf[fieldVariable]].any() for fieldVariable in nodes[label].fields.values()
+                ):
+                    raise TopologyError(
+                        "element {:} of {:} carries a load and reaches into the subdomain of process {:}, but was "
+                        "not created there".format(number, loadedSetName, self.rank)
+                    )
 
     def constraintsSearchedHere(self, model: FEModel, constraints: dict) -> dict:
         """Those of the given constraints whose connectivity search is run here: those this process
@@ -794,8 +915,11 @@ class Subdomain:
         :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
         :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
         -- a cutback with the smallest size any process requested -- so that every process takes the
-        same path out of the step. Nothing inside the context may itself communicate: a process
-        that raised would skip it.
+        same path out of the step. Nothing inside the context may itself communicate, unless every
+        process reaches it whatever another process did before: a process that raised would skip
+        it. (The field outputs of a distributed model gather their element results inside the
+        output context, every process in the same order, before anything that runs in one process
+        only -- the output managers of rank 0.)
 
         Parameters
         ----------
@@ -852,7 +976,12 @@ class Subdomain:
 
     def measuresElementCosts(self) -> bool:
         """Whether the element kernels are to be timed, for :meth:`rebalance`: whenever load
-        balancing is enabled.
+        balancing is enabled, and the model can be repartitioned.
+
+        A model whose processes each created only their own elements is not repartitioned: an
+        element changing process would have to be created by its new process and its state sent
+        there (migration), which is not implemented yet. Its first partition is kept, and the
+        subdomain reports that once (:meth:`define`).
 
         Returns
         -------
@@ -860,7 +989,7 @@ class Subdomain:
             Whether to time them.
         """
 
-        return bool(self.loadBalanceTolerance)
+        return bool(self.loadBalanceTolerance) and self._model.elementDistribution.createsEveryElement
 
     def rebalance(self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int) -> bool:
         """Repartition with the measured element costs if the slowest process has fallen more than
@@ -885,6 +1014,10 @@ class Subdomain:
 
         tolerance = self.loadBalanceTolerance
         if not tolerance or self.nProcesses == 1 or costs is None or not nIncrements:
+            return False
+        if not self._model.elementDistribution.createsEveryElement:
+            # Repartitioning a distributed model would move elements between processes; see
+            # measuresElementCosts.
             return False
 
         busyTimes = np.array(self.communicator.allgather(float(costs.sum())))

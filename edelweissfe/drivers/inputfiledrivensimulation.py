@@ -39,6 +39,9 @@ from time import time as getCurrentTime
 from edelweissfe.config.configurator import loadConfiguration, updateConfiguration
 from edelweissfe.config.phenomena import carriesLinearMomentum, domainMapping
 from edelweissfe.config.solvers import getSolverByName
+from edelweissfe.domaindecomposition.elementdistribution import (
+    elementDistributionOfThisJob,
+)
 from edelweissfe.domaindecomposition.mpienvironment import (
     abortAllProcesses,
     abortAllProcessesOnUncaughtException,
@@ -97,7 +100,8 @@ def finiteElementSimulation(
     identification = "feCore"
 
     # Started by an MPI launcher, every process runs this function on the same input, and each
-    # builds the complete model; a domain-decomposed solver then has each compute a subdomain of it.
+    # builds the model -- the whole model, or only its own part of the elements; a domain-decomposed
+    # solver then has each compute a subdomain of it.
     # Only rank 0 reports and writes output -- the others would write the same files concurrently.
     # A process stopping alone, by an uncaught exception or an interrupt, aborts all of them: the
     # others would wait for it forever.
@@ -124,6 +128,9 @@ def finiteElementSimulation(
 
     tic = getCurrentTime()
     model = FEModel(domainSize)
+    # Which elements of the mesh this process creates: every one, unless the job is distributed over
+    # several MPI processes, which then each create only their own part (see elementdistribution).
+    model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
     model = fillFEModelFromInputFile(model, inputfile, journal)
     model.prepareYourself(journal)
     model.advanceToTime(job.get("startTime", 0.0))
