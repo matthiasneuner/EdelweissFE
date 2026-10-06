@@ -286,8 +286,11 @@ class Subdomain:
         elements were created (see
         :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`),
         on the same mesh and by the same estimate: that partition is adopted, since an element can
-        only be computed where it exists. Repartitioned with measured costs, its elements are then
-        to be moved to their new processes (:meth:`moveElements`).
+        only be computed where it exists -- after a refinement with the children of a refined
+        element where their parent was computed
+        (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.placeChildElement`).
+        Repartitioned with measured costs, its elements are then to be moved to their new processes
+        (:meth:`moveElements`).
 
         Parameters
         ----------
@@ -301,14 +304,14 @@ class Subdomain:
         Raises
         ------
         TopologyError
-            If the mesh of a distributed model changed since it was partitioned.
+            If the mesh of a distributed model changed without its distribution following.
         """
 
         distribution = model.elementDistribution
         if not distribution.createsEveryElement and model.mesh.elements.keys() != distribution.owners.keys():
             raise TopologyError(
-                "the elements of this model were partitioned over the processes before they were created, and "
-                "its mesh cannot change since"
+                "the mesh of this distributed model changed, but the processes computing its elements were not "
+                "decided for the changed mesh (ElementDistribution.holdElementsOfChangedMesh)"
             )
 
         if distribution.createsEveryElement or byMeasuredCosts:
@@ -321,7 +324,9 @@ class Subdomain:
                     owners = keepElementsWhereTheyWere(owners, self._elementOwners, self.nProcesses)
             self._elementOwners = owners
         else:
-            self._elementOwners = distribution.owners
+            # A copy: the distribution changes its own as the mesh changes (see
+            # DistributedElements.placeChildElement), and this partition must not change with it.
+            self._elementOwners = dict(distribution.owners)
         self._partitionedElementKeys = set(model.mesh.elements.keys())
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:

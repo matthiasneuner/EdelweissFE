@@ -30,8 +30,12 @@
 
 The modifier works on the mesh, not on element objects: its octree mirror, the marking, the 2:1
 balance, the hanging nodes and the numbering of the new nodes and elements are derived from the
-mesh, the nodes and the node fields. Element objects are touched only to create a child and to
-transfer its parent's state to it.
+mesh, the nodes and the node fields, which every process of a domain-decomposed run holds whole, so
+every process refines identically. Element objects are touched only where they exist: the child of a
+refined element is created by the process computing its parent
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`), which
+transfers its parent's state to it; every process updates the mesh, the nodes, the sets and the
+surfaces. A serial run creates every child, as the process computing every element.
 """
 
 from collections import defaultdict
@@ -281,11 +285,9 @@ class ModelModifier(ModelModifierBase):
         super().__init__(name, model, journal, *args, **kwargs)
         options = buildSchemaFromOptions(HAdaptivitySchema, kwargs)
 
-        # the octree mirror, the marking and the 2:1 balance work on the whole mesh, and the children
-        # are created where their parents are: every element must exist in this process
-        model.requireCompleteMesh("hAdaptivity")
-        # Everything below reads the mesh, the nodes and the sets of element numbers, never an
-        # element object (see the module documentation).
+        # Everything below reads the mesh, the nodes and the sets of element numbers -- which every
+        # process holds whole -- and never an element object, of which a process of a
+        # domain-decomposed run may hold only its own (see the module documentation).
         mesh = model.mesh
 
         self._name = name
@@ -662,8 +664,8 @@ class ModelModifier(ModelModifierBase):
 
         1. snapshot the converged nodal values, for the warm start;
         2. create the new nodes;
-        3. describe the child elements in the mesh, level by level, and create them (with state
-           transfer from their parents), interpolating the nodal values;
+        3. describe the child elements in the mesh, level by level, and create those computed here
+           (with state transfer from their parents), interpolating the nodal values;
         4. remove the refined parents, and check that octree and model agree;
         5. update the surfaces and the node and element sets;
         6. resize the node fields and write the warm-start values.
@@ -846,9 +848,13 @@ class ModelModifier(ModelModifierBase):
         newValues: dict,
         change: ModelChange,
     ):
-        """Describe the element of one octree child cell in the mesh and create it, inheriting
-        section, properties and state from its parent; and interpolate the nodal values at its new
-        nodes."""
+        """Describe the element of one octree child cell in the mesh; create it if it is computed
+        here, inheriting section, properties and state from its parent; and interpolate the nodal
+        values at its new nodes.
+
+        The child is computed where its parent was
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`): in a
+        serial run here, in a domain-decomposed one by the process holding the parent's state."""
 
         mesh = self._mesh
         e = mesh.elements[eid]
@@ -857,11 +863,14 @@ class ModelModifier(ModelModifierBase):
         parentRecord = model.mesh.elements[parentNumber]
         # the child is described in the mesh and created from it, as every element of the model is
         model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, e["conn"])
-        child = model.createElementOfMesh(elNumber)
-        self._sectionOf[parentNumber].assignSectionToElement(child, model)
-        for elementProperty in self._elementPropertiesOf.get(parentNumber, ()):
-            child.assignProperty(elementProperty.propertyName, elementProperty.values)
-        self._stateTransfer.transferState(model.elements[parentNumber], [child], self._topology)
+        distribution = model.elementDistribution
+        distribution.placeChildElement(elNumber, parentNumber)
+        if distribution.isCreatedHere(elNumber):
+            child = model.createElementOfMesh(elNumber)
+            self._sectionOf[parentNumber].assignSectionToElement(child, model)
+            for elementProperty in self._elementPropertiesOf.get(parentNumber, ()):
+                child.assignProperty(elementProperty.propertyName, elementProperty.values)
+            self._stateTransfer.transferState(model.elements[parentNumber], [child], self._topology)
 
         # warm start: interpolate each NEW node's field values from the parent via the HEX20
         # isoparametric map, so the increment restarts from a consistent state, not zero

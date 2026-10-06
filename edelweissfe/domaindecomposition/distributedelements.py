@@ -212,6 +212,9 @@ class DistributedElements(ElementDistribution):
         self._loadedElements = set()
         #: Changed by every :meth:`moveElementsTo`.
         self.ownershipVersion = 0
+        #: How many elements this process received from another one over the run, by
+        #: :meth:`moveElementsTo`; a diagnostic.
+        self.receivedElements = 0
         #: The state of every element of the model, by number, on rank 0, between
         #: :meth:`gatherStatesForCheckpoint` and :meth:`forgetGatheredStates`.
         self._gatheredStates = None
@@ -237,11 +240,27 @@ class DistributedElements(ElementDistribution):
 
         self.owners = partitionElementsOfMesh(mesh, self.communicator.Get_size(), domainSize, self.communicator)
 
-        self._loadedElements = set()
-        for stepActionClass, definition in self._stepActionDefinitions:
-            self._loadedElements.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
-
+        self._loadedElements = self._elementsLoadedIn(mesh)
         self._createdHere = self._elementsCreatedFor(mesh, self.owners)
+
+    def _elementsLoadedIn(self, mesh: Mesh) -> set:
+        """The numbers of the elements of the mesh carrying a load of some step.
+
+        Parameters
+        ----------
+        mesh
+            The mesh.
+
+        Returns
+        -------
+        set
+            The element numbers.
+        """
+
+        loaded = set()
+        for stepActionClass, definition in self._stepActionDefinitions:
+            loaded.update(stepActionClass.elementsLoadedByDefinition(definition, mesh))
+        return loaded
 
     def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
         """The numbers of the elements this process creates under a partition: its own, and the
@@ -308,7 +327,6 @@ class DistributedElements(ElementDistribution):
             How many element objects this process created, dropped, and received the state of.
         """
 
-        mesh = model.mesh
         rank = self.rank
         previousOwners = self.owners
 
@@ -319,12 +337,44 @@ class DistributedElements(ElementDistribution):
         incoming = self.communicator.alltoall(outgoing)
         del outgoing
 
-        createdHere = self._elementsCreatedFor(mesh, owners)
+        # Element objects change process; the mesh does not change.
+        self.owners = owners
+        created, dropped = self._holdElementsCreatedFor(model)
+
+        nReceived = 0
+        for states in incoming:
+            for number, state in states.items():
+                model.elements[number].setStateVars(state)
+                nReceived += 1
+
+        self.ownershipVersion += 1
+        self.receivedElements += nReceived
+        return len(created), len(dropped), nReceived
+
+    def _holdElementsCreatedFor(self, model) -> tuple[dict, list]:
+        """Hold here exactly the element objects this process creates under the current partition
+        (:attr:`owners`): drop those it no longer needs, and create those it lacks from the mesh, in
+        mesh order, with their sections and element properties, as at setup.
+
+        The dropped elements leave their sets and surfaces before the new ones are created, so that
+        they are released first.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        tuple[dict, list]
+            The elements created, by number, and the numbers of the elements dropped.
+        """
+
+        mesh = model.mesh
+        createdHere = self._elementsCreatedFor(mesh, self.owners)
         toDrop = [number for number in model.elements if number not in createdHere]
         toCreate = [number for number in mesh.elements if number in createdHere and number not in model.elements]
 
-        # Element objects change process; the mesh does not change. The dropped elements leave
-        # their sets and surfaces before the new ones are created, so that they are released first.
         with model.topology.changes():
             for number in toDrop:
                 model.dropElementOfMesh(number)
@@ -334,16 +384,59 @@ class DistributedElements(ElementDistribution):
         model.resolveSetsAndSurfacesOfMesh()
         model.assignSectionsAndPropertiesToElements(created)
 
-        nReceived = 0
-        for states in incoming:
-            for number, state in states.items():
-                model.elements[number].setStateVars(state)
-                nReceived += 1
-
-        self.owners = owners
         self._createdHere = createdHere
-        self.ownershipVersion += 1
-        return len(created), len(toDrop), nReceived
+        return created, toDrop
+
+    def placeChildElement(self, childNumber: int, parentNumber: int):
+        """The child of a refined element is computed by the process that computed its parent: that
+        process creates it, and transfers the state of its own parent to it. See
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`.
+
+        Parameters
+        ----------
+        childNumber
+            The number of the new element, already described in the mesh.
+        parentNumber
+            The number of the element it replaces (in part), still described in the mesh.
+        """
+
+        owner = self.owners[parentNumber]
+        self.owners[childNumber] = owner
+        if owner == self.rank:
+            self._createdHere.add(childNumber)
+
+    def holdElementsOfChangedMesh(self, model):
+        """After a model modifier changed the mesh -- every process changes it identically -- forget
+        the elements no longer in it, and hold here exactly the elements this process now needs:
+        its own, which the modifier created already (:meth:`placeChildElement`), and the loaded
+        elements sharing a node with one of them (see :meth:`decideWhichElementsAreCreatedHere`),
+        which the elements and the sets of the changed mesh may have changed. Local: the decision
+        reads only the mesh, which every process holds whole.
+
+        Parameters
+        ----------
+        model
+            The model tree, its mesh changed.
+
+        Raises
+        ------
+        TopologyError
+            If the modifier described an element without placing it on a process.
+        """
+
+        mesh = model.mesh
+        unplaced = [number for number in mesh.elements if number not in self.owners]
+        if unplaced:
+            raise TopologyError(
+                "{:} element(s) (e.g. {:}) were described during the run without a process to compute them: a "
+                "model modifier that describes elements must place them (ElementDistribution.placeChildElement)".format(
+                    len(unplaced), unplaced[:5]
+                )
+            )
+        self.owners = {number: self.owners[number] for number in mesh.elements}
+
+        self._loadedElements = self._elementsLoadedIn(mesh)
+        self._holdElementsCreatedFor(model)
 
     def isCreatedHere(self, number: int) -> bool:
         """Whether this process creates the element with the given number.

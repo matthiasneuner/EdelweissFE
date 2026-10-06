@@ -72,6 +72,31 @@ class ElementDistribution:
             The spatial dimension.
         """
 
+    def placeChildElement(self, childNumber: int, parentNumber: int):
+        """Decide where an element a model modifier describes in place of another is computed: the
+        child of a refined element is computed by the process that computed its parent, which holds
+        the parent's state to transfer. Here: every element is computed here, so there is nothing to
+        decide.
+
+        Parameters
+        ----------
+        childNumber
+            The number of the new element, already described in the mesh.
+        parentNumber
+            The number of the element it replaces (in part), still described in the mesh.
+        """
+
+    def holdElementsOfChangedMesh(self, model):
+        """After a model modifier changed the mesh, hold here exactly the element objects this process
+        needs for the changed mesh. Here: the modifier created every new element itself, so there is
+        nothing left to do.
+
+        Parameters
+        ----------
+        model
+            The model tree, its mesh changed.
+        """
+
     def isCreatedHere(self, number: int) -> bool:
         """Whether this process creates the element with the given number; asked by
         :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.
