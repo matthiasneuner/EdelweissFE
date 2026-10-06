@@ -355,6 +355,7 @@ class Subdomain:
             self._stateSynchronization = ModelStateSynchronization(
                 self.communicator, model.elements, self._elementOwners, model.constraints, self._constraintOwners
             )
+            self._refuseElementsWithoutState(model)
 
         self._constraintForceExchange = ConstraintForceExchange(
             self.communicator, model.constraints, self._ownedConstraints, dofManager.idcsOfConstraintsInDofVector
@@ -364,6 +365,34 @@ class Subdomain:
         self.partition = ModelPartition(
             self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs, self._interface.ownedDofMask
         )
+
+    def _refuseElementsWithoutState(self, model: FEModel):
+        """Refuse a model with elements that expose no state, on more than one process.
+
+        Such an element's state cannot be sent to another process: the output and a checkpoint
+        written by rank 0 would read the state its copy was built with, and a repartition would
+        continue it from there. Every process holds the same model, so every process refuses it.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Raises
+        ------
+        NotImplementedError
+            If an element does not implement ``getStateVars``.
+        """
+
+        withoutState = self._stateSynchronization.elementsWithoutState
+        if withoutState and self.nProcesses > 1:
+            raise NotImplementedError(
+                "{:} element(s) of the model, e.g. element {:} ({:}), expose no state (getStateVars), "
+                "so their state cannot be exchanged between processes; this model cannot be "
+                "domain-decomposed. Run it with a serial solver.".format(
+                    len(withoutState), withoutState[0], type(model.elements[withoutState[0]]).__name__
+                )
+            )
 
     def _closeOverMultiPointConstraints(self, touched: np.ndarray, nDof: int) -> np.ndarray:
         """Add to the touched degrees of freedom every one linked to them by a multi-point
@@ -409,8 +438,10 @@ class Subdomain:
 
         The interface exchange addresses degrees of freedom by index, which is only meaningful if
         every process numbered them identically; after a refinement that rests on every process
-        having refined identically. A fingerprint of the element numbers, the node order of every
-        field and the size of the system is compared across all processes. Collective.
+        having refined identically. A fingerprint of the element numbers, the degrees of freedom of
+        every element (its connectivity, in the numbering of the layout), the node order of every
+        field, the node coordinates and the size of the system is compared across all processes.
+        Collective.
 
         Parameters
         ----------
@@ -427,9 +458,21 @@ class Subdomain:
 
         digest = hashlib.sha1()
         digest.update(np.asarray(list(model.elements.keys()), dtype=np.int64).tobytes())
+        if model.elements:
+            digest.update(
+                np.concatenate(
+                    [np.asarray(dofManager.idcsOfElementsInDofVector[element]) for element in model.elements.values()]
+                )
+                .astype(np.int64)
+                .tobytes()
+            )
         for name, field in model.nodeFields.items():
             digest.update(name.encode())
             digest.update(np.asarray([node.label for node in field.nodes], dtype=np.int64).tobytes())
+        if model.nodes:
+            digest.update(
+                np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()]).tobytes()
+            )
         digest.update(np.int64(dofManager.nDof).tobytes())
 
         fingerprints = self.communicator.allgather(digest.hexdigest())
@@ -719,8 +762,9 @@ class Subdomain:
         A process raising alone would leave the others waiting for it in the next exchange forever.
         Every process reports what went wrong in it, and every process raises the most severe: a
         :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
-        :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere,
-        so that every process takes the same path out of the step. Nothing inside the context may itself communicate: a process
+        :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
+        -- a cutback with the smallest size any process requested -- so that every process takes the
+        same path out of the step. Nothing inside the context may itself communicate: a process
         that raised would skip it.
 
         Parameters
@@ -759,13 +803,19 @@ class Subdomain:
             raise ConditionalStop() from failure
 
         reports = self.communicator.allgather(
-            None if failure is None else "{:}: {:}".format(type(failure).__name__, failure)
+            None
+            if failure is None
+            else (
+                "{:}: {:}".format(type(failure).__name__, failure),
+                failure.cutbackSize if outcome == _CUTBACK else None,
+            )
         )
         message = "; ".join(
-            "process {:}: {:}".format(rank, report) for rank, report in enumerate(reports) if report is not None
+            "process {:}: {:}".format(rank, report[0]) for rank, report in enumerate(reports) if report is not None
         )
         if status[0] == _CUTBACK:
-            raise CutbackRequest(message, 0.5) from failure
+            cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
+            raise CutbackRequest(message, cutbackSize) from failure
         raise StepFailed("{:} failed in {:}".format(operation, message)) from failure
 
     # --- Load balancing -----------------------------------------------------------------------------

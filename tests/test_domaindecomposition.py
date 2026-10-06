@@ -245,6 +245,11 @@ def test_a_single_subdomain_agrees_with_itself():
         with pytest.raises(agreed):
             with subdomain.agreedOnByAllParts("testing"):
                 raise raised
+    # a cutback is agreed on with the size requested, not a fixed one
+    with pytest.raises(CutbackRequest) as caught:
+        with subdomain.agreedOnByAllParts("testing"):
+            raise CutbackRequest("x", 0.25)
+    assert caught.value.cutbackSize == 0.25
     with pytest.raises(StepFailed, match="testing failed"):
         with subdomain.agreedOnByAllParts("testing"):
             raise KeyError("a failure")
