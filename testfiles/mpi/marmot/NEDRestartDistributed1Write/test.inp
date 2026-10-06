@@ -1,7 +1,6 @@
-** Distributed restart, part 1: the explicit column of NEDInitialStressPressure, without the pressure (a load
-** does not survive a restart at the end of its step, a pre-existing defect of the load step actions), writes a
-** restart checkpoint. Under NEDMPI each process creates only its own elements; rank 0 writes the checkpoint
-** from the element states gathered from every process.
+** Distributed restart, part 1: the explicit column of NEDInitialStressPressure, without its load, writes a
+** restart checkpoint every fourth output increment. Under NEDMPI each process creates only its own elements;
+** rank 0 writes the checkpoint from the element states gathered from every process.
 *modelGenerator, generator=planeRectQuad, name=gen
 l=50
 h=150
