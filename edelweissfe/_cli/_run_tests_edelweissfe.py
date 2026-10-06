@@ -84,6 +84,13 @@ def main():
         type=str,
         default="all",
     )
+    parser.add_argument(
+        "--tolerance",
+        help="largest admissible absolute difference to the reference solution; 0 demands bitwise equality, "
+        "e.g. of a run over several MPI processes with a serial reference created on the same machine",
+        type=float,
+        default=1e-6,
+    )
     args = parser.parse_args()
 
     testfile = "test.inp"
@@ -159,7 +166,7 @@ def main():
                         )
                     )
                     failedTests += 1
-                elif np.max(np.abs(U - UReference)) < 1e-6:
+                elif np.max(np.abs(U - UReference)) <= args.tolerance:
                     report("Test {:50} [green]PASSED[/] [{:2.1f}]".format(directory, toc - tic))
                 else:
                     report("Test {:50} [red]FAILED[/]".format(directory))
