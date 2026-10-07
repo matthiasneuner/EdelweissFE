@@ -210,7 +210,7 @@ class FEModel:
         again for the others), and sets and surfaces that already exist are updated in place
         (references held to them stay valid), so a mesh described in several steps can be made in
         several steps. :meth:`prepareYourself` checks that every element of the mesh was either
-        created or declined.
+        created or declined, and that every element of the model is described in the mesh.
         """
 
         isCreatedHere = self.elementDistribution.isCreatedHere
@@ -374,15 +374,21 @@ class FEModel:
         elementSet.requireComplete(reader)
         return elementSet
 
-    def _checkEveryElementIsCreatedOrDeclined(self):
-        """Raise unless every element of the mesh was either created here or declined by
-        :attr:`elementDistribution` -- an element described after the elements were made, and
-        never made, would otherwise silently be missing from the model.
+    def _checkElementsAgreeWithMesh(self):
+        """Raise unless :attr:`elements` and :attr:`mesh` describe the same elements, in both directions.
+
+        * Every element of the mesh was either created here or declined by :attr:`elementDistribution`
+          -- an element described after the elements were made, and never made, would otherwise
+          silently be missing from the model.
+        * Every element of :attr:`elements` is described in the mesh -- an element assigned to
+          :attr:`elements` directly would otherwise silently be missing from everything the mesh
+          determines, e.g. the fields at its nodes and the layout of the degrees of freedom.
 
         Raises
         ------
         TopologyError
-            If some element of the mesh was neither created nor declined.
+            If some element of the mesh was neither created nor declined, or some element of the
+            model is not described in the mesh.
         """
 
         neverCreated = sorted(
@@ -395,6 +401,15 @@ class FEModel:
                 "{:} element(s) of the mesh (e.g. {:}) were described but never created -- elements described "
                 "after FEModel.createElementsOfMesh must be made by calling it again".format(
                     len(neverCreated), neverCreated[:5]
+                )
+            )
+
+        notDescribed = sorted(self.elements.keys() - self.mesh.elements.keys())
+        if notDescribed:
+            raise TopologyError(
+                "{:} element(s) of the model (e.g. {:}) are not described in the mesh -- elements are created "
+                "from the mesh: describe them in model.mesh and call FEModel.createElementsOfMesh".format(
+                    len(notDescribed), notDescribed[:5]
                 )
             )
 
@@ -710,7 +725,7 @@ class FEModel:
             The journal instance.
         """
 
-        self._checkEveryElementIsCreatedOrDeclined()
+        self._checkElementsAgreeWithMesh()
         self.topology.adoptSetupElementNumbers()
         self.topology.ensureSurfaceFacetModifier(journal)
         self.topology.checkModelModifierDomains()

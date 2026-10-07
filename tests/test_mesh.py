@@ -306,6 +306,20 @@ def test_an_element_described_but_never_created_is_refused(tmp_path):
         model.prepareYourself(Journal(verbose=False))
 
 
+def test_an_element_assigned_to_the_model_but_not_described_in_the_mesh_is_refused(tmp_path):
+    """Elements are created from the mesh: an element put into ``model.elements`` directly is not in
+    the mesh, so nothing the mesh determines (the fields at its nodes, the degrees of freedom) would
+    know of it. Preparing the model refuses it instead of silently leaving it out."""
+
+    model = _buildModel(tmp_path)
+    record = model.mesh.elements[1]
+    element = model.mesh.elementClassOf(record)(record.elType, 5000)
+    element.setNodes([model.nodes[label] for label in record.nodeLabels])
+    model.elements[5000] = element
+    with pytest.raises(TopologyError, match="not described in the mesh -- elements are created from the mesh"):
+        model.prepareYourself(Journal(verbose=False))
+
+
 def test_completeness_is_derived_from_the_mesh_and_repeated_making_changes_nothing(tmp_path):
     part = _buildModel(tmp_path, lambda number: number != 1002)
     picked = part.elementSets["picked"]
