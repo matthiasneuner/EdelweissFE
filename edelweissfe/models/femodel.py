@@ -690,7 +690,9 @@ class FEModel:
 
         for section in self.sections.values():
             if section.writeMaterialPropertiesToFile:
-                section.exportMaterialPropertiesToFile(section.elSets)
+                # the material properties are known for the elements created here: the local part of
+                # each set (in a distributed run every process writes its part to the same file, as before)
+                section.exportMaterialPropertiesToFile([elementSet.localElements() for elementSet in section.elSets])
 
     def assignSectionsAndPropertiesToElements(self, elements: dict):
         """Assign sections and element properties to elements: to every element when the model is
