@@ -145,18 +145,24 @@ make a distributed model possible:
   degrees of freedom is therefore the same in every process *by construction*, whichever elements it
   created. Vectors stay global-length: a process holds the solution at every node, and receives it
   from the owners of the degrees of freedom whenever the whole model is read.
-* **An element set is the part of the set created here.** Each element set of the model, an
-  :class:`~edelweissfe.sets.elementset.ElementSetOfMesh`, holds the created elements of its set in
-  the mesh, and knows whether that is all of them (``isComplete``). So do surfaces and sections.
+* **An element set holds its local elements, and fails safe.** Each element set of the model, an
+  :class:`~edelweissfe.sets.elementset.ElementSetOfMesh`, holds the elements of its set in the mesh
+  that are *local* to this process (created here), and is *complete* if that is all of them
+  (``isComplete``); a serial run is always complete. So do the faces of surfaces, and with them
+  sections. Reading a set that is not complete as a whole -- iterating it, indexing it, ``len()`` --
+  raises a :class:`~edelweissfe.utils.exceptions.TopologyError`; a reader of the local part asks for
+  it explicitly (:meth:`~edelweissfe.sets.elementset.ElementSet.localElements`), e.g. the section
+  assignment, the restriction of the loads to a subdomain, the initial conditions and the result
+  collector of a per-element field output.
   What the mesh describes is known for the whole set in every process: its element numbers
   (:meth:`~edelweissfe.sets.elementset.ElementSetOfMesh.elementNumbersOfWholeSet`) and its nodes
   (:meth:`~edelweissfe.sets.elementset.ElementSet.extractNodeSet`), read from the mesh.
 * **Whole-model readers gather, or refuse.** A reader that needs every element of a set or of the
   model either goes through the gather path of the element distribution (see `Where the whole model is
-  read`_), or says that it needs the whole set
-  (:meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete`) or the whole model
-  (:meth:`~edelweissfe.models.femodel.FEModel.requireCompleteMesh`) and fails loudly on a distributed
-  model, instead of giving a silently partial result.
+  read`_), or reads it whole and so fails loudly on a distributed model, instead of giving a silently
+  partial result -- by iterating the set, or up front, naming itself, through
+  :meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete` or, for the whole model,
+  :meth:`~edelweissfe.models.femodel.FEModel.requireCompleteMesh`.
 * **An element can be created at any time, anywhere.** An element is completely described by the
   mesh, its section (assigned through its sets) and its state vector, so
   :meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`,

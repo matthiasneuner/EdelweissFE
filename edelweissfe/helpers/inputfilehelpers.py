@@ -198,10 +198,9 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
             if definition["nSet"]:
                 associatedSet = model.nodeSets[definition["nSet"]]
             elif definition["elSet"]:
+                # An expression over an element set reads the whole set (ExpressionFieldOutput takes its
+                # len()), which raises if only part of the set is local to this process.
                 associatedSet = model.elementSets[definition["elSet"]]
-                # An expression over an element set reads the elements themselves, which cannot be
-                # gathered from other processes.
-                associatedSet.requireComplete("expression field output {:}".format(definition["name"]))
             else:
                 raise Exception(
                     f"During parsing of keyword {keywordIdentifier}fieldOutput ({moduleLevelKeywordIdentifier}fromExpression): All fieldOuputs must be associated with a set!"

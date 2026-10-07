@@ -208,6 +208,13 @@ def test_a_predicate_that_skips_elements_keeps_the_dof_layout(tmp_path):
     assert part.elementSets["gen_top"].isComplete
     assert [e.elNumber for e in part.surfaces["gen_bottom"][1].localElements()] == []
 
+    # a set that is not complete fails safe: read as a whole it raises, membership is allowed
+    picked = part.elementSets["picked"]
+    for readWhole in (list, len, bool, lambda s: s[0], lambda s: s.elements):
+        with pytest.raises(TopologyError, match="element set picked was read as a whole"):
+            readWhole(picked)
+    assert part.elements[6] in picked and part.elements[4] not in picked
+
     # the nodes of a set are those of the whole set, from the mesh, whatever was created here
     for name in ("picked", "gen_top", "all"):
         assert [n.label for n in part.elementSets[name].extractNodeSet()] == [

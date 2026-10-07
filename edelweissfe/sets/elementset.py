@@ -65,9 +65,12 @@ class ElementSet(OrderedSet):
     serial run is always complete, and so is a set of element objects like this one, which holds the
     elements it was given.
 
-    A reader that wants the local part asks for it explicitly, with :meth:`localElements`. What is
-    known of the whole set in every process is read through :meth:`elementNumbersOfWholeSet` and
-    :meth:`extractNodeSet`; a reader that needs the whole set states it with :meth:`requireComplete`.
+    Reading a set as a whole -- iterating it, indexing it, ``len()``, :attr:`elements` -- requires it
+    to be complete, and raises a :class:`~edelweissfe.utils.exceptions.TopologyError` otherwise:
+    a result computed from part of a set, silently, would be wrong. A reader that wants the local
+    part asks for it explicitly, with :meth:`localElements`; membership (``element in elementSet``)
+    is always allowed. What is known of the whole set in every process is read through
+    :meth:`elementNumbersOfWholeSet` and :meth:`extractNodeSet`.
 
     Parameters
     ----------
@@ -93,14 +96,26 @@ class ElementSet(OrderedSet):
         super().__init__(label, elements)
         self._nodes = None
 
-        self.elements = self.items
-
     @property
     def isComplete(self) -> bool:
         """Whether every element of the set is local to this process: always, for a set of the
         element objects it was given."""
 
         return True
+
+    @property
+    def elements(self):
+        """The elements of the set, in set order, as a read-only view.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process; see :meth:`localElements`.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("reading .elements of")
+        return self.items
 
     def localElements(self):
         """The elements of the set local to this process, in set order, as a read-only view: every
@@ -113,6 +128,61 @@ class ElementSet(OrderedSet):
         """
 
         return self.items
+
+    def __iter__(self):
+        """Iterate over the elements of the set, in set order.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process; see :meth:`localElements`.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("iterating")
+        return iter(self.data)
+
+    def __getitem__(self, index):
+        """The element at the given position (or slice) of the set.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process; see :meth:`localElements`.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("indexing")
+        return list(self.items)[index]
+
+    def __len__(self) -> int:
+        """The number of elements of the set.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process: the number of its local elements and the
+            size of the set differ, and ``bool(elementSet)`` ("is it empty?") would be ambiguous.
+            Ask ``len(elementSet.localElements())`` or ``len(elementSet.elementNumbersOfWholeSet())``.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("taking len() of")
+        return len(self.data)
+
+    def _raiseNotComplete(self, reading: str):
+        """Raise the error of a whole-set reading of a set that is not complete here.
+
+        Parameters
+        ----------
+        reading
+            How the set was read, for the error message.
+        """
+
+        raise TopologyError(
+            "element set {:} was read as a whole ({:} it), but only {:} of its elements are local to this process "
+            "-- a reader of the local part asks for localElements()".format(self.name, reading, len(self.data))
+        )
 
     def elementNumbersOfWholeSet(self) -> list:
         """The numbers of every element of the set, in set order: here, of its elements.
@@ -128,9 +198,9 @@ class ElementSet(OrderedSet):
     def requireComplete(self, reader: str):
         """State that ``reader`` needs every element of this set, not only its local part.
 
-        A set that is not complete, read as if it were whole, gives silently wrong results -- an
-        output, a marker or a checkpoint computed from part of the set. A whole-set reader therefore
-        calls this, so that such a reading fails loudly instead.
+        Reading a set that is not complete as a whole raises anyway; a reader that keeps the set
+        for later states it up front with this, so that the error names the reader and arises
+        where the set is chosen.
 
         Parameters
         ----------
@@ -194,8 +264,8 @@ class ElementSetOfMesh(ElementSet):
     (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`), which resolves every element
     set of the mesh to such a set (:meth:`~edelweissfe.models.femodel.FEModel.resolveElementSetOfMesh`,
     the only place one is made). In a serial run that is every element of the set. A domain-decomposed
-    run may create only part of the mesh in each process; a set then holds only its local part, and says
-    so through :attr:`isComplete`. What the mesh and the nodes describe is known for the whole set in
+    run may create only part of the mesh in each process; a set then holds only its local part, says so
+    through :attr:`isComplete`, and raises if read as a whole (:class:`ElementSet`). What the mesh and the nodes describe is known for the whole set in
     every process: its element numbers (:meth:`elementNumbersOfWholeSet`) and its nodes
     (:meth:`extractNodeSet`).
 
