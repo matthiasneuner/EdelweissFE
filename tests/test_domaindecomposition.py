@@ -164,6 +164,121 @@ def test_loads_are_added_one_after_another_in_the_order_of_the_loads():
     assert np.array_equal(vector.view(np.int64), expected.view(np.int64))
 
 
+def _adversarialContributions(rng, n: int) -> np.ndarray:
+    """Values whose sum depends on the order it is formed in: magnitudes from 1e-12 to 1e12, and
+    signed zeros."""
+
+    values = rng.standard_normal(n) * 10.0 ** rng.integers(-12, 12, n)
+    values[::13] = -0.0
+    return values
+
+
+def test_assembly_sums_every_degree_of_freedom_from_left_to_right_in_element_order():
+    # The element loop assembles with np.bincount, which adds the weights into each bin one after
+    # another, in the order they are given -- a left fold, the order a loop `P[dofs] += Pe` over the
+    # elements forms. Nothing else makes a result independent of the number of threads, chunks and
+    # processes, so a NumPy that summed a bin in any other order (pairwise, say) must fail here.
+    from edelweissfe.numerics.dofvector import DofVector
+    from edelweissfe.solvers.base.parallelelementcomputation import (
+        computeLumpedDiagonalForExplicit,
+        planElements,
+    )
+
+    rng = np.random.default_rng(11)
+    nDof, nElements = 7, 400
+    elements, indices, values = {}, {}, {}
+    for number in range(nElements):
+        element = _SpringElement(1.0, 3)
+        elements[number] = element
+        indices[element] = rng.choice(nDof, 3, replace=False)
+        values[element] = _adversarialContributions(rng, 3)
+
+    expected = np.zeros(nDof)
+    for element in elements.values():
+        for dof, value in zip(indices[element], values[element]):
+            expected[dof] += value
+
+    for nThreads in (1, 4):
+        plan = planElements(elements, indices, slice(None), nDof, nThreads)
+        vector = DofVector(nDof, indices)
+        vector[:] = 0.0
+        computeLumpedDiagonalForExplicit(plan, lambda element, Ve: Ve.__iadd__(values[element]), vector)
+        assert np.array_equal(np.asarray(vector).view(np.int64), expected.view(np.int64))
+
+    # the test has teeth: the same values summed pairwise give other bits
+    pairwise = np.zeros(nDof)
+    for dof in range(nDof):
+        pairwise[dof] = np.sum([v for e in elements.values() for d, v in zip(indices[e], values[e]) if d == dof])
+    assert not np.array_equal(pairwise, expected)
+
+
+#: Assembles adversarial element contributions over three processes, each holding a random third of
+#: the elements, and checks every degree of freedom it integrates against the serial left fold.
+_INTERFACE_ASSEMBLY_SCRIPT = """
+import numpy as np
+from mpi4py import MPI
+from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly, SubdomainInterface
+
+communicator = MPI.COMM_WORLD
+rank = communicator.Get_rank()
+rng = np.random.default_rng(5)
+nDof, nElements = 40, 600
+elementDofs = [rng.choice(nDof, 4, replace=False) for _ in range(nElements)]
+values = rng.standard_normal((nElements, 4)) * 10.0 ** rng.integers(-12, 12, (nElements, 4))
+values[::7, 1] = -0.0
+owner = rng.integers(0, communicator.Get_size(), nElements)
+
+expected = np.zeros(nDof)
+for dofs, contribution in zip(elementDofs, values):
+    for dof, value in zip(dofs, contribution):
+        expected[dof] += value
+
+mine = np.flatnonzero(owner == rank)
+entryDofs = np.concatenate([elementDofs[e] for e in mine])
+entryPositions = np.repeat(mine, 4)
+contributions = values[mine].ravel()
+
+interface = SubdomainInterface(communicator, entryDofs, nDof)
+# the own elements, in model order, assembled as the element loop assembles them
+vector = np.zeros(nDof) + np.bincount(entryDofs, weights=contributions, minlength=nDof)
+InterfaceForceAssembly(interface, entryDofs, entryPositions).assemble(contributions, vector)
+
+integrated = interface.subdomainDofs
+same = np.array_equal(vector[integrated].view(np.int64), expected[integrated].view(np.int64))
+print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", interface.nInterfaceDofs > 0, flush=True)
+"""
+
+
+def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path):
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+
+    (tmp_path / "run.py").write_text(_INTERFACE_ASSEMBLY_SCRIPT)
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    launched = subprocess.Popen(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = launched.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        os.killpg(launched.pid, signal.SIGKILL)
+        launched.communicate()
+        pytest.fail("the interface exchange did not complete")
+
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert reports == ["PROCESS {:} BITWISE True".format(rank) for rank in range(3)], output
+
+
 class _SpringElement:
     """An element just complex enough for the explicit element loop: a force that depends on its
     solution, and an internal energy."""
