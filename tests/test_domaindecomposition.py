@@ -279,6 +279,64 @@ def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path)
     assert reports == ["PROCESS {:} BITWISE True".format(rank) for rank in range(3)], output
 
 
+#: Adds adversarial constraint forces over three processes, each owning a random part of the
+#: constraints, and checks the whole net force vector against the serial sum in model order.
+_CONSTRAINT_EXCHANGE_SCRIPT = """
+import numpy as np
+from mpi4py import MPI
+from edelweissfe.domaindecomposition.subdomaininterface import ConstraintForceExchange
+from edelweissfe.numerics.assembly import addNodalForces
+
+communicator = MPI.COMM_WORLD
+rank = communicator.Get_rank()
+rng = np.random.default_rng(9)
+nDof, nConstraints = 30, 80
+names = ["constraint{:}".format(i) for i in rng.permutation(nConstraints)]
+constraints = {name: name for name in names}
+dofs = {name: rng.integers(0, nDof, int(rng.integers(1, 7))) for name in names}  # a DOF may repeat
+forces = {name: rng.standard_normal(dofs[name].shape[0]) * 10.0 ** rng.integers(-12, 12, dofs[name].shape[0])
+          for name in names}
+for name in names[::5]:
+    forces[name][0] = -0.0
+initial = rng.standard_normal(nDof) * 1e6
+initial[::4] = -0.0
+owner = {name: int(rng.integers(0, communicator.Get_size())) for name in names}
+
+expected = initial.copy()
+for name in names:
+    addNodalForces(expected, dofs[name], forces[name], len(np.unique(dofs[name])) != len(dofs[name]))
+
+owned = {name: constraints[name] for name in names if owner[name] == rank}
+exchange = ConstraintForceExchange(communicator, constraints, owned, {constraints[name]: dofs[name] for name in names})
+vector = initial.copy()
+exchange.addAllConstraintForces({name: forces[name] for name in owned}, vector)
+same = np.array_equal(vector.view(np.int64), expected.view(np.int64))
+print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", len(owned) > 0, flush=True)
+"""
+
+
+def test_constraint_forces_are_added_in_model_order_on_every_process(tmp_path):
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+
+    (tmp_path / "run.py").write_text(_CONSTRAINT_EXCHANGE_SCRIPT)
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    output = subprocess.run(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert reports == ["PROCESS {:} BITWISE True".format(rank) for rank in range(3)], output
+
+
 class _SpringElement:
     """An element just complex enough for the explicit element loop: a force that depends on its
     solution, and an internal energy."""
