@@ -184,7 +184,8 @@ class ScatterDofVector(np.ndarray):
         ScatterDofVector
             A new `ScatterDofVector` instance with copied array data and metadata.
         """
-        new_vec = super().copy(order).view(ScatterDofVector)
+        # A view of a plain copy, not of a ScatterDofVector copy -- see DofVector.copy.
+        new_vec = self.view(np.ndarray).copy(order).view(ScatterDofVector)
         if self._offset_map is not None:
             new_vec._offset_map = self._offset_map.copy()
         if self._entitiesInDofVector is not None:

@@ -130,7 +130,12 @@ class DofVector(np.ndarray):
         DofVector
             A new `DofVector` instance with copied array data and an independent copy of `entitiesInDofVector`.
         """
-        newDofVector = super().copy(order).view(DofVector)
+        # Copy the data as a plain ndarray and view that as the new DofVector. Copying the DofVector
+        # itself would make the new vector a view of a second DofVector owning the data -- a reference
+        # (``base``) that numpy hides from the garbage collector, so that second vector, and everything
+        # its entity map reaches, would never be collected (with a rigid body: the whole model).
+        newDofVector = self.view(np.ndarray).copy(order).view(DofVector)
+        newDofVector._scatterTemplate = self._scatterTemplate
         if self.entitiesInDofVector is not None:
             newDofVector.entitiesInDofVector = self.entitiesInDofVector.copy()
         return newDofVector
