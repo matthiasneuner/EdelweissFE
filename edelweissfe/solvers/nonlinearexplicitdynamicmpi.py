@@ -581,7 +581,7 @@ class NEDMPI(NEDParallel):
             Per degree of freedom, the net nodal force times the prescribed increment.
         """
 
-        self._pendingWorkAtPrescribedDofs.append(reactionTimesIncrement[self.partition.ownedDofMask[dofs]])
+        self._pendingWorkAtPrescribedDofs.append(reactionTimesIncrement[self.subdomain.ownedDofMask[dofs]])
 
     def gatherExternalWork(self):
         """Add the work of every increment since the last call to the external work, increment by
@@ -616,7 +616,7 @@ class NEDMPI(NEDParallel):
         """
 
         indices = np.arange(V.shape[0])[indices]
-        return super().halfMassTimesSquaredRate(indices[self.partition.ownedDofMask[indices]], V)
+        return super().halfMassTimesSquaredRate(indices[self.subdomain.ownedDofMask[indices]], V)
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.

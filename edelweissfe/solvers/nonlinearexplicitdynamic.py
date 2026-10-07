@@ -1657,7 +1657,7 @@ class NED(NonlinearSolverBase):
             The partition.
         """
 
-        return ModelPartition.wholeModel(model, self.theDofManager.nDof)
+        return ModelPartition.wholeModel(model)
 
     def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator -- the inertia or the damping -- of the elements of a plan.

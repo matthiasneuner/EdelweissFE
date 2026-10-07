@@ -35,19 +35,17 @@ which elements, constraints and degrees of freedom it runs over, and that is one
 
 * the **elements** computed here, and the **constraints** evaluated here;
 * the **degrees of freedom** integrated here -- every one touched by those elements and
-  constraints;
-* which of those degrees of freedom are **owned** here. A degree of freedom at the boundary between
-  two parts is integrated by both, but a quantity to be counted once for the model -- the work done
-  at a prescribed degree of freedom, a kinetic energy -- is counted by its owner only.
+  constraints.
 
 A solver computing the whole model in one process uses :meth:`ModelPartition.wholeModel`: every
-element, constraint and degree of freedom, all of them owned. The degrees of freedom are then the
-slice ``slice(None)``, so that indexing a vector with them, ``V[partition.dofs]``, is a view of the
-whole vector and costs nothing.
+element, constraint and degree of freedom. The degrees of freedom are then the slice
+``slice(None)``, so that indexing a vector with them, ``V[partition.dofs]``, is a view of the whole
+vector and costs nothing.
 
 How the parts exchange what they share -- the forces at their common degrees of freedom, the
-constraint forces, the states before an output -- is not the partition's business but the
-domain-decomposed solver's; see :class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`.
+constraint forces, the states before an output -- and which part counts a degree of freedom two of
+them integrate is not the partition's business but the domain-decomposed solver's; see
+:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`.
 """
 
 from dataclasses import dataclass
@@ -71,27 +69,20 @@ class ModelPartition:
     dofs
         The degrees of freedom integrated here, as an index into a vector of the whole model:
         ``slice(None)`` for all of them, or a sorted index array.
-    ownedDofMask
-        Whether each degree of freedom of the model is owned here: True at most at those integrated
-        here, and at each degree of freedom of the model in exactly one part.
     """
 
     elements: dict
     constraints: dict
     dofs: slice | np.ndarray
-    ownedDofMask: np.ndarray
 
     @classmethod
-    def wholeModel(cls, model: FEModel, nDof: int) -> "ModelPartition":
-        """The partition of a process computing the whole model: everything is computed and owned
-        here.
+    def wholeModel(cls, model: FEModel) -> "ModelPartition":
+        """The partition of a process computing the whole model: everything is computed here.
 
         Parameters
         ----------
         model
             The model tree.
-        nDof
-            The size of the equation system.
 
         Returns
         -------
@@ -99,4 +90,4 @@ class ModelPartition:
             The partition.
         """
 
-        return cls(model.elements, model.constraints, slice(None), np.ones(nDof, dtype=bool))
+        return cls(model.elements, model.constraints, slice(None))

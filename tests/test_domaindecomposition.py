@@ -447,13 +447,12 @@ def test_the_whole_model_is_a_trivial_partition():
     from edelweissfe.solvers.base.modelpartition import ModelPartition
 
     model = SimpleNamespace(elements={1: "element"}, constraints={"c": "constraint"})
-    partition = ModelPartition.wholeModel(model, 5)
+    partition = ModelPartition.wholeModel(model)
     vector = np.arange(5.0)
 
     assert partition.elements is model.elements and partition.constraints is model.constraints
     # every degree of freedom, as a view: no copy, and writing it back writes it onto itself
     assert np.shares_memory(vector[partition.dofs], vector) and vector[partition.dofs].shape == vector.shape
-    assert partition.ownedDofMask.all() and partition.ownedDofMask.shape == (5,)
 
 
 def test_a_single_subdomain_agrees_with_itself():

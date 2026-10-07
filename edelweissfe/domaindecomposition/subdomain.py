@@ -486,9 +486,7 @@ class Subdomain:
         )
         self._loadsOnSubdomain = None
 
-        self.partition = ModelPartition(
-            self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs, self._interface.ownedDofMask
-        )
+        self.partition = ModelPartition(self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs)
 
     def _refuseElementsWithoutState(self, model: FEModel):
         """Refuse a model with elements that expose no state, on more than one process.
@@ -832,6 +830,22 @@ class Subdomain:
         self.requireSameOnAllRanks(
             digest.hexdigest(), "the nodes and fields the constraints couple before a topology update"
         )
+
+    @property
+    def ownedDofMask(self) -> np.ndarray:
+        """Whether each degree of freedom of the model is owned here: True at most at those this
+        process integrates, and at each degree of freedom of the model in exactly one process. A
+        degree of freedom at the interface is integrated by several processes, but a quantity to be
+        counted once for the model -- the work done at a prescribed degree of freedom, a kinetic
+        energy -- is counted by its owner only.
+
+        Returns
+        -------
+        np.ndarray
+            The mask, one entry per degree of freedom of the model.
+        """
+
+        return self._interface.ownedDofMask
 
     # --- Completing the results of the whole model ------------------------------------------------
 
