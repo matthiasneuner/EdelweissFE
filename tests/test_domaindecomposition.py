@@ -660,6 +660,54 @@ def test_a_step_failing_in_one_process_alone_stops_every_process(tmp_path):
     assert "a step failed without the agreement of the other processes in MPI process 1 of 3" in output, output
 
 
+#: _FIELD_OUTPUT_DECK repartitioned with the element numbers as costs on its output increments, so
+#: that elements move between the processes.
+_MIGRATING_DECK = _FIELD_OUTPUT_DECK.replace(
+    "output-frequency=2", "output-frequency=2\nload-balance-costs=elementNumber"
+)
+
+#: The lumped inertia of an element depends on whether it was assembled before -- a state.
+_STATE_DEPENDENT_INERTIA_PATCH = """
+from edelweissfe.elements.base.displacementelementbase import DisplacementElementBase
+
+computeLumpedInertia = DisplacementElementBase.computeLumpedInertia
+assembledBefore = set()
+
+
+def stateDependentInertia(self, M):
+    computeLumpedInertia(self, M)
+    if id(self) in assembledBefore:
+        M *= 1.0 + 1e-12
+    assembledBefore.add(id(self))
+
+
+DisplacementElementBase.computeLumpedInertia = stateDependentInertia
+"""
+
+
+def test_elements_move_only_with_the_lumped_operators_a_serial_run_keeps(tmp_path):
+    # Elements move, and the lumped operators assembled again afterwards are those of before.
+    moving = tmp_path / "moving"
+    moving.mkdir()
+    (moving / "test.inp").write_text(_MIGRATING_DECK)
+    (moving / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", ""))
+    output, exitCode = _runUnderMPI(moving)
+    assert exitCode == 0 and output.count("PROCESS") == 3 and "failed" not in output, output
+
+    # An element whose lumped inertia depends on its state is refused at the migration, loudly.
+    stateDependent = tmp_path / "stateDependent"
+    stateDependent.mkdir()
+    (stateDependent / "test.inp").write_text(_MIGRATING_DECK)
+    (stateDependent / "run.py").write_text(
+        _FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _STATE_DEPENDENT_INERTIA_PATCH)
+    )
+    output, exitCode = _runUnderMPI(stateDependent)
+    if output is None:
+        pytest.fail("the refused migration left processes waiting")
+    assert exitCode != 0, output
+    assert "the lumped operators assembled again from the elements now held here differ" in output, output
+
+
 _MATERIAL_PROPERTIES_DECK = """
 *material, name=LinearElastic, id=linearelastic
 20000.0, 0.2, 2.0e-9

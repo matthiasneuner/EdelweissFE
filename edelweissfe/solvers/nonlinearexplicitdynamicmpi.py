@@ -690,6 +690,10 @@ class NEDMPI(NEDParallel):
         change of the topology. The solution, the velocity and the net force,
         just made complete in every process by the output synchronization, are carried over.
 
+        The lumped operators are assembled again, from the elements now held here, and must be the
+        same bits as before (:meth:`_requireSameLumpedOperators`): a serial run keeps them over the
+        whole step, so a run that moves elements is bit-identical to it only if they are.
+
         Parameters
         ----------
         model
@@ -698,9 +702,60 @@ class NEDMPI(NEDParallel):
             The step being solved.
         """
 
+        before = self._lumpedOperators()
         carried = self.releaseEquationSystem()
         self.subdomain.moveElements()
         self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
+        self._requireSameLumpedOperators(before)
+
+    def _lumpedOperators(self) -> dict[str, np.ndarray]:
+        """Plain copies of the lumped operators of the current equation system, complete at every
+        degree of freedom of the model.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            The vector the increment divides by, its inverse, the unfolded mass and the damping
+            rate, by name.
+        """
+
+        return {
+            "lumped mass": np.array(self._lumpedMass),
+            "inverse lumped mass": np.array(self._Minv),
+            "unfolded lumped mass": np.array(self._rawLumpedMass),
+            "damping rate": np.array(self._dampingRate),
+        }
+
+    def _requireSameLumpedOperators(self, before: dict[str, np.ndarray]):
+        """Refuse to continue unless the lumped operators are the same bits as ``before``.
+
+        Elements moved between processes, and the equation system was built again for the elements
+        now held here, which assembles the lumped operators again. A serial run assembles them once
+        per mesh and keeps them: the two agree only if an element's lumped inertia and damping do not
+        depend on its state. That holds for the elements of this package, and is checked here rather
+        than assumed, at every migration. The operators are complete in every process, so every
+        process decides the same.
+
+        Parameters
+        ----------
+        before
+            The operators before the elements moved (:meth:`_lumpedOperators`).
+
+        Raises
+        ------
+        RuntimeError
+            If any of them changed in any bit.
+        """
+
+        after = self._lumpedOperators()
+        changed = [name for name in before if before[name].tobytes() != after[name].tobytes()]
+        if changed:
+            raise RuntimeError(
+                "Elements moved between processes, and the lumped operators assembled again from the elements "
+                "now held here differ from those before: {:}. An element's lumped inertia or damping depends "
+                "on its state, so a run that moves elements would no longer be the serial run, which keeps "
+                "them over the step. Run without load balancing (load-balance-tolerance=0).".format(", ".join(changed))
+            )
 
     def releaseEquationSystem(self) -> ExplicitSystem:
         """Release the equation system and everything built with it -- the counterpart of
