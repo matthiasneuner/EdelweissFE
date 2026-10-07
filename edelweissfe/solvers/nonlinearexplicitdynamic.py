@@ -1178,14 +1178,16 @@ class NED(NonlinearSolverBase):
 
         P, psi = self.assembleInternalForces(U, dU, P, timeStep)
         P[:] = -P[:]
+        # The load assembly is shared with the implicit solvers, which also assemble the load
+        # stiffness into a tangent K; an explicit increment has no tangent, hence K=None.
         P, _ = self.assembleLoads(
             stepActions["nodeforces"].values(),
             stepActions["distributedload"].values(),
             stepActions["bodyforce"].values(),
             U,
             P,
-            None,
-            timeStep,
+            K=None,
+            timeStep=timeStep,
         )
         P = self.assembleConstraintForces(self.partition.constraints, U, dU, P, timeStep)
 
