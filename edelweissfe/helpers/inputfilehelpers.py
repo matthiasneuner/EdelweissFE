@@ -72,6 +72,11 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
     """Convenience helper function
     to create the FieldOutputController instance using the *fieldOutput keyword.
 
+    A ``perNode`` output covers the nodes of its ``nSet`` or ``elSet`` -- for an element set, the nodes
+    of the whole set, also where a domain-decomposed process created none of its elements -- and the
+    whole field only if it names no set. A set without nodes gives an empty output, never the whole
+    field.
+
     Parameters
     ----------
     inputfile
@@ -154,8 +159,9 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
                 # set; from the mesh, also where a domain-decomposed process created only part of it.
                 subset = model.elementSets[definition["elSet"]]
 
-            # An element set may hold none of its elements in this process, and is then empty -- but its
-            # nodes are still those of the whole set.
+            # A named set selects its nodes, even if it has none: an empty set gives an empty output, not
+            # the whole field. (An element set may also hold none of its elements in this process, and is
+            # then empty -- but its nodes are still those of the whole set.)
             if subset is not None:
                 nodeField = nodeField.subset(subset)
 

@@ -273,7 +273,10 @@ class NodeFieldSubset(NodeField):
         self.associatedSet = subset
         self._seenParentVersion = parentNodeField._version
         self.nodes = self._getSubsetNodes(subset)
-        self._indicesOfNodesInParentArray = np.array([parentNodeField._indicesOfNodesInArray[n] for n in self.nodes])
+        # integer indices also for a subset without nodes (an empty set): an empty np.array is float
+        self._indicesOfNodesInParentArray = np.array(
+            [parentNodeField._indicesOfNodesInArray[n] for n in self.nodes], dtype=int
+        )
 
     def _healIfParentResized(self):
         """Rebuild the cached parent-index array if the parent NodeField was resized (e.g. by AMR)
@@ -291,7 +294,7 @@ class NodeFieldSubset(NodeField):
         if self.parentNodeField._version != self._seenParentVersion:
             self.nodes = self._getSubsetNodes(self.associatedSet)
             self._indicesOfNodesInParentArray = np.array(
-                [self.parentNodeField._indicesOfNodesInArray[n] for n in self.nodes]
+                [self.parentNodeField._indicesOfNodesInArray[n] for n in self.nodes], dtype=int
             )
             self._seenParentVersion = self.parentNodeField._version
 

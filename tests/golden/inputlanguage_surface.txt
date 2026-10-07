@@ -1048,8 +1048,8 @@ ATTENTION:
     [field] Field of the result. (<class 'str'>)
     [result] Result name. (<class 'str'>)
   optional arguments
-    [elSet] Element set. (<class 'str'>, default = None)
-    [nSet] Node set. (<class 'str'>, default = None)
+    [elSet] Element set: the output covers its nodes (none for an empty set); without a set, the whole field. (<class 'str'>, default = None)
+    [nSet] Node set: the output covers its nodes (none for an empty set); without a set, the whole field. (<class 'str'>, default = None)
     [rigidBody] Rigid body (as registered in model.rigidBodies). (<class 'str'>, default = None)
     [saveHistory] Save complete History or only last (increment) result (<class 'bool'>, default = False)
     [f(x)] Function to apply in each increment. (<class 'str'>, default = None)

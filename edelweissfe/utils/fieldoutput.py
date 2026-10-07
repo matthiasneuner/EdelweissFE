@@ -60,8 +60,16 @@ class FieldOutputPerNodeSchema:
     name: str | None = schemaField(description="Name of the field output.", dtype=str, default=None, required=True)
     field: str | None = schemaField(description="Field of the result.", dtype=str, default=None, required=True)
     result: str | None = schemaField(description="Result name.", dtype=str, default=None, required=True)
-    elSet: str | None = schemaField(description="Element set.", dtype=str, default=None)
-    nSet: str | None = schemaField(description="Node set.", dtype=str, default=None)
+    elSet: str | None = schemaField(
+        description="Element set: the output covers its nodes (none for an empty set); without a set, the whole field.",
+        dtype=str,
+        default=None,
+    )
+    nSet: str | None = schemaField(
+        description="Node set: the output covers its nodes (none for an empty set); without a set, the whole field.",
+        dtype=str,
+        default=None,
+    )
     rigidBody: str | None = schemaField(
         description="Rigid body (as registered in model.rigidBodies).", dtype=str, default=None
     )
