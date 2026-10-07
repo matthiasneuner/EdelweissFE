@@ -329,12 +329,13 @@ node field output over an element set   the nodes of the whole set, from the mes
 Ensight                                 rank 0 draws the geometry of a partial set from the mesh
                                         (``visualizedElementsOf``) and writes the gathered results
 monitor, conditional stop               read field outputs
-restart checkpoint                      before the output of an output increment, every process sends
-                                        the states of the elements it computes to rank 0
-                                        (``gatherStatesForCheckpoint``, only on an increment rank 0
-                                        writes one: ``writesCheckpointAtNextIncrement``, broadcast);
-                                        rank 0 writes them in the format of a serial checkpoint and
-                                        releases them, however the output ended
+restart checkpoint                      on an increment rank 0 writes one
+                                        (``writesCheckpointAtNextIncrement``, broadcast), every process
+                                        reads the states of the elements it computes and they are
+                                        gathered to rank 0 (``Subdomain.gatherElementStatesToRoot``);
+                                        rank 0 writes them in the format of a serial checkpoint
+                                        (``FEModel.elementStatesFromElsewhere``) and releases them,
+                                        however the output ended
 ======================================  =================================================================
 
 Still guarded, and refused loudly on a partial model: an expression field output over an element
@@ -342,9 +343,9 @@ set (``>>fromExpression, elSet=``, which the fallback rule already sends to the 
 mesh plot and ``meshDataToFile`` (which fail at their setup), ``surfaceSnap`` and the P1 topology
 classification (which only exist with a model modifier the fallback rule sends to the whole model).
 
-The gathers of the field outputs happen inside the output step that every process agrees on: each
-process reaches them in the same order, before anything that runs in one process only (the output
-managers of rank 0), so no process can wait for one that already left.
+The gathers of the field outputs and of the element states happen between the two output steps every
+process agrees on -- reading its own part, and writing -- in the same order in every process, so no
+process can wait for one that already left (see Failures below).
 
 The contact search itself, at a contact update and at a topology check alike, runs on the process
 that evaluates the constraint only: nothing but that evaluation reads its outcome. The constraint

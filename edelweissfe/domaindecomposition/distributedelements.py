@@ -207,9 +207,6 @@ class DistributedElements(ElementDistribution):
         #: How many elements this process received from another one over the run, by
         #: :meth:`moveElementsTo`; a diagnostic.
         self.nElementsReceived = 0
-        #: The state of every element of the model, by number, on rank 0, between
-        #: :meth:`gatherStatesForCheckpoint` and :meth:`forgetGatheredStates`.
-        self._gatheredStates = None
 
     def decideLocalElements(self, mesh: Mesh, domainSize: int):
         """Partition the mesh, and decide which elements this process creates. Collective.
@@ -511,54 +508,3 @@ class DistributedElements(ElementDistribution):
                 "were computed by none".format(elementSet.name, int((~filled).sum()))
             )
         return whole
-
-    def gatherStatesForCheckpoint(self, elements: dict):
-        """Gather the state of every element of the model to rank 0, each from the process computing
-        it, so that rank 0 can write a restart checkpoint of the whole model. Collective.
-
-        Parameters
-        ----------
-        elements
-            The local elements, by number.
-        """
-
-        computedHere = {
-            number: element.getStateVars() for number, element in elements.items() if self.owners[number] == self.rank
-        }
-        gathered = self.communicator.gather(computedHere, root=0)
-        if gathered is not None:
-            self._gatheredStates = {}
-            for states in gathered:
-                self._gatheredStates.update(states)
-
-    def forgetGatheredStates(self):
-        """Release the states :meth:`gatherStatesForCheckpoint` gathered."""
-
-        self._gatheredStates = None
-
-    def statesOfElements(self, elements: dict):
-        """The state of every element of the model, by number, as gathered to rank 0 by
-        :meth:`gatherStatesForCheckpoint`.
-
-        Parameters
-        ----------
-        elements
-            The local elements, by number; their states are among those gathered.
-
-        Returns
-        -------
-        Iterator
-            ``(number, state)`` pairs, one per element of the model.
-
-        Raises
-        ------
-        RuntimeError
-            If the states were not gathered for this checkpoint.
-        """
-
-        if self._gatheredStates is None:
-            raise RuntimeError(
-                "a restart checkpoint of a distributed model needs the element states gathered from every "
-                "process first (DistributedElements.gatherStatesForCheckpoint)"
-            )
-        return iter(self._gatheredStates.items())

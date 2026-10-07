@@ -288,6 +288,23 @@ def test_an_incomplete_set_of_a_serial_run_says_why_without_naming_processes(tmp
     assert "process" not in str(raised.value)
 
 
+def test_a_checkpoint_reads_every_element_state_or_refuses(tmp_path):
+    """A checkpoint holds the state of every element of the mesh: from the element objects, or --
+    where only part of them is held here -- from states given for it; never silently part of them."""
+
+    whole = _buildModel(tmp_path)
+    assert [number for number, _ in whole.elementStatesForCheckpoint()] == list(whole.mesh.elements)
+
+    part = _buildModel(tmp_path, lambda number: number != 3)
+    with pytest.raises(TopologyError, match="A restart checkpoint needs every element of the model"):
+        part.elementStatesForCheckpoint()
+    given = {number: np.full(2, float(number)) for number in part.mesh.elements}
+    with part.elementStatesFromElsewhere(given):
+        assert list(part.elementStatesForCheckpoint()) == list(given.items())
+    with pytest.raises(TopologyError):
+        part.elementStatesForCheckpoint()
+
+
 def test_an_auxiliary_element_is_described_from_the_object():
     from edelweissfe.elements.pointmass import PointMass
 

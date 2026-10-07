@@ -906,6 +906,48 @@ class Subdomain:
             self._stateSynchronization.synchronizeElementStates()
         self._stateSynchronization.synchronizeConstraintStates()
 
+    def elementStatesOwnedHere(self, model: FEModel) -> dict:
+        """The converged state of every element this process owns, by number, in model order: its
+        part of a restart checkpoint of the whole model. Local.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        dict
+            The states, by element number.
+        """
+
+        owned = model.elementDistribution.ownedElements(model.elements.values())
+        return {element.elNumber: element.getStateVars() for element in owned}
+
+    def gatherElementStatesToRoot(self, statesHere: dict) -> dict | None:
+        """Gather the element states of every process (:meth:`elementStatesOwnedHere`) to rank 0, for
+        the restart checkpoint rank 0 writes. Collective.
+
+        Parameters
+        ----------
+        statesHere
+            The states of the elements this process owns, by number.
+
+        Returns
+        -------
+        dict | None
+            On rank 0, the state of every element of the model, by number -- the elements of rank 0
+            first, then those of rank 1, and so on; None elsewhere.
+        """
+
+        gathered = self.communicator.gather(statesHere, root=0)
+        if gathered is None:
+            return None
+        states = {}
+        for statesOfProcess in gathered:
+            states.update(statesOfProcess)
+        return states
+
     def allreduceSum(self, values: list[float]) -> list[float]:
         """The sums of values over all processes, added in ascending rank order, so that they are the
         same bits in every process. Collective.

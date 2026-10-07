@@ -622,7 +622,7 @@ def test_a_field_output_failing_in_one_process_before_the_gather_fails_in_every_
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
     expected = (
-        "['Simulation failed: Reading the field outputs failed in process 1: RuntimeError: reading the element "
+        "['Simulation failed: Reading the output failed in process 1: RuntimeError: reading the element "
         "results failed']"
     )
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output

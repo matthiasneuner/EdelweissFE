@@ -820,14 +820,17 @@ class NEDMPI(NEDParallel):
         """Write the output of an accepted increment, in three parts, so that no process communicates
         where another may have failed before. Collective.
 
-        1. Each process reads its part of the field outputs -- the results of the elements it owns --
-           failing on all ranks together if it fails on one.
-        2. The parts are gathered: the results of every element set, and, if a checkpoint is written
-           now -- which only rank 0, holding the output managers, knows -- the state of every element
-           of a model whose processes each hold only their own elements.
-        3. The field outputs store the gathered results, and the output managers of rank 0 write,
-           failing on all ranks together if it fails on one: a conditional stop is decided by an
-           output manager of rank 0, and a failure to write may happen in one process only.
+        1. Each process reads its part of the output: the results of the elements it owns for the
+           field outputs, and -- if a checkpoint is written now, which only rank 0, holding the output
+           managers, knows, and each process holds only its own elements -- their states; failing on
+           all ranks together if it fails on one.
+        2. The parts are gathered: the results of every element set to every process, the element
+           states to rank 0.
+        3. The field outputs store the gathered results, and the output managers of rank 0 write --
+           a checkpoint from the gathered states
+           (:meth:`~edelweissfe.models.femodel.FEModel.elementStatesFromElsewhere`) --, failing on all
+           ranks together if it fails on one: a conditional stop is decided by an output manager of
+           rank 0, and a failure to write may happen in one process only.
 
         Nothing communicates in parts 1 and 3; the communicator refuses it
         (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`).
@@ -843,23 +846,21 @@ class NEDMPI(NEDParallel):
 
         model = fieldOutputController.model
         with performancetiming.timeit("finalize output"):
-            with self.subdomain.allRanksFailTogether("Reading the field outputs"):
-                fieldOutputController.readResultsHere()
-
-            fieldOutputController.gatherResultsOfWholeSet()
-            writesCheckpoint = self.subdomain.communicator.bcast(
+            # Where every process holds every element, rank 0 holds their states: nothing to gather.
+            gathersStates = not model.elementDistribution.replicatesElements and self.subdomain.communicator.bcast(
                 any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
             )
-            if writesCheckpoint:
-                with performancetiming.timeit("gather states"):
-                    model.elementDistribution.gatherStatesForCheckpoint(model.elements)
 
-            # The gathered states are released once written, however the output ended.
-            try:
-                with self.subdomain.allRanksFailTogether("Writing the output"):
-                    super().writeIncrementOutput(fieldOutputController, outputManagers)
-            finally:
-                model.elementDistribution.forgetGatheredStates()
+            with self.subdomain.allRanksFailTogether("Reading the output"):
+                fieldOutputController.readResultsHere()
+                statesHere = self.subdomain.elementStatesOwnedHere(model) if gathersStates else None
+
+            fieldOutputController.gatherResultsOfWholeSet()
+            with performancetiming.timeit("gather states"):
+                states = self.subdomain.gatherElementStatesToRoot(statesHere) if gathersStates else None
+
+            with model.elementStatesFromElsewhere(states), self.subdomain.allRanksFailTogether("Writing the output"):
+                super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
         """Make the whole model current in every process, then let the step actions finish the step.

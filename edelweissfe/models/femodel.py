@@ -30,6 +30,8 @@
 # @author: Matthias Neuner
 
 import textwrap
+from collections.abc import Iterator
+from contextlib import contextmanager
 from operator import attrgetter
 
 import h5py
@@ -124,6 +126,10 @@ class FEModel:
         self.fieldOutputController = None  #: Set once by the driver; lets in-model entities (e.g. AMR markers) look up a named *fieldOutput by value, not just by declaration.
         #: How the mesh may change during a run; see :class:`~edelweissfe.models.topologypipeline.TopologyPipeline`.
         self.topology = TopologyPipeline(self)
+        #: The state of every element of the mesh, by number, for the restart checkpoint being written,
+        #: where it does not come from the element objects held here; see
+        #: :meth:`elementStatesFromElsewhere`. None otherwise.
+        self._elementStatesFromElsewhere = None
 
     def __copy__(self):
         """A shallow copy of the model, with a topology pipeline that acts on the copy.
@@ -882,6 +888,51 @@ class FEModel:
         # return here with workers still writing element state.
         list(getThreadPool(numThreads).map(acceptChunk, chunks))
 
+    def elementStatesForCheckpoint(self) -> Iterator[tuple[int, np.ndarray]]:
+        """The converged state of every element of the mesh, by number, for a restart checkpoint:
+        read from the element objects -- or from the states given for this checkpoint
+        (:meth:`elementStatesFromElsewhere`).
+
+        Returns
+        -------
+        Iterator[tuple[int, np.ndarray]]
+            ``(number, state)`` pairs, one per element of the mesh.
+
+        Raises
+        ------
+        TopologyError
+            If some element of the mesh has no element object here, and no states were given.
+        """
+
+        if self._elementStatesFromElsewhere is not None:
+            return iter(self._elementStatesFromElsewhere.items())
+        self.requireCompleteMesh("A restart checkpoint")
+        return ((number, element.getStateVars()) for number, element in self.elements.items())
+
+    @contextmanager
+    def elementStatesFromElsewhere(self, states: dict | None):
+        """A context in which a restart checkpoint reads the element states from ``states`` instead of
+        the element objects held here (:meth:`elementStatesForCheckpoint`): a process that holds only
+        some of the elements -- in a domain-decomposed run -- writes a checkpoint of the whole model
+        from the states gathered from the processes holding the others.
+
+        Parameters
+        ----------
+        states
+            The converged state of every element of the mesh, by number; None to read them from the
+            element objects, as without the context.
+
+        Yields
+        ------
+        None
+        """
+
+        self._elementStatesFromElsewhere = states
+        try:
+            yield
+        finally:
+            self._elementStatesFromElsewhere = None
+
     def writeRestart(self, restartFile: h5py.File):
         """Write the current (converged) state of the model to a restart checkpoint.
 
@@ -913,9 +964,9 @@ class FEModel:
         writeRestartDataOf(f.create_group("modelModifiers"), self.modelModifiers)
 
         # Every element of the model: in a domain-decomposed run, also those created and computed in
-        # other processes (see ElementDistribution.statesOfElements).
+        # other processes (see elementStatesForCheckpoint).
         elementsGroup = f.create_group("elements")
-        for elNumber, stateVars in self.elementDistribution.statesOfElements(self.elements):
+        for elNumber, stateVars in self.elementStatesForCheckpoint():
             elementsGroup.create_dataset(str(elNumber), data=stateVars)
 
         writeRestartDataOf(f.create_group("constraints"), self.constraints)

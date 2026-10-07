@@ -36,10 +36,9 @@ element, and that is what this class does; every method below is trivial here.
 A domain-decomposed run may give each process only the elements of its subdomain (*distributed*
 elements), or every element (*replicated* elements); its distribution
 (:class:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements`) then also says
-how a result of a whole element set, or the state of the whole model, is gathered from the
-processes owning the elements. Code that reads results of a whole element set or of the whole model
-goes through the methods below, and so reads the same thing in both cases. Those are all the
-places the model meets the decomposition:
+how a result of a whole element set is gathered from the processes owning the elements. Code that
+reads results of a whole element set goes through the methods below, and so reads the same thing in
+both cases. Those are all the places the model meets the decomposition:
 
 =================================  ==================================================================  ===================
 method                             called by                                                           serial behaviour
@@ -51,9 +50,6 @@ method                             called by                                    
 :meth:`updateLocalElements`        the topology pipeline, after a mesh change                          nothing to do
 :meth:`ownedElements`              element field outputs                                               all of them
 :meth:`resultsOfWholeSet`          element field outputs                                               the results given
-:meth:`gatherStatesForCheckpoint`  the domain-decomposed solver                                        nothing to gather
-:meth:`forgetGatheredStates`       the domain-decomposed solver                                        nothing to forget
-:meth:`statesOfElements`           :meth:`~edelweissfe.models.femodel.FEModel.writeRestart`            every local element
 =================================  ==================================================================  ===================
 
 **Replicated or distributed: what a model entity declares.** Whether a domain-decomposed job may
@@ -71,8 +67,6 @@ using it simply runs with replicated elements -- more memory per process, the sa
 (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements` collects the
 reasons of a job).
 """
-
-from collections.abc import Iterator
 
 import numpy as np
 
@@ -214,33 +208,3 @@ class ElementDistribution:
         """
 
         return results
-
-    def gatherStatesForCheckpoint(self, elements: dict):
-        """Gather the states of the elements computed in other processes, for a restart checkpoint.
-        Here: nothing to gather, every element is here.
-
-        Parameters
-        ----------
-        elements
-            The local elements, by number.
-        """
-
-    def forgetGatheredStates(self):
-        """Release what :meth:`gatherStatesForCheckpoint` gathered. Here: nothing."""
-
-    def statesOfElements(self, elements: dict) -> Iterator[tuple[int, np.ndarray]]:
-        """The converged state of every element of the model, for a restart checkpoint, by element
-        number. Here: the state of every element, all local.
-
-        Parameters
-        ----------
-        elements
-            The local elements, by number.
-
-        Returns
-        -------
-        Iterator
-            ``(number, state)`` pairs, one per element of the mesh that has an object somewhere.
-        """
-
-        return ((number, element.getStateVars()) for number, element in elements.items())
