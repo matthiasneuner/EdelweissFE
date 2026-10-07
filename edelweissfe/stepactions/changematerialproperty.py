@@ -256,6 +256,9 @@ class StepAction(StepActionBase):
             self.name,
         )
 
+        # The property vector of the material itself, which the sections hold: an element created
+        # later from its section -- a child of a refinement, an element moved to another process --
+        # reads the changed value.
         modifiedProperties = self._propertyVector()
         modifiedProperties[self.theIndex] = theCurrentProperty
 
@@ -263,8 +266,10 @@ class StepAction(StepActionBase):
             if not self._sectionUsesThisMaterial(section):
                 continue
 
+            # The elements local to this process -- in a serial run, all of them: in a distributed
+            # run every process hands the changed material to its own.
             for elSet in section.elSets:
-                for el in elSet:
+                for el in elSet.localElements():
                     # The material is rebuilt per element on purpose: an edelweiss material instance
                     # holds the state vars of the element it is assigned to, so one instance shared
                     # across an element set would alias them.
