@@ -803,7 +803,7 @@ class FEModel:
         self._prepareElements(journal)
         self.topology.recordSetupFingerprint()
 
-    def advanceToTime(self, time: float, elements: dict = None, constraints: dict = None):
+    def advanceToTime(self, time: float):
         """Accept the current state of the model and sub instances, and
         set the new time.
 
@@ -811,25 +811,31 @@ class FEModel:
         ----------
         time
             The new time.
-        elements
-            The elements whose computed state is accepted, by number; all elements of the model if
-            omitted. A domain-decomposed solver passes the elements of its own subdomain: the others
-            were not computed in this process, and accepting them would overwrite the state they
-            were last synchronized to with a stale trial state.
-        constraints
-            The constraints whose state is accepted, by name; all constraints of the model if
-            omitted. Restricted for the same reason as ``elements``: a frictional contact promotes
-            its current tangential force to its history here.
         """
 
         self.time = time
+        self.acceptStatesOf(self.elements, self.constraints)
 
-        self._acceptElementStates(self.elements if elements is None else elements)
+    def acceptStatesOf(self, elements: dict, constraints: dict):
+        """Let the given elements and constraints, and every multi-point constraint, accept their
+        computed state: :meth:`advanceToTime` without the time, for part of the model. A solver that
+        computes only part of the model accepts that part -- the state of an element it did not
+        compute is not its to accept.
+
+        Parameters
+        ----------
+        elements
+            The elements whose computed state is accepted, by number.
+        constraints
+            The constraints whose computed state is accepted, by name.
+        """
+
+        self._acceptElementStates(elements)
 
         # Left serial deliberately. Measured on the 337 471-dof explicit anchor pry-out model, where
         # the element loop below costs 19.09 ms per call: these two together cost 0.015 ms, i.e. less
         # than a tenth of a percent of it. There is nothing here to parallelize.
-        for constraint in (self.constraints if constraints is None else constraints).values():
+        for constraint in constraints.values():
             constraint.acceptLastState()
 
         for mpc in self.multiPointConstraints.values():

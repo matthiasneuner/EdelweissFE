@@ -860,13 +860,23 @@ class NED(NonlinearSolverBase):
         # method shared with the implicit solvers, where it runs once per *converged*
         # increment and is amortised over a Newton loop; here it runs on every one of
         # millions of increments, and it is a serial Python loop over every element,
-        # constraint and multi-point constraint in the model -- here, over those computed here.
+        # constraint and multi-point constraint in the model.
         with performancetiming.timeit("accept state"):
-            model.advanceToTime(
-                timeStep.totalTime,
-                elements=self.partition.elements,
-                constraints=self.partition.constraints,
-            )
+            self.advanceModelToTime(model, timeStep.totalTime)
+
+    def advanceModelToTime(self, model: FEModel, time: float):
+        """Let the model accept the state the increment computed, and advance it to the end of the
+        increment (:meth:`~edelweissfe.models.femodel.FEModel.advanceToTime`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        time
+            The time at the end of the increment.
+        """
+
+        model.advanceToTime(time)
 
     def endStep(self, step, model: FEModel):
         """Report the step's performance timing.

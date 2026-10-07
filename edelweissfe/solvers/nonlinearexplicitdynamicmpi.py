@@ -679,6 +679,25 @@ class NEDMPI(NEDParallel):
                     self._incrementPlan = self.planIncrement(model)
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
 
+    def advanceModelToTime(self, model: FEModel, time: float):
+        """Let the elements and the constraints of this subdomain accept the state the increment
+        computed (:meth:`~edelweissfe.models.femodel.FEModel.acceptStatesOf`), and advance the model
+        to the end of the increment; see :meth:`NED.advanceModelToTime`. Only those: the others were
+        computed by other processes, and accepting them here would overwrite the state they were last
+        synchronized to with a stale trial state (a frictional contact, for example, promotes its
+        current tangential force to its history).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        time
+            The time at the end of the increment.
+        """
+
+        model.time = time
+        model.acceptStatesOf(self.partition.elements, self.partition.constraints)
+
     def _moveElements(self, model: FEModel, step):
         """Move elements between the processes, after a rebalance changed the partition of a
         distributed model, and build the equation system again for the elements now held here.
