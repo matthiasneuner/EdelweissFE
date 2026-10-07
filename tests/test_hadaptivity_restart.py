@@ -208,7 +208,7 @@ def _driveRounds(model: FEModel) -> None:
     marker's, so that several rounds accumulate deterministically without a solve in between."""
 
     amr = model.modelModifiers["amr"]
-    for roundIndex, eids in enumerate(_rounds(amr._mesh), start=1):
+    for roundIndex, eids in enumerate(_rounds(amr._octree), start=1):
         model.advanceToTime(float(roundIndex))
         with model.topology.changes():
             plan = RefinementPlan(eids=list(eids))
@@ -251,7 +251,7 @@ def test_multi_round_replay_matches_the_live_run_exactly(tmp_path):
     assert modelA.topology.history[-1].nElementsAdded > 8, "the last round should have cascaded"
 
     # the octree mirror's active-set cache agrees with a scan of the hierarchy
-    mesh = modelA.modelModifiers["amr"]._mesh
+    mesh = modelA.modelModifiers["amr"]._octree
     assert mesh.active() == [eid for eid, e in mesh.elements.items() if e["active"]]
 
     # give every field value something to be restored to, so a wrong layout cannot hide behind zeros

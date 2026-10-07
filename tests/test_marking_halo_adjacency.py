@@ -156,7 +156,7 @@ _MARKERS = [
 
 def _assertMarksMatchReference(model, amr):
     for marker in _MARKERS:
-        marked = marker.mark(model, amr._refineableElements, amr._mesh)
+        marked = marker.mark(model, amr._refineableElements, amr._octree)
         reference = _referenceMark(model, marker, list(amr._eidToNumber.values()))
         assert marked, "the synthetic field must mark something, or the comparison proves nothing"
         assert marked == reference
@@ -177,7 +177,7 @@ def test_kept_adjacency_marks_exactly_what_a_fresh_build_marks(tmp_path, monkeyp
 
     _assertMarksMatchReference(model, amr)
     for _ in range(nRefinements):
-        marked = _MARKERS[0].mark(model, amr._refineableElements, amr._mesh)
+        marked = _MARKERS[0].mark(model, amr._refineableElements, amr._octree)
         eidOf = {number: eid for eid, number in amr._eidToNumber.items()}
         plan = RefinementPlan(eids=[eidOf[number] for number in sorted(marked)])
         with model.topology.changes():
@@ -200,7 +200,7 @@ def test_replayed_refinement_marks_what_the_live_run_marked(tmp_path, monkeypatc
 
     plans = []
     for _ in range(2):
-        marked = _MARKERS[0].mark(live, liveAmr._refineableElements, liveAmr._mesh)
+        marked = _MARKERS[0].mark(live, liveAmr._refineableElements, liveAmr._octree)
         eidOf = {number: eid for eid, number in liveAmr._eidToNumber.items()}
         plans.append(RefinementPlan(eids=[eidOf[number] for number in sorted(marked)]))
         with live.topology.changes():
@@ -208,13 +208,13 @@ def test_replayed_refinement_marks_what_the_live_run_marked(tmp_path, monkeypatc
 
     # the replayed modifier marks once on the unrefined mesh first, so it holds an adjacency the
     # replay has to discard
-    _MARKERS[0].mark(replayed, replayedAmr._refineableElements, replayedAmr._mesh)
+    _MARKERS[0].mark(replayed, replayedAmr._refineableElements, replayedAmr._octree)
     for plan in plans:
         with replayed.topology.changes():
             replayedAmr.apply(replayed, plan)
 
     for marker in _MARKERS:
-        liveMarks = marker.mark(live, liveAmr._refineableElements, liveAmr._mesh)
-        replayedMarks = marker.mark(replayed, replayedAmr._refineableElements, replayedAmr._mesh)
+        liveMarks = marker.mark(live, liveAmr._refineableElements, liveAmr._octree)
+        replayedMarks = marker.mark(replayed, replayedAmr._refineableElements, replayedAmr._octree)
         assert _elementNumbers(replayedMarks) == _elementNumbers(liveMarks)
         assert replayedMarks == _referenceMark(replayed, marker, list(replayedAmr._eidToNumber.values()))

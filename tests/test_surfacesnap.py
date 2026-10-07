@@ -352,14 +352,14 @@ def test_maxlevel_2_also_works(tmp_path):
     model.topology.update()
 
     amr = model.modelModifiers["amr"]
-    levelOfElement = {number: amr._mesh.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOfElement = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
     assert set(levelOfElement.values()) == {1}, "sanity check: a single topology update must reach exactly level 1"
 
     _markOnNextUpdate(amr, set(levelOfElement))
     changed = model.topology.update()
     assert changed, "the second, directly-seeded round must also have refined something"
 
-    levelOfElement = {number: amr._mesh.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOfElement = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
     assert 2 in set(levelOfElement.values()), "level 2 must actually have been reached this time"
 
     finalWall = {n.label for n in model.nodeSets[TRACKED_WALL_SET]}
@@ -387,7 +387,7 @@ def test_a_second_refinement_of_an_already_snapped_element_uses_corrected_geomet
 
     mismatches = [
         label
-        for label, coord in amr._mesh.registry.coordinates.items()
+        for label, coord in amr._octree.registry.coordinates.items()
         if label in model.nodes and not np.allclose(coord, model.nodes[label].coordinates, atol=1e-9)
     ]
     assert not mismatches, f"hAdaptivity's mirror must be kept in sync with model.nodes, but diverged for {mismatches}"
@@ -547,7 +547,7 @@ def test_a_resolved_hanging_collision_is_retried_and_snapped(tmp_path):
     assert pendingAfterRound1, "the asymmetric refinement must have left at least one node pending"
 
     amr = model.modelModifiers["amr"]
-    levelOf = {number: amr._mesh.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOf = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
     stillCoarse = {el for el, level in levelOf.items() if level == 0}
     assert stillCoarse, "sanity check: the other three sectors must still be unrefined"
 

@@ -115,7 +115,7 @@ def _driveMirrorAhead(model, modifier, levels: int):
     allocator.
     """
 
-    mesh = modifier._mesh
+    mesh = modifier._octree
     deepest = max(mesh.active(), key=lambda e: mesh.elements[e]["coords"][:, 0].min())
     interface = mesh.elements[deepest]["coords"][:, 0].min()
     with model.topology.changes():
@@ -131,7 +131,7 @@ def test_a_cascade_materialises_every_level_it_produced(tmp_path):
 
     model = _buildModel(tmp_path)
     amr = model.modelModifiers["amr"]
-    mesh = amr._mesh
+    mesh = amr._octree
 
     _driveMirrorAhead(model, amr, 3)
     createdBefore = set(mesh.elements)
@@ -170,7 +170,7 @@ def test_a_fully_resplit_parent_leaves_nothing_behind(tmp_path):
 
     model = _buildModel(tmp_path)
     amr = model.modelModifiers["amr"]
-    mesh = amr._mesh
+    mesh = amr._octree
 
     root = max(mesh.active(), key=lambda e: mesh.elements[e]["coords"][:, 0].min())
     with model.topology.changes():  # the mirror mints its node labels from the model's allocator
