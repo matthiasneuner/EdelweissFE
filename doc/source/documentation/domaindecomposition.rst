@@ -245,6 +245,23 @@ and so is everything computed from it. The constraint forces, each computed by o
 shared with all and added in model order. A run on any number of processes is bit-identical to
 ``NED`` on the same input.
 
+**What is bit-identical, exactly.** The solution, the velocity and the net nodal force at every
+degree of freedom; the state of every element and every constraint; the external work; and
+therefore every dataset of a restart checkpoint and every field output computed from them. Not
+bit-identical: the kinetic and the internal energy printed in the energy table, which each process
+sums over its own subdomain and the processes then add in rank order; they enter nothing but the
+table. Timings, and the load balancing that depends on them, change the speed of a run, never its
+result.
+
+**What the order rests on.** Within one process the contributions at each degree of freedom are
+summed by :func:`numpy.bincount` (:meth:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan.assembleInto`,
+:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`), which adds the
+weights into each bin one after another, in the order given -- a left fold, the sum a loop over the
+elements forms. That is how NumPy implements it, not a documented guarantee, so it is tested rather
+than assumed: ``tests/test_domaindecomposition.py`` sums values of very different magnitudes and
+signed zeros, whose sum differs in any other order, through the element loop and -- over three
+processes -- through the interface exchange, and compares the bits with the left fold.
+
 **Loads.** A distributed load or a body force acting on an element is a contribution of that element,
 and is assembled like its forces
 (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`): the process
@@ -590,6 +607,32 @@ a serial run on the same machine rather than against the committed ``U.ref`` fil
 written on another one, and a serial run differs from them in the last digits wherever the two
 machines' math libraries do. ``run_tests_edelweissfe testfiles/mpi/edelweiss-only`` without
 ``--create`` compares against the committed files within an absolute tolerance of 1e-6.
+
+``U.ref`` holds the solution only. The states of the elements and constraints, the velocity, the net
+force and the external work are all in a restart checkpoint, so comparing the checkpoints of a deck
+that writes one compares everything a run carries on with -- for example
+``testfiles/mpi/marmot/NEDRestartDistributed1Write``, which runs distributed:
+
+.. code-block:: console
+
+    cd serial/marmot/NEDRestartDistributed1Write && edelweissfe test.inp && cd -
+    cd decomposed/marmot/NEDRestartDistributed1Write
+    mpirun -n 3 --bind-to none -x PYTHON_GIL -x OMP_NUM_THREADS edelweissfe test.inp && cd -
+    python - <<'EOF'
+    import h5py, numpy as np
+    serial = h5py.File("serial/marmot/NEDRestartDistributed1Write/restart_0.h5")
+    decomposed = h5py.File("decomposed/marmot/NEDRestartDistributed1Write/restart_0.h5")
+    def compare(name, dataset):
+        if isinstance(dataset, h5py.Dataset):
+            a, b = np.asarray(dataset[()]), np.asarray(decomposed[name][()])
+            same = a.shape == b.shape and a.tobytes() == b.tobytes()
+            print("" if same else "DIFFERS: " + name, end="")
+    serial.visititems(compare)
+    EOF
+
+Nothing printed means every dataset -- every element's state variables, every constraint's state,
+``U``, ``V`` and ``P`` of every node field, and the solver's ``_externalWork`` -- is the same, byte
+for byte, signed zeros included.
 
 Limitations
 -----------

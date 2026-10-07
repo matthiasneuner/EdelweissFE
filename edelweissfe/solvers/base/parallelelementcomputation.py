@@ -154,11 +154,16 @@ class ElementChunk:
 class ElementPlan:
     """How a set of elements gathers its degrees of freedom and assembles what it contributes.
 
-    The elements are cut into chunks; each chunk gathers its solution in one indexed read, evaluates
-    its elements into a buffer of its own, and places that buffer into the plan's *contribution
-    buffer* -- one entry per element and degree of freedom, element after element, in the order of
-    the elements. Summing that buffer into a vector, in that order, is the assembly: the sum at every
-    degree of freedom is formed in element order, whatever the number of threads or chunks.
+    This is the element loop of every finite element code, :math:`f = \\mathop{\\mathsf{A}}_e f_e(u_e)`,
+    in its three steps: **gather** each element's solution :math:`u_e` from the global vector,
+    **evaluate** the element, and **assemble** (scatter-add) its nodal forces :math:`f_e` into the
+    global vector. Done one element at a time, that is ``Pe = element(U[dofs_e]); P[dofs_e] += Pe``.
+    The plan does the same in bulk. The elements are cut into chunks; each chunk gathers its
+    solution in one indexed read, evaluates its elements into a buffer of its own, and places that
+    buffer into the plan's *contribution buffer* -- one entry per element and degree of freedom,
+    element after element, in the order of the elements. Summing that buffer into a vector, in that
+    order, is the assembly: the sum at every degree of freedom is formed in element order, as the
+    one-element-at-a-time loop forms it, whatever the number of threads or chunks.
 
     The plan assembles into the degrees of freedom a model partition integrates, never into more:
     a process computing one part of a model of many would otherwise pay, every increment, for the
@@ -201,6 +206,13 @@ class ElementPlan:
     def assembleInto(self, contributions: np.ndarray, vector: DofVector):
         """Add the contribution buffer into ``vector`` at the plan's degrees of freedom, summing the
         entries at each degree of freedom in element order.
+
+        :func:`numpy.bincount` with weights adds the weights into each bin one after another, in the
+        order given: a left fold, the sum ``P[dofs_e] += Pe`` forms element after element. That is
+        how NumPy implements it rather than a documented guarantee, and the bit-identity of the
+        threaded and the domain-decomposed loops rests on it, so
+        ``tests/test_domaindecomposition.py`` checks it with values whose sum differs in any other
+        order.
 
         Parameters
         ----------
