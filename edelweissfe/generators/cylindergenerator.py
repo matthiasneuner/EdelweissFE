@@ -89,14 +89,12 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 
-from edelweissfe.config.elementlibrary import getElementClass
+from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
-from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.schema import schemaField
 
 
@@ -348,6 +346,9 @@ def _addMidsideNodes(nodes, quads, radius, curvedBoundary):
 class Generator(GeneratorBase):
     """A structured hex mesh generator for cylindrical geometries."""
 
+    #: It only describes the mesh; see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = CylinderGeneratorSchema
 
@@ -407,13 +408,12 @@ class Generator(GeneratorBase):
 
         elTypeName = configuration.elType
         elProvider = configuration.elProvider
-        elType = getElementClass(elTypeName, elProvider)
+        # the number of nodes of the element type decides the element order
+        prototype = createPrototypeElement(elTypeName, elProvider)
 
-        testEl = elType(elTypeName, 0)
-
-        if testEl.nNodes == 8:
+        if prototype.nNodes == 8:
             order = 1
-        elif testEl.nNodes == 20:
+        elif prototype.nNodes == 20:
             order = 2
         else:
             raise Exception(f"Generator called with unsupported element type {elTypeName}.")
@@ -535,18 +535,17 @@ class Generator(GeneratorBase):
                     rc = windCorners(c0, c1, c2, c3)
                     nodeList = [layerNodes[iy][idx] for idx in rc] + [layerNodes[iy + 1][idx] for idx in rc]
 
-                    newEl = elType(elTypeName, currentElementLabel)
-                    newEl.setNodes(nodeList)
+                    model.mesh.addElement(
+                        currentElementLabel, elTypeName, elProvider, [node.label for node in nodeList]
+                    )
 
-                    elements.append(newEl)
-                    model.createElement(newEl)
-
+                    elements.append(currentElementLabel)
                     if iy == 0:
-                        elementsBottom.append(newEl)
+                        elementsBottom.append(currentElementLabel)
                     if iy == nY - 1:
-                        elementsTop.append(newEl)
+                        elementsTop.append(currentElementLabel)
                     if outerQuadMask[iq]:
-                        elementsOuter.append(newEl)
+                        elementsOuter.append(currentElementLabel)
 
                     currentElementLabel += 1
 
@@ -594,22 +593,19 @@ class Generator(GeneratorBase):
 
                     nodeList = bottomCorners + topCorners + bottomMids + topMids + verticalMids
 
-                    newEl = elType(elTypeName, currentElementLabel)
-                    newEl.setNodes(nodeList)
+                    model.mesh.addElement(
+                        currentElementLabel, elTypeName, elProvider, [node.label for node in nodeList]
+                    )
 
-                    elements.append(newEl)
-                    model.createElement(newEl)
-
+                    elements.append(currentElementLabel)
                     if iy == 0:
-                        elementsBottom.append(newEl)
+                        elementsBottom.append(currentElementLabel)
                     if iy == nY - 1:
-                        elementsTop.append(newEl)
+                        elementsTop.append(currentElementLabel)
                     if outerQuadMask[iq]:
-                        elementsOuter.append(newEl)
+                        elementsOuter.append(currentElementLabel)
 
                     currentElementLabel += 1
-
-        model._populateNodeFieldVariablesFromElements()
 
         # node sets
         model.nodeSets["{:}_top".format(name)] = NodeSet("{:}_top".format(name), nodesTop)
@@ -629,16 +625,16 @@ class Generator(GeneratorBase):
             model.nodeSets[setName] = NodeSet(setName, nodesBottomLine)
 
         # element sets
-        model.elementSets["{:}_all".format(name)] = ElementSet("{:}_all".format(name), elements)
-        model.elementSets["{:}_top".format(name)] = ElementSet("{:}_top".format(name), elementsTop)
-        model.elementSets["{:}_bottom".format(name)] = ElementSet("{:}_bottom".format(name), elementsBottom)
-        model.elementSets["{:}_outer".format(name)] = ElementSet("{:}_outer".format(name), elementsOuter)
+        model.mesh.setElementSet("{:}_all".format(name), elements)
+        model.mesh.setElementSet("{:}_top".format(name), elementsTop)
+        model.mesh.setElementSet("{:}_bottom".format(name), elementsBottom)
+        model.mesh.setElementSet("{:}_outer".format(name), elementsOuter)
 
         # surfaces: S1/S2 are the bottom/top faces, S5 the outward-radial face of the outer-ring elements
         # (both hold regardless of element order, since Abaqus face numbering only depends on corner connectivity)
         surfaceName = "{:}_bottom".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {1: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {1: surfaceName})
         surfaceName = "{:}_top".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {2: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {2: surfaceName})
         surfaceName = "{:}_outer".format(name)
-        model.surfaces[surfaceName] = EntityBasedSurface(surfaceName, {5: model.elementSets[surfaceName]})
+        model.mesh.addSurface(surfaceName, {5: surfaceName})
