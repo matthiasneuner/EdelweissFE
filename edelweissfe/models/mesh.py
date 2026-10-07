@@ -54,6 +54,10 @@ from dataclasses import dataclass
 
 from edelweissfe.utils.exceptions import TopologyError
 
+#: The provider of every auxiliary element (:meth:`Mesh.addAuxiliaryElement`): a contact facet or a
+#: point mass, which a model entity makes itself and no provider creates from its record.
+AUXILIARY = "auxiliary"
+
 
 @dataclass(frozen=True)
 class ElementTypeInfo:
@@ -127,8 +131,9 @@ class MeshElement:
     elType
         The element type, e.g. ``C3D20R``.
     provider
-        The element provider, e.g. ``marmot``; ``None`` for an auxiliary element (see
-        :meth:`Mesh.addAuxiliaryElement`), which cannot be created from this record.
+        The element provider, e.g. ``marmot``; ``None`` for the default provider; :data:`AUXILIARY`
+        for an auxiliary element (see :meth:`Mesh.addAuxiliaryElement`), which cannot be created
+        from this record.
     nodeLabels
         The labels of the element's nodes, in the element's node order, as a tuple of ints.
     ownTypeInfo
@@ -161,8 +166,9 @@ class MeshElement:
     @property
     def isAuxiliary(self) -> bool:
         """True for an auxiliary element: one a model entity (a contact surface, a rigid body) made
-        itself, e.g. a contact facet or a point mass; it cannot be created from this record."""
-        return self.ownTypeInfo is not None
+        itself, e.g. a contact facet or a point mass; it cannot be created from this record. Its
+        provider says so (:data:`AUXILIARY`)."""
+        return self.provider == AUXILIARY
 
 
 class Mesh:
@@ -194,7 +200,9 @@ class Mesh:
         elType
             The element type.
         provider
-            The element provider; ``None`` selects the default provider (``marmot``).
+            The element provider; ``None`` selects the default provider (``marmot``). Not
+            :data:`AUXILIARY`: an auxiliary element is described from its object
+            (:meth:`addAuxiliaryElement`).
         nodeLabels
             The labels of the element's nodes.
 
@@ -204,14 +212,34 @@ class Mesh:
             The record of the element.
         """
 
-        if number in self.elements:
+        if provider == AUXILIARY:
+            raise TopologyError(
+                "element {:}: an auxiliary element is described from its object (Mesh.addAuxiliaryElement)".format(
+                    number
+                )
+            )
+        return self._describe(MeshElement(number, elType, provider, tuple(nodeLabels)))
+
+    def _describe(self, record: MeshElement) -> MeshElement:
+        """Add the record of an element under its number, which must be new.
+
+        Parameters
+        ----------
+        record
+            The record.
+
+        Returns
+        -------
+        MeshElement
+            The record.
+        """
+
+        if record.number in self.elements:
             raise TopologyError(
                 "element number {:} is already taken in the mesh -- every element number is described once, "
-                "and numbers from TopologyPipeline.reserveElementNumbers() are never recycled".format(number)
+                "and numbers from TopologyPipeline.reserveElementNumbers() are never recycled".format(record.number)
             )
-
-        record = MeshElement(number, elType, provider, tuple(nodeLabels))
-        self.elements[number] = record
+        self.elements[record.number] = record
         return record
 
     def addAuxiliaryElement(self, element, hostElement: int | None = None) -> MeshElement:
@@ -236,10 +264,16 @@ class Mesh:
             The record of the element.
         """
 
-        record = self.addElement(element.elNumber, element.elType, None, [node.label for node in element.nodes])
-        record.ownTypeInfo = ElementTypeInfo(element.fields, element.ensightType, element.nDof, element.hasKernels)
-        record.hostElement = hostElement
-        return record
+        return self._describe(
+            MeshElement(
+                element.elNumber,
+                element.elType,
+                AUXILIARY,
+                tuple(node.label for node in element.nodes),
+                ElementTypeInfo(element.fields, element.ensightType, element.nDof, element.hasKernels),
+                hostElement,
+            )
+        )
 
     def removeElement(self, number: int):
         """Remove an element from the mesh, and from every element set and surface; see
@@ -390,7 +424,7 @@ class Mesh:
             The type information.
         """
 
-        if record.ownTypeInfo is not None:
+        if record.isAuxiliary:
             return record.ownTypeInfo
         return self._typeEntry(record.elType, record.provider)[1]
 

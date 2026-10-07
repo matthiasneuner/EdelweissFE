@@ -44,7 +44,7 @@ from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.models.mesh import SurfaceFace
+from edelweissfe.models.mesh import AUXILIARY, SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.points.node import Node
 from edelweissfe.utils.exceptions import TopologyError
@@ -317,7 +317,11 @@ def test_an_auxiliary_element_is_described_from_the_object():
         model.createAuxiliaryElement(pointMass)
 
     record = model.mesh.elements[number]
-    assert record.isAuxiliary and record.nodeLabels == (1,)
+    assert record.isAuxiliary and record.nodeLabels == (1,) and record.provider == AUXILIARY
+    # provider=None is the default provider, never an auxiliary element; that marker is not for addElement
+    assert not model.mesh.addElement(number + 1, "CPE4", None, [1, 1, 1, 1]).isAuxiliary
+    with pytest.raises(TopologyError, match="described from its object"):
+        model.mesh.addElement(number + 2, "PointMass", AUXILIARY, [1])
     assert model.mesh.typeOf(record).fields == [["displacement", "rotation"]]
     with pytest.raises(TopologyError, match="is an auxiliary element"):
         model.mesh.elementClassOf(record)
