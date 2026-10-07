@@ -198,11 +198,11 @@ class Generator(GeneratorBase):
             tLayersRed = tLayers * [np.cos((np.pi * phi / 180.0) / (nNodesC - extraNode)) if not exG else 1]
             for it in range(nNodesT):
                 for ic in range(nNodesC - extraNode):
+                    if not carriesElementNode(it, iy, ic):
+                        nodes.append(GRID_POSITION_WITHOUT_NODE)
+                        continue
+                    label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
                     # use reduced radius to keep element planar if exG is True
-                    if carriesElementNode(it, iy, ic):
-                        label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
-                    else:
-                        label = GRID_POSITION_WITHOUT_NODE
                     if prototype.nNodes == 20 and (ic % 2 != 0):
                         node = Node(
                             label,
@@ -226,8 +226,7 @@ class Generator(GeneratorBase):
                             ),
                         )
                     nodes.append(node)
-                    if label != GRID_POSITION_WITHOUT_NODE:
-                        model.createNode(node)
+                    model.createNode(node)
 
         # # 3d plot of nodes; for debugging
         # import os

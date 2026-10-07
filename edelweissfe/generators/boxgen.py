@@ -177,14 +177,13 @@ class Generator(GeneratorBase):
         for ix in range(nNodesX):
             for iy in range(nNodesY):
                 for iz in range(nNodesZ):
-                    if carriesElementNode(ix, iy, iz):
-                        label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
-                    else:
-                        label = GRID_POSITION_WITHOUT_NODE
+                    if not carriesElementNode(ix, iy, iz):
+                        nodes.append(GRID_POSITION_WITHOUT_NODE)
+                        continue
+                    label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
                     node = Node(label, np.array([xLayers[ix], yLayers[iy], zLayers[iz]]))
                     nodes.append(node)
-                    if label != GRID_POSITION_WITHOUT_NODE:
-                        model.createNode(node)
+                    model.createNode(node)
 
         # # 3d plot of nodes; for debugging
         # def plotNodeList( nodeList ):

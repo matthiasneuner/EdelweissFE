@@ -35,23 +35,24 @@ from edelweissfe.models.elementdistribution import NOT_KNOWN_TO_ONLY_DESCRIBE_TH
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider, buildSchemaFromOptions
 
-#: The label of a position of a generator's node grid that does not become a node of the model, e.g.
-#: the centre of a 20-node hexahedron. No node of a model has it.
-GRID_POSITION_WITHOUT_NODE = -1
+#: The entry of a generator's node grid at a position that does not become a node of the model, e.g.
+#: the centre of a 20-node hexahedron: no :class:`~edelweissfe.points.node.Node` object, just this marker.
+GRID_POSITION_WITHOUT_NODE = None
 
 
 def isNodeOfElements(nodeGrid: np.ndarray, elementNodeLabels) -> np.ndarray:
     """Which entries of a generator's grid of nodes are nodes of the elements it described.
 
     A structured generator lays out a full grid of node positions, of which only some become nodes
-    of the model (the others carry the label :data:`GRID_POSITION_WITHOUT_NODE`), and only some of
+    of the model (the others hold :data:`GRID_POSITION_WITHOUT_NODE`), and only some of
     those belong to an element. Its node sets keep exactly the nodes of its elements -- the nodes that
     carry fields -- which this mask selects without any element object.
 
     Parameters
     ----------
     nodeGrid
-        The grid of :class:`~edelweissfe.points.node.Node` objects.
+        The grid of :class:`~edelweissfe.points.node.Node` objects, and :data:`GRID_POSITION_WITHOUT_NODE`
+        where a position is not a node.
     elementNodeLabels
         The node labels of every element the generator described.
 
@@ -62,7 +63,9 @@ def isNodeOfElements(nodeGrid: np.ndarray, elementNodeLabels) -> np.ndarray:
     """
 
     referenced = {label for labels in elementNodeLabels for label in labels}
-    return np.array([node.label in referenced for node in nodeGrid.flat], dtype=bool).reshape(nodeGrid.shape)
+    return np.array(
+        [node is not GRID_POSITION_WITHOUT_NODE and node.label in referenced for node in nodeGrid.flat], dtype=bool
+    ).reshape(nodeGrid.shape)
 
 
 class GeneratorBase(OptionSchemaProvider, ABC):
