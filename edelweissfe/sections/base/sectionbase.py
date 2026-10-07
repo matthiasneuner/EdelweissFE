@@ -109,6 +109,21 @@ class Section(OptionSchemaProvider, ABC):
             self.materialPropertiesFileName = definition.filename
 
     def assignSectionPropertiesToModel(self, model):
+        """Assign this section to every element of its sets, and export the material properties if
+        asked to. The path of EdelweissMeshfree's model, whose sets are plain element sets; an
+        :class:`~edelweissfe.models.femodel.FEModel` assigns sections through
+        :meth:`~edelweissfe.models.femodel.FEModel.assignSectionsAndPropertiesToElements`.
+
+        Parameters
+        ----------
+        model
+            The model.
+
+        Returns
+        -------
+        model
+            The model.
+        """
         for elSet in self.elSets:
             for el in elSet:
                 self.assignSectionToElement(el, model)
@@ -189,9 +204,36 @@ class Section(OptionSchemaProvider, ABC):
         return materialProperties
 
     def exportMaterialPropertiesToFile(self, elSets):
+        """Write the material properties of the elements of the given sets to the file of
+        ``>>writeMaterialPropertiesToFile``, one line per element, in set order.
+
+        Parameters
+        ----------
+        elSets
+            The element sets, each held whole by this process.
+        """
+
+        self.writeMaterialPropertiesFile(
+            [([el.elNumber for el in elSet], [el._materialProperties for el in elSet]) for elSet in elSets]
+        )
+
+    def writeMaterialPropertiesFile(self, rowsOfSets: list):
+        """Write the file of ``>>writeMaterialPropertiesToFile``: per element set, one line per
+        element -- its number, then its material properties.
+
+        Parameters
+        ----------
+        rowsOfSets
+            Per element set, the element numbers in set order and their material properties, one
+            row per element (None for a set without elements).
+        """
+
         with open("{:}.csv".format(self.materialPropertiesFileName), "w+") as f:
-            for elSet in elSets:
-                for el in elSet:
-                    f.write("{:}".format(el.elNumber))
-                    [f.write("{:} ".format(matprop)) for matprop in el._materialProperties]
+            for numbers, properties in rowsOfSets:
+                if properties is None:
+                    continue
+                for number, materialProperties in zip(numbers, properties):
+                    f.write("{:}".format(number))
+                    for materialProperty in materialProperties:
+                        f.write("{:} ".format(materialProperty))
                     f.write("\n")

@@ -36,6 +36,7 @@ import h5py
 import numpy as np
 
 from edelweissfe.config.phenomena import getFieldSize, phenomena
+from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
@@ -690,9 +691,34 @@ class FEModel:
 
         for section in self.sections.values():
             if section.writeMaterialPropertiesToFile:
-                # the material properties are known for the local elements: the local part of
-                # each set (in a distributed run every process writes its part to the same file, as before)
-                section.exportMaterialPropertiesToFile([elementSet.localElements() for elementSet in section.elSets])
+                self._exportMaterialProperties(section)
+
+    def _exportMaterialProperties(self, section):
+        """Write the material properties of every element of a section to its file: the whole
+        model's, in mesh order, as a serial run writes it. Each element's properties come from the
+        process owning it; in a distributed run they are gathered
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`) and
+        only rank 0 writes the file. Collective.
+
+        Parameters
+        ----------
+        section
+            The section.
+        """
+
+        distribution = self.elementDistribution
+        rowsOfSets = []
+        for elementSet in section.elSets:
+            owned = distribution.ownedElements(elementSet.localElements())
+            properties = np.array([element._materialProperties for element in owned]) if owned else None
+            rowsOfSets.append(
+                (
+                    elementSet.elementNumbersOfWholeSet(),
+                    distribution.resultsOfWholeSet(elementSet, [element.elNumber for element in owned], properties),
+                )
+            )
+        if isRootProcess():
+            section.writeMaterialPropertiesFile(rowsOfSets)
 
     def assignSectionsAndPropertiesToElements(self, elements: dict):
         """Assign sections and element properties to elements: to every element when the model is

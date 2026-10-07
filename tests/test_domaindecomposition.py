@@ -491,6 +491,79 @@ def test_a_load_failing_in_one_process_fails_in_every_process(tmp_path):
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
 
 
+_MATERIAL_PROPERTIES_DECK = """
+*material, name=LinearElastic, id=linearelastic
+20000.0, 0.2, 2.0e-9
+*AnalyticalField, name=stiffness, type=scalarExpression
+"f(x,y,z)" = "1.0 + 0.37*x + 0.11*y"
+*section, name=section1, material=linearelastic, type=solid
+gen_all
+>>materialParameterFromField, index=0, field=stiffness, type=scale
+>>writeMaterialPropertiesToFile, filename=matprops
+*job, name=matpropsjob, domain=3d
+*solver, solver=SOLVER, name=theSolver
+*modelGenerator, generator=boxGen, name=gen
+nX=9
+nY=4
+nZ=1
+lX=90
+lY=40
+lZ=10
+elType=C3D8
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1, minInc=1e-14, maxNumInc=2, maxIter=25, stepLength=1e-6
+>>dirichlet, name=fixLeft, nSet=gen_left, field=displacement, 1=0, 2=0, 3=0
+"""
+
+#: Runs the deck in this directory and prints how many elements this process created.
+_RUN_DECK_SCRIPT = """
+import contextlib, io
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+with contextlib.redirect_stdout(io.StringIO()):
+    model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+print("CREATED", len(model.elements), "OF", len(model.mesh.elements), flush=True)
+"""
+
+
+def test_a_distributed_run_writes_the_material_properties_of_a_serial_one(tmp_path):
+    pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.utils.misc import checkSuccessfulExtension
+
+    if not checkSuccessfulExtension("edelweissfe.elements.marmotelement.element"):
+        pytest.skip("the deck needs Marmot elements")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    files = {}
+    for solver, launcher in (("NED", []), ("NEDMPI", [mpirun, "--bind-to", "none", "-n", "3"])):
+        directory = tmp_path / solver
+        directory.mkdir()
+        (directory / "test.inp").write_text(_MATERIAL_PROPERTIES_DECK.replace("SOLVER", solver))
+        (directory / "run.py").write_text(_RUN_DECK_SCRIPT)
+        output = subprocess.run(
+            launcher + [sys.executable, "run.py"],
+            cwd=directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        ).stdout
+        if solver == "NEDMPI":
+            # distributed: every process created only part of the 36 elements
+            created = [int(line.split()[1]) for line in output.splitlines() if line.startswith("CREATED")]
+            assert len(created) == 3 and max(created) < 36, output
+        files[solver] = (directory / "matprops.csv").read_bytes()
+
+    assert files["NED"].count(b"\n") == 36
+    assert files["NEDMPI"] == files["NED"]
+
+
 _DISTRIBUTION_DECK = """
 *job, name=distributionjob, domain=2d
 *material, name=linearelastic, id=linearelastic, provider=edelweiss
