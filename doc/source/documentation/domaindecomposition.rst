@@ -579,7 +579,7 @@ A failure while evaluating the elements or the constraints -- a material that ca
 the stable step, above all --, in a constraint's connectivity search, in a topology update (the
 marker, the refinement, the mesh refresh), or in finalizing the output (a conditional stop, too) is
 raised on all ranks together
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`), and every process
+(:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`), and every process
 ends the step the same way; a cutback requested anywhere is raised everywhere, with the smallest
 size requested. A failure anywhere else aborts all processes, and so does an interrupt (``Ctrl+C``)
 of any one of them: the others would otherwise wait forever for the one that stopped
@@ -697,7 +697,13 @@ Package reference
 .. automodule:: edelweissfe.domaindecomposition.metis
    :members:
 
+.. automodule:: edelweissfe.domaindecomposition.communicator
+   :members:
+
 .. automodule:: edelweissfe.domaindecomposition.subdomain
+   :members:
+
+.. automodule:: edelweissfe.domaindecomposition.loadsonsubdomain
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.distributedelements

@@ -35,14 +35,15 @@ assigns to it, the constraints dealt to it, and the degrees of freedom those tou
 also carries out every exchange between the processes the domain-decomposed solver needs: the
 element forces are completed at the interface with the neighbouring subdomains
 (:mod:`.subdomaininterface`), the constraint forces are shared with every process, sums are formed
-over all processes in rank order, a failure on one rank is raised on all, and the vectors and states of the whole
-model are made current from the processes computing them (:mod:`.statesynchronization`). Every sum
+over all processes in rank order, and the vectors and states of the whole model are made current
+from the processes computing them (:mod:`.statesynchronization`). The loads of the elements a
+subdomain computes are described in :mod:`.loadsonsubdomain`, and how the processes agree -- on a
+failure in any of them, among others -- in :mod:`.communicator`. Every sum
 that decides the solution is formed in the order it is formed without decomposition, so a run is
 bit-identical to one in a single process.
 """
 
 import hashlib
-from contextlib import contextmanager
 from time import perf_counter
 
 import numpy as np
@@ -52,7 +53,11 @@ from scipy.sparse.csgraph import connected_components
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.communicator import Communicator
-from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
+from edelweissfe.domaindecomposition.loadsonsubdomain import (
+    BodyLoadOnSubdomain,
+    DistributedLoadOnSubdomain,
+    LoadsOnSubdomain,
+)
 from edelweissfe.domaindecomposition.partitioning import (
     assignConstraints,
     keepElementsWhereTheyWere,
@@ -73,164 +78,7 @@ from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
-from edelweissfe.stepactions.base.bodyloadbase import BodyLoadBase
-from edelweissfe.stepactions.base.distributedloadbase import DistributedLoadBase
-from edelweissfe.timesteppers.timestep import TimeStep
-from edelweissfe.utils.exceptions import (
-    ConditionalStop,
-    CutbackRequest,
-    TopologyError,
-)
-
-#: How :meth:`Subdomain.allRanksFailTogether` ranks what went wrong: the most severe outcome of any
-#: process is the one every process raises.
-_NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
-
-
-class DistributedLoadOnSubdomain:
-    """A distributed load, restricted to the faces of the elements computed in a subdomain.
-
-    What the shared load assembly
-    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeDistributedLoads`)
-    reads of a :class:`~edelweissfe.stepactions.base.distributedloadbase.DistributedLoadBase`, with
-    a smaller surface.
-
-    Parameters
-    ----------
-    load
-        The distributed load.
-    surface
-        The faces it acts on in the subdomain: element lists by face, in the load's order.
-    """
-
-    def __init__(self, load: DistributedLoadBase, surface: dict):
-        self.load = load
-        self.surface = surface
-
-    @property
-    def loadType(self) -> str:
-        """The load's type."""
-
-        return self.load.loadType
-
-    def getCurrentLoad(self, timeStep: TimeStep) -> np.ndarray:
-        """The load's current magnitude.
-
-        Parameters
-        ----------
-        timeStep
-            The time step.
-
-        Returns
-        -------
-        np.ndarray
-            The magnitude.
-        """
-
-        return self.load.getCurrentLoad(timeStep)
-
-
-class BodyLoadOnSubdomain:
-    """A body load, restricted to the elements computed in a subdomain.
-
-    What the shared load assembly
-    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeBodyForces`)
-    reads of a :class:`~edelweissfe.stepactions.base.bodyloadbase.BodyLoadBase`, with a smaller
-    element set.
-
-    Parameters
-    ----------
-    load
-        The body load.
-    elementSet
-        The elements it acts on in the subdomain, in the load's order.
-    """
-
-    def __init__(self, load: BodyLoadBase, elementSet: list):
-        self.load = load
-        self.elementSet = elementSet
-
-    def getCurrentLoad(self, timeStep: TimeStep) -> np.ndarray:
-        """The load's current magnitude.
-
-        Parameters
-        ----------
-        timeStep
-            The time step.
-
-        Returns
-        -------
-        np.ndarray
-            The magnitude.
-        """
-
-        return self.load.getCurrentLoad(timeStep)
-
-
-class LoadsOnSubdomain:
-    """The distributed and body loads of a step, restricted to the elements computed in a subdomain,
-    and the tags of their nodal forces for the assembly completing them at the interface; see
-    :meth:`Subdomain.loadsOnSubdomain` and :meth:`Subdomain.loadAssemblyFor`.
-
-    Parameters
-    ----------
-    distributedLoads
-        The distributed loads of the step, as given.
-    bodyLoads
-        The body loads of the step, as given.
-    restrictedDistributedLoads
-        The distributed loads, restricted to the elements computed here.
-    restrictedBodyLoads
-        The body loads, restricted to the elements computed here.
-    entryDofs
-        The degree of freedom of every entry of their nodal forces, in the order the restricted loads
-        are evaluated.
-    entryLoadOrder
-        The place of every entry in the order of all load contributions of the model.
-    """
-
-    def __init__(
-        self,
-        distributedLoads: list,
-        bodyLoads: list,
-        restrictedDistributedLoads: list[DistributedLoadOnSubdomain],
-        restrictedBodyLoads: list[BodyLoadOnSubdomain],
-        entryDofs: np.ndarray,
-        entryLoadOrder: np.ndarray,
-    ):
-        self._loads = (distributedLoads, bodyLoads)
-        #: The distributed loads, restricted to the elements computed here.
-        self.distributedLoads = restrictedDistributedLoads
-        #: The body loads, restricted to the elements computed here.
-        self.bodyLoads = restrictedBodyLoads
-        #: The degree of freedom of every entry of their nodal forces.
-        self.entryDofs = entryDofs
-        #: The place of every entry in the order of all load contributions of the model.
-        self.entryLoadOrder = entryLoadOrder
-        #: The assembly of their nodal forces, once built (:meth:`Subdomain.loadAssemblyFor`).
-        self.assembly = None
-
-    def isFor(self, distributedLoads: list, bodyLoads: list) -> bool:
-        """Whether these are the restrictions of the given loads.
-
-        Parameters
-        ----------
-        distributedLoads
-            The distributed loads.
-        bodyLoads
-            The body loads.
-
-        Returns
-        -------
-        bool
-            Whether they are the loads given here, the same objects in the same order.
-        """
-
-        given = (distributedLoads, bodyLoads)
-        return all(
-            len(mine) == len(theirs) and all(a is b for a, b in zip(mine, theirs))
-            for mine, theirs in zip(self._loads, given)
-        )
+from edelweissfe.utils.exceptions import TopologyError
 
 
 class Subdomain:
@@ -659,7 +507,8 @@ class Subdomain:
         """The given loads, restricted to the elements computed here, with their nodal forces tagged
         for the assembly at the interface (:meth:`loadAssemblyFor`); made again when the loads or the
         subdomain changed. Local: it reads the mesh, which every process holds whole, and so may be
-        called where a process can fail alone (:meth:`allRanksFailTogether`).
+        called where a process can fail alone
+        (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
         A load acting on an element is a contribution of that element: it is evaluated by the
         process computing the element, with that process' current solution -- the element's degrees
@@ -827,7 +676,7 @@ class Subdomain:
             digest.update(name.encode())
             digest.update(np.asarray([node.label for node in constraint.nodes], dtype=np.int64).tobytes())
             digest.update(repr(constraint.fieldsOnNodes).encode())
-        self.requireSameOnAllRanks(
+        self.communicator.requireSameOnAllRanks(
             digest.hexdigest(), "the nodes and fields the constraints couple before a topology update"
         )
 
@@ -961,152 +810,6 @@ class Subdomain:
         for statesOfProcess in gathered:
             states.update(statesOfProcess)
         return states
-
-    def allreduceSum(self, values: list[float]) -> list[float]:
-        """The sums of values over all processes, added in ascending rank order, so that they are the
-        same bits in every process. Collective.
-
-        Parameters
-        ----------
-        values
-            This process' contributions.
-
-        Returns
-        -------
-        list[float]
-            The sum of every entry over all processes.
-        """
-
-        gathered = self.communicator.allgather(list(values))
-        totals = list(gathered[0])
-        for contributions in gathered[1:]:
-            totals = [total + value for total, value in zip(totals, contributions)]
-        return totals
-
-    def allreduceMin(self, value: float) -> float:
-        """The minimum of a value over all processes. Collective.
-
-        Parameters
-        ----------
-        value
-            This process' value.
-
-        Returns
-        -------
-        float
-            The minimum.
-        """
-
-        return self.communicator.allreduce(value, op=MPI.MIN)
-
-    def allreduceAny(self, flag: bool) -> bool:
-        """Whether a flag is set in any process. Collective.
-
-        Parameters
-        ----------
-        flag
-            This process' flag.
-
-        Returns
-        -------
-        bool
-            Whether any process set it.
-        """
-
-        return bool(self.communicator.allreduce(bool(flag), op=MPI.LOR))
-
-    def requireSameOnAllRanks(self, value, description: str):
-        """Refuse to continue unless every process holds the same value. Collective.
-
-        Parameters
-        ----------
-        value
-            This process' value; anything comparable for equality.
-        description
-            What the value says, for the message.
-
-        Raises
-        ------
-        RuntimeError
-            In every process, if two processes hold different values.
-        """
-
-        values = self.communicator.allgather(value)
-        if any(other != values[0] for other in values[1:]):
-            raise RuntimeError(
-                "The processes disagree on {:} ({:}); they must compute the replicated parts of the model "
-                "identically.".format(description, values)
-            )
-
-    @contextmanager
-    def allRanksFailTogether(self, operation: str):
-        """A context in which an exception raised in one process is raised in every process.
-        Collective.
-
-        A process raising alone would leave the others waiting for it in the next exchange forever.
-        Every process reports what went wrong in it, and every process raises the most severe: a
-        :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
-        :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
-        -- a cutback with the smallest size any process requested -- so that every process takes the
-        same path out of the step. Nothing inside the context may communicate: a process that
-        raised would skip the communication, and leave the others waiting in it. That is enforced,
-        not assumed -- the communicator raises at any communication inside the context
-        (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.withoutCommunication`),
-        which then fails on all ranks like any other failure. A step that needs to communicate is
-        split: each process does its own part in the context, and communicates after it (see
-        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`).
-
-        Parameters
-        ----------
-        operation
-            What is done in the context, for the message.
-
-        Yields
-        ------
-        None
-        """
-
-        failure = None
-        try:
-            with self.communicator.withoutCommunication(operation):
-                yield
-        except Exception as exception:
-            failure = exception
-
-        if failure is None:
-            outcome = _NO_FAILURE
-        elif isinstance(failure, CutbackRequest):
-            outcome = _CUTBACK
-        elif isinstance(failure, ConditionalStop):
-            outcome = _CONDITIONAL_STOP
-        else:
-            outcome = _FAILURE
-
-        status = np.array([outcome], dtype=np.int32)
-        # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
-        with performancetiming.timeit("subdomain wait"):
-            self.communicator.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
-
-        if status[0] == _NO_FAILURE:
-            return
-        if status[0] == _CONDITIONAL_STOP:
-            raise ConditionalStop() from failure
-
-        reports = self.communicator.allgather(
-            None
-            if failure is None
-            else (
-                "{:}: {:}".format(type(failure).__name__, failure),
-                failure.cutbackSize if outcome == _CUTBACK else None,
-            )
-        )
-        message = "; ".join(
-            "process {:}: {:}".format(rank, report[0]) for rank, report in enumerate(reports) if report is not None
-        )
-        if status[0] == _CUTBACK:
-            cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
-            raise CutbackRequest(message, cutbackSize) from failure
-        raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
 
     # --- Load balancing -----------------------------------------------------------------------------
 

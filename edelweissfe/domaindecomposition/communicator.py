@@ -30,8 +30,7 @@
 may be missing.
 
 A step that may fail in one process alone runs in a context in which the processes agree on its
-outcome afterwards
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`). Inside such a
+outcome afterwards (:meth:`Communicator.allRanksFailTogether`). Inside such a
 context no process may communicate: a process that failed before reaching a collective operation
 skips it, and the others wait in it for that process forever, or meet it in a different collective
 operation. What reads more than one process is therefore split into the part each process does
@@ -46,11 +45,23 @@ raises there --, the agreement that closes the context reports it as a failure o
 
 from contextlib import contextmanager
 
+import numpy as np
 from mpi4py import MPI
+
+import edelweissfe.utils.performancetiming as performancetiming
+from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
+from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest
+
+#: How :meth:`Communicator.allRanksFailTogether` ranks what went wrong: the most severe outcome of any
+#: process is the one every process raises.
+_NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
 
 
 class Communicator:
-    """The communicator of the processes sharing a model; see the module documentation.
+    """The communicator of the processes sharing a model; see the module documentation. Besides the
+    operations of ``mpi4py``, it lets the processes agree: on a failure in any of them
+    (:meth:`allRanksFailTogether`), on sums and extremes formed the same in every process, and that
+    they hold the same value.
 
     The methods carry the names of the ``mpi4py`` communicator they forward to, so that this is the
     communicator wherever one is expected.
@@ -334,3 +345,151 @@ class Communicator:
 
         self._requireCommunicationAllowed("Irecv")
         return self.mpiCommunicator.Irecv(buffer, source=source, tag=tag)
+
+    # --- Agreeing among the processes ---------------------------------------------------------------
+
+    def allreduceSum(self, values: list[float]) -> list[float]:
+        """The sums of values over all processes, added in ascending rank order, so that they are the
+        same bits in every process. Collective.
+
+        Parameters
+        ----------
+        values
+            This process' contributions.
+
+        Returns
+        -------
+        list[float]
+            The sum of every entry over all processes.
+        """
+
+        gathered = self.allgather(list(values))
+        totals = list(gathered[0])
+        for contributions in gathered[1:]:
+            totals = [total + value for total, value in zip(totals, contributions)]
+        return totals
+
+    def allreduceMin(self, value: float) -> float:
+        """The minimum of a value over all processes. Collective.
+
+        Parameters
+        ----------
+        value
+            This process' value.
+
+        Returns
+        -------
+        float
+            The minimum.
+        """
+
+        return self.allreduce(value, op=MPI.MIN)
+
+    def allreduceAny(self, flag: bool) -> bool:
+        """Whether a flag is set in any process. Collective.
+
+        Parameters
+        ----------
+        flag
+            This process' flag.
+
+        Returns
+        -------
+        bool
+            Whether any process set it.
+        """
+
+        return bool(self.allreduce(bool(flag), op=MPI.LOR))
+
+    def requireSameOnAllRanks(self, value, description: str):
+        """Refuse to continue unless every process holds the same value. Collective.
+
+        Parameters
+        ----------
+        value
+            This process' value; anything comparable for equality.
+        description
+            What the value says, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            In every process, if two processes hold different values.
+        """
+
+        values = self.allgather(value)
+        if any(other != values[0] for other in values[1:]):
+            raise RuntimeError(
+                "The processes disagree on {:} ({:}); they must compute the replicated parts of the model "
+                "identically.".format(description, values)
+            )
+
+    @contextmanager
+    def allRanksFailTogether(self, operation: str):
+        """A context in which an exception raised in one process is raised in every process.
+        Collective.
+
+        A process raising alone would leave the others waiting for it in the next exchange forever.
+        Every process reports what went wrong in it, and every process raises the most severe: a
+        :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
+        :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
+        -- a cutback with the smallest size any process requested -- so that every process takes the
+        same path out of the step. Nothing inside the context may communicate: a process that
+        raised would skip the communication, and leave the others waiting in it. That is enforced,
+        not assumed -- this communicator raises at any communication inside the context
+        (:meth:`withoutCommunication`),
+        which then fails on all ranks like any other failure. A step that needs to communicate is
+        split: each process does its own part in the context, and communicates after it (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`).
+
+        Parameters
+        ----------
+        operation
+            What is done in the context, for the message.
+
+        Yields
+        ------
+        None
+        """
+
+        failure = None
+        try:
+            with self.withoutCommunication(operation):
+                yield
+        except Exception as exception:
+            failure = exception
+
+        if failure is None:
+            outcome = _NO_FAILURE
+        elif isinstance(failure, CutbackRequest):
+            outcome = _CUTBACK
+        elif isinstance(failure, ConditionalStop):
+            outcome = _CONDITIONAL_STOP
+        else:
+            outcome = _FAILURE
+
+        status = np.array([outcome], dtype=np.int32)
+        # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
+        with performancetiming.timeit("subdomain wait"):
+            self.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
+
+        if status[0] == _NO_FAILURE:
+            return
+        if status[0] == _CONDITIONAL_STOP:
+            raise ConditionalStop() from failure
+
+        reports = self.allgather(
+            None
+            if failure is None
+            else (
+                "{:}: {:}".format(type(failure).__name__, failure),
+                failure.cutbackSize if outcome == _CUTBACK else None,
+            )
+        )
+        message = "; ".join(
+            "process {:}: {:}".format(rank, report[0]) for rank, report in enumerate(reports) if report is not None
+        )
+        if status[0] == _CUTBACK:
+            cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
+            raise CutbackRequest(message, cutbackSize) from failure
+        raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure

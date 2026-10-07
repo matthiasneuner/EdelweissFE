@@ -68,7 +68,7 @@ def _startedByMPILauncher() -> bool:
 
 class StepFailedOnAllRanks(StepFailed):
     """A step failed, and every process of the job raised this failure together, having agreed on it
-    (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`): so every
+    (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`): so every
     process may finish the job as after any failed step. A :class:`StepFailed` raised otherwise may
     have been raised in one process alone, which leaves the others waiting for it in their next
     collective operation; the driver then stops all of them (:func:`abortAllProcesses`)."""

@@ -458,32 +458,31 @@ def test_the_whole_model_is_a_trivial_partition():
     assert np.shares_memory(vector[partition.dofs], vector) and vector[partition.dofs].shape == vector.shape
 
 
-def test_a_single_subdomain_agrees_with_itself():
+def test_a_single_process_agrees_with_itself():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.communicator import Communicator
-    from edelweissfe.domaindecomposition.subdomain import Subdomain
     from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
 
-    subdomain = Subdomain(Communicator(MPI.COMM_SELF), journal=None, identification="test", loadBalanceTolerance=0.1)
+    communicator = Communicator(MPI.COMM_SELF)
 
-    assert subdomain.allreduceSum([1.5, -2.0]) == [1.5, -2.0]
-    assert subdomain.allreduceMin(0.25) == 0.25
-    assert subdomain.allreduceAny(True) and not subdomain.allreduceAny(False)
-    subdomain.requireSameOnAllRanks((True, False), "a verdict")
+    assert communicator.allreduceSum([1.5, -2.0]) == [1.5, -2.0]
+    assert communicator.allreduceMin(0.25) == 0.25
+    assert communicator.allreduceAny(True) and not communicator.allreduceAny(False)
+    communicator.requireSameOnAllRanks((True, False), "a verdict")
 
-    with subdomain.allRanksFailTogether("testing"):
+    with communicator.allRanksFailTogether("testing"):
         pass
     for raised, agreed in ((CutbackRequest("x", 0.25), CutbackRequest), (ConditionalStop(), ConditionalStop)):
         with pytest.raises(agreed):
-            with subdomain.allRanksFailTogether("testing"):
+            with communicator.allRanksFailTogether("testing"):
                 raise raised
     # a cutback is agreed on with the size requested, not a fixed one
     with pytest.raises(CutbackRequest) as caught:
-        with subdomain.allRanksFailTogether("testing"):
+        with communicator.allRanksFailTogether("testing"):
             raise CutbackRequest("x", 0.25)
     assert caught.value.cutbackSize == 0.25
     with pytest.raises(StepFailed, match="testing failed"):
-        with subdomain.allRanksFailTogether("testing"):
+        with communicator.allRanksFailTogether("testing"):
             raise KeyError("a failure")
 
 
@@ -491,27 +490,25 @@ def test_no_process_communicates_where_the_processes_agree_on_failures():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.communicator import Communicator
     from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
-    from edelweissfe.domaindecomposition.subdomain import Subdomain
 
     communicator = Communicator(MPI.COMM_SELF)
-    subdomain = Subdomain(communicator, journal=None, identification="test", loadBalanceTolerance=0.1)
 
     # A communication inside the context fails, on all ranks together, and names the context.
     with pytest.raises(StepFailedOnAllRanks, match="allgather was called while gathering inside"):
-        with subdomain.allRanksFailTogether("Gathering inside"):
+        with communicator.allRanksFailTogether("Gathering inside"):
             communicator.allgather(1.0)
     with pytest.raises(StepFailedOnAllRanks, match="Isend was called while"):
-        with subdomain.allRanksFailTogether("Exchanging inside"):
+        with communicator.allRanksFailTogether("Exchanging inside"):
             communicator.Isend(np.zeros(1), dest=0, tag=1)
     # So does one nested deeper, and the communicator is usable again after either context.
     with pytest.raises(StepFailedOnAllRanks, match="bcast was called while the inner one"):
-        with subdomain.allRanksFailTogether("The outer one"):
+        with communicator.allRanksFailTogether("The outer one"):
             with communicator.withoutCommunication("The inner one"):
                 pass
             with communicator.withoutCommunication("The inner one"):
                 communicator.bcast(1)
     assert communicator.allgather(2.0) == [2.0]
-    assert subdomain.allreduceSum([1.5]) == [1.5]
+    assert communicator.allreduceSum([1.5]) == [1.5]
 
 
 _FAILING_LOAD_DECK = """

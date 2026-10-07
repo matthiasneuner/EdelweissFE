@@ -120,7 +120,7 @@ communication, each in an override of a method of ``NED``:
 * :meth:`NEDMPI.updateConnectivityOf` runs a contact search on the constraint's process only;
 * and every step that can fail in one process alone -- the element and constraint evaluation, a
   contact search, a topology update, writing the output -- fails on all ranks together
-  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`).
+  (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
 **Limits of this prototype.** Every process holds the whole mesh, every node, every contact facet
 and global-length vectors; a model under the whole-model rule
@@ -247,10 +247,13 @@ class NEDMPI(NEDParallel):
         super().__init__(jobInfo, journal, **kwargs)
 
         communicator = worldCommunicator()
-        #: The subdomain this process computes, among all processes of the launcher; started without
-        #: a launcher, a subdomain of one -- the same code path, with every exchange a copy.
+        #: The communicator of all processes of the launcher -- started without a launcher, of this
+        #: process alone: the same code path, with every exchange a copy. The processes agree through
+        #: it, e.g. on a failure in any of them (:meth:`Communicator.allRanksFailTogether`).
+        self.communicator = Communicator(MPI.COMM_SELF) if communicator is None else communicator
+        #: The subdomain this process computes.
         self.subdomain = Subdomain(
-            Communicator(MPI.COMM_SELF) if communicator is None else communicator,
+            self.communicator,
             journal,
             self.identification,
             self.options["load-balance-tolerance"],
@@ -441,7 +444,7 @@ class NEDMPI(NEDParallel):
         """
 
         P[:] = 0.0
-        with self.subdomain.allRanksFailTogether("Evaluating the elements"):
+        with self.communicator.allRanksFailTogether("Evaluating the elements"):
             psi, contributions = computeElementsForExplicit(
                 self._incrementPlan.elementPlan, U_np, dU, P, timeStep, self._elementCosts
             )
@@ -502,7 +505,7 @@ class NEDMPI(NEDParallel):
 
         # A load kernel -- or a load not where the mesh describes it -- may fail in one process alone,
         # which would leave its neighbours waiting in the exchange below.
-        with self.subdomain.allRanksFailTogether("Evaluating the loads"):
+        with self.communicator.allRanksFailTogether("Evaluating the loads"):
             loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
             with performancetiming.timeit("distributed loads"):
                 forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
@@ -541,7 +544,7 @@ class NEDMPI(NEDParallel):
         """
 
         forces = {}
-        with self.subdomain.allRanksFailTogether("Evaluating the constraints"):
+        with self.communicator.allRanksFailTogether("Evaluating the constraints"):
             for name, constraint in constraints.items():
                 forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
 
@@ -565,7 +568,7 @@ class NEDMPI(NEDParallel):
             The critical time step.
         """
 
-        return self.subdomain.allreduceMin(super().getCriticalTimeStepForExplicitDynamics(model, U))
+        return self.communicator.allreduceMin(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
     def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
         """Keep the work of this increment at the prescribed degrees of freedom owned here -- a degree
@@ -593,7 +596,7 @@ class NEDMPI(NEDParallel):
         a checkpoint written with it), the end of a step. Collective.
         """
 
-        gathered = self.subdomain.communicator.allgather(self._pendingWorkAtPrescribedDofs)
+        gathered = self.communicator.allgather(self._pendingWorkAtPrescribedDofs)
         for increment in range(len(self._pendingWorkAtPrescribedDofs)):
             self._externalWork -= math.fsum(np.concatenate([ofProcess[increment] for ofProcess in gathered]).tolist())
         self._pendingWorkAtPrescribedDofs = []
@@ -640,7 +643,7 @@ class NEDMPI(NEDParallel):
 
         self.gatherExternalWork()
         Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
-        Wint, Wkin, *nonMechanical = self.subdomain.allreduceSum([Wint, Wkin] + nonMechanical)
+        Wint, Wkin, *nonMechanical = self.communicator.allreduceSum([Wint, Wkin] + nonMechanical)
         return Wint, Wkin, Wext, nonMechanical
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
@@ -833,7 +836,7 @@ class NEDMPI(NEDParallel):
            rank 0, and a failure to write may happen in one process only.
 
         Nothing communicates in parts 1 and 3; the communicator refuses it
-        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`).
+        (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
         Parameters
         ----------
@@ -847,11 +850,11 @@ class NEDMPI(NEDParallel):
         model = fieldOutputController.model
         with performancetiming.timeit("finalize output"):
             # Where every process holds every element, rank 0 holds their states: nothing to gather.
-            gathersStates = not model.elementDistribution.replicatesElements and self.subdomain.communicator.bcast(
+            gathersStates = not model.elementDistribution.replicatesElements and self.communicator.bcast(
                 any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
             )
 
-            with self.subdomain.allRanksFailTogether("Reading the output"):
+            with self.communicator.allRanksFailTogether("Reading the output"):
                 fieldOutputController.readResultsHere()
                 statesHere = self.subdomain.elementStatesOwnedHere(model) if gathersStates else None
 
@@ -859,7 +862,7 @@ class NEDMPI(NEDParallel):
             with performancetiming.timeit("gather states"):
                 states = self.subdomain.gatherElementStatesToRoot(statesHere) if gathersStates else None
 
-            with model.elementStatesFromElsewhere(states), self.subdomain.allRanksFailTogether("Writing the output"):
+            with model.elementStatesFromElsewhere(states), self.communicator.allRanksFailTogether("Writing the output"):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
@@ -986,9 +989,9 @@ class NEDMPI(NEDParallel):
         """
 
         searched = self.subdomain.constraintsSearchedHere(model, constraints)
-        with self.subdomain.allRanksFailTogether("Updating the constraint connectivity"):
+        with self.communicator.allRanksFailTogether("Updating the constraint connectivity"):
             changed = super().updateConnectivityOf(model, searched)
-        return self.subdomain.allreduceAny(changed)
+        return self.communicator.allreduceAny(changed)
 
     def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
         """Run the model modifiers and the mesh refresh of
@@ -1017,9 +1020,9 @@ class NEDMPI(NEDParallel):
         """
 
         self.subdomain.requireConstraintCopiesCurrent(model)
-        with self.subdomain.allRanksFailTogether("Updating the topology"):
+        with self.communicator.allRanksFailTogether("Updating the topology"):
             changed = super().updateTopology(model, step, offerModelModifiers)
-        self.subdomain.requireSameOnAllRanks(
+        self.communicator.requireSameOnAllRanks(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
         )
         if changed[0]:
