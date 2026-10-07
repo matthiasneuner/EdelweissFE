@@ -59,6 +59,7 @@ EXPECTED_DISTRIBUTED = {
     "marmot/GCDPNEDExplicitHyperbolic",
     "marmot/GCDPNEDExplicitHyperbolicAMR",
     "marmot/NED",
+    "marmot/NEDCylinderGenerator",
     "marmot/NEDFollowerPressureUL",
     "marmot/NEDInitialStressPressure",
     "marmot/NEDLiveAMR",

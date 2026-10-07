@@ -1,0 +1,27 @@
+** An explicit cylinder from the cylinderGenerator (an O-grid of hexahedra, extruded along z): fixed at the
+** bottom, compressed at the top and confined by a pressure on its mantle. The generator only describes the
+** mesh, so the model runs distributed; its element sets and surfaces hold the part each process computes.
+** Bit-identical to a serial run (U.ref).
+*material, name=VonMises, id=myMaterial
+210000, 0.3, 550, 1000, 200, 1400, 1
+
+*modelGenerator, generator=cylinderGenerator, name=cyl
+axis=z
+radius=5.0
+lY=10.0
+nR=3
+nY=4
+elType=C3D8
+
+*section, name=section1, material=myMaterial, type=solid
+cyl_all
+
+*job, name=cylinderjob, domain=3d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=1
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1e0, minInc=1e-2, maxNumInc=10000, maxIter=25, stepLength=1
+>>dirichlet, name=bottom, nSet=cyl_bottom, field=displacement, 1=0, 2=0, 3=0
+>>dirichlet, name=top, nSet=cyl_top, field=displacement, 3=-0.05
+>>distributedload, name=confinement, surface=cyl_outer, magnitude=10, f(t)=t, type=pressure
