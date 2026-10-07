@@ -565,11 +565,10 @@ Dynamic h-adaptivity model modifier for HEX20 hanging-node AMR.
 The modifier works on the mesh, not on element objects: its octree mirror, the marking, the 2:1
 balance, the hanging nodes and the numbering of the new nodes and elements are derived from the
 mesh, the nodes and the node fields, which every process of a domain-decomposed run holds whole, so
-every process refines identically. Element objects are touched only where they exist: the child of a
-refined element is created by the process computing its parent
-(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`), which
-transfers its parent's state to it; every process updates the mesh, the nodes, the sets and the
-surfaces. A serial run creates every child, as the process computing every element.
+every process refines identically. Element objects are touched only where they exist: the model
+creates the child of a refined element where its parent is computed
+(:meth:`~edelweissfe.models.femodel.FEModel.createChildElementOfMesh`), and the parent's state is
+transferred to it there; the mesh, the nodes, the sets and the surfaces are updated everywhere.
 [hadaptivity] Dynamic hanging-node h-adaptivity model modifier for HEX20 elements.
   optional arguments
     [moduleOptions] Internal (<class 'dict'>, default = {})
