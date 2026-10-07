@@ -136,6 +136,10 @@ def finiteElementSimulation(
     model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
     model = fillFEModelFromInputFile(model, inputfile, journal)
     model.prepareYourself(journal)
+    # Every process contributes the material properties of its own elements; one writes the files.
+    for section, rowsOfSets in model.materialPropertiesToExport():
+        if writesOutput:
+            section.writeMaterialPropertiesFile(rowsOfSets)
     model.advanceToTime(job.get("startTime", 0.0))
     toc = getCurrentTime()
     jobInfo["model setup time"] = toc - tic

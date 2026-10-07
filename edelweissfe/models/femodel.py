@@ -36,7 +36,6 @@ import h5py
 import numpy as np
 
 from edelweissfe.config.phenomena import getFieldSize, phenomena
-from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
@@ -706,36 +705,41 @@ class FEModel:
         """
         self.assignSectionsAndPropertiesToElements(self.elements)
 
-        for section in self.sections.values():
-            if section.writeMaterialPropertiesToFile:
-                self._exportMaterialProperties(section)
+    def materialPropertiesToExport(self) -> list[tuple]:
+        """The material properties of every element of every section that writes them to a file
+        (``>>writeMaterialPropertiesToFile``): the whole model's, in mesh order, as a serial run holds
+        them. Each element's properties come from the process owning it; in a distributed run they
+        are gathered
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`), so
+        this is collective there. Who writes the files decides the writer -- the driver: only one
+        process of a distributed run.
 
-    def _exportMaterialProperties(self, section):
-        """Write the material properties of every element of a section to its file: the whole
-        model's, in mesh order, as a serial run writes it. Each element's properties come from the
-        process owning it; in a distributed run they are gathered
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`) and
-        only rank 0 writes the file. Collective.
-
-        Parameters
-        ----------
-        section
-            The section.
+        Returns
+        -------
+        list[tuple]
+            Per such section, the section and, per element set of it, the element numbers in set
+            order and their material properties, one row per element (None for a set without
+            elements), as :meth:`~edelweissfe.sections.base.sectionbase.Section.writeMaterialPropertiesFile`
+            takes them.
         """
 
         distribution = self.elementDistribution
-        rowsOfSets = []
-        for elementSet in section.elSets:
-            owned = distribution.ownedElements(elementSet.localElements())
-            properties = np.array([element._materialProperties for element in owned]) if owned else None
-            rowsOfSets.append(
-                (
-                    elementSet.elementNumbersOfWholeSet(),
-                    distribution.resultsOfWholeSet(elementSet, [element.elNumber for element in owned], properties),
+        exports = []
+        for section in self.sections.values():
+            if not section.writeMaterialPropertiesToFile:
+                continue
+            rowsOfSets = []
+            for elementSet in section.elSets:
+                owned = distribution.ownedElements(elementSet.localElements())
+                properties = np.array([element._materialProperties for element in owned]) if owned else None
+                rowsOfSets.append(
+                    (
+                        elementSet.elementNumbersOfWholeSet(),
+                        distribution.resultsOfWholeSet(elementSet, [element.elNumber for element in owned], properties),
+                    )
                 )
-            )
-        if isRootProcess():
-            section.writeMaterialPropertiesFile(rowsOfSets)
+            exports.append((section, rowsOfSets))
+        return exports
 
     def assignSectionsAndPropertiesToElements(self, elements: dict):
         """Assign sections and element properties to elements: to every element when the model is
