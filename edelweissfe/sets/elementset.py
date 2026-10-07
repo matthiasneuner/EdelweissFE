@@ -265,13 +265,13 @@ class ElementSetOfMesh(ElementSet):
     set of the mesh to such a set (:meth:`~edelweissfe.models.femodel.FEModel.resolveElementSetOfMesh`,
     the only place one is made). In a serial run that is every element of the set. A domain-decomposed
     run may create only part of the mesh in each process; a set then holds only its local part, says so
-    through :attr:`isComplete`, and raises if read as a whole (:class:`ElementSet`). What the mesh and the nodes describe is known for the whole set in
-    every process: its element numbers (:meth:`elementNumbersOfWholeSet`) and its nodes
+    through :attr:`isComplete`, and raises if read as a whole (:class:`ElementSet`). What the mesh and
+    the nodes describe is known for the whole set in every process: its element numbers (:meth:`elementNumbersOfWholeSet`) and its nodes
     (:meth:`extractNodeSet`).
 
     Parameters
     ----------
-    label
+    name
         The name of the set, in the mesh as here.
     elements
         The elements of the set local to this process, in set order.
