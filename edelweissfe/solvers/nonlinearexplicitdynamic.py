@@ -28,6 +28,22 @@
 #  ---------------------------------------------------------------------
 """The nonlinear explicit dynamic solver.
 
+**Reading this module.** The step drives the solver through :meth:`NED.beginStep`, then, per
+increment, :meth:`NED.prepareIncrement` (a topology update when due, and the equation system:
+the lumped mass and the stable time increment), :meth:`NED.attemptIncrement` (a contact search
+when due, then the increment itself) and :meth:`NED.acceptIncrement` (the converged state
+committed), and finally :meth:`NED.endStep`. The increment itself, :meth:`NED.solveIncrement`, is
+the central-difference method in four named steps:
+
+1. :meth:`NED.prescribeBoundaryMotion` -- the motion of the Dirichlet degrees of freedom;
+2. :meth:`NED.updateVelocities` -- :math:`v_{n+1/2} = v_{n-1/2} + \\Delta t\\, M^{-1} f_n`;
+3. :meth:`NED.advanceDisplacements` -- :math:`u_{n+1} = u_n + \\Delta t\\, v_{n+1/2}`;
+4. :meth:`NED.assembleNetForce` -- :math:`f_{n+1} = f^{ext} + f^{c} - f^{int}` at :math:`u_{n+1}`:
+   :meth:`NED.assembleInternalForces` over the elements, the loads, and the constraint forces.
+
+The equation system is built by :meth:`NED.buildEquationSystem`, the lumped operators by
+:meth:`NED._assembleLumpedOperators`. Everything else in the module is diagnostics and validation.
+
 An increment solves no equation system. Second-order fields are advanced by central differences
 (a leapfrog, with the velocity staggered half an increment behind the displacement), first-order
 fields -- a nonlocal damage field, for instance -- by forward Euler, and both divide by a **lumped**
