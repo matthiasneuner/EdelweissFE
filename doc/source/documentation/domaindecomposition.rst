@@ -114,7 +114,7 @@ with the same function and the same weights the subdomain uses
 mesh is described and before the elements are made
 (:func:`~edelweissfe.helpers.inputfilehelpers.fillFEModelFromInputFile`). A process then creates
 
-* the elements it **computes** -- its part of the partition; and
+* the elements it **owns** -- those the partition assigns to it; and
 * every **auxiliary element** -- the contact facets and the point masses of rigid bodies
   (see `Contact, ties and rigid bodies`_).
 

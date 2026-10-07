@@ -193,7 +193,7 @@ class ElementDistribution:
 
         return list(elements)
 
-    def resultsOfWholeSet(self, elementSet, numbersReportedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(self, elementSet, numbersOwnedHere: list, results: np.ndarray | None) -> np.ndarray:
         """The results of every element of a set, in set order, from the results of the elements
         owned here. Here: the results given, since every element is owned here.
 
@@ -201,7 +201,7 @@ class ElementDistribution:
         ----------
         elementSet
             The element set.
-        numbersReportedHere
+        numbersOwnedHere
             The numbers of the elements of the set owned here (:meth:`ownedElements`), in set
             order.
         results

@@ -214,7 +214,7 @@ class DistributedElements(ElementDistribution):
     def decideLocalElements(self, mesh: Mesh, domainSize: int):
         """Partition the mesh, and decide which elements this process creates. Collective.
 
-        A process creates the elements it computes -- its part of the partition -- and the auxiliary
+        A process creates the elements it owns -- those the partition assigns to it -- and the auxiliary
         elements (see :meth:`placeAuxiliaryElement`). The loads acting on an element
         are evaluated where the element is computed, and exchanged like its forces (see
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`), so no
@@ -465,7 +465,7 @@ class DistributedElements(ElementDistribution):
 
         return [element for element in elements if self.owners[element.elNumber] == self.rank]
 
-    def resultsOfWholeSet(self, elementSet, numbersReportedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(self, elementSet, numbersOwnedHere: list, results: np.ndarray | None) -> np.ndarray:
         """The results of every element of a set, in the order of the set in the mesh, gathered from
         the processes computing them -- to every process, so that a field output is the same in
         every process, as without decomposition. Collective.
@@ -474,7 +474,7 @@ class DistributedElements(ElementDistribution):
         ----------
         elementSet
             The element set; resolved from the mesh.
-        numbersReportedHere
+        numbersOwnedHere
             The numbers of the elements of the set computed here, in set order.
         results
             Their results, one row per element; None if there are none.
@@ -491,7 +491,7 @@ class DistributedElements(ElementDistribution):
         """
 
         numbers = elementSet.elementNumbersOfWholeSet()
-        pieces = self.communicator.allgather((list(numbersReportedHere), results))
+        pieces = self.communicator.allgather((list(numbersOwnedHere), results))
 
         rowOf = {number: row for row, number in enumerate(numbers)}
         whole = None

@@ -670,21 +670,21 @@ class ElementFieldOutput(_FieldOutputBase):
         self.resultName = resultName
         self.quadraturePoints = quadraturePoints
 
-        self._collectFromElementsReportedHere(model)
+        self._collectFromOwnedElements(model)
 
         super().__init__(name, model, journal, saveHistory, f_x, export, fExport_x)
 
-    def _collectFromElementsReportedHere(self, model: FEModel):
+    def _collectFromOwnedElements(self, model: FEModel):
         """Set up the element result collector for the elements of the set this process reports --
         all of them, unless a domain-decomposed run computes some of them elsewhere."""
 
         self._seenSetVersion = self.associatedSet._version
         self._seenOwnershipVersion = model.elementDistribution.ownershipVersion
-        reportedHere = model.elementDistribution.ownedElements(self.associatedSet.localElements())
+        ownedHere = model.elementDistribution.ownedElements(self.associatedSet.localElements())
         # Numbers, not the elements: an element moving to another process must not be kept alive here.
-        self._numbersReportedHere = [element.elNumber for element in reportedHere]
+        self._numbersOwnedHere = [element.elNumber for element in ownedHere]
         self.elementResultCollector = (
-            ElementResultCollector(reportedHere, self.quadraturePoints, self.resultName) if reportedHere else None
+            ElementResultCollector(ownedHere, self.quadraturePoints, self.resultName) if ownedHere else None
         )
 
     def _rebuildCollectorIfSetChanged(self):
@@ -700,7 +700,7 @@ class ElementFieldOutput(_FieldOutputBase):
             self.associatedSet._version != self._seenSetVersion
             or self.model.elementDistribution.ownershipVersion != self._seenOwnershipVersion
         ):
-            self._collectFromElementsReportedHere(self.model)
+            self._collectFromOwnedElements(self.model)
 
     def updateResults(self, model: FEModel):
         """Update the field output.
@@ -714,7 +714,7 @@ class ElementFieldOutput(_FieldOutputBase):
 
         self._rebuildCollectorIfSetChanged()
         resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
-        result = model.elementDistribution.resultsOfWholeSet(self.associatedSet, self._numbersReportedHere, resultsHere)
+        result = model.elementDistribution.resultsOfWholeSet(self.associatedSet, self._numbersOwnedHere, resultsHere)
 
         super()._applyResultsPipleline(result)
 

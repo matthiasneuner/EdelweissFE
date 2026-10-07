@@ -1,6 +1,6 @@
 ** The NED test case, held whole in every process: the executePythonCode generator below changes
-** nothing, but code run on the model while the mesh is described is a reason for the whole-model
-** fallback (domaindecomposition.distributedelements.reasonsForTheWholeModel). Contact and ties run
+** nothing, but code run on the model while the mesh is described is a reason for the replicated-elements
+** fallback (domaindecomposition.distributedelements.reasonsToReplicateElements). Contact and ties run
 ** distributed, so this keeps the fallback under test (testfiles/mpi/check_element_distribution.py).
 *material, name=VonMises, id=myMaterial, provider=edelweiss
 210000, 0.3, 550, 1000, 200, 1400, 1
