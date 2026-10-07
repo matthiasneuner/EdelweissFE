@@ -115,8 +115,8 @@ class Generator(GeneratorBase):
     """
 
     #: It makes the nodes of a rigid body and its point mass -- an element of its own -- in every
-    #: process; see GeneratorBase.wholeModelReason.
-    wholeModelReason = None
+    #: process; see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: The point mass is an element of its own; see GeneratorBase.describesElementsOfMesh.
     describesElementsOfMesh = False

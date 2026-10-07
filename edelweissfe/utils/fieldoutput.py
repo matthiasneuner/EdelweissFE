@@ -672,7 +672,7 @@ class ElementFieldOutput(_FieldOutputBase):
 
         self._seenSetVersion = self.associatedSet._version
         self._seenOwnershipVersion = model.elementDistribution.ownershipVersion
-        reportedHere = model.elementDistribution.elementsReportedHere(self.associatedSet.localElements())
+        reportedHere = model.elementDistribution.ownedElements(self.associatedSet.localElements())
         # Numbers, not the elements: an element moving to another process must not be kept alive here.
         self._numbersReportedHere = [element.elNumber for element in reportedHere]
         self.elementResultCollector = (

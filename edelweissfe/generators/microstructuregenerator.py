@@ -77,8 +77,8 @@ class MicrostructureGeneratorSchema:
 class Generator(GeneratorBase):
     """A mesh generator for generating a structure from a single unit cell mesh."""
 
-    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
-    wholeModelReason = None
+    #: It only describes the mesh; see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = MicrostructureGeneratorSchema

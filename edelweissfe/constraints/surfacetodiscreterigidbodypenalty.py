@@ -198,8 +198,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     """
 
     #: It reads the contact facets of its surface, the nodes and the rigid body, which every process
-    #: holds whole; see ConstraintBase.wholeModelReason.
-    wholeModelReason = None
+    #: holds whole; see ConstraintBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = SurfaceToDiscreteRigidBodyPenaltySchema

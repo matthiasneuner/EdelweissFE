@@ -105,8 +105,8 @@ class BoxgenSchema:
 class Generator(GeneratorBase):
     """A mesh generator for cuboid geometries and structured hex meshes."""
 
-    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
-    wholeModelReason = None
+    #: It only describes the mesh; see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = BoxgenSchema

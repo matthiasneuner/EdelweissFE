@@ -181,8 +181,8 @@ class Constraint(ConstraintBase, MeshDependent):
     """
 
     #: It reads its node set, the nodes and the rigid body, which every process holds whole; see
-    #: ConstraintBase.wholeModelReason.
-    wholeModelReason = None
+    #: ConstraintBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDiscreteRigidBodyPenaltySchema

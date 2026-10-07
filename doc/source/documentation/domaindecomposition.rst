@@ -65,18 +65,18 @@ reported once on rank 0:
 The fallback rule
 ~~~~~~~~~~~~~~~~~
 
-:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel` reads the input
+:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements` reads the input
 file and names every reason to hold the whole model on every process; the job is distributed only if
 there is none:
 
 * a **model modifier that reads element objects of the whole model** (``*modelModifier``, e.g.
   ``surfaceSnap``): it changes the mesh during the run from what it reads. Every model modifier says
-  so through :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.wholeModelReason`;
+  so through :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.replicatedElementsReason`;
   one that does not say it reads only the mesh is assumed to need the whole model. Adaptive
   refinement (``hAdaptivity``) reads only the mesh and runs distributed (see `Adaptive refinement`_);
 * a **constraint not known to read only what every process holds** (``*constraint``): every
   constraint says so through
-  :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`
+  :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.replicatedElementsReason`
   (:mod:`~edelweissfe.constraints.base.wholemodel`). Ties (``tie``), penalty contact
   (``surfaceToDeformableSurfacePenalty``, ``nodeToDeformableSurfacePenalty``,
   ``surfaceToDiscreteRigidBodyPenalty``, ``nodeToDiscreteRigidBodyPenalty``,
@@ -88,7 +88,7 @@ there is none:
   case;
 * a **generator that does more than describe the mesh**: ``executePythonCode`` and ``cubit`` act on
   element objects while the mesh is being described. Every generator says so through
-  :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`; a generator
+  :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.replicatedElementsReason`; a generator
   that does not say it only describes the mesh is assumed to need the whole model. The contact-facet
   generator (``surfaceElementGenerator``) and the discrete rigid body generator are not among them:
   they read the mesh and make elements of their own in every process;
@@ -349,7 +349,7 @@ managers of rank 0), so no process can wait for one that already left.
 The contact search itself, at a contact update and at a topology check alike, runs on the process
 that evaluates the constraint only: nothing but that evaluation reads its outcome. The constraint
 forces are shared with the degrees of freedom of the owner's search. Whether a search changed a
-footprint is decided by the owners and agreed on by all processes.
+footprint is decided by the owners and communicated to all processes.
 
 Restoring a constraint's state restores it completely -- a contact constraint adopts the owner's
 search, and with it the nodes it couples -- so after a synchronization every process' copy of a
@@ -439,7 +439,7 @@ Only that process creates it from the mesh, assigns it its parent's section and 
 and transfers its parent's state to it; the parent is then dropped. Every process updates the mesh,
 the nodes, the element and node sets, the surfaces and the node fields identically. After the
 modifier, the topology pipeline lets the distribution create and drop the elements of the changed
-mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`): a
+mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`): a
 process drops the elements no longer in the mesh. The equation
 system is then built again, as after any topology change, adopting this partition; the next
 rebalancing check may move the children like any other element (`Load balancing`_). The hanging-node
@@ -502,7 +502,7 @@ process -- over, and with it the degree-of-freedom indices of the elements, the 
 interface, the loads of the elements computed here, the lumped inertia and damping (assembled from the
 elements now computed here, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
-element results again for the elements now reported here. All of these are released *before* the
+element results again for the elements now owned here. All of these are released *before* the
 elements move -- the solver keeps only plain copies of the three vectors it carries over, the field
 outputs keep element numbers, not elements -- so that a dropped element is freed before the new ones
 are created, and a migration does not raise the memory of a process beyond what its elements need:
@@ -543,7 +543,7 @@ process keeps the products at the degrees of freedom it owns, increment by incre
 gathered only where the external work is read -- the energy balance, an output increment, the end
 of a step -- and added increment by increment, so every process accumulates that of the whole model,
 as a serial run does, without an exchange every increment
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.settleExternalWork`). It is an
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.gatherExternalWork`). It is an
 ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the
@@ -570,8 +570,8 @@ Failures
 A failure while evaluating the elements or the constraints -- a material that cannot integrate at
 the stable step, above all --, in a constraint's connectivity search, in a topology update (the
 marker, the refinement, the mesh refresh), or in finalizing the output (a conditional stop, too) is
-agreed on by all processes before any of them raises
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`), and every process
+raised on all ranks together
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`), and every process
 ends the step the same way; a cutback requested anywhere is raised everywhere, with the smallest
 size requested. A failure anywhere else aborts all processes, and so does an interrupt (``Ctrl+C``)
 of any one of them: the others would otherwise wait forever for the one that stopped

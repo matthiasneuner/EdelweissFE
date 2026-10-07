@@ -30,8 +30,10 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from edelweissfe.constraints.base.wholemodel import NOT_YET_VERIFIED
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import (
+    NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.vijentitybase import VIJEntityBase
 from edelweissfe.timesteppers.timestep import TimeStep
@@ -52,12 +54,10 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: Undeclared, it cannot be checkpointed.
     checkpointedState: dict | None = None
 
-    #: Why this constraint needs every element of the model in every process of a domain-decomposed
-    #: run (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`),
-    #: or None for a constraint that reads only what every process holds -- the mesh, the nodes and
-    #: their fields, contact facets and rigid bodies -- and no element object of the solid mesh. Not
-    #: None unless a constraint says so.
-    wholeModelReason: str | None = NOT_YET_VERIFIED
+    #: Why a domain-decomposed job using this class needs every element object in every process
+    #: (replicated elements), or None if it works with distributed elements; declared once per class,
+    #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
+    replicatedElementsReason: str | None = NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS
 
     @classmethod
     def fromConstraintDefinition(

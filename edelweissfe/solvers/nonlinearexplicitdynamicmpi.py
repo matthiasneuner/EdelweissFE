@@ -84,7 +84,7 @@ loads and the constraint forces after them in deck order. A run on any number of
 therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same input -- through
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
 depends on measured timings, changes the speed of a run and never its result. The external work is
-summed exactly (:meth:`settleExternalWork`), so it, too, and the checkpoints recording it,
+summed exactly (:meth:`gatherExternalWork`), so it, too, and the checkpoints recording it,
 are bit-identical. Only the kinetic and internal energy of the energy table are formed per
 subdomain and then added, and may differ from a serial run's in their last digits; they enter
 nothing but the table.
@@ -119,16 +119,16 @@ communication, each in an override of a method of ``NED``:
   :meth:`NEDMPI.applyStepActionsAtStepEnd` at the end of a step;
 * :meth:`NEDMPI.updateConnectivityOf` runs a contact search on the constraint's process only;
 * and every step that can fail in one process alone -- the element and constraint evaluation, a
-  contact search, a topology update, writing the output -- is agreed on by all of them
-  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.agreedOnByAllParts`).
+  contact search, a topology update, writing the output -- fails on all ranks together
+  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`).
 
 **Limits of this prototype.** Every process holds the whole mesh, every node, every contact facet
 and global-length vectors; a model under the whole-model rule
-(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`) holds every
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements`) holds every
 element in every process, so that its memory per process does not shrink with the number of
 processes. The topology of a refinement costs every process what it costs a serial run. Constraints
 are evaluated whole, each by one process, while the others wait. An exception outside the steps
-agreed on by all processes, and an interrupt of any process, abort all of them.
+that fail on all ranks together, and an interrupt of any process, abort all of them.
 
 Run with, for example::
 
@@ -270,7 +270,7 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots: list[NodeFieldSlot] = []
         #: The work at the prescribed degrees of freedom owned here of every increment since the
         #: external work was last read, in increment order: one array of products per increment,
-        #: added to the external work by :meth:`settleExternalWork`.
+        #: added to the external work by :meth:`gatherExternalWork`.
         self._pendingWorkAtPrescribedDofs: list[np.ndarray] = []
 
     def beginStep(
@@ -410,7 +410,7 @@ class NEDMPI(NEDParallel):
         contributions = computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
         with performancetiming.timeit("interface forces"):
             self.subdomain.interfaceAssemblyFor(plan).assemble(contributions, vector)
-            self.subdomain.shareFromOwners(vector)
+            self.subdomain.allgatherOwnedValues(vector)
         return vector
 
     # --- The increment ------------------------------------------------------------------------------
@@ -419,7 +419,7 @@ class NEDMPI(NEDParallel):
     def assembleInternalForces(
         self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements of the subdomain, agreed on by all processes, and complete their
+        """Evaluate the elements of the subdomain, failing on all ranks together if it fails on one, and complete their
         internal force at the interface; see :meth:`NED.assembleInternalForces`. Collective.
 
         Parameters
@@ -440,7 +440,7 @@ class NEDMPI(NEDParallel):
         """
 
         P[:] = 0.0
-        with self.subdomain.agreedOnByAllParts("Evaluating the elements"):
+        with self.subdomain.allRanksFailTogether("Evaluating the elements"):
             psi, contributions = computeElementsForExplicit(
                 self._incrementPlan.elementPlan, U_np, dU, P, timeStep, self._elementCosts
             )
@@ -466,7 +466,7 @@ class NEDMPI(NEDParallel):
     ) -> tuple[DofVector, None]:
         """Assemble the loads of :meth:`NED.assembleLoads` in the same order, those acting on
         elements as the element forces are: each process evaluates the loads of the elements it
-        computes, agreed on by all processes, and the contributions are completed at the interface
+        computes, failing on all ranks together if it fails on one, and the contributions are completed at the interface
         and added in the order of the loads of the model; see
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`. Collective.
 
@@ -501,7 +501,7 @@ class NEDMPI(NEDParallel):
 
         # A load kernel -- or a load not where the mesh describes it -- may fail in one process alone,
         # which would leave its neighbours waiting in the exchange below.
-        with self.subdomain.agreedOnByAllParts("Evaluating the loads"):
+        with self.subdomain.allRanksFailTogether("Evaluating the loads"):
             loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
             with performancetiming.timeit("distributed loads"):
                 forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
@@ -516,7 +516,7 @@ class NEDMPI(NEDParallel):
     def assembleConstraintForces(
         self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> DofVector:
-        """Evaluate the constraints of the subdomain, agreed on by all processes, share their forces
+        """Evaluate the constraints of the subdomain, failing on all ranks together if it fails on one, share their forces
         with every process, and add those of every constraint of the model, in model order; see
         :meth:`NED.assembleConstraintForces`. Collective.
 
@@ -540,7 +540,7 @@ class NEDMPI(NEDParallel):
         """
 
         forces = {}
-        with self.subdomain.agreedOnByAllParts("Evaluating the constraints"):
+        with self.subdomain.allRanksFailTogether("Evaluating the constraints"):
             for name, constraint in constraints.items():
                 forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
 
@@ -564,12 +564,12 @@ class NEDMPI(NEDParallel):
             The critical time step.
         """
 
-        return self.subdomain.minAcrossParts(super().getCriticalTimeStepForExplicitDynamics(model, U))
+        return self.subdomain.allreduceMin(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
     def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
         """Keep the work of this increment at the prescribed degrees of freedom owned here -- a degree
         of freedom shared by two subdomains is counted once, by its owner -- until the external work
-        is next read (:meth:`settleExternalWork`), so that the products need not be gathered every
+        is next read (:meth:`gatherExternalWork`), so that the products need not be gathered every
         increment; see :meth:`NED.addExternalWork`.
 
         Parameters
@@ -582,7 +582,7 @@ class NEDMPI(NEDParallel):
 
         self._pendingWorkAtPrescribedDofs.append(reactionTimesIncrement[self.partition.ownedDofMask[dofs]])
 
-    def settleExternalWork(self):
+    def gatherExternalWork(self):
         """Add the work of every increment since the last call to the external work, increment by
         increment, in increment order: the products at the degrees of freedom each process owns are
         gathered to every process -- once for all those increments -- and each increment's are summed
@@ -622,7 +622,7 @@ class NEDMPI(NEDParallel):
 
         The internal and kinetic energies are formed per subdomain and then added in rank order, so
         they may differ from a serial run's in their last digits; they enter nothing but the energy
-        table. The external work is that of the whole model (:meth:`settleExternalWork`).
+        table. The external work is that of the whole model (:meth:`gatherExternalWork`).
 
         Parameters
         ----------
@@ -637,9 +637,9 @@ class NEDMPI(NEDParallel):
             As for :meth:`NED.energyBalanceTerms`.
         """
 
-        self.settleExternalWork()
+        self.gatherExternalWork()
         Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
-        Wint, Wkin, *nonMechanical = self.subdomain.sumAcrossParts([Wint, Wkin] + nonMechanical)
+        Wint, Wkin, *nonMechanical = self.subdomain.allreduceSum([Wint, Wkin] + nonMechanical)
         return Wint, Wkin, Wext, nonMechanical
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
@@ -663,7 +663,7 @@ class NEDMPI(NEDParallel):
 
         if self.isOutputIncrement(timeStep):
             # the output and a checkpoint written after it read the external work
-            self.settleExternalWork()
+            self.gatherExternalWork()
             self._synchronizeModel(model, timeStep, includeStates=True)
 
             # Right after every element state was synchronized -- or, where each process holds
@@ -742,7 +742,7 @@ class NEDMPI(NEDParallel):
         return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
-        """Write the output of an accepted increment, agreed on by all processes: a conditional stop
+        """Write the output of an accepted increment, failing on all ranks together if it fails on one: a conditional stop
         is decided by an output manager of rank 0, and a failure to write may happen in one process
         only. Collective.
 
@@ -756,7 +756,7 @@ class NEDMPI(NEDParallel):
         """
 
         # A checkpoint holds the state of every element. Where each process created only its own
-        # elements, they are gathered to rank 0 first -- outside the agreed context, in which nothing
+        # elements, they are gathered to rank 0 first -- outside the context failing on all ranks together, in which nothing
         # may communicate -- if a checkpoint is written now, which only rank 0, holding the output
         # managers, knows; and released once written, however the output ended.
         model = fieldOutputController.model
@@ -768,7 +768,7 @@ class NEDMPI(NEDParallel):
                 model.elementDistribution.gatherStatesForCheckpoint(model.elements)
 
         try:
-            with performancetiming.timeit("finalize output"), self.subdomain.agreedOnByAllParts("Writing the output"):
+            with performancetiming.timeit("finalize output"), self.subdomain.allRanksFailTogether("Writing the output"):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
         finally:
             model.elementDistribution.forgetGatheredStates()
@@ -788,7 +788,7 @@ class NEDMPI(NEDParallel):
         if self._system is not None:
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True)
         # the end of a step reads the external work, and so does the output written after it
-        self.settleExternalWork()
+        self.gatherExternalWork()
         super().applyStepActionsAtStepEnd(model, stepActions)
 
     @performancetiming.timeit("publish node fields")
@@ -879,7 +879,7 @@ class NEDMPI(NEDParallel):
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let those of the given constraints update their connectivity whose search runs in this
-        process, agreed on by all processes; whether a constraint of any process changed. See
+        process, failing on all ranks together; whether a constraint of any process changed. See
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.constraintsSearchedHere`.
         Collective.
 
@@ -897,14 +897,14 @@ class NEDMPI(NEDParallel):
         """
 
         searched = self.subdomain.constraintsSearchedHere(model, constraints)
-        with self.subdomain.agreedOnByAllParts("Updating the constraint connectivity"):
+        with self.subdomain.allRanksFailTogether("Updating the constraint connectivity"):
             changed = super().updateConnectivityOf(model, searched)
-        return self.subdomain.anyPart(changed)
+        return self.subdomain.allreduceAny(changed)
 
     def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
         """Run the model modifiers and the mesh refresh of
         :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopology` in
-        every process, on the same synchronized model, agreed on by all processes; and check that
+        every process, on the same synchronized model, failing on all ranks together if it fails on one; and check that
         every process arrived at the same outcome. Collective.
 
         If the topology changed, the subdomains are rebalanced for the changed mesh if that pays
@@ -928,9 +928,9 @@ class NEDMPI(NEDParallel):
         """
 
         self.subdomain.requireConstraintCopiesCurrent(model)
-        with self.subdomain.agreedOnByAllParts("Updating the topology"):
+        with self.subdomain.allRanksFailTogether("Updating the topology"):
             changed = super().updateTopology(model, step, offerModelModifiers)
-        self.subdomain.requireSameOnAllParts(
+        self.subdomain.requireSameOnAllRanks(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
         )
         if changed[0]:
@@ -962,7 +962,7 @@ class NEDMPI(NEDParallel):
 
         U, V, P = self._U, self._V, self._P
         for vector in (U, V, P):
-            self.subdomain.shareFromOwners(vector)
+            self.subdomain.allgatherOwnedValues(vector)
         # every degree of freedom is current now, not only those integrated here
         super().publishNodeFields(model, U, V, P)
 

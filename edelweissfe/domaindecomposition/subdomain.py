@@ -35,7 +35,7 @@ assigns to it, the constraints dealt to it, and the degrees of freedom those tou
 also carries out every exchange between the processes the domain-decomposed solver needs: the
 element forces are completed at the interface with the neighbouring subdomains
 (:mod:`.subdomaininterface`), the constraint forces are shared with every process, sums are formed
-over all processes in rank order, failures are agreed on, and the vectors and states of the whole
+over all processes in rank order, a failure on one rank is raised on all, and the vectors and states of the whole
 model are made current from the processes computing them (:mod:`.statesynchronization`). Every sum
 that decides the solution is formed in the order it is formed without decomposition, so a run is
 bit-identical to one in a single process.
@@ -81,7 +81,7 @@ from edelweissfe.utils.exceptions import (
     TopologyError,
 )
 
-#: How :meth:`Subdomain.agreedOnByAllParts` ranks what went wrong: the most severe outcome of any
+#: How :meth:`Subdomain.allRanksFailTogether` ranks what went wrong: the most severe outcome of any
 #: process is the one every process raises.
 _NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
 
@@ -356,7 +356,7 @@ class Subdomain:
 
         A model whose processes each created only their own elements was partitioned before its
         elements were created (see
-        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideWhichElementsAreCreatedHere`),
+        :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.decideLocalElements`),
         on the same mesh and by the same estimate: that partition is adopted, since an element can
         only be computed where it exists -- after a refinement with the children of a refined
         element where their parent was computed
@@ -380,13 +380,13 @@ class Subdomain:
         """
 
         distribution = model.elementDistribution
-        if not distribution.createsEveryElement and model.mesh.elements.keys() != distribution.owners.keys():
+        if not distribution.replicatesElements and model.mesh.elements.keys() != distribution.owners.keys():
             raise TopologyError(
                 "the mesh of this distributed model changed, but the processes computing its elements were not "
-                "decided for the changed mesh (ElementDistribution.createAndDropElementsOfChangedMesh)"
+                "decided for the changed mesh (ElementDistribution.updateLocalElements)"
             )
 
-        if distribution.createsEveryElement or byMeasuredCosts:
+        if distribution.replicatesElements or byMeasuredCosts:
             with performancetiming.timeit("partition"):
                 owners = partitionElementsOfMesh(
                     model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts
@@ -472,7 +472,7 @@ class Subdomain:
             # element was created; a distributed model gathers what it reads instead.
             self._stateSynchronization = ModelStateSynchronization(
                 self.communicator,
-                model.elements if model.elementDistribution.createsEveryElement else {},
+                model.elements if model.elementDistribution.replicatesElements else {},
                 self._elementOwners,
                 model.constraints,
                 self._constraintOwners,
@@ -659,7 +659,7 @@ class Subdomain:
         """The given loads, restricted to the elements computed here, with their nodal forces tagged
         for the assembly at the interface (:meth:`loadAssemblyFor`); made again when the loads or the
         subdomain changed. Local: it reads the mesh, which every process holds whole, and so may be
-        called where a process can fail alone (:meth:`agreedOnByAllParts`).
+        called where a process can fail alone (:meth:`allRanksFailTogether`).
 
         A load acting on an element is a contribution of that element: it is evaluated by the
         process computing the element, with that process' current solution -- the element's degrees
@@ -827,7 +827,7 @@ class Subdomain:
             digest.update(name.encode())
             digest.update(np.asarray([node.label for node in constraint.nodes], dtype=np.int64).tobytes())
             digest.update(repr(constraint.fieldsOnNodes).encode())
-        self.requireSameOnAllParts(
+        self.requireSameOnAllRanks(
             digest.hexdigest(), "the nodes and fields the constraints couple before a topology update"
         )
 
@@ -854,7 +854,7 @@ class Subdomain:
         )
         return InterfaceForceAssembly(self._interface, plan.entryDofs, entryElementPositions)
 
-    def shareFromOwners(self, vector: DofVector):
+    def allgatherOwnedValues(self, vector: DofVector):
         """Make a vector, correct at the degrees of freedom owned here, the same complete vector in
         every process, in place: every entry from its owner. Collective.
 
@@ -864,7 +864,7 @@ class Subdomain:
             A vector of the whole model.
         """
 
-        self._interface.gatherFromOwners(vector)
+        self._interface.allgatherOwnedValues(vector)
 
     def addConstraintForces(self, forces: dict, P: DofVector):
         """Share the forces of the constraints evaluated here with every process, and add those of
@@ -904,7 +904,7 @@ class Subdomain:
             self._stateSynchronization.synchronizeElementStates()
         self._stateSynchronization.synchronizeConstraintStates()
 
-    def sumAcrossParts(self, values: list[float]) -> list[float]:
+    def allreduceSum(self, values: list[float]) -> list[float]:
         """The sums of values over all processes, added in ascending rank order, so that they are the
         same bits in every process. Collective.
 
@@ -925,7 +925,7 @@ class Subdomain:
             totals = [total + value for total, value in zip(totals, contributions)]
         return totals
 
-    def minAcrossParts(self, value: float) -> float:
+    def allreduceMin(self, value: float) -> float:
         """The minimum of a value over all processes. Collective.
 
         Parameters
@@ -941,7 +941,7 @@ class Subdomain:
 
         return self.communicator.allreduce(value, op=MPI.MIN)
 
-    def anyPart(self, flag: bool) -> bool:
+    def allreduceAny(self, flag: bool) -> bool:
         """Whether a flag is set in any process. Collective.
 
         Parameters
@@ -957,7 +957,7 @@ class Subdomain:
 
         return bool(self.communicator.allreduce(bool(flag), op=MPI.LOR))
 
-    def requireSameOnAllParts(self, value, description: str):
+    def requireSameOnAllRanks(self, value, description: str):
         """Refuse to continue unless every process holds the same value. Collective.
 
         Parameters
@@ -981,7 +981,7 @@ class Subdomain:
             )
 
     @contextmanager
-    def agreedOnByAllParts(self, operation: str):
+    def allRanksFailTogether(self, operation: str):
         """A context in which an exception raised in one process is raised in every process.
         Collective.
 
@@ -1197,7 +1197,7 @@ class Subdomain:
 
         distribution = model.elementDistribution
         tolerance = self.loadBalanceTolerance
-        if distribution.createsEveryElement or not tolerance or self.nProcesses == 1:
+        if distribution.replicatesElements or not tolerance or self.nProcesses == 1:
             return
 
         mesh = model.mesh
@@ -1258,7 +1258,7 @@ class Subdomain:
         """
 
         distribution = self._model.elementDistribution
-        return not distribution.createsEveryElement and self._elementOwners != distribution.owners
+        return not distribution.replicatesElements and self._elementOwners != distribution.owners
 
     @performancetiming.timeit("element migration")
     def moveElements(self):

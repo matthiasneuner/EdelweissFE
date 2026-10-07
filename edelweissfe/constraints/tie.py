@@ -187,8 +187,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
     """
 
     #: It reads the contact facets of both surfaces and the nodes, which every process holds whole;
-    #: see MultiPointConstraintBase.wholeModelReason.
-    wholeModelReason = None
+    #: see MultiPointConstraintBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Schema declared for the registry, per OptionSchemaProvider.
     schema = TieSchema
@@ -398,8 +398,8 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
             return
 
         snapped = set(self._snappedNodes)
-        # The elements created here suffice: setNodes refreshes an element's cached coordinates, and
-        # an element not created here has no cache to refresh -- it is made from the moved nodes.
+        # The local elements suffice: setNodes refreshes an element's cached coordinates, and
+        # an element not local here has no cache to refresh -- it is made from the moved nodes.
         for element in model.elements.values():
             if not snapped.isdisjoint(element.nodes):
                 element.setNodes(element.nodes)

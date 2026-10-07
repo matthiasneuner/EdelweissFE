@@ -414,7 +414,7 @@ class TopologyPipeline:
     def _applyPlan(self, modifier, plan):
         """Let a model modifier carry out its plan, live or replayed, and then let this process create
         and drop the element objects it needs for the changed mesh
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`):
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`):
         in a serial run the modifier created every new element itself; in a domain-decomposed run
         that created only each process' own elements, the modifier created those computed here,
         and the elements loading them are created afterwards.
@@ -433,7 +433,7 @@ class TopologyPipeline:
         """
 
         modelChange = modifier.apply(self._model, plan)
-        self._model.elementDistribution.createAndDropElementsOfChangedMesh(self._model)
+        self._model.elementDistribution.updateLocalElements(self._model)
         return modelChange
 
     def recordSetupFingerprint(self):

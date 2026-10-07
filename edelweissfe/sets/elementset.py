@@ -287,7 +287,7 @@ class ElementSetOfMesh(ElementSet):
 
     def describedBy(self, mesh, nodesOfModel: dict):
         """Read the whole set from the given mesh and nodes from now on, and forget the nodes found
-        before: the set may have changed in the mesh, also where the part of it created here did not.
+        before: the set may have changed in the mesh, also where its local part did not.
 
         Parameters
         ----------
@@ -336,7 +336,7 @@ class ElementSetOfMesh(ElementSet):
         return list(self._numbersInMesh())
 
     def _findNodes(self) -> NodeSet:
-        """The nodes of the whole set, also where only part of it was created here: the node labels of
+        """The nodes of the whole set, also where only part of it is local: the node labels of
         its elements, read from the mesh, which every process holds whole.
 
         Returns

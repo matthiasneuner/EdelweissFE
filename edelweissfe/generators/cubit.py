@@ -74,8 +74,8 @@ class CubitSchema:
 class Generator(GeneratorBase):
     """Interface to Cubit. Generate mesh using Cubit .jou files."""
 
-    #: See GeneratorBase.wholeModelReason.
-    wholeModelReason = "makes the elements of its mesh while the mesh is described"
+    #: See GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = "makes the elements of its mesh while the mesh is described"
 
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = CubitSchema

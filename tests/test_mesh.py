@@ -103,19 +103,19 @@ class _ElementsByPredicate(ElementDistribution):
     def __init__(self, predicate):
         self._predicate = predicate
 
-    def isCreatedHere(self, number: int) -> bool:
+    def isLocal(self, number: int) -> bool:
         return self._predicate(number)
 
 
-def _buildModel(tmp_path, isCreatedHere=lambda number: True) -> FEModel:
-    """Build the model of :data:`DECK`, creating the elements for which ``isCreatedHere`` holds."""
+def _buildModel(tmp_path, isLocal=lambda number: True) -> FEModel:
+    """Build the model of :data:`DECK`, creating the elements for which ``isLocal`` holds."""
 
     deck = tmp_path / "test.inp"
     deck.write_text(DECK)
     inputFile = parseInputFile(str(deck))
     journal = Journal(verbose=False)
     model = FEModel(domainMapping[inputFile["job"][0]["domain"]])
-    model.elementDistribution = _ElementsByPredicate(isCreatedHere)
+    model.elementDistribution = _ElementsByPredicate(isLocal)
     model = fillFEModelFromInputFile(model, inputFile, journal)
     model.prepareYourself(journal)
     return model
@@ -215,7 +215,7 @@ def test_a_predicate_that_skips_elements_keeps_the_dof_layout(tmp_path):
             readWhole(picked)
     assert part.elements[6] in picked and part.elements[4] not in picked
 
-    # the nodes of a set are those of the whole set, from the mesh, whatever was created here
+    # the nodes of a set are those of the whole set, from the mesh, whatever is local
     for name in ("picked", "gen_top", "all"):
         assert [n.label for n in part.elementSets[name].extractNodeSet()] == [
             n.label for n in whole.elementSets[name].extractNodeSet()

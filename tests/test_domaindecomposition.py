@@ -126,7 +126,7 @@ def test_single_subdomain_owns_and_integrates_everything():
     assert interface.neighbours == [] and interface.nInterfaceDofs == 0
 
     vector = np.arange(10.0)
-    interface.gatherFromOwners(vector)
+    interface.allgatherOwnedValues(vector)
     assert np.array_equal(vector, np.arange(10.0))
 
     assembly = InterfaceForceAssembly(interface, np.array([0, 1, 1, 2]), np.array([0, 0, 1, 1]))
@@ -387,24 +387,24 @@ def test_a_single_subdomain_agrees_with_itself():
 
     subdomain = Subdomain(MPI.COMM_SELF, journal=None, identification="test", loadBalanceTolerance=0.1)
 
-    assert subdomain.sumAcrossParts([1.5, -2.0]) == [1.5, -2.0]
-    assert subdomain.minAcrossParts(0.25) == 0.25
-    assert subdomain.anyPart(True) and not subdomain.anyPart(False)
-    subdomain.requireSameOnAllParts((True, False), "a verdict")
+    assert subdomain.allreduceSum([1.5, -2.0]) == [1.5, -2.0]
+    assert subdomain.allreduceMin(0.25) == 0.25
+    assert subdomain.allreduceAny(True) and not subdomain.allreduceAny(False)
+    subdomain.requireSameOnAllRanks((True, False), "a verdict")
 
-    with subdomain.agreedOnByAllParts("testing"):
+    with subdomain.allRanksFailTogether("testing"):
         pass
     for raised, agreed in ((CutbackRequest("x", 0.25), CutbackRequest), (ConditionalStop(), ConditionalStop)):
         with pytest.raises(agreed):
-            with subdomain.agreedOnByAllParts("testing"):
+            with subdomain.allRanksFailTogether("testing"):
                 raise raised
     # a cutback is agreed on with the size requested, not a fixed one
     with pytest.raises(CutbackRequest) as caught:
-        with subdomain.agreedOnByAllParts("testing"):
+        with subdomain.allRanksFailTogether("testing"):
             raise CutbackRequest("x", 0.25)
     assert caught.value.cutbackSize == 0.25
     with pytest.raises(StepFailed, match="testing failed"):
-        with subdomain.agreedOnByAllParts("testing"):
+        with subdomain.allRanksFailTogether("testing"):
             raise KeyError("a failure")
 
 
@@ -526,13 +526,13 @@ class _SecondOfTwoProcesses:
 
 def test_the_rule_for_the_whole_model_names_its_reasons(tmp_path):
     from edelweissfe.domaindecomposition.distributedelements import (
-        reasonsForTheWholeModel,
+        reasonsToReplicateElements,
     )
     from edelweissfe.utils.inputfileparser import parseInputFile
 
     deck = tmp_path / "test.inp"
     deck.write_text(_DISTRIBUTION_DECK)
-    assert reasonsForTheWholeModel(parseInputFile(str(deck))) == []
+    assert reasonsToReplicateElements(parseInputFile(str(deck))) == []
 
     deck.write_text(
         _DISTRIBUTION_DECK
@@ -555,7 +555,7 @@ nSet=gen_left, referencePoint=gen_leftBottom
 >>fromExpression, name=fromElements, elSet=gen_all, expression='np.zeros(len(model.elementSets["gen_all"]))'
 """
     )
-    reasons = reasonsForTheWholeModel(parseInputFile(str(deck)))
+    reasons = reasonsToReplicateElements(parseInputFile(str(deck)))
     # adaptive refinement reads the mesh only and runs distributed, and so do a tie and contact facets
     # made by a late generator; the surface snap and an unverified constraint do not
     assert len(reasons) == 5
@@ -588,14 +588,14 @@ def test_a_process_creates_only_its_own_elements_also_where_a_load_reaches_its_s
     # row (the even numbers), element 8 shares nodes with element 9, which this process computes --
     # but its load is evaluated where it is computed, so it is not created here.
     assert set(model.elements) == own
-    assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == sorted(own)
+    assert [element.elNumber for element in distribution.ownedElements(model.elements.values())] == sorted(own)
     assert not model.elementSets["gen_top"].isComplete
 
 
 def test_contact_facets_are_made_everywhere_and_computed_with_their_host_element(tmp_path):
     from edelweissfe.domaindecomposition.distributedelements import (
         DistributedElements,
-        reasonsForTheWholeModel,
+        reasonsToReplicateElements,
     )
     from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
     from edelweissfe.journal.journal import Journal
@@ -612,7 +612,7 @@ name=top
 """
     )
     inputFile = parseInputFile(str(deck))
-    assert reasonsForTheWholeModel(inputFile) == []
+    assert reasonsToReplicateElements(inputFile) == []
 
     model = FEModel(2)
     distribution = DistributedElements(_SecondOfTwoProcesses())
@@ -625,7 +625,7 @@ name=top
         hostElement = model.mesh.elements[facet.elNumber].hostElement
         assert distribution.owners[facet.elNumber] == distribution.owners[hostElement]
     # The facets on the top row (the even numbers) of elements 9-16 are computed here.
-    reported = [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())]
+    reported = [element.elNumber for element in distribution.ownedElements(model.elements.values())]
     assert [
         model.mesh.elements[number].hostElement for number in reported if number in model.mesh.elementSets["top_facets"]
     ] == [10, 12, 14, 16]
@@ -730,7 +730,7 @@ def test_an_element_moves_with_its_state_and_its_section(tmp_path):
     assert model.elements[7].hasMaterial
     assert np.array_equal(model.elements[7].getStateVars(), stateOf7)
     assert distribution.ownershipVersion == 1
-    assert [element.elNumber for element in distribution.elementsReportedHere(model.elements.values())] == [
+    assert [element.elNumber for element in distribution.ownedElements(model.elements.values())] == [
         7,
         8,
     ] + list(range(11, 17))

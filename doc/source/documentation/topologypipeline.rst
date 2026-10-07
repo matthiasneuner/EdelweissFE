@@ -124,11 +124,11 @@ domain-decomposed run that creates only each process' own elements, every proces
 ``apply`` on the same mesh, and must change it identically. A modifier that describes an element in
 place of another (``model.mesh.addElement``) places it with
 :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement` and creates its
-object only where :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isCreatedHere`
+object only where :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isLocal`
 says so; after ``apply`` the pipeline lets the distribution create the other elements a process
-needs (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.createAndDropElementsOfChangedMesh`).
+needs (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`).
 A modifier that reads only the mesh, the nodes and the node fields -- not the element objects of the
-whole model -- says so with ``wholeModelReason = None``; any other keeps the job on the whole model
+whole model -- says so with ``replicatedElementsReason = None``; any other keeps the job on the whole model
 (see :doc:`domaindecomposition`). ``hAdaptivity`` is the example of both.
 
 **Say so if your modifier is purely reactive.** A modifier that can only act in response to another
@@ -320,7 +320,7 @@ A checklist for a new modifier
 #. Return ``None`` from ``plan`` when the incoming change does not touch your domain.
 #. Reserve element numbers from the model; never write ``model.elements``.
 #. Place new elements on a process (``placeChildElement``), create them only where they are created
-   here, and set ``wholeModelReason = None`` if you read nothing but the mesh, nodes and node fields.
+   here, and set ``replicatedElementsReason = None`` if you read nothing but the mesh, nodes and node fields.
 #. Implement ``encodePlan``/``decodePlan`` so your decision survives a checkpoint.
 #. Declare ``checkpointedState``: what ``plan`` carries from one decision to the next (often nothing).
 #. Verify with a restart round-trip and compare

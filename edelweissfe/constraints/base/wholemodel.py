@@ -30,23 +30,11 @@
 A constraint is evaluated whole, by one process. It can run on a distributed model -- where each
 process creates only its own elements -- if it reads only what every process holds whole: the mesh,
 the nodes and their fields, contact facets and rigid bodies. A constraint says whether it does
-through ``wholeModelReason`` (see
-:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`): None if it
-does, otherwise one of the reasons below, or its own.
+through ``replicatedElementsReason``; see :mod:`~edelweissfe.models.elementdistribution`.
 """
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.sets.elementset import ElementSet
-
-#: The reason of a constraint not yet verified, by a distributed test case, to read only what every
-#: process holds.
-NOT_YET_VERIFIED = (
-    "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
-)
-
-#: The reason of a constraint with scalar variables of its own (Lagrange multipliers): only the
-#: implicit solvers solve for them, and the domain-decomposed solver is explicit.
-IMPLICIT_ONLY = "introduces scalar variables (Lagrange multipliers), which only the implicit solvers solve for"
 
 
 def wholeFacetSet(model: FEModel, facetSetName: str, constraintName: str) -> ElementSet:

@@ -62,8 +62,8 @@ class Generator(GeneratorBase):
     """Find the node closest to a given spatial position, and store it in an existing or new node
     set."""
 
-    #: It only describes the mesh; see GeneratorBase.wholeModelReason.
-    wholeModelReason = None
+    #: It only describes the mesh; see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: It describes no element; see GeneratorBase.describesElementsOfMesh.
     describesElementsOfMesh = False

@@ -43,7 +43,7 @@ Each degree of freedom is also *owned* by exactly one process, the lowest-ranked
 it; a degree of freedom no process touches is owned (and integrated) by rank 0. Ownership decides
 which process counts a quantity that must be counted once -- a concentrated load, a kinetic energy
 -- and which process' value is authoritative when the whole vector is gathered everywhere, by
-:meth:`SubdomainInterface.gatherFromOwners`.
+:meth:`SubdomainInterface.allgatherOwnedValues`.
 """
 
 import numpy as np
@@ -119,9 +119,9 @@ class SubdomainInterface:
         self._gatherBuffer = np.empty(nDof)
 
         # The interface: every (degree of freedom, other process) pair among this process' own.
-        isLocal = np.zeros(nDof, dtype=bool)
-        isLocal[localDofs] = True
-        shared = isLocal[allDofs] & (allRanks != rank)
+        isLocalDof = np.zeros(nDof, dtype=bool)
+        isLocalDof[localDofs] = True
+        shared = isLocalDof[allDofs] & (allRanks != rank)
         sharedDofs = allDofs[shared]
         sharedRanks = allRanks[shared]
 
@@ -155,7 +155,7 @@ class SubdomainInterface:
 
         return self._sharedWith[neighbour]
 
-    def gatherFromOwners(self, vector: np.ndarray):
+    def allgatherOwnedValues(self, vector: np.ndarray):
         """Overwrite every entry of a vector with its owner's value, in place, so that it is the same,
         complete vector on every process.
 

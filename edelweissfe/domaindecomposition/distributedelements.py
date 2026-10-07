@@ -32,13 +32,13 @@ A domain-decomposed job decides, once for the whole job and in one place
 
 * **Distributed** (:class:`DistributedElements`): the mesh is partitioned before any element exists,
   and each process creates only the elements it computes -- plus those few others it must evaluate
-  itself (see :meth:`DistributedElements.decideWhichElementsAreCreatedHere`). The memory of the
+  itself (see :meth:`DistributedElements.decideLocalElements`). The memory of the
   elements -- most of a model -- is divided among the processes.
 * **The whole model in every process** (the plain
   :class:`~edelweissfe.models.elementdistribution.ElementDistribution`): every process creates every
   element, as a serial run does, and the processes keep the states of the elements they do not
   compute current by synchronizing them. That is the fallback for whatever still reads the whole
-  model during a run; :func:`reasonsForTheWholeModel` is the rule that names it, and the job reports
+  model during a run; :func:`reasonsToReplicateElements` is the rule that names it, and the job reports
   the reason once.
 
 Nothing here imports ``mpi4py`` itself: a distribution under an MPI launcher is given the communicator
@@ -64,7 +64,7 @@ from edelweissfe.models.mesh import Mesh, MeshElement
 from edelweissfe.utils.exceptions import TopologyError
 
 
-def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
+def reasonsToReplicateElements(inputfile: dict) -> list[str]:
     """Why a job must hold the whole model in every process: the rule of the fallback.
 
     A job needs every element in every process if something reads, or changes, the whole model
@@ -72,12 +72,12 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
     it:
 
     * **model modifiers that read element objects of the whole model** (see
-      :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.wholeModelReason`),
+      :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.replicatedElementsReason`),
       e.g. the surface snap; adaptive refinement (``hAdaptivity``) is not among them: it reads the
       mesh, which every process holds whole, and creates the children of a refined element where
       the parent is computed;
     * **constraints not known to read only what every process holds** (see
-      :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`). A
+      :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.replicatedElementsReason`). A
       constraint is evaluated whole by one process, but it reads no element object of the solid
       mesh: contact and ties read the contact facets of their surfaces, the nodes and the rigid
       bodies, which every process holds whole (a facet and the point mass of a rigid body are made
@@ -86,7 +86,7 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
       constraints of the implicit solvers (Lagrange multipliers, indirect load control) still name
       a reason (:mod:`~edelweissfe.constraints.base.wholemodel`);
     * **generators that do more than describe the mesh** (see
-      :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.wholeModelReason`): code
+      :attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.replicatedElementsReason`): code
       running on element objects while the mesh is described (``executePythonCode``, ``cubit``);
       contact facets and rigid bodies are not among them;
     * **generators run after the keywords** (``executeAfterManualGeneration=True``) **that describe
@@ -110,19 +110,19 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
 
     reasons = []
     for definition in inputfile["modelModifier"]:
-        reason = getModelModifierClass(definition["type"]).wholeModelReason
+        reason = getModelModifierClass(definition["type"]).replicatedElementsReason
         if reason is not None:
             reasons.append("model modifier {:} ({:}) {:}".format(definition["name"], definition["type"], reason))
     for definition in inputfile["constraint"]:
-        reason = getConstraintClass(definition["type"]).wholeModelReason
+        reason = getConstraintClass(definition["type"]).replicatedElementsReason
         if reason is not None:
             reasons.append("constraint {:} ({:}) {:}".format(definition["name"], definition["type"], reason))
     for definition in inputfile["modelGenerator"]:
         generatorClass = getGeneratorClass(definition["generator"])
-        if generatorClass.wholeModelReason is not None:
+        if generatorClass.replicatedElementsReason is not None:
             reasons.append(
                 "generator {:} ({:}) {:}".format(
-                    definition["name"], definition["generator"], generatorClass.wholeModelReason
+                    definition["name"], definition["generator"], generatorClass.replicatedElementsReason
                 )
             )
         if definition.get("executeAfterManualGeneration", False) and generatorClass.describesElementsOfMesh:
@@ -146,7 +146,7 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
     """How the processes of this job hold the model; decided once per job, and reported once.
 
     A serial job creates every element. A job on several MPI processes distributes the elements over
-    them, unless :func:`reasonsForTheWholeModel` names a reason to hold the whole model in every
+    them, unless :func:`reasonsToReplicateElements` names a reason to hold the whole model in every
     process.
 
     Parameters
@@ -166,7 +166,7 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
     if numberOfProcesses() == 1:
         return ElementDistribution()
 
-    reasons = reasonsForTheWholeModel(inputfile)
+    reasons = reasonsToReplicateElements(inputfile)
     if reasons:
         journal.message(
             "Whole model on every process because: {:}".format("; ".join(reasons)), "DomainDecomposition", 0
@@ -192,7 +192,7 @@ class DistributedElements(ElementDistribution):
         The communicator of the processes sharing the model.
     """
 
-    createsEveryElement = False
+    replicatesElements = False
 
     def __init__(self, communicator):
         self.communicator = communicator
@@ -201,7 +201,7 @@ class DistributedElements(ElementDistribution):
         #: The rank of every element of the mesh, by number: the process computing it.
         self.owners = None
         #: The numbers of the elements created in this process.
-        self._createdHere = set()
+        self._localElements = set()
         #: Changed by every :meth:`moveElementsTo`.
         self.ownershipVersion = 0
         #: How many elements this process received from another one over the run, by
@@ -211,7 +211,7 @@ class DistributedElements(ElementDistribution):
         #: :meth:`gatherStatesForCheckpoint` and :meth:`forgetGatheredStates`.
         self._gatheredStates = None
 
-    def decideWhichElementsAreCreatedHere(self, mesh: Mesh, domainSize: int):
+    def decideLocalElements(self, mesh: Mesh, domainSize: int):
         """Partition the mesh, and decide which elements this process creates. Collective.
 
         A process creates the elements it computes -- its part of the partition -- and the auxiliary
@@ -230,9 +230,9 @@ class DistributedElements(ElementDistribution):
 
         self.owners = partitionElementsOfMesh(mesh, self.communicator.Get_size(), domainSize, self.communicator)
 
-        self._createdHere = self._elementsCreatedFor(mesh, self.owners)
+        self._localElements = self._localElementsFor(mesh, self.owners)
 
-    def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
+    def _localElementsFor(self, mesh: Mesh, owners: dict) -> set:
         """The numbers of the elements this process creates under a partition: its own, and every
         auxiliary element (see :meth:`placeAuxiliaryElement`).
 
@@ -264,9 +264,9 @@ class DistributedElements(ElementDistribution):
         1. each process sends the state of every element it computed and no longer computes to the
            element's new process;
         2. each process drops the objects of the elements it no longer needs, and creates those it
-           now needs -- its new elements (:meth:`decideWhichElementsAreCreatedHere`) -- from the
+           now needs -- its new elements (:meth:`decideLocalElements`) -- from the
            mesh, in mesh order;
-        3. the element sets and surfaces are resolved to the elements now created here (and, before
+        3. the element sets and surfaces are resolved to the elements now local (and, before
            the new elements are created, to those kept), the new
            elements receive their sections and element properties, as at setup, and every element
            this process now computes, but did not compute before, receives the state its previous
@@ -303,7 +303,7 @@ class DistributedElements(ElementDistribution):
 
         # Element objects change process; the mesh does not change.
         self.owners = owners
-        created, dropped = self._createAndDropElementsCreatedFor(model)
+        created, dropped = self._createAndDropLocalElements(model)
 
         nReceived = 0
         for states in incoming:
@@ -315,7 +315,7 @@ class DistributedElements(ElementDistribution):
         self.nElementsReceived += nReceived
         return len(created), len(dropped), nReceived
 
-    def _createAndDropElementsCreatedFor(self, model) -> tuple[dict, list]:
+    def _createAndDropLocalElements(self, model) -> tuple[dict, list]:
         """Create and drop element objects so that this process holds exactly those it creates under
         the current partition (:attr:`owners`): drop those it no longer needs, and create those it
         lacks from the mesh, in mesh order, with their sections and element properties, as at setup.
@@ -335,7 +335,7 @@ class DistributedElements(ElementDistribution):
         """
 
         mesh = model.mesh
-        createdHere = self._elementsCreatedFor(mesh, self.owners)
+        createdHere = self._localElementsFor(mesh, self.owners)
         toDrop = [number for number in model.elements if number not in createdHere]
         toCreate = [number for number in mesh.elements if number in createdHere and number not in model.elements]
 
@@ -348,7 +348,7 @@ class DistributedElements(ElementDistribution):
         model.resolveSetsAndSurfacesOfMesh()
         model.assignSectionsAndPropertiesToElements(created)
 
-        self._createdHere = createdHere
+        self._localElements = createdHere
         return created, toDrop
 
     def placeChildElement(self, childNumber: int, parentNumber: int):
@@ -367,7 +367,7 @@ class DistributedElements(ElementDistribution):
         owner = self.owners[parentNumber]
         self.owners[childNumber] = owner
         if owner == self.rank:
-            self._createdHere.add(childNumber)
+            self._localElements.add(childNumber)
 
     def placeAuxiliaryElement(self, record: MeshElement):
         """An auxiliary element -- a contact facet, the point mass of a rigid body -- is
@@ -383,14 +383,14 @@ class DistributedElements(ElementDistribution):
             The element as described in the mesh, with its host element.
         """
 
-        self._createdHere.add(record.number)
+        self._localElements.add(record.number)
         if self.owners is not None:
             self.owners[record.number] = processOfAuxiliaryElement(record, self.owners)
 
-    def createAndDropElementsOfChangedMesh(self, model):
+    def updateLocalElements(self, model):
         """After a model modifier changed the mesh -- every process changes it identically -- forget
         the elements no longer in it, and create and drop elements so that this process holds exactly
-        those it now needs (see :meth:`decideWhichElementsAreCreatedHere`): its own, which the
+        those it now needs (see :meth:`decideLocalElements`): its own, which the
         modifier created already (:meth:`placeChildElement`). Local: the decision reads only the
         mesh, which every process holds whole.
 
@@ -416,9 +416,9 @@ class DistributedElements(ElementDistribution):
             )
         self.owners = {number: self.owners[number] for number in mesh.elements}
 
-        self._createAndDropElementsCreatedFor(model)
+        self._createAndDropLocalElements(model)
 
-    def isCreatedHere(self, number: int) -> bool:
+    def isLocal(self, number: int) -> bool:
         """Whether this process creates the element with the given number.
 
         Parameters
@@ -429,7 +429,7 @@ class DistributedElements(ElementDistribution):
         Returns
         -------
         bool
-            Whether it is created here.
+            Whether it is local.
 
         Raises
         ------
@@ -447,15 +447,15 @@ class DistributedElements(ElementDistribution):
                 "element {:} was described after the mesh was partitioned over the processes, so no process "
                 "computes it".format(number)
             )
-        return number in self._createdHere
+        return number in self._localElements
 
-    def elementsReportedHere(self, elements) -> list:
+    def ownedElements(self, elements) -> list:
         """Those of the given elements this process computes, and so reports.
 
         Parameters
         ----------
         elements
-            Elements created here.
+            Local elements.
 
         Returns
         -------
@@ -519,7 +519,7 @@ class DistributedElements(ElementDistribution):
         Parameters
         ----------
         elements
-            The elements created here, by number.
+            The local elements, by number.
         """
 
         computedHere = {
@@ -543,7 +543,7 @@ class DistributedElements(ElementDistribution):
         Parameters
         ----------
         elements
-            The elements created here, by number; their states are among those gathered.
+            The local elements, by number; their states are among those gathered.
 
         Returns
         -------

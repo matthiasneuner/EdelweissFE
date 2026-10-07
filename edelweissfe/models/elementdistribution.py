@@ -25,20 +25,51 @@
 #  The full text of the license can be found in the file LICENSE.md at
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
-"""Which elements of the mesh a process creates, and whose results it reports.
+"""Which elements of the mesh a process creates, and which it owns.
 
 A model is built in two stages: the mesh is described as data, then the element objects are made
 from it (:mod:`~edelweissfe.models.mesh`). Between the two stages an :class:`ElementDistribution`
-decides which elements *this* process creates. A serial run creates every element, and that is what
-this class does: every element is created here, every element's results and state are reported
-from here, and a result over an element set is simply the result of its elements.
+decides which elements are *local* to this process -- have an element object here -- and which it
+*owns*: computes, and reports the results and the state of. A serial run creates and owns every
+element, and that is what this class does; every method below is trivial here.
 
-A domain-decomposed run that computes each subdomain in its own process may create only the
-elements of its subdomain; its distribution
+A domain-decomposed run may give each process only the elements of its subdomain (*distributed*
+elements), or every element (*replicated* elements); its distribution
 (:class:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements`) then also says
 how a result of a whole element set, or the state of the whole model, is gathered from the
-processes that computed it. Code that reads results of a whole element set or of the whole model
-goes through the methods below, and so reads the same thing in both cases.
+processes owning the elements. Code that reads results of a whole element set or of the whole model
+goes through the methods below, and so reads the same thing in both cases. Those are all the
+places the model meets the decomposition:
+
+=================================  ==================================================================  ===================
+method                             called by                                                           serial behaviour
+=================================  ==================================================================  ===================
+:meth:`decideLocalElements`        the input file, once the mesh is described                          nothing to decide
+:meth:`isLocal`                    :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`    always True
+:meth:`placeAuxiliaryElement`      :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`  nothing to decide
+:meth:`placeChildElement`          h-adaptivity, for the child of a refined element                    nothing to decide
+:meth:`updateLocalElements`        the topology pipeline, after a mesh change                          nothing to do
+:meth:`ownedElements`              element field outputs                                               all of them
+:meth:`resultsOfWholeSet`          element field outputs                                               the results given
+:meth:`gatherStatesForCheckpoint`  the domain-decomposed solver                                        nothing to gather
+:meth:`forgetGatheredStates`       the domain-decomposed solver                                        nothing to forget
+:meth:`statesOfElements`           :meth:`~edelweissfe.models.femodel.FEModel.writeRestart`            every local element
+=================================  ==================================================================  ===================
+
+**Replicated or distributed: what a model entity declares.** Whether a domain-decomposed job may
+distribute its elements depends on what its constraints, generators and model modifiers read. Each
+of these classes declares it once, in the class attribute ``replicatedElementsReason``
+(:class:`~edelweissfe.constraints.base.constraintbase.ConstraintBase`,
+:class:`~edelweissfe.constraints.base.multipointconstraintbase.MultiPointConstraintBase`,
+:class:`~edelweissfe.generators.base.generatorbase.GeneratorBase`,
+:class:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase`): ``None`` if it reads
+only what every process holds whole -- the mesh, the nodes and their fields, contact facets and rigid
+bodies -- and no element object; otherwise why it needs every element object in every process. The
+base classes default to one of the reasons below, so a new class needs to declare nothing: a job
+using it simply runs with replicated elements -- more memory per process, the same result. Setting
+``None`` is a claim, to be backed by a test case in ``testfiles/mpi`` that runs distributed
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements` collects the
+reasons of a job).
 """
 
 from collections.abc import Iterator
@@ -47,20 +78,38 @@ import numpy as np
 
 from edelweissfe.models.mesh import Mesh, MeshElement
 
+#: The default reason of a constraint: not yet verified, by a distributed test case, to read only what
+#: every process holds.
+NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS = (
+    "is not yet known to read only what every process holds (the mesh, the nodes, contact facets, rigid bodies)"
+)
+
+#: The reason of a constraint with scalar variables of its own (Lagrange multipliers): only the
+#: implicit solvers solve for them, and the domain-decomposed solver is explicit.
+IMPLICIT_ONLY = "introduces scalar variables (Lagrange multipliers), which only the implicit solvers solve for"
+
+#: The default reason of a generator, which is free to read and change the model.
+NOT_KNOWN_TO_ONLY_DESCRIBE_THE_MESH = "is not known to only describe the mesh"
+
+#: The default reason of a model modifier, which is free to read and change the element objects.
+CHANGES_THE_MESH_READING_ELEMENT_OBJECTS = (
+    "changes the mesh during the run, reading the element objects of the whole model"
+)
+
 
 class ElementDistribution:
-    """Every element of the mesh is created here, and reported from here; see the module
+    """Every element of the mesh is local, and owned, here; see the module
     documentation."""
 
     #: Whether every process creates every element of the mesh.
-    createsEveryElement = True
+    replicatesElements = True
 
     #: Changed whenever elements move between processes, so that whatever was derived from the
     #: elements this process holds or reports (e.g. the result views of a field output) is derived
     #: again. Here: never.
     ownershipVersion = 0
 
-    def decideWhichElementsAreCreatedHere(self, mesh: Mesh, domainSize: int):
+    def decideLocalElements(self, mesh: Mesh, domainSize: int):
         """Decide, once the mesh is described and before any element exists, which of its elements
         this process creates. Here: all of them, so there is nothing to decide.
 
@@ -99,7 +148,7 @@ class ElementDistribution:
             (:attr:`~edelweissfe.models.mesh.MeshElement.hostElement`).
         """
 
-    def createAndDropElementsOfChangedMesh(self, model):
+    def updateLocalElements(self, model):
         """After a model modifier changed the mesh, create and drop element objects so that this process
         holds exactly those it needs for the changed mesh. Here: the modifier created every new element itself, so there is
         nothing left to do.
@@ -110,7 +159,7 @@ class ElementDistribution:
             The model tree, its mesh changed.
         """
 
-    def isCreatedHere(self, number: int) -> bool:
+    def isLocal(self, number: int) -> bool:
         """Whether this process creates the element with the given number; asked by
         :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.
 
@@ -127,33 +176,33 @@ class ElementDistribution:
 
         return True
 
-    def elementsReportedHere(self, elements) -> list:
+    def ownedElements(self, elements) -> list:
         """Those of the given elements whose results and state this process reports: the elements it
         computes. Here: all of them.
 
         Parameters
         ----------
         elements
-            Elements created here, e.g. an :class:`~edelweissfe.sets.elementset.ElementSet`.
+            Local elements, e.g. an :class:`~edelweissfe.sets.elementset.ElementSet`.
 
         Returns
         -------
         list
-            The elements reported here, in the order given.
+            The elements owned here, in the order given.
         """
 
         return list(elements)
 
     def resultsOfWholeSet(self, elementSet, numbersReportedHere: list, results: np.ndarray | None) -> np.ndarray:
         """The results of every element of a set, in set order, from the results of the elements
-        reported here. Here: the results given, since every element is reported here.
+        owned here. Here: the results given, since every element is owned here.
 
         Parameters
         ----------
         elementSet
             The element set.
         numbersReportedHere
-            The numbers of the elements of the set reported here (:meth:`elementsReportedHere`), in set
+            The numbers of the elements of the set owned here (:meth:`ownedElements`), in set
             order.
         results
             Their results, one row per element; None if there are none.
@@ -173,7 +222,7 @@ class ElementDistribution:
         Parameters
         ----------
         elements
-            The elements created here, by number.
+            The local elements, by number.
         """
 
     def forgetGatheredStates(self):
@@ -181,12 +230,12 @@ class ElementDistribution:
 
     def statesOfElements(self, elements: dict) -> Iterator[tuple[int, np.ndarray]]:
         """The converged state of every element of the model, for a restart checkpoint, by element
-        number. Here: the state of every element, all created here.
+        number. Here: the state of every element, all local.
 
         Parameters
         ----------
         elements
-            The elements created here, by number.
+            The local elements, by number.
 
         Returns
         -------

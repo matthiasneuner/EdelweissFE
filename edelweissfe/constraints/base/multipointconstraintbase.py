@@ -28,8 +28,10 @@
 
 from abc import ABC, abstractmethod
 
-from edelweissfe.constraints.base.wholemodel import NOT_YET_VERIFIED
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import (
+    NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider
 
@@ -72,9 +74,10 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
     #: to False, and a dropped record is then an error, not a log line.
     mayYieldSlaveToEarlierClaim: bool = True
 
-    #: Why this constraint needs every element of the model in every process of a domain-decomposed
-    #: run; see :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.wholeModelReason`.
-    wholeModelReason: str | None = NOT_YET_VERIFIED
+    #: Why a domain-decomposed job using this class needs every element object in every process
+    #: (replicated elements), or None if it works with distributed elements; declared once per class,
+    #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
+    replicatedElementsReason: str | None = NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS
 
     @classmethod
     def fromConstraintDefinition(

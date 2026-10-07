@@ -33,6 +33,9 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import (
+    CHANGES_THE_MESH_READING_ELEMENT_OBJECTS,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.checkpointedstate import packState, unpackState
 from edelweissfe.utils.schema import OptionSchemaProvider
@@ -49,13 +52,10 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     #: disqualify that solver. See NonlinearSolverBase.validateModelCapabilities.
     initiatesTopologyChanges = True
 
-    #: Why a domain-decomposed job with this modifier must hold the whole model in every process
-    #: (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`), or
-    #: None for a modifier that reads only the mesh, the nodes and the node fields -- which every
-    #: process holds whole -- and creates the element objects of a changed mesh only where they are
-    #: computed. Not None unless a modifier says so, since a modifier is free to read and change the
-    #: element objects of the whole model.
-    wholeModelReason: str | None = "changes the mesh during the run, reading the element objects of the whole model"
+    #: Why a domain-decomposed job using this class needs every element object in every process
+    #: (replicated elements), or None if it works with distributed elements; declared once per class,
+    #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
+    replicatedElementsReason: str | None = CHANGES_THE_MESH_READING_ELEMENT_OBJECTS
 
     @property
     def actsOnlyAtSimulationStart(self) -> bool:

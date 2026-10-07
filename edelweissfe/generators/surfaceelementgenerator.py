@@ -651,8 +651,8 @@ class Generator(GeneratorBase):
     """
 
     #: It reads the mesh, and makes facets -- elements of its own, surface-sized -- in every process;
-    #: see GeneratorBase.wholeModelReason.
-    wholeModelReason = None
+    #: see GeneratorBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: The facets are elements of its own; see GeneratorBase.describesElementsOfMesh.
     describesElementsOfMesh = False

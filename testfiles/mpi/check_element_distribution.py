@@ -3,7 +3,7 @@
 
 A test case either runs **distributed** -- each process creates only the elements it computes -- or
 with the **whole model** in every process, by the rule of
-:func:`edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`. Both give the
+:func:`edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements`. Both give the
 same result, so comparing results cannot tell which one ran; this script runs every test case (in a
 copy) and checks, from the model each process ends with, that it ran in the mode expected below:
 
@@ -91,7 +91,7 @@ def modeOf(model, communicator) -> str:
 
     created = communicator.allgather(set(model.elements))
     computed = communicator.allgather(
-        [element.elNumber for element in model.elementDistribution.elementsReportedHere(model.elements.values())]
+        [element.elNumber for element in model.elementDistribution.ownedElements(model.elements.values())]
     )
     meshElements = set(model.mesh.elements)
     if all(elements == meshElements for elements in created):
@@ -105,7 +105,7 @@ def facetsWithTheirHosts(model, communicator) -> str:
     process computing the host, as the model ends; empty if the model has none."""
 
     computed = communicator.allgather(
-        [element.elNumber for element in model.elementDistribution.elementsReportedHere(model.elements.values())]
+        [element.elNumber for element in model.elementDistribution.ownedElements(model.elements.values())]
     )
     processOf = {number: rank for rank, numbers in enumerate(computed) for number in numbers}
     hosted = [record for record in model.mesh.elements.values() if record.hostElement is not None]

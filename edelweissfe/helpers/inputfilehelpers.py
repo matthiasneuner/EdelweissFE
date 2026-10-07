@@ -291,7 +291,7 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
 
     # The mesh is described: decide which of its elements this process creates -- every one, unless
     # a domain-decomposed run distributes them over its processes -- and make them.
-    model.elementDistribution.decideWhichElementsAreCreatedHere(model.mesh, model.domainSize)
+    model.elementDistribution.decideLocalElements(model.mesh, model.domainSize)
     model.createElementsOfMesh()
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file

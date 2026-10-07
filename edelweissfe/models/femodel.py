@@ -217,23 +217,23 @@ class FEModel:
 
         Elements are created in mesh order, so :attr:`elements` lists them in the order they were
         described. Each element set of the mesh becomes an
-        :class:`~edelweissfe.sets.elementset.ElementSetOfMesh` of the elements created here, and each surface
+        :class:`~edelweissfe.sets.elementset.ElementSetOfMesh` of the local elements, and each surface
         an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
 
         Which elements are created here, :attr:`elementDistribution` decides
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isCreatedHere`): every
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isLocal`): every
         element in a serial run, only its own in a process of a distributed one.
 
         Calling it again is harmless: elements already created are kept (the distribution is asked
         again for the others), and sets and surfaces that already exist are updated in place
         (references held to them stay valid), so a mesh described in several steps can be made in
         several steps. :meth:`prepareYourself` checks that every element of the mesh was either
-        created or declined, and that every element of the model is described in the mesh.
+        local or declared not local, and that every element of the model is described in the mesh.
         """
 
-        isCreatedHere = self.elementDistribution.isCreatedHere
+        isLocal = self.elementDistribution.isLocal
         for number in self.mesh.elements:
-            if number not in self.elements and isCreatedHere(number):
+            if number not in self.elements and isLocal(number):
                 self.createElementOfMesh(number)
 
         self.resolveSetsAndSurfacesOfMesh()
@@ -273,7 +273,7 @@ class FEModel:
         self.elements.update(ordered)
 
     def resolveSetsAndSurfacesOfMesh(self):
-        """Make every element set and surface of the mesh hold the elements created here; sets and
+        """Make every element set and surface of the mesh hold the local elements; sets and
         surfaces that already exist are updated in place, so references held to them stay valid."""
 
         for name in self.mesh.elementSets:
@@ -309,7 +309,7 @@ class FEModel:
         else:
             if list(elementSet.localElements()) != created:
                 elementSet.replaceMembers(created)
-            # the set may have changed in the mesh even where the part created here did not
+            # the set may have changed in the mesh even where the local part did not
             elementSet.describedBy(self.mesh, self.nodes)
         return elementSet
 
@@ -345,7 +345,7 @@ class FEModel:
             surface.replaceData(faces)
 
     def requireCompleteMesh(self, reader: str):
-        """State that ``reader`` needs every element of the mesh, not only those created here; the
+        """State that ``reader`` needs every element of the mesh, not only the local ones; the
         whole-model counterpart of :meth:`~edelweissfe.sets.elementset.ElementSet.requireComplete`.
 
         Parameters
@@ -398,7 +398,7 @@ class FEModel:
     def _checkElementsAgreeWithMesh(self):
         """Raise unless :attr:`elements` and :attr:`mesh` describe the same elements, in both directions.
 
-        * Every element of the mesh was either created here or declined by :attr:`elementDistribution`
+        * Every element of the mesh was either local or declared not local by :attr:`elementDistribution`
           -- an element described after the elements were made, and never made, would otherwise
           silently be missing from the model.
         * Every element of :attr:`elements` is described in the mesh -- an element assigned to
@@ -408,14 +408,14 @@ class FEModel:
         Raises
         ------
         TopologyError
-            If some element of the mesh was neither created nor declined, or some element of the
+            If some element of the mesh was neither local nor declared not local, or some element of the
             model is not described in the mesh.
         """
 
         neverCreated = sorted(
             number
             for number in self.mesh.elements.keys() - self.elements.keys()
-            if self.elementDistribution.isCreatedHere(number)
+            if self.elementDistribution.isLocal(number)
         )
         if neverCreated:
             raise TopologyError(
@@ -449,7 +449,7 @@ class FEModel:
             )
 
     def removeElement(self, elNumber: int):
-        """Remove an element from the mesh and, if it was created here, from the model. Its number is
+        """Remove an element from the mesh and, if it is local, from the model. Its number is
         retired, never reissued.
 
         Parameters
@@ -690,7 +690,7 @@ class FEModel:
 
         for section in self.sections.values():
             if section.writeMaterialPropertiesToFile:
-                # the material properties are known for the elements created here: the local part of
+                # the material properties are known for the local elements: the local part of
                 # each set (in a distributed run every process writes its part to the same file, as before)
                 section.exportMaterialPropertiesToFile([elementSet.localElements() for elementSet in section.elSets])
 
@@ -947,18 +947,14 @@ class FEModel:
 
         # One uniform loop, by element number, with nothing swallowed -- sound only because the replay
         # above reproduces the original numbering exactly, verified against the recorded fingerprint.
-        # The one element skipped is an element of the mesh this process declined to create (a
+        # The one element skipped is an element of the mesh that is not local to this process (a
         # domain-decomposed run creates only its own); its process restores it. Any other missing
         # element means the replayed model does not match the one checkpointed, which must be
         # reported, not silently skipped.
         for elementKey, stateVars in f["elements"].items():
             elNumber = int(elementKey)
             element = self.elements.get(elNumber)
-            if (
-                element is None
-                and elNumber in self.mesh.elements
-                and not self.elementDistribution.isCreatedHere(elNumber)
-            ):
+            if element is None and elNumber in self.mesh.elements and not self.elementDistribution.isLocal(elNumber):
                 continue
             if element is None:
                 raise RestartError(

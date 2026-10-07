@@ -329,8 +329,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     """
 
     #: It reads the contact facets of both surfaces and the nodes, which every process holds whole;
-    #: see ConstraintBase.wholeModelReason.
-    wholeModelReason = None
+    #: see ConstraintBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDeformableSurfacePenaltySchema

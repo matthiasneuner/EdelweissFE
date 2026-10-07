@@ -279,8 +279,8 @@ class ModelModifier(ModelModifierBase):
     schema = HAdaptivitySchema
 
     #: It reads the mesh, and creates the children of a refined element where the parent is computed;
-    #: see the module documentation and ModelModifierBase.wholeModelReason.
-    wholeModelReason = None
+    #: see the module documentation and ModelModifierBase.replicatedElementsReason.
+    replicatedElementsReason = None
 
     #: Whether the step-start markers are still to be evaluated: they act on the first decision only.
     checkpointedState = {"_isFirstCall": bool}
@@ -869,7 +869,7 @@ class ModelModifier(ModelModifierBase):
         model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, e["conn"])
         distribution = model.elementDistribution
         distribution.placeChildElement(elNumber, parentNumber)
-        if distribution.isCreatedHere(elNumber):
+        if distribution.isLocal(elNumber):
             child = model.createElementOfMesh(elNumber)
             self._sectionOf[parentNumber].assignSectionToElement(child, model)
             for elementProperty in self._elementPropertiesOf.get(parentNumber, ()):

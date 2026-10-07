@@ -34,8 +34,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
-from edelweissfe.constraints.base.wholemodel import IMPLICIT_ONLY
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import IMPLICIT_ONLY
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import buildSchemaFromOptions, schemaField
@@ -156,8 +156,8 @@ class Constraint(ConstraintBase):
     Currently only available for spatialdomain = 3D.
     """
 
-    #: It solves for Lagrange multipliers; see ConstraintBase.wholeModelReason.
-    wholeModelReason = IMPLICIT_ONLY
+    #: It solves for Lagrange multipliers; see ConstraintBase.replicatedElementsReason.
+    replicatedElementsReason = IMPLICIT_ONLY
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = RigidBodySchema

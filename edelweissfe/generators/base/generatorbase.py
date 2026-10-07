@@ -31,6 +31,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from edelweissfe.journal.journal import Journal
+from edelweissfe.models.elementdistribution import NOT_KNOWN_TO_ONLY_DESCRIBE_THE_MESH
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider, buildSchemaFromOptions
 
@@ -82,12 +83,10 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     (e.g. ``executePythonCode``'s raw code lines).
     """
 
-    #: Why this generator needs every element of the model in every process of a domain-decomposed
-    #: run (see :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForTheWholeModel`),
-    #: or None for a generator that only describes the mesh -- nodes, elements, sets and surfaces --
-    #: and reads no element object. Not None unless a generator says so, since a generator is free
-    #: to read and change the model.
-    wholeModelReason: str | None = "is not known to only describe the mesh"
+    #: Why a domain-decomposed job using this class needs every element object in every process
+    #: (replicated elements), or None if it works with distributed elements; declared once per class,
+    #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
+    replicatedElementsReason: str | None = NOT_KNOWN_TO_ONLY_DESCRIBE_THE_MESH
 
     #: Whether this generator may describe elements of the mesh. Those must be described before the
     #: mesh is partitioned over the processes of a domain-decomposed run, so such a generator may not
