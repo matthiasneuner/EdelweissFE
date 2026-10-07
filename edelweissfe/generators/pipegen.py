@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
+from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import (
     GRID_POSITION_WITHOUT_NODE,
     GeneratorBase,
@@ -124,22 +124,21 @@ class Generator(GeneratorBase):
         elTypeName = configuration.elType
         elProvider = configuration.elProvider
 
-        elType = getElementClass(elTypeName, elProvider)
+        # the number of nodes of the element type decides the node grid
+        prototype = createPrototypeElement(elTypeName, elProvider)
 
-        testEl = elType(elTypeName, 0)
-
-        if nY < 4 and testEl.nNodes == 20:
+        if nY < 4 and prototype.nNodes == 20:
             print(
                 "Information: Using a hexahedral element with 20 nodes and a non constant function"
                 + " for the radius with low element count over height can lead to display errors in paraview."
             )
 
         extraNode = 0 if phi != 360 else 1
-        if testEl.nNodes == 8:
+        if prototype.nNodes == 8:
             nNodesT = nT + 1
             nNodesY = nY + 1
             nNodesC = nC + 1
-        elif testEl.nNodes == 20:
+        elif prototype.nNodes == 20:
             nNodesT = 2 * nT + 1
             nNodesY = 2 * nY + 1
             nNodesC = 2 * nC + 1
@@ -176,7 +175,7 @@ class Generator(GeneratorBase):
             # A 20-node hexahedron has nodes at corners and edge midpoints only, i.e. at grid
             # positions with at most one odd index. The remaining positions are kept in the local
             # grid (it is sliced into node sets further below) but never become model nodes.
-            return testEl.nNodes == 8 or (testEl.nNodes == 20 and sum(np.mod([it, iy, ic], 2)) < 2)
+            return prototype.nNodes == 8 or (prototype.nNodes == 20 and sum(np.mod([it, iy, ic], 2)) < 2)
 
         # Node labels come from the model's monotonic allocator (TopologyPipeline.reserveNodeNumbers), not
         # from max(model.nodes). Only the positions that carry an element node consume a label, so
@@ -204,7 +203,7 @@ class Generator(GeneratorBase):
                         label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
                     else:
                         label = GRID_POSITION_WITHOUT_NODE
-                    if testEl.nNodes == 20 and (ic % 2 != 0):
+                    if prototype.nNodes == 20 and (ic % 2 != 0):
                         node = Node(
                             label,
                             np.array(
@@ -264,7 +263,7 @@ class Generator(GeneratorBase):
                         fullIndex = 0
                     else:  # for the last element of a full circle
                         fullIndex = nC
-                    if testEl.nNodes == 8:
+                    if prototype.nNodes == 8:
                         nodeList = [
                             nodes[0 + iy * (nNodesT * nNodesC) + it * nNodesC + ic],
                             nodes[1 + iy * (nNodesT * nNodesC) + it * nNodesC + ic - fullIndex],
@@ -275,7 +274,7 @@ class Generator(GeneratorBase):
                             nodes[1 + (1 + iy) * (nNodesT * nNodesC) + (1 + it) * nNodesC + ic - fullIndex],
                             nodes[0 + (1 + iy) * (nNodesT * nNodesC) + (1 + it) * nNodesC + ic],
                         ]
-                    elif testEl.nNodes == 20:
+                    elif prototype.nNodes == 20:
                         nodeList = [
                             nodes[0 + 2 * iy * (nNodesT * nNodesC) + 2 * it * nNodesC + 2 * ic],
                             nodes[2 + 2 * iy * (nNodesT * nNodesC) + 2 * it * nNodesC + 2 * ic - 2 * fullIndex],

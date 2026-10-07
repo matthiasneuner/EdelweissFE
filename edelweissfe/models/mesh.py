@@ -367,17 +367,17 @@ class Mesh:
 
     def _typeEntry(self, elType: str, provider: str) -> tuple:
         """The element class and the type information of an element type, from one prototype
-        element created once per (type, provider)."""
+        element (:func:`~edelweissfe.config.elementlibrary.createPrototypeElement`) created once per
+        (type, provider)."""
 
         key = (elType, provider)
         entry = self._types.get(key)
         if entry is None:
-            from edelweissfe.config.elementlibrary import getElementClass
+            from edelweissfe.config.elementlibrary import createPrototypeElement
 
-            elementClass = getElementClass(elType, provider)
-            prototype = elementClass(elType, 0)
+            prototype = createPrototypeElement(elType, provider)
             entry = (
-                elementClass,
+                type(prototype),
                 ElementTypeInfo(prototype.fields, prototype.ensightType, prototype.nDof, prototype.hasKernels),
             )
             self._types[key] = entry

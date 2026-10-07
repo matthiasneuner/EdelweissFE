@@ -96,3 +96,35 @@ def getElementClass(elType: str, provider: str = None) -> type:
 
     else:
         raise Exception("This element provider doesn't exist!")
+
+
+#: The element number of a prototype element (see :func:`createPrototypeElement`). A prototype never
+#: becomes an element of a model and is never looked up by its number, so it cannot clash with an
+#: element of the model that has the same number.
+PROTOTYPE_ELEMENT_NUMBER = 0
+
+
+def createPrototypeElement(elType: str, provider: str = None):
+    """Create a prototype element: an element object of a type, made only to ask it what every element
+    of that type has in common -- its number of nodes, the fields at each node, its number of degrees
+    of freedom, its EnSight shape.
+
+    Element classes answer these questions per object, not per class (a Marmot element, for instance,
+    learns them from Marmot when it is created), so a mesh generator or the mesh asks a prototype
+    before, or without, creating any element of the model. A prototype has no nodes and carries the
+    number :data:`PROTOTYPE_ELEMENT_NUMBER`; it is never added to a model.
+
+    Parameters
+    ----------
+    elType
+        A string identifying the requested element formulation.
+    provider
+        The name of the element provider to load, see :func:`getElementClass`.
+
+    Returns
+    -------
+    BaseElement
+        The prototype element.
+    """
+
+    return getElementClass(elType, provider)(elType, PROTOTYPE_ELEMENT_NUMBER)

@@ -67,7 +67,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
+from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import (
     GRID_POSITION_WITHOUT_NODE,
     GeneratorBase,
@@ -136,15 +136,14 @@ class Generator(GeneratorBase):
         nX = configuration.nX
         nY = configuration.nY
         nZ = configuration.nZ
-        elType = getElementClass(configuration.elType, configuration.elProvider)
+        # the number of nodes of the element type decides the node grid
+        prototype = createPrototypeElement(configuration.elType, configuration.elProvider)
 
-        testEl = elType(configuration.elType, 0)
-
-        if testEl.nNodes == 8:
+        if prototype.nNodes == 8:
             nNodesX = nX + 1
             nNodesY = nY + 1
             nNodesZ = nZ + 1
-        elif testEl.nNodes == 20:
+        elif prototype.nNodes == 20:
             nNodesX = 2 * nX + 1
             nNodesY = 2 * nY + 1
             nNodesZ = 2 * nZ + 1
@@ -160,7 +159,7 @@ class Generator(GeneratorBase):
             # A 20-node hexahedron has nodes at corners and edge midpoints only, i.e. at grid
             # positions with at most one odd index. The remaining positions are kept in the local
             # grid (it is sliced into node sets further below) but never become model nodes.
-            return testEl.nNodes == 8 or testEl.nNodes == 20 and sum(np.mod([ix, iy, iz], 2)) < 2
+            return prototype.nNodes == 8 or prototype.nNodes == 20 and sum(np.mod([ix, iy, iz], 2)) < 2
 
         # Node labels come from the model's monotonic allocator (TopologyPipeline.reserveNodeNumbers), not
         # from max(model.nodes). Only the positions that carry an element node consume a label, so
@@ -216,7 +215,7 @@ class Generator(GeneratorBase):
         for ix in range(nX):
             for iy in range(nY):
                 for iz in range(nZ):
-                    if testEl.nNodes == 8:
+                    if prototype.nNodes == 8:
                         nodeList = [
                             nodes[0 + ix * (nNodesY * nNodesZ) + iy * nNodesZ + iz],
                             nodes[1 + ix * (nNodesY * nNodesZ) + iy * nNodesZ + iz],
@@ -231,7 +230,7 @@ class Generator(GeneratorBase):
                                 0 + (1 + ix) * (nNodesY * nNodesZ) + (1 + iy) * nNodesZ + iz
                             ],
                         ]
-                    elif testEl.nNodes == 20:
+                    elif prototype.nNodes == 20:
                         nodeList = [
                             nodes[
                                 0 + 2 * ix * (nNodesY * nNodesZ) + 2 * iy * nNodesZ + 2 * iz

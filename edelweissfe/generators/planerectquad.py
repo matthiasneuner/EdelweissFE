@@ -57,7 +57,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
+from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import GeneratorBase, isNodeOfElements
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
@@ -133,14 +133,13 @@ class Generator(GeneratorBase):
         elTypeName = configuration.elType
         elProvider = configuration.elProvider
 
-        elType = getElementClass(elTypeName, elProvider)
-
-        testEl = elType(elTypeName, 0)
-        if testEl.nNodes == 4:
+        # the number of nodes of the element type decides the node grid
+        prototype = createPrototypeElement(elTypeName, elProvider)
+        if prototype.nNodes == 4:
             nNodesX = nX + 1
             nNodesY = nY + 1
 
-        if testEl.nNodes == 8:
+        if prototype.nNodes == 8:
             nNodesX = 2 * nX + 1
             nNodesY = 2 * nY + 1
 
@@ -172,10 +171,10 @@ class Generator(GeneratorBase):
         for x in range(nX):
             for y in range(nY):
                 (currentElementLabel,) = model.topology.reserveElementNumbers(1)
-                if testEl.nNodes == 4:
+                if prototype.nNodes == 4:
                     elNodes = [nG[x, y], nG[x + 1, y], nG[x + 1, y + 1], nG[x, y + 1]]
 
-                elif testEl.nNodes == 8:
+                elif prototype.nNodes == 8:
                     elNodes = [
                         nG[2 * x, 2 * y],
                         nG[2 * x + 2, 2 * y],
