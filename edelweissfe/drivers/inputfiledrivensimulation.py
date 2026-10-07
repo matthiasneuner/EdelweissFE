@@ -43,6 +43,7 @@ from edelweissfe.domaindecomposition.distributedelements import (
     elementDistributionOfThisJob,
 )
 from edelweissfe.domaindecomposition.mpienvironment import (
+    StepFailedOnAllRanks,
     abortAllProcesses,
     abortAllProcessesOnUncaughtException,
     isRootProcess,
@@ -108,6 +109,8 @@ def finiteElementSimulation(
     writesOutput = isRootProcess()
     abortAllProcessesOnUncaughtException()
     interrupted = False
+    # A step failure the processes did not agree on may have happened in this process alone.
+    failedAlone = False
 
     journal = Journal(verbose=verbose and writesOutput)
 
@@ -294,12 +297,15 @@ def finiteElementSimulation(
         journal.errorMessage("Interrupted by user", identification)
         interrupted = True
 
+    except StepFailedOnAllRanks as e:
+        # Every process raised it together: every process finishes the job as a failed one.
+        _reportFailedStep(e, journal, identification)
+
     except StepFailed as e:
-        print("")
-        message = str(e)
-        journal.errorMessage(
-            "Simulation failed: {:}".format(message) if message else "Simulation failed", identification
-        )
+        # Perhaps raised here alone, while the other processes wait for this one in their next
+        # exchange: once this process finished the job, it stops them too (a serial run: nothing).
+        _reportFailedStep(e, journal, identification)
+        failedAlone = True
 
     except Exception as e:
         print("")
@@ -333,5 +339,25 @@ def finiteElementSimulation(
 
         if interrupted:
             abortAllProcesses("interrupted")
+        if failedAlone:
+            abortAllProcesses("a step failed without the agreement of the other processes")
 
     return model, fieldOutputController
+
+
+def _reportFailedStep(failure: StepFailed, journal: Journal, identification: str):
+    """Report a failed step in the journal.
+
+    Parameters
+    ----------
+    failure
+        The failure.
+    journal
+        The journal.
+    identification
+        Who reports.
+    """
+
+    print("")
+    message = str(failure)
+    journal.errorMessage("Simulation failed: {:}".format(message) if message else "Simulation failed", identification)

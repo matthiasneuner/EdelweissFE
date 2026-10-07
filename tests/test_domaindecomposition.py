@@ -67,6 +67,44 @@ def _metis():
     return metis
 
 
+def _runUnderMPI(directory, nProcesses: int = 3, timeout: float = 180.0) -> tuple[str | None, int | None]:
+    """Run ``run.py`` in a directory on ``nProcesses`` processes under the MPI launcher, with this
+    EdelweissFE; skip the test without ``mpi4py`` or a launcher.
+
+    Returns
+    -------
+    tuple[str | None, int | None]
+        The output of every process, stdout and stderr together, and the exit code of the launcher;
+        both None if the run did not end within ``timeout`` seconds -- the launcher and every process
+        it started are killed then, which would otherwise wait on.
+    """
+
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    launched = subprocess.Popen(
+        [mpirun, "--bind-to", "none", "-n", str(nProcesses), sys.executable, "run.py"],
+        cwd=directory,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = launched.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(launched.pid, signal.SIGKILL)
+        launched.communicate()
+        return None, None
+    return output, launched.returncode
+
+
 def test_metis_balances_a_uniform_grid():
     metis = _metis()
     offsets, nodes, nNodes = _quadGrid(8)
@@ -250,29 +288,9 @@ print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", interface.nInterfaceD
 
 
 def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path):
-    pytest.importorskip("mpi4py.MPI")
-    mpirun = shutil.which("mpirun")
-    if mpirun is None:
-        pytest.skip("no MPI launcher")
-
     (tmp_path / "run.py").write_text(_INTERFACE_ASSEMBLY_SCRIPT)
-    environment = dict(
-        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
-    )
-    launched = subprocess.Popen(
-        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"],
-        cwd=tmp_path,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        output, _ = launched.communicate(timeout=120)
-    except subprocess.TimeoutExpired:
-        os.killpg(launched.pid, signal.SIGKILL)
-        launched.communicate()
+    output, _ = _runUnderMPI(tmp_path, timeout=120)
+    if output is None:
         pytest.fail("the interface exchange did not complete")
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
@@ -440,10 +458,11 @@ def test_the_whole_model_is_a_trivial_partition():
 
 def test_a_single_subdomain_agrees_with_itself():
     MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.communicator import Communicator
     from edelweissfe.domaindecomposition.subdomain import Subdomain
     from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
 
-    subdomain = Subdomain(MPI.COMM_SELF, journal=None, identification="test", loadBalanceTolerance=0.1)
+    subdomain = Subdomain(Communicator(MPI.COMM_SELF), journal=None, identification="test", loadBalanceTolerance=0.1)
 
     assert subdomain.allreduceSum([1.5, -2.0]) == [1.5, -2.0]
     assert subdomain.allreduceMin(0.25) == 0.25
@@ -466,6 +485,33 @@ def test_a_single_subdomain_agrees_with_itself():
             raise KeyError("a failure")
 
 
+def test_no_process_communicates_where_the_processes_agree_on_failures():
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
+    from edelweissfe.domaindecomposition.subdomain import Subdomain
+
+    communicator = Communicator(MPI.COMM_SELF)
+    subdomain = Subdomain(communicator, journal=None, identification="test", loadBalanceTolerance=0.1)
+
+    # A communication inside the context fails, on all ranks together, and names the context.
+    with pytest.raises(StepFailedOnAllRanks, match="allgather was called while gathering inside"):
+        with subdomain.allRanksFailTogether("Gathering inside"):
+            communicator.allgather(1.0)
+    with pytest.raises(StepFailedOnAllRanks, match="Isend was called while"):
+        with subdomain.allRanksFailTogether("Exchanging inside"):
+            communicator.Isend(np.zeros(1), dest=0, tag=1)
+    # So does one nested deeper, and the communicator is usable again after either context.
+    with pytest.raises(StepFailedOnAllRanks, match="bcast was called while the inner one"):
+        with subdomain.allRanksFailTogether("The outer one"):
+            with communicator.withoutCommunication("The inner one"):
+                pass
+            with communicator.withoutCommunication("The inner one"):
+                communicator.bcast(1)
+    assert communicator.allgather(2.0) == [2.0]
+    assert subdomain.allreduceSum([1.5]) == [1.5]
+
+
 _FAILING_LOAD_DECK = """
 *material, name=LinearElastic, id=linearelastic, provider=edelweiss
 30000.0, 0.15, 1.0
@@ -486,16 +532,27 @@ maxInc=1, minInc=1e-12, maxNumInc=5, maxIter=25, stepLength=1
 >>bodyForce, name=gravity, elSet=all, forceVector='0.0, -0.01'
 """
 
-#: Runs _FAILING_LOAD_DECK with a body force kernel failing in process 1 only, and prints, per process,
-#: the failures the simulation reported.
-_FAILING_LOAD_SCRIPT = """
+#: Runs the deck in this directory with PATCH applied -- which makes something fail in process 1
+#: only --, and prints, per process, the failures the simulation reported.
+_FAILING_IN_PROCESS_ONE_SCRIPT = """
 import contextlib, io
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
-from edelweissfe.elements.base.displacementelementbase import DisplacementElementBase
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 rank = worldCommunicator().Get_rank()
+PATCH
+journal = io.StringIO()
+with contextlib.redirect_stdout(journal):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.getvalue().splitlines() if "failed" in line]
+print("PROCESS", rank, failures, flush=True)
+"""
+
+#: A body force kernel failing in process 1.
+_FAILING_LOAD_PATCH = """
+from edelweissfe.elements.base.displacementelementbase import DisplacementElementBase
+
 computeBodyForce = DisplacementElementBase.computeBodyForce
 
 
@@ -506,47 +563,101 @@ def failingInProcessOne(self, *args):
 
 
 DisplacementElementBase.computeBodyForce = failingInProcessOne
-journal = io.StringIO()
-with contextlib.redirect_stdout(journal):
-    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
-failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.getvalue().splitlines() if "failed" in line]
-print("PROCESS", rank, failures, flush=True)
 """
 
 
 def test_a_load_failing_in_one_process_fails_in_every_process(tmp_path):
-    pytest.importorskip("mpi4py.MPI")
-    mpirun = shutil.which("mpirun")
-    if mpirun is None:
-        pytest.skip("no MPI launcher")
-
     (tmp_path / "test.inp").write_text(_FAILING_LOAD_DECK)
-    (tmp_path / "run.py").write_text(_FAILING_LOAD_SCRIPT)
-    environment = dict(
-        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
-    )
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _FAILING_LOAD_PATCH))
     # Without the agreement, process 1 leaves the evaluation alone: uncaught, its exception aborts the
     # job with no failure reported; caught, the others wait for it in the exchange forever (the timeout).
-    launched = subprocess.Popen(
-        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"],
-        cwd=tmp_path,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        output, _ = launched.communicate(timeout=180)
-    except subprocess.TimeoutExpired:
-        # the launcher and every process it started, which would otherwise wait on
-        os.killpg(launched.pid, signal.SIGKILL)
-        launched.communicate()
+    output, _ = _runUnderMPI(tmp_path)
+    if output is None:
         pytest.fail("a load failing in one process left the others waiting")
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
     expected = "['Simulation failed: Evaluating the loads failed in process 1: RuntimeError: load kernel failed']"
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
+
+
+#: _FAILING_LOAD_DECK without the load, with an element field output: a distributed model, whose
+#: element results are gathered from the processes on every output increment.
+_FIELD_OUTPUT_DECK = _FAILING_LOAD_DECK.replace(
+    ">>bodyForce, name=gravity, elSet=all, forceVector='0.0, -0.01'",
+    ">>dirichlet, name=top, nSet=gen_top, field=displacement, 2=1e-3",
+).replace(
+    "*solver, solver=NEDMPI, name=theSolver",
+    "*fieldOutput\n>>perElement, elSet=all, result=stress, name=S, quadraturePoint=0\n"
+    "*solver, solver=NEDMPI, name=theSolver\noutput-frequency=2",
+)
+
+#: Reading the element results of an increment fails in process 1, before the results are gathered
+#: (the first reading, at the start of the job, succeeds).
+_FAILING_FIELD_OUTPUT_PATCH = """
+from edelweissfe.utils.fieldoutput import ElementFieldOutput
+
+rebuildCollector = ElementFieldOutput._rebuildCollectorIfSetChanged
+readings = []
+
+
+def failingInProcessOne(self):
+    readings.append(self)
+    if rank == 1 and len(readings) > 1:
+        raise RuntimeError("reading the element results failed")
+    return rebuildCollector(self)
+
+
+ElementFieldOutput._rebuildCollectorIfSetChanged = failingInProcessOne
+"""
+
+
+def test_a_field_output_failing_in_one_process_before_the_gather_fails_in_every_process(tmp_path):
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK)
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _FAILING_FIELD_OUTPUT_PATCH))
+    # Read inside the gather, the failure would leave process 1 agreeing on it while the others wait
+    # for it in the gather: a hang (the timeout), or two different collective operations matched.
+    output, _ = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("a field output failing in one process left the others waiting")
+
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    expected = (
+        "['Simulation failed: Reading the field outputs failed in process 1: RuntimeError: reading the element "
+        "results failed']"
+    )
+    assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
+
+
+#: A step failing in process 1 alone, outside any step the processes agree on: after the first
+#: output increment, the others go on into the next increment's exchange.
+_STEP_FAILING_ALONE_PATCH = """
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.exceptions import StepFailed
+
+writeIncrementOutput = NEDMPI.writeIncrementOutput
+
+
+def failingInProcessOne(self, *args):
+    writeIncrementOutput(self, *args)
+    if rank == 1:
+        raise StepFailed("the step failed in process 1 alone")
+
+
+NEDMPI.writeIncrementOutput = failingInProcessOne
+"""
+
+
+def test_a_step_failing_in_one_process_alone_stops_every_process(tmp_path):
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK)
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _STEP_FAILING_ALONE_PATCH))
+    # Finished like any failed step, process 1 would end its job while the others wait for it in the
+    # next exchange forever (the timeout).
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("a step failing in one process alone left the others waiting")
+
+    assert exitCode != 0, output
+    assert "a step failed without the agreement of the other processes in MPI process 1 of 3" in output, output
 
 
 _MATERIAL_PROPERTIES_DECK = """

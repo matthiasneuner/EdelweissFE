@@ -44,6 +44,8 @@ import os
 import sys
 from functools import cache
 
+from edelweissfe.utils.exceptions import StepFailed
+
 #: Environment variables at least one of which every supported MPI launcher sets in the processes
 #: it starts.
 _LAUNCHER_VARIABLES = (
@@ -64,14 +66,23 @@ def _startedByMPILauncher() -> bool:
     return any(variable in os.environ for variable in _LAUNCHER_VARIABLES)
 
 
+class StepFailedOnAllRanks(StepFailed):
+    """A step failed, and every process of the job raised this failure together, having agreed on it
+    (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`): so every
+    process may finish the job as after any failed step. A :class:`StepFailed` raised otherwise may
+    have been raised in one process alone, which leaves the others waiting for it in their next
+    collective operation; the driver then stops all of them (:func:`abortAllProcesses`)."""
+
+
 @cache
 def worldCommunicator():
     """The communicator of all processes of this job, or None for a serial run.
 
     Returns
     -------
-    mpi4py.MPI.Comm | None
-        ``MPI.COMM_WORLD`` if this process is one of more than one; None otherwise.
+    Communicator | None
+        ``MPI.COMM_WORLD``, as a :class:`~edelweissfe.domaindecomposition.communicator.Communicator`,
+        if this process is one of more than one; None otherwise. The same object on every call.
     """
 
     if not _startedByMPILauncher():
@@ -79,11 +90,12 @@ def worldCommunicator():
 
     from mpi4py import MPI
 
-    communicator = MPI.COMM_WORLD
-    if communicator.Get_size() == 1:
+    from edelweissfe.domaindecomposition.communicator import Communicator
+
+    if MPI.COMM_WORLD.Get_size() == 1:
         return None
 
-    return communicator
+    return Communicator(MPI.COMM_WORLD)
 
 
 def abortAllProcesses(reason: str):

@@ -146,6 +146,7 @@ import numpy as np
 from mpi4py import MPI
 
 import edelweissfe.utils.performancetiming as performancetiming
+from edelweissfe.domaindecomposition.communicator import Communicator
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.domaindecomposition.subdomain import Subdomain
 from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly
@@ -249,7 +250,7 @@ class NEDMPI(NEDParallel):
         #: The subdomain this process computes, among all processes of the launcher; started without
         #: a launcher, a subdomain of one -- the same code path, with every exchange a copy.
         self.subdomain = Subdomain(
-            MPI.COMM_SELF if communicator is None else communicator,
+            Communicator(MPI.COMM_SELF) if communicator is None else communicator,
             journal,
             self.identification,
             self.options["load-balance-tolerance"],
@@ -742,9 +743,20 @@ class NEDMPI(NEDParallel):
         return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
-        """Write the output of an accepted increment, failing on all ranks together if it fails on one: a conditional stop
-        is decided by an output manager of rank 0, and a failure to write may happen in one process
-        only. Collective.
+        """Write the output of an accepted increment, in three parts, so that no process communicates
+        where another may have failed before. Collective.
+
+        1. Each process reads its part of the field outputs -- the results of the elements it owns --
+           failing on all ranks together if it fails on one.
+        2. The parts are gathered: the results of every element set, and, if a checkpoint is written
+           now -- which only rank 0, holding the output managers, knows -- the state of every element
+           of a model whose processes each hold only their own elements.
+        3. The field outputs store the gathered results, and the output managers of rank 0 write,
+           failing on all ranks together if it fails on one: a conditional stop is decided by an
+           output manager of rank 0, and a failure to write may happen in one process only.
+
+        Nothing communicates in parts 1 and 3; the communicator refuses it
+        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.allRanksFailTogether`).
 
         Parameters
         ----------
@@ -755,23 +767,25 @@ class NEDMPI(NEDParallel):
             none.
         """
 
-        # A checkpoint holds the state of every element. Where each process created only its own
-        # elements, they are gathered to rank 0 first -- outside the context failing on all ranks together, in which nothing
-        # may communicate -- if a checkpoint is written now, which only rank 0, holding the output
-        # managers, knows; and released once written, however the output ended.
         model = fieldOutputController.model
-        writesCheckpoint = self.subdomain.communicator.bcast(
-            any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
-        )
-        if writesCheckpoint:
-            with performancetiming.timeit("gather states"):
-                model.elementDistribution.gatherStatesForCheckpoint(model.elements)
+        with performancetiming.timeit("finalize output"):
+            with self.subdomain.allRanksFailTogether("Reading the field outputs"):
+                fieldOutputController.readResultsHere()
 
-        try:
-            with performancetiming.timeit("finalize output"), self.subdomain.allRanksFailTogether("Writing the output"):
-                super().writeIncrementOutput(fieldOutputController, outputManagers)
-        finally:
-            model.elementDistribution.forgetGatheredStates()
+            fieldOutputController.gatherResultsOfWholeSet()
+            writesCheckpoint = self.subdomain.communicator.bcast(
+                any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
+            )
+            if writesCheckpoint:
+                with performancetiming.timeit("gather states"):
+                    model.elementDistribution.gatherStatesForCheckpoint(model.elements)
+
+            # The gathered states are released once written, however the output ended.
+            try:
+                with self.subdomain.allRanksFailTogether("Writing the output"):
+                    super().writeIncrementOutput(fieldOutputController, outputManagers)
+            finally:
+                model.elementDistribution.forgetGatheredStates()
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
         """Make the whole model current in every process, then let the step actions finish the step.

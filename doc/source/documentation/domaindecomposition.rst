@@ -233,7 +233,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``updateConstraintConnectivity``            the synchronization before a contact search
 ``updateConnectivityOf``                    runs a search on the constraint's process only
 ``updateTopology``                          the agreement on a topology update
-``writeIncrementOutput``                    the agreement on writing the output
+``writeIncrementOutput``                    reads locally, agrees, gathers, then writes (below)
 ``applyStepActionsAtStepEnd``               the synchronization at the end of a step
 ``releaseEquationSystem``                   (its own) releases the system before elements move
 ==========================================  =========================================================
@@ -575,7 +575,21 @@ raised on all ranks together
 ends the step the same way; a cutback requested anywhere is raised everywhere, with the smallest
 size requested. A failure anywhere else aborts all processes, and so does an interrupt (``Ctrl+C``)
 of any one of them: the others would otherwise wait forever for the one that stopped
-(:mod:`~edelweissfe.domaindecomposition.mpienvironment`).
+(:mod:`~edelweissfe.domaindecomposition.mpienvironment`). The driver finishes a job normally after a
+failed step only if every process raised the failure together
+(:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`); any other failed
+step may have failed in one process alone, so that process then stops all of them.
+
+Nothing inside such an agreement may communicate: a process that failed before a collective operation
+would skip it, and leave the others waiting in it. That is enforced: the communicator
+(:class:`~edelweissfe.domaindecomposition.communicator.Communicator`) raises at any communication
+inside the agreement, which then fails on all ranks like any other failure. What reads more than one
+process is split into a part each process does alone and the communication after the agreement. The
+output of an increment, for example, is written in three parts
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`): each process
+reads the results of its own elements for the field outputs, agreeing on failures; the results of
+every element set -- and the element states of a checkpoint -- are gathered; then the field outputs
+store them and rank 0 writes, agreeing on failures (a conditional stop, too) again.
 
 A model with an element that exposes no state (``getStateVars``) is refused on more than one
 process: its state could not be sent to the process writing the output and the checkpoints, nor to

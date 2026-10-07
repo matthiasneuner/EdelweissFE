@@ -423,6 +423,21 @@ class _FieldOutputBase:
         if self.export:
             self.writeLastResult()
 
+    def readResultsHere(self):
+        """Read the part of the current result this process holds, without communicating: the first
+        half of :meth:`updateResults` for a result gathered from several processes, which a
+        domain-decomposed solver calls apart from the second, :meth:`gatherResultsOfWholeSet` (see
+        :meth:`FieldOutputController.readResultsHere`). Nothing, for a result every process holds
+        whole: every result but that of an element set.
+        """
+
+    def gatherResultsOfWholeSet(self):
+        """Complete the part read by :meth:`readResultsHere` to the result of the whole set, from the
+        processes holding the rest; the next :meth:`updateResults` stores it. Collective where the
+        elements are distributed over several processes. Nothing, for a result every process holds
+        whole.
+        """
+
     def finalizeStep(
         self,
     ):
@@ -669,6 +684,13 @@ class ElementFieldOutput(_FieldOutputBase):
         self.associatedSet = elSet
         self.resultName = resultName
         self.quadraturePoints = quadraturePoints
+        #: Whether :meth:`readResultsHere` read results that are not yet gathered, and those results
+        #: of the elements of the set owned here (None if none are owned here).
+        self._resultsHereRead = False
+        self._resultsHere = None
+        #: The results of the whole set, gathered by :meth:`gatherResultsOfWholeSet` and not yet
+        #: stored; None if nothing was gathered since.
+        self._resultsOfWholeSet = None
 
         self._collectFromOwnedElements(model)
 
@@ -702,9 +724,34 @@ class ElementFieldOutput(_FieldOutputBase):
         ):
             self._collectFromOwnedElements(self.model)
 
+    def readResultsHere(self):
+        """Read the results of the elements of the set owned here; see
+        :meth:`_FieldOutputBase.readResultsHere`."""
+
+        self._rebuildCollectorIfSetChanged()
+        self._resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
+        self._resultsHereRead = True
+
+    def gatherResultsOfWholeSet(self):
+        """Gather the results of the whole set from those read here and those owned elsewhere
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`);
+        see :meth:`_FieldOutputBase.gatherResultsOfWholeSet`. Collective where the elements are
+        distributed."""
+
+        if not self._resultsHereRead:
+            raise RuntimeError(
+                "field output {:}: the results of the whole set are gathered from those read here, "
+                "which were not read (readResultsHere)".format(self.name)
+            )
+        resultsHere, self._resultsHere, self._resultsHereRead = self._resultsHere, None, False
+        self._resultsOfWholeSet = self.model.elementDistribution.resultsOfWholeSet(
+            self.associatedSet, self._numbersOwnedHere, resultsHere
+        )
+
     def updateResults(self, model: FEModel):
-        """Update the field output.
-        Will use the current solution and reaction vector if result is a nodal result.
+        """Update the field output: read the results of the elements owned here, gather those of the
+        whole set, and store them -- or store the results gathered already, if a domain-decomposed
+        solver gathered them apart (:meth:`gatherResultsOfWholeSet`).
 
         Parameters
         ----------
@@ -712,9 +759,10 @@ class ElementFieldOutput(_FieldOutputBase):
             The model tree.
         """
 
-        self._rebuildCollectorIfSetChanged()
-        resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
-        result = model.elementDistribution.resultsOfWholeSet(self.associatedSet, self._numbersOwnedHere, resultsHere)
+        if self._resultsOfWholeSet is None:
+            self.readResultsHere()
+            self.gatherResultsOfWholeSet()
+        result, self._resultsOfWholeSet = self._resultsOfWholeSet, None
 
         super()._applyResultsPipleline(result)
 
@@ -1027,6 +1075,30 @@ class FieldOutputController:
 
         for output in self.fieldOutputs.values():
             output.finalizeIncrement()
+
+    def readResultsHere(self):
+        """Let every field output read the part of its current result this process holds, without
+        communicating (:meth:`_FieldOutputBase.readResultsHere`).
+
+        :meth:`finalizeIncrement` reads, gathers and stores every result in one pass. A
+        domain-decomposed solver splits it instead: each process reads its part -- which may fail in
+        one process alone, and so is done where the processes agree on failures afterwards --, then
+        the parts are gathered (:meth:`gatherResultsOfWholeSet`), and only then :meth:`finalizeIncrement`
+        stores them, communicating no more (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`).
+        """
+
+        for output in self.fieldOutputs.values():
+            output.readResultsHere()
+
+    def gatherResultsOfWholeSet(self):
+        """Let every field output complete the part read by :meth:`readResultsHere` to the result of
+        its whole set, for the next :meth:`finalizeIncrement`. Collective where the elements are
+        distributed over several processes: every process gathers the field outputs in the same
+        order."""
+
+        for output in self.fieldOutputs.values():
+            output.gatherResultsOfWholeSet()
 
     def finalizeStep(
         self,

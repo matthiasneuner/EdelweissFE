@@ -51,6 +51,8 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 import edelweissfe.utils.performancetiming as performancetiming
+from edelweissfe.domaindecomposition.communicator import Communicator
+from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
 from edelweissfe.domaindecomposition.partitioning import (
     assignConstraints,
     keepElementsWhereTheyWere,
@@ -77,7 +79,6 @@ from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.exceptions import (
     ConditionalStop,
     CutbackRequest,
-    StepFailed,
     TopologyError,
 )
 
@@ -239,7 +240,8 @@ class Subdomain:
     Parameters
     ----------
     communicator
-        The communicator of the processes sharing the model.
+        The communicator of the processes sharing the model
+        (:class:`~edelweissfe.domaindecomposition.communicator.Communicator`).
     journal
         The journal, for the subdomain report.
     identification
@@ -249,7 +251,7 @@ class Subdomain:
         :meth:`rebalance` repartitions; 0 disables it.
     """
 
-    def __init__(self, communicator, journal, identification: str, loadBalanceTolerance: float):
+    def __init__(self, communicator: Communicator, journal, identification: str, loadBalanceTolerance: float):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
         self.nProcesses = communicator.Get_size()
@@ -990,11 +992,13 @@ class Subdomain:
         :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
         :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
         -- a cutback with the smallest size any process requested -- so that every process takes the
-        same path out of the step. Nothing inside the context may itself communicate, unless every
-        process reaches it whatever another process did before: a process that raised would skip
-        it. (The field outputs of a distributed model gather their element results inside the
-        output context, every process in the same order, before anything that runs in one process
-        only -- the output managers of rank 0.)
+        same path out of the step. Nothing inside the context may communicate: a process that
+        raised would skip the communication, and leave the others waiting in it. That is enforced,
+        not assumed -- the communicator raises at any communication inside the context
+        (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.withoutCommunication`),
+        which then fails on all ranks like any other failure. A step that needs to communicate is
+        split: each process does its own part in the context, and communicates after it (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`).
 
         Parameters
         ----------
@@ -1008,7 +1012,8 @@ class Subdomain:
 
         failure = None
         try:
-            yield
+            with self.communicator.withoutCommunication(operation):
+                yield
         except Exception as exception:
             failure = exception
 
@@ -1045,7 +1050,7 @@ class Subdomain:
         if status[0] == _CUTBACK:
             cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
             raise CutbackRequest(message, cutbackSize) from failure
-        raise StepFailed("{:} failed in {:}".format(operation, message)) from failure
+        raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
 
     # --- Load balancing -----------------------------------------------------------------------------
 
