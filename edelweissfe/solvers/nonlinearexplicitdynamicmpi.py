@@ -910,7 +910,7 @@ class NEDMPI(NEDParallel):
         If the topology changed, the subdomains are rebalanced for the changed mesh if that pays
         (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalanceAfterTopologyChange`),
         over the increments until the end of the step or since the previous topology change,
-        whichever are fewer.
+        whichever are fewer (the latter alone if the time stepper cannot estimate the former).
 
         Parameters
         ----------
@@ -937,9 +937,10 @@ class NEDMPI(NEDParallel):
             # The children of a refined element are computed where it was; move elements now if that
             # unbalances the subdomains enough to pay, inside the rebuild that follows anyway.
             incrementsDone = step.timeStepper.numberOfIncrementsDone()
-            horizon = min(
-                step.timeStepper.incrementsLeftEstimate(), incrementsDone - self._incrementsDoneAtLastTopologyChange
-            )
+            horizon = incrementsDone - self._incrementsDoneAtLastTopologyChange
+            incrementsLeft = step.timeStepper.incrementsLeftEstimate()
+            if incrementsLeft is not None:
+                horizon = min(incrementsLeft, horizon)
             self._incrementsDoneAtLastTopologyChange = incrementsDone
             self.subdomain.rebalanceAfterTopologyChange(model, horizon)
         return changed

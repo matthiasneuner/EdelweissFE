@@ -76,3 +76,16 @@ def test_time_never_runs_backwards():
         stepper.acceptTimeStep(timeStep)
     assert times == sorted(times)
     assert times[-1] == pytest.approx(STEP_START + STEP_LENGTH)
+
+
+def test_a_time_stepper_need_not_estimate_the_increments_left():
+    # Only a domain-decomposed run weighing a repartition asks for the estimate, and it copes with
+    # "unknown": a time stepper written without it keeps working.
+    from edelweissfe.timesteppers.base.timestepperbase import TimeStepperBase
+
+    assert "incrementsLeftEstimate" not in TimeStepperBase.__abstractmethods__
+
+    class _WithoutEstimate(SimpleTimeStepper):
+        incrementsLeftEstimate = TimeStepperBase.incrementsLeftEstimate
+
+    assert _WithoutEstimate.incrementsLeftEstimate(_stepper()) is None

@@ -199,17 +199,18 @@ class TimeStepperBase(ABC):
             The number of increments.
         """
 
-    @abstractmethod
-    def incrementsLeftEstimate(self) -> int:
+    def incrementsLeftEstimate(self) -> int | None:
         """How many more increments the step is expected to take, at the current increment size and
         within the maximum number of increments: an estimate, e.g. for weighing a cost that pays off
-        over the rest of the step.
+        over the rest of the step. A time stepper that cannot tell need not override this.
 
         Returns
         -------
-        int
-            The number of increments.
+        int | None
+            The number of increments, or None if unknown.
         """
+
+        return None
 
     def _warnIfResumedAtIncrementCap(self):
         """Warn when a checkpoint is resumed at or past the step's increment cap.
