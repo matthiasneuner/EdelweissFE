@@ -213,18 +213,22 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``NEDMPI`` method                            adds
 ==========================================  =========================================================
 ``partitionModel``                          the subdomain, instead of the whole model
-``computeElements``                         the interface exchange of the element forces
+``assembleInternalForces``                  the interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
 ``assembleLoads``                           the loads of the own elements, completed at the interface
 ``assembleConstraintForces``                evaluates the own constraints, shares all forces
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the sums over the subdomains
+``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned
+``addExternalWork``                         keeps the owned work until it is read (below)
+``publishNodeFields``                       publishes the degrees of freedom integrated here
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
 ``updateConstraintConnectivity``            the synchronization before a contact search
 ``updateConnectivityOf``                    runs a search on the constraint's process only
 ``updateTopology``                          the agreement on a topology update
 ``writeIncrementOutput``                    the agreement on writing the output
 ``applyStepActionsAtStepEnd``               the synchronization at the end of a step
+``releaseEquationSystem``                   (its own) releases the system before elements move
 ==========================================  =========================================================
 
 Each process evaluates the kernels of its own elements. At an interior degree of freedom of its
@@ -515,7 +519,7 @@ process keeps the products at the degrees of freedom it owns, increment by incre
 gathered only where the external work is read -- the energy balance, an output increment, the end
 of a step -- and added increment by increment, so every process accumulates that of the whole model,
 as a serial run does, without an exchange every increment
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.settleExternalWork`). It is an
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.settleExternalWork`). It is an
 ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the

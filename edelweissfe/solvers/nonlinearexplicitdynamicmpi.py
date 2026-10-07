@@ -84,7 +84,7 @@ loads and the constraint forces after them in deck order. A run on any number of
 therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same input -- through
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
 depends on measured timings, changes the speed of a run and never its result. The external work is
-summed exactly (:meth:`sumsOfWorkAtPrescribedDofs`), so it, too, and the checkpoints recording it,
+summed exactly (:meth:`settleExternalWork`), so it, too, and the checkpoints recording it,
 are bit-identical. Only the kinetic and internal energy of the energy table are formed per
 subdomain and then added, and may differ from a serial run's in their last digits; they enter
 nothing but the table.
@@ -105,7 +105,7 @@ deterministic, uneven cost, for tests.
 :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines. What this solver adds is the
 communication, each in an override of a method of ``NED``:
 
-* :meth:`NEDMPI.computeElements` completes the element forces at the interface;
+* :meth:`NEDMPI.assembleInternalForces` completes the element forces at the interface;
 * :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
   shares them from the owners;
 * :meth:`NEDMPI.assembleConstraintForces` shares the constraint forces;
@@ -149,6 +149,7 @@ import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.domaindecomposition.subdomain import Subdomain
 from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly
+from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
@@ -200,6 +201,25 @@ class NEDMPISchema(NEDSchema):
     )
 
 
+@dataclass(frozen=True)
+class NodeFieldSlot:
+    """Where degrees of freedom of a vector are published in a node field.
+
+    Parameters
+    ----------
+    nodeField
+        The node field.
+    positions
+        The positions in the node field's flattened values, as an index.
+    dofs
+        The degrees of freedom published there, in the same order, as an index into a vector.
+    """
+
+    nodeField: NodeField
+    positions: slice | np.ndarray
+    dofs: slice | np.ndarray
+
+
 class NEDMPI(NEDParallel):
     """The nonlinear explicit dynamic solver, domain-decomposed over MPI processes.
 
@@ -245,6 +265,13 @@ class NEDMPI(NEDParallel):
         #: The increments of the step done at the last topology change (or 0, at the start of the
         #: step), for the horizon a migration after a topology change is weighed over.
         self._incrementsDoneAtLastTopologyChange = 0
+        #: Where the degrees of freedom integrated here are published in the node fields; see
+        #: :meth:`publishNodeFields`.
+        self._integratedNodeFieldSlots: list[NodeFieldSlot] = []
+        #: The work at the prescribed degrees of freedom owned here of every increment since the
+        #: external work was last read, in increment order: one array of products per increment,
+        #: added to the external work by :meth:`settleExternalWork`.
+        self._pendingWorkAtPrescribedDofs: list[np.ndarray] = []
 
     def beginStep(
         self,
@@ -275,6 +302,7 @@ class NEDMPI(NEDParallel):
             0,
         )
         self._incrementsDoneAtLastTopologyChange = 0
+        self._pendingWorkAtPrescribedDofs = []
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     # --- The subdomain ------------------------------------------------------------------------------
@@ -314,6 +342,7 @@ class NEDMPI(NEDParallel):
         """
 
         plan = super().planIncrement(model)
+        self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
         self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if timesKernels else None
@@ -387,11 +416,11 @@ class NEDMPI(NEDParallel):
     # --- The increment ------------------------------------------------------------------------------
 
     @performancetiming.timeit("elements")
-    def computeElements(
+    def assembleInternalForces(
         self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> tuple[DofVector, float]:
         """Evaluate the elements of the subdomain, agreed on by all processes, and complete their
-        internal force at the interface; see :meth:`NED.computeElements`. Collective.
+        internal force at the interface; see :meth:`NED.assembleInternalForces`. Collective.
 
         Parameters
         ----------
@@ -537,40 +566,63 @@ class NEDMPI(NEDParallel):
 
         return self.subdomain.minAcrossParts(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
-    def sumsOfWorkAtPrescribedDofs(self, workOfIncrements: list[np.ndarray]) -> list[float]:
-        """The work at the prescribed degrees of freedom of the whole model in each of the given
-        increments, the same in every process: the products at the degrees of freedom each process
-        owns are gathered to every process -- once for all the increments since the external work was
-        last read, not every increment -- and each increment's are summed exactly (:func:`math.fsum`),
-        as :meth:`NED.sumsOfWorkAtPrescribedDofs` sums them in a serial run. So the external work is
-        the same, bit for bit, on any number of processes, and every process holds that of the whole
-        model. Collective: :meth:`NED.settleExternalWork` is called at the same increments in every
-        process.
+    def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
+        """Keep the work of this increment at the prescribed degrees of freedom owned here -- a degree
+        of freedom shared by two subdomains is counted once, by its owner -- until the external work
+        is next read (:meth:`settleExternalWork`), so that the products need not be gathered every
+        increment; see :meth:`NED.addExternalWork`.
 
         Parameters
         ----------
-        workOfIncrements
-            Per increment, the products at the prescribed degrees of freedom owned here.
+        dofs
+            The prescribed degrees of freedom whose work is an energy.
+        reactionTimesIncrement
+            Per degree of freedom, the net nodal force times the prescribed increment.
+        """
+
+        self._pendingWorkAtPrescribedDofs.append(reactionTimesIncrement[self.partition.ownedDofMask[dofs]])
+
+    def settleExternalWork(self):
+        """Add the work of every increment since the last call to the external work, increment by
+        increment, in increment order: the products at the degrees of freedom each process owns are
+        gathered to every process -- once for all those increments -- and each increment's are summed
+        exactly (:func:`math.fsum`), as :meth:`NED.addExternalWork` sums them in a serial run. So the
+        external work is the same, bit for bit, on any number of processes, and every process holds
+        that of the whole model. Called where it is read: the energy balance, an output increment (and
+        a checkpoint written with it), the end of a step. Collective.
+        """
+
+        gathered = self.subdomain.communicator.allgather(self._pendingWorkAtPrescribedDofs)
+        for increment in range(len(self._pendingWorkAtPrescribedDofs)):
+            self._externalWork -= math.fsum(np.concatenate([ofProcess[increment] for ofProcess in gathered]).tolist())
+        self._pendingWorkAtPrescribedDofs = []
+
+    def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
+        """The sum of :meth:`NED.halfMassTimesSquaredRate` over the degrees of freedom owned here, so
+        that the sums of all subdomains add up to that of the model.
+
+        Parameters
+        ----------
+        indices
+            The degrees of freedom.
+        V
+            The velocity vector.
 
         Returns
         -------
-        list[float]
-            The work of each increment, of the whole model, in the order given.
+        float
+            The sum over those owned here.
         """
 
-        gathered = self.subdomain.communicator.allgather(workOfIncrements)
-        return [
-            math.fsum(np.concatenate([ofProcess[increment] for ofProcess in gathered]).tolist())
-            for increment in range(len(workOfIncrements))
-        ]
+        indices = np.arange(V.shape[0])[indices]
+        return super().halfMassTimesSquaredRate(indices[self.partition.ownedDofMask[indices]], V)
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.
 
         The internal and kinetic energies are formed per subdomain and then added in rank order, so
         they may differ from a serial run's in their last digits; they enter nothing but the energy
-        table. The external work is that of the whole model already
-        (:meth:`sumsOfWorkAtPrescribedDofs`).
+        table. The external work is that of the whole model (:meth:`settleExternalWork`).
 
         Parameters
         ----------
@@ -585,6 +637,7 @@ class NEDMPI(NEDParallel):
             As for :meth:`NED.energyBalanceTerms`.
         """
 
+        self.settleExternalWork()
         Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
         Wint, Wkin, *nonMechanical = self.subdomain.sumAcrossParts([Wint, Wkin] + nonMechanical)
         return Wint, Wkin, Wext, nonMechanical
@@ -609,6 +662,8 @@ class NEDMPI(NEDParallel):
         super().acceptIncrement(step, model, timeStep)
 
         if self.isOutputIncrement(timeStep):
+            # the output and a checkpoint written after it read the external work
+            self.settleExternalWork()
             self._synchronizeModel(model, timeStep, includeStates=True)
 
             # Right after every element state was synchronized -- or, where each process holds
@@ -647,16 +702,41 @@ class NEDMPI(NEDParallel):
         self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
 
     def releaseEquationSystem(self) -> ExplicitSystem:
-        """Release the equation system as :meth:`NED.releaseEquationSystem` does, and the interface
-        assembly and the element timing built with its increment plan.
+        """Release the equation system and everything built with it -- the counterpart of
+        :meth:`NED.buildEquationSystem`, and of :meth:`planIncrement` -- keeping only plain copies of
+        the solution, the velocity and the net force, and the critical time step.
+
+        Everything released is indexed by the elements and constraints the system was built for:
+        the DofManager (whose entity indices hold the elements themselves), every vector carrying
+        those indices, the lumped operators, the partition, the increment plan, the interface
+        assembly and the element timing. Before elements move to another process, so that nothing
+        keeps a dropped element alive; the system is then built again, with the returned system as
+        ``previous``.
 
         Returns
         -------
         ExplicitSystem
-            The carried state; see :meth:`NED.releaseEquationSystem`.
+            The carried state: plain copies of ``U``, ``V`` and ``P``, and the critical time step;
+            no ``Minv`` and no ``dU``.
         """
 
-        carried = super().releaseEquationSystem()
+        carried = ExplicitSystem(
+            Minv=None,
+            U=np.array(self._system.U),
+            dU=None,
+            V=np.array(self._system.V),
+            P=np.array(self._system.P),
+            criticalTimeStep=self._system.criticalTimeStep,
+        )
+        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
+        self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
+        self._secondOrderMask = self._halfDampingRate = None
+        self._reusableOperators = None
+        self._constraintForces = {}
+        self.theDofManager = None
+        self.partition = None
+        self._incrementPlan = None
+        self._integratedNodeFieldSlots = []
         self._interfaceAssembly = None
         self._elementCosts = None
         return carried
@@ -707,7 +787,72 @@ class NEDMPI(NEDParallel):
 
         if self._system is not None:
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True)
+        # the end of a step reads the external work, and so does the output written after it
+        self.settleExternalWork()
         super().applyStepActionsAtStepEnd(model, stepActions)
+
+    @performancetiming.timeit("publish node fields")
+    def publishNodeFields(self, model: FEModel, U: DofVector, V: DofVector, P: DofVector):
+        """Publish the degrees of freedom integrated here; see :meth:`NED.publishNodeFields`. The
+        others are current only in the processes integrating them, and are published here by
+        :meth:`_synchronizeModel` before anything reads them.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        U
+            The solution vector.
+        V
+            The velocity vector.
+        P
+            The net force vector.
+        """
+
+        for slot in self._integratedNodeFieldSlots:
+            nodeField = slot.nodeField
+            for vector, entry in ((U, "U"), (P, "P"), (V, "V")):
+                if entry not in nodeField:
+                    nodeField.createFieldValueEntry(entry)
+                values = nodeField[entry]
+                # Written through a flat view, which only a contiguous array has.
+                if not values.flags.c_contiguous:
+                    raise RuntimeError("Node field entry {:}/{:} is not contiguous.".format(nodeField.name, entry))
+                values.reshape(-1)[slot.positions] = vector.asPlainArray()[slot.dofs]
+
+        for variable in model.scalarVariables.values():
+            variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
+
+    def _nodeFieldSlotsOf(self, model: FEModel, dofs: slice | np.ndarray) -> list[NodeFieldSlot]:
+        """Where the given degrees of freedom are published in the node fields.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        dofs
+            ``slice(None)`` for every degree of freedom, or sorted degree-of-freedom indices.
+
+        Returns
+        -------
+        list[NodeFieldSlot]
+            One slot per node field.
+        """
+
+        selected = np.zeros(self.theDofManager.nDof, dtype=bool)
+        selected[dofs] = True
+        slots = []
+        for nodeField in model.nodeFields.values():
+            indices = self.theDofManager.idcsOfNodeFieldsInDofVector[nodeField.name]
+            fieldDofs = np.arange(self.theDofManager.nDof)[indices]
+            positions = np.flatnonzero(selected[fieldDofs])
+            if positions.shape == fieldDofs.shape:
+                # Every degree of freedom of the field: published through the field's own index,
+                # which copies without gathering where it is a slice.
+                slots.append(NodeFieldSlot(nodeField, slice(None), indices))
+            else:
+                slots.append(NodeFieldSlot(nodeField, positions, fieldDofs[positions]))
+        return slots
 
     # --- Searches and topology updates ---------------------------------------------------------------
 
@@ -817,7 +962,8 @@ class NEDMPI(NEDParallel):
         U, V, P = self._U, self._V, self._P
         for vector in (U, V, P):
             self.subdomain.shareFromOwners(vector)
-        self.publishNodeFields(model, U, V, P)
+        # every degree of freedom is current now, not only those integrated here
+        super().publishNodeFields(model, U, V, P)
 
         if includeStates:
             self.subdomain.synchronizeStates(includeElements=True)

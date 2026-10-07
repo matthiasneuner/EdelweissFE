@@ -137,7 +137,6 @@ from scipy.sparse import csr_matrix
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesKineticEnergy, carriesLinearMomentum
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
-from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.assembly import addNodalForces
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
@@ -277,18 +276,6 @@ class NEDSchema:
     )
 
 
-def _lumpedInertiaOf(element, Me: np.ndarray):
-    """An element's lumped inertia, written into ``Me``."""
-
-    element.computeLumpedInertia(Me)
-
-
-def _lumpedDampingOf(element, Ce: np.ndarray):
-    """An element's lumped damping, written into ``Ce``."""
-
-    element.computeLumpedDamping(Ce)
-
-
 @dataclass
 class ExplicitSystem:
     """Everything an explicit increment operates on that is sized by the current equation system.
@@ -355,47 +342,26 @@ class _ReusableExplicitOperators:
 
 
 @dataclass(frozen=True)
-class NodeFieldSlot:
-    """Where degrees of freedom of a vector are published in a node field.
-
-    Parameters
-    ----------
-    nodeField
-        The node field.
-    positions
-        The positions in the node field's flattened values, as an index.
-    dofs
-        The degrees of freedom published there, in the same order, as an index into a vector.
-    """
-
-    nodeField: NodeField
-    positions: slice | np.ndarray
-    dofs: slice | np.ndarray
-
-
-@dataclass(frozen=True)
 class IncrementPlan:
-    """What an increment computes in this process, derived from the model partition and the equation
-    system together, and derived again whenever either changes.
+    """What every increment needs prepared, once per equation system: the element loop, the
+    first-order degrees of freedom, and the fold of the multi-point-constraint slave forces. Derived
+    again by :meth:`NED.planIncrement` whenever the equation system or the partition changes.
 
     Parameters
     ----------
     elementPlan
-        The gather and assembly plan of the elements computed here that have kernels; see
+        How the elements gather their degrees of freedom and how their forces are assembled; see
         :func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`.
     firstOrderDofs
         The first-order degrees of freedom integrated here.
-    nodeFieldSlots
-        Where the degrees of freedom integrated here are published in the node fields.
     mpcForceFold
-        The fold of the multi-point-constraint slave forces onto their masters, restricted to the
+        The fold of the multi-point-constraint slave forces onto their masters, as a matrix on the
         degrees of freedom integrated here; None without multi-point constraints. See
         :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldExplicitForceOperator`.
     """
 
     elementPlan: ElementPlan
     firstOrderDofs: np.ndarray
-    nodeFieldSlots: list[NodeFieldSlot]
     mpcForceFold: csr_matrix | None
 
 
@@ -519,15 +485,9 @@ class NED(NonlinearSolverBase):
         #: drift those changes accumulate over a step; reset at every step start.
         self._conservationCheck = ConservationCheck(journal, self.identification)
         #: Work done on the model by its prescribed degrees of freedom, accumulated every
-        #: increment over those owned here (see :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`).
-        #: Compared against the kinetic energy to detect energy creation; see
-        #: _ENERGY_CREATION_TOLERANCE.
+        #: increment (:meth:`addExternalWork`). Compared against the kinetic energy to detect
+        #: energy creation; see _ENERGY_CREATION_TOLERANCE.
         self._externalWork = 0.0
-        #: The work at the prescribed degrees of freedom owned here of every increment since the
-        #: last time the external work was read, in increment order: one array of per-degree-of-
-        #: freedom products per increment, added to :attr:`_externalWork` by
-        #: :meth:`settleExternalWork`.
-        self._pendingWorkAtPrescribedDofs = []
         #: The last completed increment. The central-difference velocity update reads
         #: 0.5 * (dT + dT_prev); None makes the first increment of a cold step the half step that
         #: starts a leapfrog. A resumed step continues from the checkpointed one instead: the
@@ -536,12 +496,10 @@ class NED(NonlinearSolverBase):
         #: The force buffer of every constraint evaluated here, by name; see
         #: :class:`ConstraintForce`. Cleared whenever the DofManager is rebuilt.
         self._constraintForces = {}
-        #: What an increment computes here; see :class:`IncrementPlan` and :meth:`planIncrement`.
+        #: What every increment needs prepared; see :class:`IncrementPlan` and :meth:`planIncrement`.
         #: None until the first equation system is built: an increment without a plan would
         #: evaluate no elements at all, and go on quietly producing wrong answers.
         self._incrementPlan = None
-        #: Where every degree of freedom is published in the node fields; see :meth:`publishNodeFields`.
-        self._nodeFieldSlots = []
         #: The lumped operators of the current equation system, kept across a rebuild that only a
         #: constraint's connectivity asked for; see :class:`_ReusableExplicitOperators`.
         self._reusableOperators = None
@@ -592,7 +550,6 @@ class NED(NonlinearSolverBase):
         self._stepWallClockTic = perf_counter()
 
         self._externalWork = 0.0
-        self._pendingWorkAtPrescribedDofs = []
         self.prevTimeStep = None
         self._conservationCheck.reset()
         self._warnedAboutMissingInternalEnergy = False
@@ -879,9 +836,7 @@ class NED(NonlinearSolverBase):
         if timeStep.timeIncrement > 0.0:
             self.prevTimeStep = timeStep
 
-        # Those integrated here: in a model computed whole, every one.
-        with performancetiming.timeit("publish node fields"):
-            self._publish(model, self._incrementPlan.nodeFieldSlots, U, V, P)
+        self.publishNodeFields(model, U, V, P)
 
         self.updateRigidBodies(model, timeStep)
 
@@ -896,25 +851,6 @@ class NED(NonlinearSolverBase):
                 elements=self.partition.elements,
                 constraints=self.partition.constraints,
             )
-
-        # the output and a checkpoint written after it read the external work
-        if self.isOutputIncrement(timeStep):
-            self.settleExternalWork()
-
-    def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict):
-        """Bring the external work up to date -- the end of a step reads it, and the output written
-        after -- then let the step actions finish the step.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        stepActions
-            The step actions, by type.
-        """
-
-        self.settleExternalWork()
-        super().applyStepActionsAtStepEnd(model, stepActions)
 
     def endStep(self, step, model: FEModel):
         """Report the step's performance timing.
@@ -934,7 +870,7 @@ class NED(NonlinearSolverBase):
     @performancetiming.timeit("increment")
     def solveIncrement(
         self,
-        U_n: DofVector,
+        U: DofVector,
         dU: DofVector,
         V: DofVector,
         P: DofVector,
@@ -944,22 +880,34 @@ class NED(NonlinearSolverBase):
         timeStep: TimeStep,
         prevTimeStep: TimeStep,
     ) -> tuple[DofVector, DofVector, DofVector]:
-        """One increment of the central-difference scheme.
+        """One increment of the central-difference method, from :math:`t_n` to
+        :math:`t_{n+1} = t_n + \\Delta t`.
 
-        From the net nodal force of the previous increment, the velocity is advanced half a step
-        beyond it, the solution a whole step; then the elements, the loads and the constraints are
-        evaluated at the new solution for the net nodal force of this one. Everything runs over the
-        degrees of freedom integrated in this process (:attr:`partition`): all of them in a model
-        computed whole.
+        On entry, ``U`` holds :math:`u_n`, ``V`` the velocity :math:`v_{n-1/2}` half an increment
+        behind it, and ``P`` the net nodal force :math:`f_n = f^{ext}_n - f^{int}_n` at :math:`u_n`.
+        The increment is four steps:
+
+        1. :meth:`prescribeBoundaryMotion` -- at the Dirichlet degrees of freedom the motion is
+           given, not integrated: the reaction there does work on the model, and the velocity is
+           the prescribed one;
+        2. :meth:`updateVelocities` -- :math:`v_{n+1/2} = v_{n-1/2} + \\Delta t_{n+1/2} M^{-1} f_n`,
+           with :math:`\\Delta t_{n+1/2}` the mean of this increment and the previous one (forward
+           Euler for a first-order field), then :meth:`imposeKinematicConstraints`;
+        3. :meth:`advanceDisplacements` -- :math:`u_{n+1} = u_n + \\Delta t\\, v_{n+1/2}`;
+        4. :meth:`assembleNetForce` -- :math:`f_{n+1}` at :math:`u_{n+1}`, which the next increment
+           starts from.
+
+        Everything runs over the degrees of freedom integrated in this process
+        (:attr:`partition`): every one, in a model computed whole.
 
         Parameters
         ----------
-        U_n
+        U
             The solution vector; advanced in place.
         dU
             The solution increment vector; overwritten.
         V
-            The velocity vector, half an increment behind ``U_n``; advanced in place.
+            The velocity vector, half an increment behind ``U``; advanced in place.
         P
             The net nodal force of the previous increment; overwritten with this one's.
         Minv
@@ -972,7 +920,8 @@ class NED(NonlinearSolverBase):
         timeStep
             The time step.
         prevTimeStep
-            The previous time step; None in the first increment of a cold step.
+            The previous time step; None in the first increment of a cold step, which makes it the
+            half step that starts the leapfrog.
 
         Returns
         -------
@@ -981,114 +930,21 @@ class NED(NonlinearSolverBase):
         """
 
         dirichlets = stepActions["dirichlet"].values()
-        nodeforces = stepActions["nodeforces"].values()
-        distributedLoads = stepActions["distributedload"].values()
-        bodyForces = stepActions["bodyforce"].values()
 
         # Find which global DOFs the Dirichlet BCs constrain, once up front.
         self.locateConstrainedDofs(dirichlets)
 
         if timeStep.timeIncrement == 0.0:
-            return U_n, V, P
+            return U, V, P
 
-        if prevTimeStep is None:
-
-            prevTimeStep = TimeStep(
-                timeStep.number,
-                timeStep.stepProgressIncrement,
-                timeStep.stepProgress,
-                0.0,
-                timeStep.stepTime,
-                timeStep.totalTime - timeStep.timeIncrement,
-            )
+        dT = timeStep.timeIncrement
+        dTPrevious = 0.0 if prevTimeStep is None else prevTimeStep.timeIncrement
 
         with performancetiming.timeit("kinematic update"):
-            # Enforce the Dirichlet boundary conditions on the constrained DOFs:
-            # there is no free equilibrium there, so their force P is set to zero,
-            # and their velocity is prescribed as (prescribed increment) / (time step).
-            prescribedVelocities = []
-            workAtPrescribedDofs = []
-            for dirichlet in dirichlets:
-                prescribedIncrement = dirichlet.getPrescribedIncrement(timeStep).flatten()
-
-                # The work put into the model at a prescribed degree of freedom is the reaction force
-                # there times the motion it is dragged through. At this point P holds the carried-over
-                # net nodal force from the previous increment (external minus internal plus constraint
-                # contributions), and the support reaction balancing it is its negative -- so this has
-                # to be accumulated HERE, immediately before the zeroing below, which is the only
-                # moment the reaction is available.
-                #
-                # Only where that product is an energy. A prescribed non-local damage, say, has a
-                # conjugate "force" in the units its own balance equation carries, and adding it
-                # here would put cubic millimetres into a total that is then compared against a
-                # kinetic energy in newton-millimetres -- the same units error the kinetic sum
-                # below excludes it from, at the other end of the same balance.
-                #
-                #
-                # Counted where the degree of freedom is owned -- here, in a model computed whole --
-                # so that a degree of freedom shared by two parts of a model is not counted twice;
-                # summed once for all Dirichlet conditions, below.
-                if carriesKineticEnergy(dirichlet.field):
-                    owned = self.partition.ownedDofMask[dirichlet.constrainedDofIndices]
-                    workAtPrescribedDofs.append(P[dirichlet.constrainedDofIndices][owned] * prescribedIncrement[owned])
-
-                prescribedVelocity = prescribedIncrement / timeStep.timeIncrement
-
-                P[dirichlet.constrainedDofIndices] = 0.0
-                V[dirichlet.constrainedDofIndices] = prescribedVelocity
-                prescribedVelocities.append((dirichlet.constrainedDofIndices, prescribedVelocity))
-
-            # Added to the external work only where it is read (settleExternalWork), so that a
-            # domain-decomposed run need not gather the products of every increment as it is made.
-            self._pendingWorkAtPrescribedDofs.append(
-                np.concatenate(workAtPrescribedDofs) if workAtPrescribedDofs else np.empty(0)
-            )
-
-            # Second-order DOFs: central difference with mass-proportional damping,
-            # V = ((1 - h) V + Minv P dt) / (1 + h), h = alpha dt / 2: the rate alpha = C/M enters
-            # as one factor on each side rather than as an extra force evaluation, so a damped
-            # degree of freedom costs what an undamped one does. At alpha = 0 it is bit-identical to
-            # the undamped update, which is why there is no branch -- and why mechanical Rayleigh
-            # damping would need no code here. The damping is not optional for a hyperbolic
-            # non-local field: undamped, the transients minted at the start of the step and at every
-            # refinement never decay, and the damage variable follows every overshoot instead of the
-            # mean. Written on whole vectors -- of the degrees of freedom integrated here, ``dofs``:
-            # h and the mask are zero off the second-order DOFs, which leaves those velocities
-            # unchanged. First-order DOFs: V = Minv P (forward Euler).
-            #
-            # In a model computed whole, ``dofs`` is ``slice(None)``: every ``x[dofs]`` below is a view
-            # of the whole vector, and writing it back is writing it onto itself.
-            dofs = self.partition.dofs
-            firstOrderDofs = self._incrementPlan.firstOrderDofs
-            VPlain, PPlain, MinvPlain = V.asPlainArray(), P.asPlainArray(), Minv.asPlainArray()
-
-            dtAverage = 0.5 * (timeStep.timeIncrement + prevTimeStep.timeIncrement)
-            halfRateStep = self._halfDampingRate[dofs] * dtAverage
-
-            velocity = VPlain[dofs]
-            velocity *= 1.0 - halfRateStep
-            velocity += MinvPlain[dofs] * PPlain[dofs] * (self._secondOrderMask[dofs] * dtAverage)
-            velocity /= 1.0 + halfRateStep
-            VPlain[dofs] = velocity
-            VPlain[firstOrderDofs] = MinvPlain[firstOrderDofs] * PPlain[firstOrderDofs]
-
-            # A prescribed velocity is a boundary condition, not a solution, and both updates above
-            # overwrote it: the damped one scales it by (1 - alpha dt/2)/(1 + alpha dt/2), the
-            # first-order one loses it outright to Minv * 0. The undamped central difference added
-            # Minv * 0 * dt and left it exactly, which is why this only needs saying now.
-            for constrainedDofIndices, prescribedVelocity in prescribedVelocities:
-                V[constrainedDofIndices] = prescribedVelocity
-
-            # slave DOFs of multi-point constraints do not integrate their own equations of motion --
-            # they ride along on their masters (Minv is zero there, so the updates above left them
-            # untouched); displacements follow automatically via dU = V * dt
-            if self.mpcTransformation is not None:
-                self.mpcTransformation.applySlaveKinematics(V)
-
-            # dU = V dt, U += dU
-            increment = VPlain[dofs] * timeStep.timeIncrement
-            dU.asPlainArray()[dofs] = increment
-            U_n.asPlainArray()[dofs] += increment
+            prescribedVelocities = self.prescribeBoundaryMotion(dirichlets, V, P, timeStep)
+            self.updateVelocities(V, P, Minv, 0.5 * (dT + dTPrevious))
+            self.imposeKinematicConstraints(V, prescribedVelocities)
+            self.advanceDisplacements(U, dU, V, dT)
 
         with performancetiming.timeit("step actions"):
             self.applyStepActionsAtIncrementStart(model, timeStep, stepActions)
@@ -1096,25 +952,239 @@ class NED(NonlinearSolverBase):
             for geostatic in stepActions["geostatic"].values():
                 geostatic.applyAtIterationStart()
 
-        P[:] = 0.0
-        P, psi = self.computeElements(U_n, dU, P, timeStep)
-        P[:] = -P[:]
-        P, _ = self.assembleLoads(nodeforces, distributedLoads, bodyForces, U_n, P, None, timeStep)
-        P = self.assembleConstraintForces(self.partition.constraints, U_n, dU, P, timeStep)
-
-        # fold the forces acting on slave DOFs onto their masters (action-reaction through the
-        # rigid interpolation link); done here so the Dirichlet handling at the start of the next
-        # increment operates on the already-folded vector. A slave and its masters are always
-        # integrated in the same part of the model, so the fold is restricted to its DOFs.
-        mpcForceFold = self._incrementPlan.mpcForceFold
-        if mpcForceFold is not None:
-            with performancetiming.timeit("mpc force fold"):
-                PPlain[dofs] = mpcForceFold @ PPlain[dofs]
+        P, psi = self.assembleNetForce(U, dU, P, stepActions, timeStep)
 
         if timeStep.number % self.options["output-frequency"] == 0:
             self.reportEnergyBalance(psi, V, timeStep)
 
-        return U_n, V, P
+        return U, V, P
+
+    def prescribeBoundaryMotion(
+        self, dirichlets: list, V: DofVector, P: DofVector, timeStep: TimeStep
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Prescribe the motion of the Dirichlet degrees of freedom: record the work their reactions
+        do on the model, set their force to zero -- there is no equation of motion to solve there --
+        and their velocity to the prescribed increment over the time increment.
+
+        Parameters
+        ----------
+        dirichlets
+            The Dirichlet conditions, with their degrees of freedom located.
+        V
+            The velocity vector; written at the prescribed degrees of freedom.
+        P
+            The net nodal force of the previous increment; zeroed at the prescribed degrees of
+            freedom.
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        list[tuple[np.ndarray, np.ndarray]]
+            Per Dirichlet condition, its degrees of freedom and their prescribed velocity, for
+            :meth:`imposeKinematicConstraints`.
+        """
+
+        prescribedVelocities = []
+        workedDofs = []
+        workProducts = []
+        for dirichlet in dirichlets:
+            prescribedIncrement = dirichlet.getPrescribedIncrement(timeStep).flatten()
+
+            # The work put into the model at a prescribed degree of freedom is the reaction force there
+            # times the motion it is dragged through. At this point P holds the carried-over net nodal
+            # force from the previous increment (external minus internal plus constraint
+            # contributions), and the support reaction balancing it is its negative -- so this has to
+            # be recorded HERE, immediately before the zeroing below, which is the only moment the
+            # reaction is available.
+            #
+            # Only where that product is an energy. A prescribed non-local damage, say, has a
+            # conjugate "force" in the units its own balance equation carries, and adding it here
+            # would put cubic millimetres into a total that is then compared against a kinetic energy
+            # in newton-millimetres -- the same units error the kinetic sum excludes it from, at the
+            # other end of the same balance.
+            if carriesKineticEnergy(dirichlet.field):
+                workedDofs.append(dirichlet.constrainedDofIndices)
+                workProducts.append(P[dirichlet.constrainedDofIndices] * prescribedIncrement)
+
+            prescribedVelocity = prescribedIncrement / timeStep.timeIncrement
+
+            P[dirichlet.constrainedDofIndices] = 0.0
+            V[dirichlet.constrainedDofIndices] = prescribedVelocity
+            prescribedVelocities.append((dirichlet.constrainedDofIndices, prescribedVelocity))
+
+        self.addExternalWork(
+            np.concatenate(workedDofs) if workedDofs else np.empty(0, dtype=int),
+            np.concatenate(workProducts) if workProducts else np.empty(0),
+        )
+
+        return prescribedVelocities
+
+    def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
+        """Add the work done at the prescribed degrees of freedom in one increment to the external
+        work.
+
+        The reaction is the negative of the net nodal force there, so the work is minus the sum of
+        the products of force and prescribed increment. That sum is formed exactly and rounded once
+        (:func:`math.fsum`): its value does not depend on the order of the products, which is what
+        makes it the same, bit for bit, however a model is split over processes
+        (:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`).
+
+        Parameters
+        ----------
+        dofs
+            The prescribed degrees of freedom whose work is an energy.
+        reactionTimesIncrement
+            Per degree of freedom, the net nodal force times the prescribed increment.
+        """
+
+        self._externalWork -= math.fsum(reactionTimesIncrement.tolist())
+
+    def updateVelocities(self, V: DofVector, P: DofVector, Minv: DofVector, dTAverage: float):
+        """Advance the velocity of every degree of freedom integrated here by the net nodal force.
+
+        Second order (central difference, with mass-proportional damping):
+
+        .. math:: v_{n+1/2} = \\frac{(1 - h)\\, v_{n-1/2} + \\Delta t_{n+1/2} M^{-1} f_n}{1 + h},
+            \\qquad h = \\tfrac{1}{2} \\alpha\\, \\Delta t_{n+1/2},
+
+        with the damping rate :math:`\\alpha = C/M`. First order (forward Euler):
+        :math:`\\dot{d} = C^{-1} f_n`, the inverse damping being what ``Minv`` holds there.
+
+        Parameters
+        ----------
+        V
+            The velocity vector; advanced in place.
+        P
+            The net nodal force.
+        Minv
+            The inverse lumped inertia (second order) or damping (first order).
+        dTAverage
+            The mean of this time increment and the previous one; half this one in the first
+            increment of a cold step.
+        """
+
+        # The rate alpha = C/M enters as one factor on each side rather than as an extra force
+        # evaluation, so a damped degree of freedom costs what an undamped one does. At alpha = 0 it
+        # is bit-identical to the undamped update, which is why there is no branch -- and why
+        # mechanical Rayleigh damping would need no code here. The damping is not optional for a
+        # hyperbolic non-local field: undamped, the transients minted at the start of the step and at
+        # every refinement never decay, and the damage variable follows every overshoot instead of
+        # the mean. Written on whole vectors: h and the second-order mask are zero off the
+        # second-order DOFs, which leaves those velocities unchanged.
+        #
+        # ``dofs`` are the degrees of freedom integrated here: in a model computed whole the slice
+        # ``slice(None)``, so that every ``x[dofs]`` below is the whole vector.
+        dofs = self.partition.dofs
+        firstOrderDofs = self._incrementPlan.firstOrderDofs
+        VPlain, PPlain, MinvPlain = V.asPlainArray(), P.asPlainArray(), Minv.asPlainArray()
+
+        halfRateStep = self._halfDampingRate[dofs] * dTAverage
+
+        velocity = VPlain[dofs]
+        velocity *= 1.0 - halfRateStep
+        velocity += MinvPlain[dofs] * PPlain[dofs] * (self._secondOrderMask[dofs] * dTAverage)
+        velocity /= 1.0 + halfRateStep
+        VPlain[dofs] = velocity
+        VPlain[firstOrderDofs] = MinvPlain[firstOrderDofs] * PPlain[firstOrderDofs]
+
+    def imposeKinematicConstraints(self, V: DofVector, prescribedVelocities: list[tuple[np.ndarray, np.ndarray]]):
+        """Set the velocities the scheme does not integrate: the prescribed ones, and those of the
+        slave degrees of freedom of multi-point constraints.
+
+        Parameters
+        ----------
+        V
+            The velocity vector.
+        prescribedVelocities
+            Per Dirichlet condition, its degrees of freedom and their prescribed velocity; see
+            :meth:`prescribeBoundaryMotion`.
+        """
+
+        # A prescribed velocity is a boundary condition, not a solution, and the update overwrote
+        # it: the damped one scales it by (1 - alpha dt/2)/(1 + alpha dt/2), the first-order one
+        # loses it outright to Minv * 0.
+        for constrainedDofIndices, prescribedVelocity in prescribedVelocities:
+            V[constrainedDofIndices] = prescribedVelocity
+
+        # Slave DOFs of multi-point constraints do not integrate their own equations of motion --
+        # they ride along on their masters (Minv is zero there, so the update left them untouched);
+        # their displacements follow from dU = V * dt.
+        if self.mpcTransformation is not None:
+            self.mpcTransformation.applySlaveKinematics(V)
+
+    def advanceDisplacements(self, U: DofVector, dU: DofVector, V: DofVector, dT: float):
+        """Advance the solution of every degree of freedom integrated here by its velocity:
+        :math:`\\Delta u = \\Delta t\\, v_{n+1/2}`, :math:`u_{n+1} = u_n + \\Delta u`.
+
+        Parameters
+        ----------
+        U
+            The solution vector; advanced in place.
+        dU
+            The solution increment vector; written.
+        V
+            The velocity vector.
+        dT
+            The time increment.
+        """
+
+        dofs = self.partition.dofs
+        increment = V.asPlainArray()[dofs] * dT
+        dU.asPlainArray()[dofs] = increment
+        U.asPlainArray()[dofs] += increment
+
+    def assembleNetForce(
+        self, U: DofVector, dU: DofVector, P: DofVector, stepActions: dict, timeStep: TimeStep
+    ) -> tuple[DofVector, float]:
+        """Assemble the net nodal force at the new solution: the external loads and the constraint
+        forces minus the internal force of the elements, :math:`f = f^{ext} + f^{c} - f^{int}`,
+        with the forces on multi-point-constraint slaves folded onto their masters.
+
+        Parameters
+        ----------
+        U
+            The current solution vector.
+        dU
+            The solution increment vector.
+        P
+            The net nodal force vector; overwritten.
+        stepActions
+            The active step actions, by type.
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        tuple[DofVector, float]
+            The net nodal force, and the internal energy the elements computed here report.
+        """
+
+        P, psi = self.assembleInternalForces(U, dU, P, timeStep)
+        P[:] = -P[:]
+        P, _ = self.assembleLoads(
+            stepActions["nodeforces"].values(),
+            stepActions["distributedload"].values(),
+            stepActions["bodyforce"].values(),
+            U,
+            P,
+            None,
+            timeStep,
+        )
+        P = self.assembleConstraintForces(self.partition.constraints, U, dU, P, timeStep)
+
+        # Fold the forces acting on slave DOFs onto their masters (action-reaction through the rigid
+        # interpolation link); done here so the Dirichlet handling at the start of the next increment
+        # operates on the already-folded vector. A slave and its masters are always integrated in the
+        # same part of the model, so the fold is restricted to its DOFs.
+        mpcForceFold = self._incrementPlan.mpcForceFold
+        if mpcForceFold is not None:
+            with performancetiming.timeit("mpc force fold"):
+                PPlain = P.asPlainArray()
+                dofs = self.partition.dofs
+                PPlain[dofs] = mpcForceFold @ PPlain[dofs]
+
+        return P, psi
 
     def reportEnergyBalance(self, psi: float, V: DofVector, timeStep: TimeStep):
         """Report the energy balance of the model -- external work, kinetic and internal energy, and
@@ -1242,42 +1312,6 @@ class NED(NonlinearSolverBase):
                 1,
             )
 
-    def settleExternalWork(self):
-        """Add the work at the prescribed degrees of freedom of every increment since the last call to
-        the external work, increment by increment, in increment order. Called where the external
-        work is read: the energy balance, an output increment (and a checkpoint written with it), the
-        end of a step.
-
-        The work of one increment is the sum of one product per prescribed degree of freedom --
-        reaction force times prescribed increment -- summed with :func:`math.fsum`
-        (:meth:`sumsOfWorkAtPrescribedDofs`), which rounds the exact sum once: it does not depend on
-        the order of the products, nor on how they are split into parts. That makes the external work
-        the same, bit for bit, whether the model is computed whole or split over any number of
-        processes, and whenever it is settled.
-        """
-
-        for work in self.sumsOfWorkAtPrescribedDofs(self._pendingWorkAtPrescribedDofs):
-            self._externalWork -= work
-        self._pendingWorkAtPrescribedDofs = []
-
-    def sumsOfWorkAtPrescribedDofs(self, workOfIncrements: list[np.ndarray]) -> list[float]:
-        """The work at the prescribed degrees of freedom of each of the given increments: the exact
-        sum (:func:`math.fsum`) of its products. See :meth:`settleExternalWork`.
-
-        Parameters
-        ----------
-        workOfIncrements
-            Per increment, the products at the prescribed degrees of freedom owned here: here, all of
-            them.
-
-        Returns
-        -------
-        list[float]
-            The work of each increment, in the order given.
-        """
-
-        return [math.fsum(products.tolist()) for products in workOfIncrements]
-
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of the energy balance: the internal energy, the kinetic energy, the external work,
         and the "kinetic energy" :math:`\\frac{1}{2} m v^2` of every second-order field whose inertia
@@ -1287,8 +1321,7 @@ class NED(NonlinearSolverBase):
         energy. Summing the whole vector also collected the first-order fields, whose "mass" is a
         viscosity and whose "velocity" is that field's rate -- no energy meaning, and orders of
         magnitude larger than the real term (eta ~ 1e-4 against a density ~ 1e-9): every balance
-        then read as 100 % kinetic. Each term is counted at the degrees of freedom owned here: all
-        of them, in a model computed whole.
+        then read as 100 % kinetic.
 
         Parameters
         ----------
@@ -1304,27 +1337,43 @@ class NED(NonlinearSolverBase):
             of :attr:`nonMechanicalSecondOrderFields`, in that order.
         """
 
-        def halfSumOfMassTimesSquaredRate(indices):
-            owned = indices[self.partition.ownedDofMask[indices]]
-            return 0.5 * float(np.sum(self._rawLumpedMass[owned] * V[owned] ** 2))
-
         nonMechanical = [
-            halfSumOfMassTimesSquaredRate(np.arange(V.shape[0])[self.theDofManager.idcsOfFieldsInDofVector[fieldName]])
+            self.halfMassTimesSquaredRate(self.theDofManager.idcsOfFieldsInDofVector[fieldName], V)
             for fieldName in self.nonMechanicalSecondOrderFields
         ]
-        self.settleExternalWork()
-        return psi, halfSumOfMassTimesSquaredRate(self.ids_mechanicalEnergy), self._externalWork, nonMechanical
+        return psi, self.halfMassTimesSquaredRate(self.ids_mechanicalEnergy, V), self._externalWork, nonMechanical
+
+    def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
+        """:math:`\\frac{1}{2} \\sum m v^2` over the given degrees of freedom, with the unfolded lumped
+        mass: the kinetic energy, where :math:`m` is a mass.
+
+        Parameters
+        ----------
+        indices
+            The degrees of freedom.
+        V
+            The velocity vector.
+
+        Returns
+        -------
+        float
+            The sum.
+        """
+
+        return 0.5 * float(np.sum(self._rawLumpedMass[indices] * V[indices] ** 2))
 
     @performancetiming.timeit("elements")
-    def computeElements(
+    def assembleInternalForces(
         self,
         U_np: DofVector,
         dU: DofVector,
         P: DofVector,
         timeStep: TimeStep,
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements computed here and assemble their internal force; see
-        :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
+        """Evaluate the elements computed here and assemble their internal force,
+        :math:`f^{int} = \\mathop{\\mathsf{A}}_e f^{int}_e`: every element gathers its degrees of freedom
+        from the solution, computes its nodal forces, and these are added into ``P`` in element
+        order; see :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
 
         Parameters
         ----------
@@ -1451,7 +1500,7 @@ class NED(NonlinearSolverBase):
                 )
 
     @performancetiming.timeit("publish node fields")
-    def publishNodeFields(self, model: FEModel, U, V, P):
+    def publishNodeFields(self, model: FEModel, U: DofVector, V: DofVector, P: DofVector):
         """Write the solution, velocity and force to the node fields and the scalar variables.
 
         Published every increment, not only on output increments, for two reasons: an h-adaptivity
@@ -1471,70 +1520,16 @@ class NED(NonlinearSolverBase):
             The net force vector.
         """
 
-        self._publish(model, self._nodeFieldSlots, U, V, P)
-
-    def _publish(self, model: FEModel, slots: list[NodeFieldSlot], U: DofVector, V: DofVector, P: DofVector):
-        """Write the solution, velocity and force at the given slots into their node fields, and the
-        solution into the scalar variables.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        slots
-            Where to write; see :meth:`_nodeFieldSlotsOf`.
-        U
-            The solution vector.
-        V
-            The velocity vector.
-        P
-            The net force vector.
-        """
-
-        for slot in slots:
-            nodeField = slot.nodeField
+        for nodeField in model.nodeFields.values():
+            indices = self.theDofManager.idcsOfNodeFieldsInDofVector[nodeField.name]
             for vector, entry in ((U, "U"), (P, "P"), (V, "V")):
                 if entry not in nodeField:
                     nodeField.createFieldValueEntry(entry)
                 values = nodeField[entry]
-                # Written through a flat view, which only a contiguous array has.
-                if not values.flags.c_contiguous:
-                    raise RuntimeError("Node field entry {:}/{:} is not contiguous.".format(nodeField.name, entry))
-                values.reshape(-1)[slot.positions] = vector.asPlainArray()[slot.dofs]
+                values[:] = vector.asPlainArray()[indices].reshape(values.shape)
 
         for variable in model.scalarVariables.values():
             variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
-
-    def _nodeFieldSlotsOf(self, model: FEModel, dofs: slice | np.ndarray) -> list[NodeFieldSlot]:
-        """Where the given degrees of freedom are published in the node fields.
-
-        Parameters
-        ----------
-        model
-            The model tree.
-        dofs
-            ``slice(None)`` for every degree of freedom, or sorted degree-of-freedom indices.
-
-        Returns
-        -------
-        list[NodeFieldSlot]
-            One slot per node field.
-        """
-
-        selected = np.zeros(self.theDofManager.nDof, dtype=bool)
-        selected[dofs] = True
-        slots = []
-        for nodeField in model.nodeFields.values():
-            indices = self.theDofManager.idcsOfNodeFieldsInDofVector[nodeField.name]
-            fieldDofs = np.arange(self.theDofManager.nDof)[indices]
-            positions = np.flatnonzero(selected[fieldDofs])
-            if positions.shape == fieldDofs.shape:
-                # Every degree of freedom of the field: published through the field's own index,
-                # which copies without gathering where it is a slice.
-                slots.append(NodeFieldSlot(nodeField, slice(None), indices))
-            else:
-                slots.append(NodeFieldSlot(nodeField, positions, fieldDofs[positions]))
-        return slots
 
     @performancetiming.timeit("constraint connectivity")
     def updateConstraintConnectivity(self, model: FEModel) -> bool:
@@ -1687,7 +1682,6 @@ class NED(NonlinearSolverBase):
                 self.elementLoopThreads(),
             ),
             firstOrderDofs=self.ids_1st[integrated[self.ids_1st]],
-            nodeFieldSlots=self._nodeFieldSlotsOf(model, dofs),
             mpcForceFold=(
                 None if self.mpcTransformation is None else self.mpcTransformation.foldExplicitForceOperator(dofs)
             ),
@@ -1757,13 +1751,13 @@ class NED(NonlinearSolverBase):
         )
 
         # initialize mass and damping matrices
-        M = self.assembleLumpedDiagonal(operatorPlan, _lumpedInertiaOf)
+        M = self.assembleLumpedDiagonal(operatorPlan, lambda element, Me: element.computeLumpedInertia(Me))
         Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
         # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
         # always (whether or not that field also has an inertia -- see computeLumpedInertia()
         # above, the SECOND-derivative coefficient).
-        damping = self.assembleLumpedDiagonal(operatorPlan, _lumpedDampingOf)
+        damping = self.assembleLumpedDiagonal(operatorPlan, lambda element, Ce: element.computeLumpedDamping(Ce))
 
         # Checked here, because the inertia check below never sees it at a second-order DOF: there
         # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
@@ -1874,44 +1868,6 @@ class NED(NonlinearSolverBase):
         self._lumpedMass = M
 
         return M, Minv
-
-    def releaseEquationSystem(self) -> ExplicitSystem:
-        """Release the equation system and everything built with it -- the counterpart of
-        :meth:`buildEquationSystem`, listing what it builds -- keeping only plain copies of the
-        solution, the velocity and the net force, and the critical time step.
-
-        Everything released is indexed by the elements and constraints the system was built for:
-        the DofManager (whose entity indices hold the elements themselves), every vector carrying
-        those indices, the lumped operators, the partition and the increment plan. A caller that
-        removes elements from the model -- a domain-decomposed run moving them to another process
-        -- releases the system first, so that nothing keeps a removed element alive, and then
-        builds it again, with the returned system as ``previous``.
-
-        Returns
-        -------
-        ExplicitSystem
-            The carried state: plain copies of ``U``, ``V`` and ``P``, and the critical time step;
-            no ``Minv`` and no ``dU``.
-        """
-
-        carried = ExplicitSystem(
-            Minv=None,
-            U=np.array(self._system.U),
-            dU=None,
-            V=np.array(self._system.V),
-            P=np.array(self._system.P),
-            criticalTimeStep=self._system.criticalTimeStep,
-        )
-        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
-        self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
-        self._secondOrderMask = self._halfDampingRate = None
-        self._reusableOperators = None
-        self._constraintForces = {}
-        self._nodeFieldSlots = []
-        self.theDofManager = None
-        self.partition = None
-        self._incrementPlan = None
-        return carried
 
     @performancetiming.timeit("build equation system")
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
@@ -2024,7 +1980,6 @@ class NED(NonlinearSolverBase):
             self._secondOrderMask[self.ids_2nd] = 1.0
         self._halfDampingRate = 0.5 * np.asarray(self._dampingRate) * self._secondOrderMask
 
-        self._nodeFieldSlots = self._nodeFieldSlotsOf(model, slice(None))
         self._incrementPlan = self.planIncrement(model)
 
         U = self.theDofManager.constructDofVector()  # initialize displacement vector
