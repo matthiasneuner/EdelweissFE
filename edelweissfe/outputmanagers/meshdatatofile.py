@@ -171,13 +171,13 @@ class OutputManager(OutputManagerBase):
                         f.write("\n")
                 f.write("\n")
 
-            # write element sets
+            # write element sets: their element numbers, which the mesh describes for the whole set
             for elementSetName in model.elementSets:
                 f.write("*ELSET, ELSET={:}\n".format(elementSetName))
                 counter = 0
-                for element in model.elementSets[elementSetName]:
+                for elementNumber in model.elementSets[elementSetName].elementNumbersOfWholeSet():
                     counter += 1
-                    f.write(" {:>5},".format(element.elNumber))
+                    f.write(" {:>5},".format(elementNumber))
                     if counter % 16 == 0:
                         f.write("\n")
                 f.write("\n")
