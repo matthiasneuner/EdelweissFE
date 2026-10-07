@@ -120,5 +120,6 @@ class StepAction(StepActionBase):
         if not self.active:
             return
 
-        for el in self.theElements:
+        # every process initializes the elements it holds; the state moves with an element
+        for el in self.theElements.localElements():
             el.setInitialCondition("initialize material", self.emptyDef)

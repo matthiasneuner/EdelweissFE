@@ -199,5 +199,6 @@ class StepAction(StepActionBase):
         if not self.active:
             return
 
-        for el in self.geostaticElements:
+        # every process sets the initial state of the elements it holds; the state moves with an element
+        for el in self.geostaticElements.localElements():
             el.setInitialCondition("geostatic stress", self.geostaticDefinition)

@@ -201,12 +201,12 @@ def test_a_predicate_that_skips_elements_keeps_the_dof_layout(tmp_path):
     # the fields at the nodes -- and with them the DOF layout -- do not depend on what was created
     assert _dofLayout(part) == _dofLayout(whole)
 
-    # a set holds the part created here and says whether that is all of it
-    assert [e.elNumber for e in part.elementSets["picked"]] == [6, 2]
+    # a set holds the part local here and says whether that is all of it
+    assert [e.elNumber for e in part.elementSets["picked"].localElements()] == [6, 2]
     assert not part.elementSets["picked"].isComplete
     assert [e.elNumber for e in part.elementSets["gen_top"]] == [2, 4, 6, 8]
     assert part.elementSets["gen_top"].isComplete
-    assert [e.elNumber for e in part.surfaces["gen_bottom"][1]] == []
+    assert [e.elNumber for e in part.surfaces["gen_bottom"][1].localElements()] == []
 
     # the nodes of a set are those of the whole set, from the mesh, whatever was created here
     for name in ("picked", "gen_top", "all"):

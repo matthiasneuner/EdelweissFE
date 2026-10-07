@@ -658,7 +658,7 @@ def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_who
         nodeField.createFieldValueEntry("U")
 
     # The elements of the left edge, 1 and 2, are computed by the other process: none is held here.
-    assert len(model.elementSets["gen_left"]) == 0
+    assert len(model.elementSets["gen_left"].localElements()) == 0
     fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["uLeft"]
     # The nodes of the two elements, read from the mesh -- not every node of the model, and not the
     # nodes of the element objects held here, of which there are none.
@@ -724,9 +724,9 @@ def test_an_element_moves_with_its_state_and_its_section(tmp_path):
     assert list(model.elements) == [7, 8] + list(range(11, 17))
     assert 9 not in model.elements and 10 not in model.elements
     # The sets are those references point to, updated in place.
-    assert model.elementSets["all"] is elementSet and [element.elNumber for element in elementSet] == list(
-        model.elements
-    )
+    assert model.elementSets["all"] is elementSet and [
+        element.elNumber for element in elementSet.localElements()
+    ] == list(model.elements)
     assert model.elements[7].hasMaterial
     assert np.array_equal(model.elements[7].getStateVars(), stateOf7)
     assert distribution.ownershipVersion == 1

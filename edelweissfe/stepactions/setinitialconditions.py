@@ -141,5 +141,6 @@ class StepAction(StepActionBase):
         if not self.active:
             return
 
-        for el in self.theElements:
+        # every process sets the initial state of the elements it holds; the state moves with an element
+        for el in self.theElements.localElements():
             el.setInitialCondition(self.theProperty, self.values)

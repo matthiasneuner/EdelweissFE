@@ -728,7 +728,7 @@ class Subdomain:
                 DistributedLoadOnSubdomain(
                     load,
                     {
-                        faceID: computedHere(load.surface.name, elementSet, numbersOfFaces[faceID])
+                        faceID: computedHere(load.surface.name, elementSet.localElements(), numbersOfFaces[faceID])
                         for faceID, elementSet in load.surface.items()
                     },
                 )
@@ -736,7 +736,9 @@ class Subdomain:
         restrictedBodyLoads = [
             BodyLoadOnSubdomain(
                 load,
-                computedHere(load.elementSet.name, load.elementSet, load.elementSet.elementNumbersOfWholeSet()),
+                computedHere(
+                    load.elementSet.name, load.elementSet.localElements(), load.elementSet.elementNumbersOfWholeSet()
+                ),
             )
             for load in bodyLoads
         ]

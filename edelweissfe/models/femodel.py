@@ -48,7 +48,11 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
-from edelweissfe.sets.elementset import ElementSet, ElementSetOfMesh
+from edelweissfe.sets.elementset import (
+    ElementSet,
+    ElementSetOfMesh,
+    ElementSetOfSurfaceFace,
+)
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -303,7 +307,7 @@ class FEModel:
         if elementSet is None:
             elementSet = self.elementSets[name] = ElementSetOfMesh(name, created, self.mesh, self.nodes)
         else:
-            if list(elementSet) != created:
+            if list(elementSet.localElements()) != created:
                 elementSet.replaceMembers(created)
             # the set may have changed in the mesh even where the part created here did not
             elementSet.describedBy(self.mesh, self.nodes)
@@ -314,7 +318,9 @@ class FEModel:
         here; an existing surface is updated in place if its faces changed.
 
         A face given by an element set refers to the resolved set itself, as a surface defined in the
-        input file always did.
+        input file always did; a face given by element numbers becomes an
+        :class:`~edelweissfe.sets.elementset.ElementSetOfSurfaceFace`. Either holds the local elements of
+        the face, and knows whether that is all of them.
 
         Parameters
         ----------
@@ -327,14 +333,15 @@ class FEModel:
             if surfaceFace.elementSetName is not None:
                 faces[face] = self.elementSets[surfaceFace.elementSetName]
             else:
-                faces[face] = [
-                    self.elements[number] for number in surfaceFace.elementNumbers if number in self.elements
-                ]
+                local = [self.elements[number] for number in surfaceFace.elementNumbers if number in self.elements]
+                faces[face] = ElementSetOfSurfaceFace(name, face, local, self.mesh, self.nodes)
 
         surface = self.surfaces.get(name)
         if surface is None:
             self.surfaces[name] = EntityBasedSurface(name, faces)
-        elif surface.keys() != faces.keys() or any(list(surface[face]) != list(faces[face]) for face in faces):
+        elif surface.keys() != faces.keys() or any(
+            list(surface[face].localElements()) != list(faces[face].localElements()) for face in faces
+        ):
             surface.replaceData(faces)
 
     def requireCompleteMesh(self, reader: str):
@@ -701,12 +708,12 @@ class FEModel:
 
         for section in self.sections.values():
             for elementSet in section.elSets:
-                for element in elementSet:
+                for element in elementSet.localElements():
                     if element.elNumber in elements:
                         section.assignSectionToElement(element, self)
 
         for elementProperty in self.elementProperties:
-            for element in self.elementSets[elementProperty.elSetName]:
+            for element in self.elementSets[elementProperty.elSetName].localElements():
                 if element.elNumber in elements:
                     elementProperty.assignToElement(element)
 
