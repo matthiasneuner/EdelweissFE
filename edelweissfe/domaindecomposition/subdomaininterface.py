@@ -301,6 +301,8 @@ class _TaggedContributions:
             requests.append(communicator.Isend(self._sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG))
 
         np.take(contributions, self.ownEntries, out=self.merged[: self.ownEntries.shape[0]])
+        # Waits on the requests, not the communicator: the guard against communicating inside an
+        # agreement (Communicator.withoutCommunication) already refused the Isend/Irecv above.
         MPI.Request.Waitall(requests)
 
 
@@ -525,6 +527,8 @@ def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict):
     requests += [
         communicator.Isend(sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG) for neighbour in sendBuffers
     ]
+    # Waits on the requests, not the communicator: the guard against communicating inside an
+    # agreement (Communicator.withoutCommunication) already refused the Isend/Irecv above.
     MPI.Request.Waitall(requests)
 
 

@@ -517,7 +517,7 @@ migrated element is bit for bit the element its previous
 process held -- exactly as a resumed restart's element is -- and every sum is still formed in model
 order, so a run that migrates elements is bit-identical to a serial run too. The equation system is
 built again for the elements now held, which assembles the lumped mass and damping again, where a
-serial run keeps them over the step: the two agree because an element's lumped inertia and damping do
+serial run keeps them between rebuilds of its equation system: the two agree because an element's lumped inertia and damping do
 not depend on its state -- checked at every migration, bit for bit, not assumed; an element violating
 it stops the run with a message. The journal reports every migration (``Element migration: ...
 element(s) changed process``).

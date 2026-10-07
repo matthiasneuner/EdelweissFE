@@ -778,8 +778,9 @@ class NEDMPI(NEDParallel):
         just made complete in every process by the output synchronization, are carried over.
 
         The lumped operators are assembled again, from the elements now held here, and must be the
-        same bits as before (:meth:`_requireSameLumpedOperators`): a serial run keeps them over the
-        whole step, so a run that moves elements is bit-identical to it only if they are.
+        same bits as before (:meth:`_requireSameLumpedOperators`): a serial run keeps them between
+        rebuilds of its equation system, and has no rebuild where a migration happens, so a run that
+        moves elements is bit-identical to it only if they are.
 
         Parameters
         ----------
@@ -817,8 +818,8 @@ class NEDMPI(NEDParallel):
         """Refuse to continue unless the lumped operators are the same bits as ``before``.
 
         Elements moved between processes, and the equation system was built again for the elements
-        now held here, which assembles the lumped operators again. A serial run assembles them once
-        per mesh and keeps them: the two agree only if an element's lumped inertia and damping do not
+        now held here, which assembles the lumped operators again. A serial run keeps them between
+        rebuilds of its equation system, and has none here: the two agree only if an element's lumped inertia and damping do not
         depend on its state. That holds for the elements of this package, and is checked here rather
         than assumed, at every migration. The operators are complete in every process, so every
         process decides the same.
@@ -841,7 +842,9 @@ class NEDMPI(NEDParallel):
                 "Elements moved between processes, and the lumped operators assembled again from the elements "
                 "now held here differ from those before: {:}. An element's lumped inertia or damping depends "
                 "on its state, so a run that moves elements would no longer be the serial run, which keeps "
-                "them over the step. Run without load balancing (load-balance-tolerance=0).".format(", ".join(changed))
+                "them between rebuilds of its equation system. Run without load balancing (load-balance-tolerance=0).".format(
+                    ", ".join(changed)
+                )
             )
 
     def releaseEquationSystem(self) -> ExplicitSystem:

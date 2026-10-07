@@ -64,7 +64,8 @@ class Communicator:
     they hold the same value.
 
     The methods carry the names of the ``mpi4py`` communicator they forward to, so that this is the
-    communicator wherever one is expected.
+    communicator wherever one is expected; they take and return the ``mpi4py`` types (buffers, buffer
+    specifications, reductions such as ``MPI.MAX``, ``MPI.Request``) unchanged.
 
     Parameters
     ----------
@@ -470,7 +471,7 @@ class Communicator:
 
         status = np.array([outcome], dtype=np.int32)
         # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
-        with performancetiming.timeit("subdomain wait"):
+        with performancetiming.timeit("waiting for all ranks"):
             self.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
 
         if status[0] == _NO_FAILURE:
