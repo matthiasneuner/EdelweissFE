@@ -48,30 +48,10 @@ if checkSuccessfulExtension("edelweissfe.materials.marmot.marmothypoelastic") or
 else:
     MarmotMaterialWrappingElement = None
 
-from edelweissfe.domaindecomposition.mpienvironment import numberOfProcesses
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.sets.orderedset import OrderedSet
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
-
-
-def whyElementsAreMissingHere() -> str:
-    """Why elements of the mesh have no element object here, for an error message: in a run on
-    several processes, because another process creates them; in a serial run, because they were
-    described after the elements were created.
-
-    Returns
-    -------
-    str
-        The explanation.
-    """
-
-    if numberOfProcesses() > 1:
-        return "the others are local to other processes -- a reader of the local part asks for localElements()"
-    return (
-        "the others were described in the mesh but never created -- elements described after "
-        "FEModel.createElementsOfMesh must be made by calling it again"
-    )
 
 
 class ElementSet(OrderedSet):
@@ -202,9 +182,21 @@ class ElementSet(OrderedSet):
         raise TopologyError(
             "element set {:} was read as a whole ({:} it), but only {:} of its {:} elements have an element object "
             "here: {:}".format(
-                self.name, reading, len(self.data), len(self.elementNumbersOfWholeSet()), whyElementsAreMissingHere()
+                self.name, reading, len(self.data), len(self.elementNumbersOfWholeSet()), self._whyIncomplete()
             )
         )
+
+    def _whyIncomplete(self) -> str:
+        """Why elements of the set have no element object here, for the error of a set that is not
+        complete: never asked of a set of the element objects it was given, which is complete.
+
+        Returns
+        -------
+        str
+            The explanation.
+        """
+
+        return "it holds only the elements it was given"
 
     def elementNumbersOfWholeSet(self) -> list:
         """The numbers of every element of the set, in set order: here, of its elements.
@@ -238,7 +230,7 @@ class ElementSet(OrderedSet):
         if not self.isComplete:
             raise TopologyError(
                 "{:} needs the whole element set {:}, but only part of it has element objects here: {:}".format(
-                    reader, self.name, whyElementsAreMissingHere()
+                    reader, self.name, self._whyIncomplete()
                 )
             )
 
@@ -301,13 +293,16 @@ class ElementSetOfMesh(ElementSet):
         The :class:`~edelweissfe.models.mesh.Mesh` describing this set under the same name.
     nodesOfModel
         The nodes of the model, by label; the nodes of the whole set are taken from them.
+    elementDistribution
+        The :class:`~edelweissfe.models.elementdistribution.ElementDistribution` of the model, which
+        explains why elements of the mesh are not local.
     """
 
-    def __init__(self, name: str, elements, mesh, nodesOfModel: dict):
+    def __init__(self, name: str, elements, mesh, nodesOfModel: dict, elementDistribution):
         super().__init__(name, elements)
-        self.describedBy(mesh, nodesOfModel)
+        self.describedBy(mesh, nodesOfModel, elementDistribution)
 
-    def describedBy(self, mesh, nodesOfModel: dict):
+    def describedBy(self, mesh, nodesOfModel: dict, elementDistribution):
         """Read the whole set from the given mesh and nodes from now on, and forget the nodes found
         before: the set may have changed in the mesh, also where its local part did not.
 
@@ -317,13 +312,29 @@ class ElementSetOfMesh(ElementSet):
             The mesh describing this set under the same name.
         nodesOfModel
             The nodes of the model, by label.
+        elementDistribution
+            The element distribution of the model.
         """
 
         #: The mesh describing this set.
         self.mesh = mesh
         #: The nodes of the model, by label.
         self.nodesOfModel = nodesOfModel
+        #: Which elements of the mesh are local here, and why others are not.
+        self.elementDistribution = elementDistribution
         self.forgetNodes()
+
+    def _whyIncomplete(self) -> str:
+        """Why elements of the set have no element object here: the element distribution's answer
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.whyElementsAreMissingHere`).
+
+        Returns
+        -------
+        str
+            The explanation.
+        """
+
+        return self.elementDistribution.whyElementsAreMissingHere()
 
     @property
     def isComplete(self) -> bool:
@@ -389,14 +400,16 @@ class ElementSetOfSurfaceFace(ElementSetOfMesh):
         The :class:`~edelweissfe.models.mesh.Mesh` describing the surface.
     nodesOfModel
         The nodes of the model, by label.
+    elementDistribution
+        The element distribution of the model.
     """
 
-    def __init__(self, surfaceName: str, face: int, elements, mesh, nodesOfModel: dict):
+    def __init__(self, surfaceName: str, face: int, elements, mesh, nodesOfModel: dict, elementDistribution):
         #: The name of the surface.
         self.surfaceName = surfaceName
         #: The face number.
         self.face = face
-        super().__init__("{:}_S{:}".format(surfaceName, face), elements, mesh, nodesOfModel)
+        super().__init__("{:}_S{:}".format(surfaceName, face), elements, mesh, nodesOfModel, elementDistribution)
 
     def _numbersInMesh(self):
         """The numbers of the elements exposing the face, in order, as the mesh lists them.

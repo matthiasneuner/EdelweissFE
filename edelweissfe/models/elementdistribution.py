@@ -153,6 +153,21 @@ class ElementDistribution:
             The model tree, its mesh changed.
         """
 
+    def whyElementsAreMissingHere(self) -> str:
+        """Why elements of the mesh have no element object here, for an error message. Here: every
+        element of the mesh is created, so such elements were described after the elements were made.
+
+        Returns
+        -------
+        str
+            The explanation.
+        """
+
+        return (
+            "the others were described in the mesh but never created -- elements described after "
+            "FEModel.createElementsOfMesh must be made by calling it again"
+        )
+
     def isLocal(self, number: int) -> bool:
         """Whether this process creates the element with the given number; asked by
         :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.

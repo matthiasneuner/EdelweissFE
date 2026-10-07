@@ -415,6 +415,19 @@ class DistributedElements(ElementDistribution):
 
         self._createAndDropLocalElements(model)
 
+    def whyElementsAreMissingHere(self) -> str:
+        """Why elements of the mesh have no element object here: they are computed by other
+        processes. See
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.whyElementsAreMissingHere`.
+
+        Returns
+        -------
+        str
+            The explanation.
+        """
+
+        return "the others are local to other processes -- a reader of the local part asks for localElements()"
+
     def isLocal(self, number: int) -> bool:
         """Whether this process creates the element with the given number.
 

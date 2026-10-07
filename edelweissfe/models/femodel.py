@@ -54,7 +54,6 @@ from edelweissfe.sets.elementset import (
     ElementSet,
     ElementSetOfMesh,
     ElementSetOfSurfaceFace,
-    whyElementsAreMissingHere,
 )
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
@@ -336,12 +335,14 @@ class FEModel:
 
         elementSet = self.elementSets.get(name)
         if elementSet is None:
-            elementSet = self.elementSets[name] = ElementSetOfMesh(name, created, self.mesh, self.nodes)
+            elementSet = self.elementSets[name] = ElementSetOfMesh(
+                name, created, self.mesh, self.nodes, self.elementDistribution
+            )
         else:
             if list(elementSet.localElements()) != created:
                 elementSet.replaceMembers(created)
             # the set may have changed in the mesh even where the local part did not
-            elementSet.describedBy(self.mesh, self.nodes)
+            elementSet.describedBy(self.mesh, self.nodes, self.elementDistribution)
         return elementSet
 
     def resolveSurfaceOfMesh(self, name: str):
@@ -365,7 +366,9 @@ class FEModel:
                 faces[face] = self.elementSets[surfaceFace.elementSetName]
             else:
                 local = [self.elements[number] for number in surfaceFace.elementNumbers if number in self.elements]
-                faces[face] = ElementSetOfSurfaceFace(name, face, local, self.mesh, self.nodes)
+                faces[face] = ElementSetOfSurfaceFace(
+                    name, face, local, self.mesh, self.nodes, self.elementDistribution
+                )
 
         surface = self.surfaces.get(name)
         if surface is None:
@@ -394,7 +397,7 @@ class FEModel:
         if notCreatedHere:
             raise TopologyError(
                 "{:} needs every element of the model, but {:} of them have no element object here: {:}".format(
-                    reader, len(notCreatedHere), whyElementsAreMissingHere()
+                    reader, len(notCreatedHere), self.elementDistribution.whyElementsAreMissingHere()
                 )
             )
 
