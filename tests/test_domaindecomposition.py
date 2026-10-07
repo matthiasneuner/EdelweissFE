@@ -627,22 +627,23 @@ def test_a_field_output_failing_in_one_process_before_the_gather_fails_in_every_
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
 
 
-#: A step failing in process 1 alone, outside any step the processes agree on: after the first
-#: output increment, the others go on into the next increment's exchange.
+#: A step failing in process 1 alone, outside any step the processes agree on: on increment 3, which
+#: writes no output, so that the others go on into the next increment's exchange -- and the failing
+#: process unwinds through the end of the step, whose field outputs gather element results.
 _STEP_FAILING_ALONE_PATCH = """
 from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
 from edelweissfe.utils.exceptions import StepFailed
 
-writeIncrementOutput = NEDMPI.writeIncrementOutput
+acceptIncrement = NEDMPI.acceptIncrement
 
 
-def failingInProcessOne(self, *args):
-    writeIncrementOutput(self, *args)
-    if rank == 1:
+def failingInProcessOne(self, step, model, timeStep):
+    acceptIncrement(self, step, model, timeStep)
+    if rank == 1 and timeStep.number == 3:
         raise StepFailed("the step failed in process 1 alone")
 
 
-NEDMPI.writeIncrementOutput = failingInProcessOne
+NEDMPI.acceptIncrement = failingInProcessOne
 """
 
 
@@ -656,7 +657,35 @@ def test_a_step_failing_in_one_process_alone_stops_every_process(tmp_path):
         pytest.fail("a step failing in one process alone left the others waiting")
 
     assert exitCode != 0, output
-    assert "a step failed without the agreement of the other processes in MPI process 1 of 3" in output, output
+    assert (
+        "the step failed without the agreement of the other processes (StepFailed: the step failed in process 1 alone)"
+        in output
+    ), output
+    assert "in MPI process 1 of 3; aborting all processes" in output, output
+
+
+#: _FIELD_OUTPUT_DECK at ten times the stable time step, over enough time to diverge.
+_DIVERGING_DECK = _FIELD_OUTPUT_DECK.replace("output-frequency=2", "output-frequency=2\ncourant-number=10").replace(
+    "maxNumInc=5, maxIter=25, stepLength=1", "maxNumInc=5000, maxIter=25, stepLength=1000"
+)
+
+
+def test_a_diverged_run_fails_on_every_process_as_a_serial_one_does(tmp_path):
+    # The energy balance is summed over all processes, so every process finds it diverged in the
+    # same increment: the failure is replicated, and ends the job as a failed step, not by abort.
+    (tmp_path / "test.inp").write_text(_DIVERGING_DECK)
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", ""))
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("a diverged run left processes waiting")
+
+    assert exitCode == 0, output
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert len(reports) == 3, output
+    for rank, report in enumerate(reports):
+        assert report.startswith(
+            "PROCESS {:} ['Simulation failed: THE SOLUTION HAS DIVERGED in increment ".format(rank)
+        ), output
 
 
 #: _FIELD_OUTPUT_DECK repartitioned with the element numbers as costs on its output increments, so

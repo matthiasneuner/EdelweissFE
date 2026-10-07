@@ -147,7 +147,11 @@ from mpi4py import MPI
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.communicator import Communicator
-from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.domaindecomposition.mpienvironment import (
+    StepFailedOnAllRanks,
+    abortAllProcesses,
+    worldCommunicator,
+)
 from edelweissfe.domaindecomposition.subdomain import Subdomain
 from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly
 from edelweissfe.fields.nodefield import NodeField
@@ -170,6 +174,7 @@ from edelweissfe.solvers.nonlinearexplicitdynamic import (
 from edelweissfe.solvers.nonlinearexplicitdynamicparallel import NEDParallel
 from edelweissfe.stepactions.base.stepactionbase import StepActionBase
 from edelweissfe.timesteppers.timestep import TimeStep
+from edelweissfe.utils.exceptions import StepFailed
 from edelweissfe.utils.fieldoutput import FieldOutputController
 from edelweissfe.utils.schema import schemaField
 
@@ -308,6 +313,66 @@ class NEDMPI(NEDParallel):
         self._incrementsDoneAtLastTopologyChange = 0
         self._pendingWorkAtPrescribedDofs = []
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
+
+    def attemptIncrement(self, step, model: FEModel, timeStep: TimeStep):
+        """Attempt the increment of :meth:`NED.attemptIncrement`; a step failure it raises is raised
+        as having failed on all ranks together. Collective.
+
+        Every :class:`~edelweissfe.utils.exceptions.StepFailed` an increment of ``NED`` raises is
+        decided from values every process holds alike, so every process raises it in the same
+        increment: the refused cutback, from a cutback request the processes agreed on
+        (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`),
+        and the diverged energy balance, from the terms summed over all processes
+        (:meth:`energyBalanceTerms`). Raised as
+        :class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`, they end the
+        job as a failed step ends a serial one, instead of aborting it (:meth:`endStep`). A failure
+        a process may meet alone must be raised through the agreement, not here.
+
+        Parameters
+        ----------
+        step
+            The step being solved.
+        model
+            The model tree.
+        timeStep
+            The increment.
+
+        Raises
+        ------
+        StepFailedOnAllRanks
+            If the increment failed.
+        """
+
+        try:
+            super().attemptIncrement(step, model, timeStep)
+        except StepFailedOnAllRanks:
+            raise
+        except StepFailed as failure:
+            raise StepFailedOnAllRanks(str(failure)) from failure
+
+    def endStep(self, step, model: FEModel, failure: BaseException | None = None):
+        """Finish the step; see :meth:`NED.endStep`. A step that failed without the processes agreeing
+        on it -- in this process alone, perhaps, while the others wait for it in their next exchange
+        -- stops every process right here: unwinding further, this process would gather the results
+        of the end of the step with processes that never arrive.
+
+        Parameters
+        ----------
+        step
+            The step that was solved.
+        model
+            The model tree.
+        failure
+            How the step failed, or None.
+        """
+
+        super().endStep(step, model, failure)
+        if failure is not None and not isinstance(failure, StepFailedOnAllRanks):
+            abortAllProcesses(
+                "the step failed without the agreement of the other processes ({:}: {:})".format(
+                    type(failure).__name__, failure
+                )
+            )
 
     # --- The subdomain ------------------------------------------------------------------------------
 

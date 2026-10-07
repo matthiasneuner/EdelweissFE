@@ -585,7 +585,7 @@ class NIST(NonlinearSolverBase):
         self.incrementStatus["iters"] = iterationCounter
         self.incrementStatus["converged"] = True
 
-    def endStep(self, step, model: FEModel):
+    def endStep(self, step, model: FEModel, failure: BaseException | None = None):
         """Report the step's performance timing.
 
         Parameters
@@ -594,6 +594,9 @@ class NIST(NonlinearSolverBase):
             The step that was solved.
         model
             The model tree.
+        failure
+            How the step failed: the exception leaving it; None if it ended normally (a
+            conditional stop and the maximum number of increments included).
         """
 
         prettyTable = performancetiming.makePrettyTable(wallTime=perf_counter() - self._stepWallClockTic)

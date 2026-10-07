@@ -211,38 +211,44 @@ class StepBase(ABC):
                 resumeFrom.restoreStep(self, model.outputManagers)
                 # Closed here, before the first increment: see ResumeCheckpoint.close.
                 resumeFrom.close()
+            # How the step ended, for the solver: None if it ended normally.
+            failure = None
             try:
-                isRetry = False
-                while not timeStepper.isFinished():
-                    solver.prepareIncrement(self, model, isRetry)
-                    timeStep = timeStepper.proposeTimeStep()
-
-                    try:
-                        solver.attemptIncrement(self, model, timeStep)
-                    except IncrementFailed as e:
-                        journal.message(str(e), solver.identification, 1)
-                        timeStepper.rejectTimeStep(e.cutbackFactor)
-                        for manager in outputManagers:
-                            manager.finalizeFailedIncrement(statusInfoDict=solver.incrementStatus)
-                        isRetry = True
-                        continue
-
-                    solver.acceptIncrement(self, model, timeStep)
-                    timeStepper.acceptTimeStep(timeStep)
+                try:
                     isRetry = False
+                    while not timeStepper.isFinished():
+                        solver.prepareIncrement(self, model, isRetry)
+                        timeStep = timeStepper.proposeTimeStep()
 
-                    if solver.isOutputIncrement(timeStep):
-                        solver.writeIncrementOutput(fieldOutputController, outputManagers)
+                        try:
+                            solver.attemptIncrement(self, model, timeStep)
+                        except IncrementFailed as e:
+                            journal.message(str(e), solver.identification, 1)
+                            timeStepper.rejectTimeStep(e.cutbackFactor)
+                            for manager in outputManagers:
+                                manager.finalizeFailedIncrement(statusInfoDict=solver.incrementStatus)
+                            isRetry = True
+                            continue
 
-            except ReachedMaxIncrements:
-                pass
-            except ReachedMinIncrementSize:
-                journal.errorMessage("Incrementation failed", solver.identification)
-                raise StepFailed()
-            except ConditionalStop:
-                journal.message("Conditional Stop", solver.identification)
+                        solver.acceptIncrement(self, model, timeStep)
+                        timeStepper.acceptTimeStep(timeStep)
+                        isRetry = False
+
+                        if solver.isOutputIncrement(timeStep):
+                            solver.writeIncrementOutput(fieldOutputController, outputManagers)
+
+                except ReachedMaxIncrements:
+                    pass
+                except ReachedMinIncrementSize:
+                    journal.errorMessage("Incrementation failed", solver.identification)
+                    raise StepFailed()
+                except ConditionalStop:
+                    journal.message("Conditional Stop", solver.identification)
+            except BaseException as exception:
+                failure = exception
+                raise
             finally:
-                solver.endStep(self, model)
+                solver.endStep(self, model, failure)
 
             solver.applyStepActionsAtStepEnd(model, self.actions)
 

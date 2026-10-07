@@ -585,8 +585,14 @@ size requested. A failure anywhere else aborts all processes, and so does an int
 of any one of them: the others would otherwise wait forever for the one that stopped
 (:mod:`~edelweissfe.domaindecomposition.mpienvironment`). The driver finishes a job normally after a
 failed step only if every process raised the failure together
-(:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`); any other failed
-step may have failed in one process alone, so that process then stops all of them.
+(:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`): a failure of the
+agreement, and the step failures of an increment, which are decided from values every process holds
+alike -- a refused cutback, a diverged energy balance
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Any other failure
+may have happened in one process alone, while the others wait for it in their next exchange; that
+process stops all of them as soon as the step ends
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`), before the end of the step
+would gather results with processes that never arrive.
 
 Nothing inside such an agreement may communicate: a process that failed before a collective operation
 would skip it, and leave the others waiting in it. That is enforced: the communicator
