@@ -407,7 +407,7 @@ class DistributedElements(ElementDistribution):
         if unplaced:
             raise TopologyError(
                 "{:} element(s) (e.g. {:}) were described during the run without a process to compute them: a "
-                "model modifier that describes elements must place them (ElementDistribution.placeChildElement)".format(
+                "model modifier that describes elements must create them with FEModel.createChildElementOfMesh".format(
                     len(unplaced), unplaced[:5]
                 )
             )

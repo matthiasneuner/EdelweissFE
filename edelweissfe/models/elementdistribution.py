@@ -46,7 +46,7 @@ method                             called by                                    
 :meth:`decideLocalElements`        the input file, once the mesh is described                          nothing to decide
 :meth:`isLocal`                    :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`    always True
 :meth:`placeAuxiliaryElement`      :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`  nothing to decide
-:meth:`placeChildElement`          h-adaptivity, for the child of a refined element                    nothing to decide
+:meth:`placeChildElement`          ``FEModel.createChildElementOfMesh``, for refined elements          nothing to decide
 :meth:`updateLocalElements`        the topology pipeline, after a mesh change                          nothing to do
 :meth:`ownedElements`              element field outputs                                               all of them
 :meth:`resultsOfWholeSet`          element field outputs                                               the results given

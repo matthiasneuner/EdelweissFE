@@ -219,6 +219,30 @@ class FEModel:
         self.elements[number] = element
         return element
 
+    def createChildElementOfMesh(self, number: int, parentNumber: int):
+        """Create the element object of an element a model modifier described in place of another --
+        the child of a refined element --, where its parent is computed: here, unless a
+        domain-decomposed run computes the parent in another process
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`).
+
+        Parameters
+        ----------
+        number
+            The number of the child in the mesh.
+        parentNumber
+            The number of the element it replaces (in part), still described in the mesh.
+
+        Returns
+        -------
+        element | None
+            The new element; None if it is created in another process.
+        """
+
+        self.elementDistribution.placeChildElement(number, parentNumber)
+        if not self.elementDistribution.isLocal(number):
+            return None
+        return self.createElementOfMesh(number)
+
     def createElementsOfMesh(self):
         """Create the element objects of the mesh, and resolve its element sets and surfaces to them.
 

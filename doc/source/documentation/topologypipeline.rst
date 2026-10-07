@@ -123,10 +123,9 @@ element set and surface of the mesh listing them), and their node-side counterpa
 **Say where a new element is computed, and whether you read element objects.** In a
 domain-decomposed run that creates only each process' own elements, every process runs ``plan`` and
 ``apply`` on the same mesh, and must change it identically. A modifier that describes an element in
-place of another (``model.mesh.addElement``) places it with
-:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement` and creates its
-object only where :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isLocal`
-says so; after ``apply`` the pipeline lets the distribution create the other elements a process
+place of another (``model.mesh.addElement``) creates its object with
+:meth:`~edelweissfe.models.femodel.FEModel.createChildElementOfMesh`, which places it where the
+element it replaces is computed and creates it only there (returning None elsewhere); after ``apply`` the pipeline lets the distribution create the other elements a process
 needs (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`).
 A modifier that reads only the mesh, the nodes and the node fields -- not the element objects of the
 whole model -- says so with ``replicatedElementsReason = None``; any other keeps the job on the whole model
@@ -320,8 +319,8 @@ A checklist for a new modifier
 #. Implement ``plan`` (may read state) and ``apply`` (may not).
 #. Return ``None`` from ``plan`` when the incoming change does not touch your domain.
 #. Reserve element numbers from the model; never write ``model.elements``.
-#. Place new elements on a process (``placeChildElement``), create them only where they are created
-   here, and set ``replicatedElementsReason = None`` if you read nothing but the mesh, nodes and node fields.
+#. Create the element replacing another with ``createChildElementOfMesh`` (which creates it only where the
+   replaced element is computed), and set ``replicatedElementsReason = None`` if you read nothing but the mesh, nodes and node fields.
 #. Implement ``encodePlan``/``decodePlan`` so your decision survives a checkpoint.
 #. Declare ``checkpointedState``: what ``plan`` carries from one decision to the next (often nothing).
 #. Verify with a restart round-trip and compare

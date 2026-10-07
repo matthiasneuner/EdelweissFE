@@ -31,11 +31,10 @@
 The modifier works on the mesh, not on element objects: its octree mirror, the marking, the 2:1
 balance, the hanging nodes and the numbering of the new nodes and elements are derived from the
 mesh, the nodes and the node fields, which every process of a domain-decomposed run holds whole, so
-every process refines identically. Element objects are touched only where they exist: the child of a
-refined element is created by the process computing its parent
-(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`), which
-transfers its parent's state to it; every process updates the mesh, the nodes, the sets and the
-surfaces. A serial run creates every child, as the process computing every element.
+every process refines identically. Element objects are touched only where they exist: the model
+creates the child of a refined element where its parent is computed
+(:meth:`~edelweissfe.models.femodel.FEModel.createChildElementOfMesh`), and the parent's state is
+transferred to it there; the mesh, the nodes, the sets and the surfaces are updated everywhere.
 """
 
 from collections import defaultdict
@@ -854,13 +853,10 @@ class ModelModifier(ModelModifierBase):
         newValues: dict,
         change: ModelChange,
     ):
-        """Describe the element of one octree child cell in the mesh; create it if it is computed
-        here, inheriting section, properties and state from its parent; and interpolate the nodal
-        values at its new nodes.
-
-        The child is computed where its parent was
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`): in a
-        serial run here, in a domain-decomposed one by the process holding the parent's state."""
+        """Describe the element of one octree child cell in the mesh; create it where its parent is
+        computed (:meth:`~edelweissfe.models.femodel.FEModel.createChildElementOfMesh`), inheriting
+        section, properties and state from its parent; and interpolate the nodal values at its new
+        nodes."""
 
         octree = self._octree
         e = octree.elements[eid]
@@ -869,10 +865,8 @@ class ModelModifier(ModelModifierBase):
         parentRecord = model.mesh.elements[parentNumber]
         # the child is described in the mesh and created from it, as every element of the model is
         model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, e["conn"])
-        distribution = model.elementDistribution
-        distribution.placeChildElement(elNumber, parentNumber)
-        if distribution.isLocal(elNumber):
-            child = model.createElementOfMesh(elNumber)
+        child = model.createChildElementOfMesh(elNumber, parentNumber)
+        if child is not None:
             self._sectionOf[parentNumber].assignSectionToElement(child, model)
             for elementProperty in self._elementPropertiesOf.get(parentNumber, ()):
                 child.assignProperty(elementProperty.propertyName, elementProperty.values)
