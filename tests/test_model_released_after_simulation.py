@@ -82,3 +82,10 @@ def test_a_copy_of_a_scatter_vector_is_the_only_scatter_vector_holding_its_data(
     assert type(copy.base) is np.ndarray
     assert np.array_equal(copy, scatterVector)
     assert copy.offsetMap == scatterVector.offsetMap
+
+
+def test_the_plain_view_of_a_dof_vector_refers_to_the_plain_buffer_not_to_the_vector():
+    from edelweissfe.numerics.dofvector import DofVector
+
+    for vector in (DofVector(5, {}), DofVector(5, {}).copy()):
+        assert type(vector.asPlainArray().base) is np.ndarray

@@ -101,6 +101,10 @@ class DofVector(np.ndarray):
             A plain-ndarray view of this vector's buffer.
         """
 
+        # Invariant: every DofVector is a view of a plain ndarray owning its data (see __new__ and
+        # copy), and numpy points a view's ``base`` at that owner. So the cached plain view refers to
+        # the plain buffer, never back to this vector: caching it adds no reference cycle -- one the
+        # garbage collector could not see through ``base`` (tests/test_model_released_after_simulation.py).
         plainView = self._plainView
         if plainView is None:
             plainView = self._plainView = self.view(np.ndarray)
