@@ -216,6 +216,9 @@ def test_assembly_sums_every_degree_of_freedom_from_left_to_right_in_element_ord
     # another, in the order they are given -- a left fold, the order a loop `P[dofs] += Pe` over the
     # elements forms. Nothing else makes a result independent of the number of threads, chunks and
     # processes, so a NumPy that summed a bin in any other order (pairwise, say) must fail here.
+    # NumPy does not document that order: it is how its implementation works, verified here with
+    # NumPy 2.5.2 (2026-10-07). After upgrading NumPy, this test -- and the interface test below,
+    # over three processes -- is what says whether the bit-identity of a decomposed run still holds.
     from edelweissfe.numerics.dofvector import DofVector
     from edelweissfe.solvers.base.parallelelementcomputation import (
         computeLumpedDiagonalForExplicit,

@@ -269,7 +269,8 @@ weights into each bin one after another, in the order given -- a left fold, the 
 elements forms. That is how NumPy implements it, not a documented guarantee, so it is tested rather
 than assumed: ``tests/test_domaindecomposition.py`` sums values of very different magnitudes and
 signed zeros, whose sum differs in any other order, through the element loop and -- over three
-processes -- through the interface exchange, and compares the bits with the left fold.
+processes -- through the interface exchange, and compares the bits with the left fold. It was last
+verified with NumPy 2.5.2; run these tests after upgrading NumPy.
 
 **Loads.** A distributed load or a body force acting on an element is a contribution of that element,
 and is assembled like its forces
@@ -620,7 +621,7 @@ files byte for byte:
 .. code-block:: console
 
     cp -r testfiles/mpi serial && cp -r testfiles/mpi decomposed
-    sed -i 's/solver=NEDMPI/solver=NED/' serial/*/*/test.inp
+    sed -i -e 's/solver=NEDMPI/solver=NED/' -e '/^load-balance-/d' serial/*/*/test.inp
     export PYTHON_GIL=0 OMP_NUM_THREADS=1
     run_tests_edelweissfe serial/edelweiss-only --create
     mpirun -n 3 --bind-to none -x PYTHON_GIL -x OMP_NUM_THREADS \
@@ -629,6 +630,8 @@ files byte for byte:
         cmp "$reference" "decomposed/${reference#serial/}" || echo "DIFFERS: $reference"
     done
 
+The ``sed`` line turns every deck into a serial one: ``solver=NED``, without the options only
+``NEDMPI`` has (``load-balance-tolerance``, ``load-balance-costs``), which ``NED`` would refuse.
 Nothing printed by the loop means every deck is bit-identical; ``marmot`` in place of
 ``edelweiss-only`` runs the decks that need Marmot (some need its private materials). Compare against
 a serial run on the same machine rather than against the committed ``U.ref`` files: those were
