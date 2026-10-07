@@ -49,17 +49,6 @@ class ElementProperty:
         self.propertyName = propertyName
         self.values = values
 
-    def assignElementPropertiesToModel(self, model):
-        """Assign this property to all elements of the referenced element set.
-
-        Parameters
-        ----------
-        model
-            The model object.
-        """
-        for el in model.elementSets[self.elSetName]:
-            self.assignToElement(el)
-
     def assignToElement(self, element):
         """Assign this property to one element.
 
