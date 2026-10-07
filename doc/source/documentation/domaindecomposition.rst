@@ -206,12 +206,13 @@ An increment
 
 An increment is the central-difference increment of ``NED``, unchanged. ``NED`` runs it over the
 elements, constraints and degrees of freedom of its
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` -- four members: the elements
-computed here, the constraints evaluated here, the degrees of freedom integrated here, and which of
-those are owned here. For ``NED`` that is the whole model, and the degrees of freedom are
-``slice(None)``, so that ``V[dofs]`` is the whole vector; for ``NEDMPI`` it is the subdomain of the
-process, as a :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines it, and the
-degrees of freedom are a sorted index array.
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` -- three members: the elements
+computed here, the constraints evaluated here, and the degrees of freedom integrated here. For
+``NED`` that is the whole model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]``
+is the whole vector; for ``NEDMPI`` it is the subdomain of the process, as a
+:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines it, and the degrees of freedom
+are a sorted index array. Which of them a process owns -- counts once for the model, e.g. in the
+external work -- is the subdomain's (``Subdomain.ownedDofMask``).
 
 Everything a process must exchange with the others, ``NEDMPI`` adds in overrides of a few methods of
 ``NED``, each calling the ``NED`` method or the shared function it extends:
@@ -230,6 +231,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``addExternalWork``                         keeps the owned work until it is read (below)
 ``publishNodeFields``                       publishes the degrees of freedom integrated here
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
+``advanceModelToTime``                      accepts the states of the own elements and constraints only
 ``updateConstraintConnectivity``            the synchronization before a contact search
 ``updateConnectivityOf``                    runs a search on the constraint's process only
 ``updateTopology``                          the agreement on a topology update

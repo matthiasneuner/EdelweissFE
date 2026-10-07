@@ -127,8 +127,8 @@ The part of the model computed in a process
 
 The increment of ``NED`` runs over the elements, constraints and degrees of freedom of one small
 object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`: the elements
-computed here, the constraints evaluated here, the degrees of freedom integrated here, and which of
-those are owned here. ``NED`` and ``NEDParallel`` compute the whole model, whose degrees of freedom
+computed here, the constraints evaluated here, and the degrees of freedom integrated here. ``NED``
+and ``NEDParallel`` compute the whole model, whose degrees of freedom
 are ``slice(None)``; ``NEDMPI`` computes the subdomain a
 :class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines in each process, and adds the
 exchange between the processes in overrides of its own (:doc:`domaindecomposition`).
