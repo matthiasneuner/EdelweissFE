@@ -134,7 +134,7 @@ class TopologyPipeline:
         """The only scope in which elements may be created or deleted.
 
         Opened once around model setup, and once per increment around the model modifiers. Outside
-        it, :meth:`~edelweissfe.models.femodel.FEModel.createElement` and :meth:`~edelweissfe.models.femodel.FEModel.removeElement` raise -- which is what makes "only model
+        it, :meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`, :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement` and :meth:`~edelweissfe.models.femodel.FEModel.removeElement` raise -- which is what makes "only model
         modifiers mutate the topology" an enforced property rather than a convention, and what lets
         :meth:`reserveElementNumbers` guarantee that element numbering is a pure function of the
         ordered creation sequence.

@@ -93,7 +93,7 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     #: mesh is partitioned over the processes of a domain-decomposed run, so such a generator may not
     #: run after the keywords (``executeAfterManualGeneration=True``) there. False for a generator
     #: that describes none -- that makes only elements of its own, like contact facets or the point
-    #: mass of a rigid body (see :meth:`~edelweissfe.models.femodel.FEModel.createElement`), or none.
+    #: mass of a rigid body (see :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`), or none.
     describesElementsOfMesh: bool = True
 
     @classmethod

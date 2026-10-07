@@ -107,7 +107,7 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
             (elNumber,) = model.topology.reserveElementNumbers(1)
             element = DisplacementElement("C3D20", elNumber)
             element.setNodes(nodes)
-            model.createElement(element)
+            model.createAuxiliaryElement(element)
 
             slaveElements = [element]
             if mixedElements:
@@ -120,7 +120,7 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
                 (elNumber,) = model.topology.reserveElementNumbers(1)
                 hexa8 = DisplacementElement("C3D8", elNumber)
                 hexa8.setNodes(hexa8Nodes)
-                model.createElement(hexa8)
+                model.createAuxiliaryElement(hexa8)
                 slaveElements.append(hexa8)
                 nodes += hexa8Nodes
 

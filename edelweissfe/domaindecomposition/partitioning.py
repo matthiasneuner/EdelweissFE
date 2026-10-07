@@ -33,10 +33,10 @@ numbers, connectivity and element types -- and not on element objects, so that a
 made before any element exists, and every process can make it without holding every element. METIS
 runs on the root process, which broadcasts the result, so every process holds the same partition
 regardless of whether METIS itself would reproduce it. The partition covers every element of the
-mesh. The elements made by their owners -- contact facets, the point masses of rigid bodies, which
+mesh. The auxiliary elements -- contact facets, the point masses of rigid bodies, which
 every process makes itself -- are not given to METIS: each is computed by the process computing its
 host element (the solid element a facet lies on, whose degrees of freedom are the facet's), or, if it
-has none, by the process given part 0 of the partition (:func:`processOfElementMadeByOwner`). Their
+has none, by the process given part 0 of the partition (:func:`processOfAuxiliaryElement`). Their
 owner is still unique.
 
 Constraints are not partitioned by geometry: each is one object, evaluated by one process, and is
@@ -86,7 +86,7 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
         The rank of every element, by element number.
     """
 
-    numbers = [number for number, record in mesh.elements.items() if not record.isMadeByOwner]
+    numbers = [number for number, record in mesh.elements.items() if not record.isAuxiliary]
     parts = np.zeros(len(numbers), dtype=np.int64)
 
     if nParts > 1:
@@ -112,14 +112,14 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
 
     owners = dict(zip(numbers, parts.tolist()))
     for number, record in mesh.elements.items():
-        if record.isMadeByOwner:
-            owners[number] = processOfElementMadeByOwner(record, owners)
+        if record.isAuxiliary:
+            owners[number] = processOfAuxiliaryElement(record, owners)
     # in mesh order, as the elements are listed everywhere else
     return {number: owners[number] for number in mesh.elements}
 
 
-def processOfElementMadeByOwner(record: MeshElement, owners: dict) -> int:
-    """The process computing an element made by its owner (a contact facet, the point mass of a
+def processOfAuxiliaryElement(record: MeshElement, owners: dict) -> int:
+    """The process computing an auxiliary element (a contact facet, the point mass of a
     rigid body): the process computing its host element, or part 0 if it has none (a point mass).
     That is rank 0 in a first partition; a repartition renumbers its parts to keep elements where
     they were (:func:`keepElementsWhereTheyWere`), and a point mass then moves with part 0.

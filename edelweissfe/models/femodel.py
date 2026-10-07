@@ -143,14 +143,15 @@ class FEModel:
 
         self.nodes[node.label] = node
 
-    def createElement(self, element, hostElement: int | None = None):
-        """Add an element its owner made itself (a contact facet, the point mass of a rigid body) to
-        the mesh and to the model.
+    def createAuxiliaryElement(self, element, hostElement: int | None = None):
+        """Add an auxiliary element to the model: one a model entity (a contact surface, a rigid body)
+        makes itself, instead of the input describing it in the mesh; it is added to the mesh as well.
 
-        Every other element is described in :attr:`mesh` first and created from there, by
-        :meth:`createElementOfMesh`. An element made by its owner is made in every process -- it is
-        surface-sized -- and :attr:`elementDistribution` decides which process computes it
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeElementMadeByOwner`).
+        This is the special path. Every other element is described in :attr:`mesh` first and created
+        from there, by :meth:`createElementsOfMesh` (or :meth:`createElementOfMesh`). An auxiliary
+        element is made in every process -- it is surface-sized -- and :attr:`elementDistribution`
+        decides which process computes it
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeAuxiliaryElement`).
 
         Parameters
         ----------
@@ -162,9 +163,9 @@ class FEModel:
         """
 
         self._checkElementCanBeAdded(element.elNumber)
-        record = self.mesh.addElementMadeByOwner(element, hostElement)
+        record = self.mesh.addAuxiliaryElement(element, hostElement)
         self.elements[element.elNumber] = element
-        self.elementDistribution.placeElementMadeByOwner(record)
+        self.elementDistribution.placeAuxiliaryElement(record)
 
     def createElementOfMesh(self, number: int):
         """Create the element object of one element of the mesh, and add it to the model.
@@ -349,7 +350,7 @@ class FEModel:
     def wholeElementSet(self, name: str, reader: str) -> ElementSet:
         """The element set of the given name, which ``reader`` needs whole -- every element of it in
         this process, e.g. the contact facets of a surface, which every process makes
-        (:meth:`createElement`).
+        (:meth:`createAuxiliaryElement`).
 
         Parameters
         ----------

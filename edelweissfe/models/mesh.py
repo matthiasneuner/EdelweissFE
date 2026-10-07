@@ -123,15 +123,15 @@ class MeshElement:
     elType
         The element type, e.g. ``C3D20R``.
     provider
-        The element provider, e.g. ``marmot``; ``None`` for an element its owner made itself (see
-        :meth:`Mesh.addElementMadeByOwner`), which cannot be created from this record.
+        The element provider, e.g. ``marmot``; ``None`` for an auxiliary element (see
+        :meth:`Mesh.addAuxiliaryElement`), which cannot be created from this record.
     nodeLabels
         The labels of the element's nodes, in the element's node order, as a tuple of ints.
     ownTypeInfo
-        The type information of an element made by its owner; ``None`` for an element whose type
+        The type information of an auxiliary element; ``None`` for an element whose type
         alone determines it.
     hostElement
-        For an element made by its owner, the number of its host element: the element of the mesh
+        For an auxiliary element, the number of its host element: the element of the mesh
         it lies on (the solid element whose face a contact facet tiles); ``None`` if it has none (the point mass
         of a rigid body), and for every other element.
     """
@@ -155,9 +155,9 @@ class MeshElement:
         self.hostElement = hostElement
 
     @property
-    def isMadeByOwner(self) -> bool:
-        """True for an element its owner made itself (a contact facet, a point mass); it cannot be
-        created from this record."""
+    def isAuxiliary(self) -> bool:
+        """True for an auxiliary element: one a model entity (a contact surface, a rigid body) made
+        itself, e.g. a contact facet or a point mass; it cannot be created from this record."""
         return self.ownTypeInfo is not None
 
 
@@ -209,10 +209,11 @@ class Mesh:
         self.elements[number] = record
         return record
 
-    def addElementMadeByOwner(self, element, hostElement: int | None = None) -> MeshElement:
-        """Describe an element its owner made itself, from the element object.
+    def addAuxiliaryElement(self, element, hostElement: int | None = None) -> MeshElement:
+        """Describe an auxiliary element, from the element object: one a model entity (a contact
+        surface, a rigid body) makes itself, instead of the input describing it in the mesh.
 
-        Contact facets and the point masses of rigid bodies are made by the code that owns them
+        Contact facets and the point masses of rigid bodies are made by the surface or rigid body they belong to
         (with data an element type alone does not carry: a parent face, a mass), on every process.
         They are part of the mesh all the same -- they have numbers, nodes and fields -- so they are
         described here from the object, including the fields it reports.
@@ -332,9 +333,9 @@ class Mesh:
             The element class.
         """
 
-        if record.isMadeByOwner:
+        if record.isAuxiliary:
             raise TopologyError(
-                "element {:} ({:}) was made by its owner and cannot be created from the mesh".format(
+                "element {:} ({:}) is an auxiliary element, made by a model entity, and cannot be created from the mesh".format(
                     record.number, record.elType
                 )
             )

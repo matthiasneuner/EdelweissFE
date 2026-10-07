@@ -99,7 +99,7 @@ def test_single_cpe4_patch_test_pure_python_no_parser():
     for n in (n1, n2, n3, n4):
         model.nodes[n.label] = n
     with model.topology.changes():
-        model.createElement(element)
+        model.createAuxiliaryElement(element)
     model.elementSets["all"] = ElementSet("all", [element])
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
     model.nodeSets["bottom"] = NodeSet("bottom", [n1, n2])
@@ -273,7 +273,7 @@ def _buildPatchModel(youngsModulus: float, poissonsRatio: float, thickness: floa
     model.nodes.update(nodes)
     with model.topology.changes():
         for element in elements.values():
-            model.createElement(element)
+            model.createAuxiliaryElement(element)
 
     model.elementSets["all"] = ElementSet("all", list(elements.values()))
     model.nodeSets["all"] = NodeSet("all", list(nodes.values()))

@@ -240,7 +240,7 @@ def test_an_element_can_be_created_and_removed_at_any_time(tmp_path):
         part.createElementOfMesh(5)
 
 
-def test_an_element_made_by_its_owner_is_described_from_the_object():
+def test_an_auxiliary_element_is_described_from_the_object():
     from edelweissfe.elements.pointmass import PointMass
 
     model = FEModel(3)
@@ -249,12 +249,12 @@ def test_an_element_made_by_its_owner_is_described_from_the_object():
     with model.topology.changes():
         (number,) = model.topology.reserveElementNumbers(1)
         pointMass = PointMass(number, [node], model, 2.0, [1.0, 1.0, 1.0])
-        model.createElement(pointMass)
+        model.createAuxiliaryElement(pointMass)
 
     record = model.mesh.elements[number]
-    assert record.isMadeByOwner and record.nodeLabels == (1,)
+    assert record.isAuxiliary and record.nodeLabels == (1,)
     assert model.mesh.typeOf(record).fields == [["displacement", "rotation"]]
-    with pytest.raises(TopologyError, match="made by its owner"):
+    with pytest.raises(TopologyError, match="is an auxiliary element"):
         model.mesh.elementClassOf(record)
 
     model._activateNodeFieldsFromMesh()

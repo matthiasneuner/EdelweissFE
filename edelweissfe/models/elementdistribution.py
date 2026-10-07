@@ -86,9 +86,9 @@ class ElementDistribution:
             The number of the element it replaces (in part), still described in the mesh.
         """
 
-    def placeElementMadeByOwner(self, record: MeshElement):
-        """Decide where an element its owner made itself (a contact facet, the point mass of a rigid
-        body; see :meth:`~edelweissfe.models.femodel.FEModel.createElement`) is computed. Such an
+    def placeAuxiliaryElement(self, record: MeshElement):
+        """Decide where an auxiliary element (a contact facet, the point mass of a rigid
+        body; see :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`) is computed. Such an
         element is surface-sized and made in every process, by the same code, with the same number.
         Here: every element is computed here, so there is nothing to decide.
 

@@ -76,7 +76,7 @@ def _buildMinimalGeometryModel() -> FEModel:
     for n in (n1, n2, n3, n4):
         model.nodes[n.label] = n
     with model.topology.changes():
-        model.createElement(element)
+        model.createAuxiliaryElement(element)
     model.elementSets["all"] = ElementSet("all", [element])
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
 

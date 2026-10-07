@@ -56,7 +56,7 @@ from edelweissfe.domaindecomposition.mpienvironment import (
 )
 from edelweissfe.domaindecomposition.partitioning import (
     partitionElementsOfMesh,
-    processOfElementMadeByOwner,
+    processOfAuxiliaryElement,
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
@@ -81,7 +81,7 @@ def reasonsForTheWholeModel(inputfile: dict) -> list[str]:
       constraint is evaluated whole by one process, but it reads no element object of the solid
       mesh: contact and ties read the contact facets of their surfaces, the nodes and the rigid
       bodies, which every process holds whole (a facet and the point mass of a rigid body are made
-      by every process itself, see :meth:`DistributedElements.placeElementMadeByOwner`). Ties,
+      by every process itself, see :meth:`DistributedElements.placeAuxiliaryElement`). Ties,
       penalty contact and the other forces-only penalty constraints are verified so; the
       constraints of the implicit solvers (Lagrange multipliers, indirect load control) still name
       a reason (:mod:`~edelweissfe.constraints.base.wholemodel`);
@@ -214,8 +214,8 @@ class DistributedElements(ElementDistribution):
     def decideWhichElementsAreCreatedHere(self, mesh: Mesh, domainSize: int):
         """Partition the mesh, and decide which elements this process creates. Collective.
 
-        A process creates the elements it computes -- its part of the partition -- and the elements
-        made by their owners (see :meth:`placeElementMadeByOwner`). The loads acting on an element
+        A process creates the elements it computes -- its part of the partition -- and the auxiliary
+        elements (see :meth:`placeAuxiliaryElement`). The loads acting on an element
         are evaluated where the element is computed, and exchanged like its forces (see
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`), so no
         process needs an element of another one for its loads.
@@ -234,7 +234,7 @@ class DistributedElements(ElementDistribution):
 
     def _elementsCreatedFor(self, mesh: Mesh, owners: dict) -> set:
         """The numbers of the elements this process creates under a partition: its own, and every
-        element made by its owner (see :meth:`placeElementMadeByOwner`).
+        auxiliary element (see :meth:`placeAuxiliaryElement`).
 
         Parameters
         ----------
@@ -250,8 +250,8 @@ class DistributedElements(ElementDistribution):
         """
 
         own = {number for number, owner in owners.items() if owner == self.rank}
-        madeByOwners = {number for number, record in mesh.elements.items() if record.isMadeByOwner}
-        return own | madeByOwners
+        auxiliary = {number for number, record in mesh.elements.items() if record.isAuxiliary}
+        return own | auxiliary
 
     def moveElementsTo(self, model, owners: dict) -> tuple[int, int, int]:
         """Adopt a new partition: move every element whose process changes to its new process
@@ -369,13 +369,13 @@ class DistributedElements(ElementDistribution):
         if owner == self.rank:
             self._createdHere.add(childNumber)
 
-    def placeElementMadeByOwner(self, record: MeshElement):
-        """An element its owner made itself -- a contact facet, the point mass of a rigid body -- is
+    def placeAuxiliaryElement(self, record: MeshElement):
+        """An auxiliary element -- a contact facet, the point mass of a rigid body -- is
         made in every process: it is surface-sized, and a constraint evaluated in any process may
         read it (a contact search reads the facets of a whole surface). It is computed, and reported,
-        by one process, the one :func:`~.partitioning.processOfElementMadeByOwner` names. Made before
+        by one process, the one :func:`~.partitioning.processOfAuxiliaryElement` names. Made before
         the mesh is partitioned, the partition places it. See
-        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeElementMadeByOwner`.
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeAuxiliaryElement`.
 
         Parameters
         ----------
@@ -385,7 +385,7 @@ class DistributedElements(ElementDistribution):
 
         self._createdHere.add(record.number)
         if self.owners is not None:
-            self.owners[record.number] = processOfElementMadeByOwner(record, self.owners)
+            self.owners[record.number] = processOfAuxiliaryElement(record, self.owners)
 
     def createAndDropElementsOfChangedMesh(self, model):
         """After a model modifier changed the mesh -- every process changes it identically -- forget

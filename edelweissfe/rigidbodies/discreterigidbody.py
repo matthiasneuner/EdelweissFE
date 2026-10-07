@@ -89,7 +89,7 @@ class DiscreteRigidBody(RigidBody):
             # label-collision risk the old max()+1 counter carried.
             (el_num,) = model.topology.reserveElementNumbers(1)
             self.pointMassElement = PointMass(el_num, [self.rpNode], model, self.mass, self.inertia)
-            model.createElement(self.pointMassElement)
+            model.createAuxiliaryElement(self.pointMassElement)
 
     def referenceCoordinatesOfMovedNodes(self) -> dict:
         """The reference coordinates of the surface nodes, which :meth:`updateKinematics` moves.

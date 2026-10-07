@@ -18,7 +18,7 @@ children of a refinement, which no first partition knew), and no process may sti
 an element it dropped (the element objects the test case made that are alive in the process, counted
 by the garbage collector, are exactly those of the model).
 
-In a distributed test case, every element made by its owner on a host element -- a contact facet --
+In a distributed test case, every auxiliary element on a host element -- a contact facet --
 must be computed by the process computing its host element, also after elements migrated.
 
 Run it under the MPI launcher, from anywhere::
@@ -101,7 +101,7 @@ def modeOf(model, communicator) -> str:
 
 
 def facetsWithTheirHosts(model, communicator) -> str:
-    """Whether every element made by its owner on a host element (a contact facet) is computed by the
+    """Whether every auxiliary element on a host element (a contact facet) is computed by the
     process computing the host, as the model ends; empty if the model has none."""
 
     computed = communicator.allgather(

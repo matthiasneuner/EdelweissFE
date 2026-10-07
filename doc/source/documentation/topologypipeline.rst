@@ -100,7 +100,8 @@ A modifier implements two halves, and the split is the single most important thi
     def apply(self, model, plan):
         numbers = model.topology.reserveElementNumbers(len(plan.ids))
         for identifier, elNumber in zip(plan.ids, numbers):
-            model.createElement(self.makeElement(elNumber, identifier))
+            model.mesh.addElement(elNumber, self.elType, self.provider, self.nodeLabelsOf(identifier))
+            model.createElementOfMesh(elNumber)  # describe it in the mesh, then create it from there
         return change                        # a ModelChange describing what happened
 
 Two rules follow from the signatures and are worth stating explicitly:
@@ -110,8 +111,10 @@ the pipeline reach a fixed point instead of looping. ``change`` is ``None`` on t
 update, meaning "evaluate freshly".
 
 **Never write** ``model.elements`` **or** ``model.nodes`` **directly.** Use
-:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`,
-:meth:`~edelweissfe.models.femodel.FEModel.createElement` and
+:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`, describe the element in
+``model.mesh`` (:meth:`~edelweissfe.models.mesh.Mesh.addElement`) and create it from there
+(:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`) -- or, for an auxiliary element a model entity
+makes itself, :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement` -- and
 :meth:`~edelweissfe.models.femodel.FEModel.removeElement`, and their node-side counterparts
 :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers` and
 :meth:`~edelweissfe.models.femodel.FEModel.createNode`.

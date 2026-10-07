@@ -96,7 +96,7 @@ def test_numbers_are_never_recycled_after_removal():
     model = _modelWithSetupElements()
     with model.topology.changes():
         (number,) = model.topology.reserveElementNumbers(1)
-        model.createElement(_StubElement(number))
+        model.createAuxiliaryElement(_StubElement(number))
         model.removeElement(number)
 
         (afterRemoval,) = model.topology.reserveElementNumbers(1)
@@ -113,7 +113,7 @@ def test_allocator_ignores_the_current_maximum():
     with model.topology.changes():
         numbers = model.topology.reserveElementNumbers(4)
         for number in numbers:
-            model.createElement(_StubElement(number))
+            model.createAuxiliaryElement(_StubElement(number))
         for number in numbers:
             model.removeElement(number)
 
@@ -155,7 +155,7 @@ def test_reserve_outside_a_topology_change_raises():
 def test_create_outside_a_topology_change_raises():
     model = _modelWithSetupElements()
     with pytest.raises(TopologyError, match="outside a topology change"):
-        model.createElement(_StubElement(1))
+        model.createAuxiliaryElement(_StubElement(1))
 
 
 def test_remove_outside_a_topology_change_raises():
@@ -168,7 +168,7 @@ def test_creating_a_taken_number_raises():
     model = _modelWithSetupElements(1)
     with model.topology.changes():
         with pytest.raises(TopologyError, match="already taken"):
-            model.createElement(_StubElement(1))
+            model.createAuxiliaryElement(_StubElement(1))
 
 
 def test_windows_nest_without_closing_early():
@@ -272,7 +272,7 @@ class _StubModifier:
         # as well would record it twice; see TopologyPipeline.recordChange.
         self._log.append(plan["who"])
         (number,) = model.topology.reserveElementNumbers(1)
-        model.createElement(_StubElement(number))
+        model.createAuxiliaryElement(_StubElement(number))
         change = ModelChange(kind=_MCT.REFINEMENT)
         change.addedElements.add(number)
         return change
@@ -631,7 +631,7 @@ def test_a_consumer_cannot_mutate_the_topology():
     class _MutatingConsumer(_StubMeshDependent):
         def refresh(self, model, change):
             (number,) = model.topology.reserveElementNumbers(1)  # must raise: window is closed
-            model.createElement(_StubElement(number))
+            model.createAuxiliaryElement(_StubElement(number))
             return True
 
     log = []

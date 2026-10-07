@@ -133,8 +133,9 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
 
         Runs inside an open topology window (see
         :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.changes`), so it may create and delete
-        elements -- through :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers` and
-        :meth:`~edelweissfe.models.femodel.FEModel.createElement`, never by writing
+        elements -- through :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`,
+        describing them in ``model.mesh`` and creating them with
+        :meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`, never by writing
         ``model.elements`` directly.
 
         Parameters

@@ -92,7 +92,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 (elNumber,) = model.topology.reserveElementNumbers(1)
                 element = DisplacementElement("C3D20", elNumber)
                 element.setNodes(nodes)
-                model.createElement(element)
+                model.createAuxiliaryElement(element)
                 elements[key] = element
 
             model.mesh.setElementSet("m", [elements["upper"].elNumber])
@@ -318,7 +318,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 (elNumber,) = model.topology.reserveElementNumbers(1)
                 element = DisplacementElement("C3D20", elNumber)
                 element.setNodes(nodes)
-                model.createElement(element)
+                model.createAuxiliaryElement(element)
                 elements[key] = element
 
             model.mesh.setElementSet("m", [elements["masterLeft"].elNumber, elements["masterRight"].elNumber])

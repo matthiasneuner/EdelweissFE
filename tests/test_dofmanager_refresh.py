@@ -82,7 +82,7 @@ def _buildTwoElementModel():
         model.nodes[node.label] = node
     with model.topology.changes():
         for element in (e1, e2):
-            model.createElement(element)
+            model.createAuxiliaryElement(element)
     model.elementSets["all"] = ElementSet("all", [e1, e2])
     model.nodeSets["all"] = NodeSet("all", n)
     model.materials["linearelastic"] = material

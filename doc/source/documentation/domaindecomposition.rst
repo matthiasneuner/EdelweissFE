@@ -115,7 +115,7 @@ mesh is described and before the elements are made
 (:func:`~edelweissfe.helpers.inputfilehelpers.fillFEModelFromInputFile`). A process then creates
 
 * the elements it **computes** -- its part of the partition; and
-* every **element made by its owner** -- the contact facets and the point masses of rigid bodies
+* every **auxiliary element** -- the contact facets and the point masses of rigid bodies
   (see `Contact, ties and rigid bodies`_).
 
 A load acting on an element -- a distributed load on its face, a body force -- is evaluated by the
@@ -164,8 +164,9 @@ make a distributed model possible:
   ``setStateVars`` recreate it in another process -- which is what moving an element between
   processes needs (see `Load balancing`_).
 
-Contact facets and the point masses of rigid bodies are made by their owners in every process; they
-are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addElementMadeByOwner`), with
+Contact facets and the point masses of rigid bodies are auxiliary elements: the surface or rigid body
+they belong to makes them itself, in every process; they
+are added to the mesh as well (:meth:`~edelweissfe.models.mesh.Mesh.addAuxiliaryElement`), with
 their host element -- the element of the mesh they lie on --, and the facets are cut from the surface as described in the
 mesh, not from element objects. A refinement adds its children to the mesh and creates them from it.
 
@@ -177,11 +178,11 @@ The elements are partitioned by `METIS <https://github.com/KarypisLab/METIS>`_
 mesh -- elements adjacent when they share a face, or an edge in 2D -- is split into parts of balanced
 weight, minimising the total communication volume. The partition is computed on the mesh -- element
 numbers, connectivity, and the size of each element type -- not on element objects, on rank 0, and
-broadcast. The elements made by their owners are not given to METIS: each is computed by the process
+broadcast. The auxiliary elements are not given to METIS: each is computed by the process
 of its host element -- a facet by that of the solid element whose face it tiles, so that its degrees
 of freedom are already in that subdomain -- or, if it has none, as a point mass, by the process given
 part 0 of the partition (rank 0, unless a repartition renumbered the parts)
-(:func:`~edelweissfe.domaindecomposition.partitioning.processOfElementMadeByOwner`). The constraints
+(:func:`~edelweissfe.domaindecomposition.partitioning.processOfAuxiliaryElement`). The constraints
 are dealt out by name, one process each.
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
