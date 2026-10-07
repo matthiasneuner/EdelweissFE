@@ -6,6 +6,23 @@ Creating finite element meshes
 The mesh is data; elements are made from it
 -------------------------------------------
 
+What a model holds, up front:
+
+* ``model.mesh`` (:class:`~edelweissfe.models.mesh.Mesh`) holds the **element connectivity, the
+  element sets and the surfaces**, as data -- element numbers, types and node labels, not element
+  objects.
+* ``model.nodes`` holds the **nodes**, as :class:`~edelweissfe.points.node.Node` objects; they are
+  not (yet) part of ``model.mesh``.
+* ``model.elements`` holds the **element objects created from the mesh**. It is never assigned
+  directly: an element is described in ``model.mesh`` and created by
+  :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`. Preparing the model checks both
+  directions -- an element of the mesh never created, or an element of ``model.elements`` the mesh
+  does not describe, raises a :class:`~edelweissfe.utils.exceptions.TopologyError`. The only
+  exception are *auxiliary elements*, which a model entity makes itself -- the contact facets of a
+  surface, the point mass of a rigid body -- and adds with
+  :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`, which describes them in the
+  mesh as well.
+
 A model is built in two stages, as in the textbook picture of the finite element method:
 
 1. **Describe the mesh.** The ``*node``, ``*element``, ``*nset``, ``*elset`` and ``*surface``

@@ -54,13 +54,11 @@ import numpy as np
 import pytest
 
 from edelweissfe.config.configurator import loadConfiguration
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.config.materiallibrary import getMaterialClass
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
 from edelweissfe.sections.plane import PlaneSectionSchema, Section
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.solvers.nonlinearimplicitstatic import NIST
 from edelweissfe.stepactions.dirichlet import StepAction as DirichletStepAction
@@ -89,18 +87,17 @@ def test_single_cpe4_patch_test_pure_python_no_parser():
     n3 = Node(3, np.array([1.0, 1.0]))  # top right
     n4 = Node(4, np.array([0.0, 1.0]))  # top left
 
-    ElementClass = getElementClass("CPE4", "edelweiss")
-    element = ElementClass("CPE4", 1)
-    element.setNodes([n1, n2, n3, n4])
-
     material = getMaterialClass("linearelastic", "edelweiss")(np.array([E, nu]))
 
     model = FEModel(2)
     for n in (n1, n2, n3, n4):
         model.nodes[n.label] = n
+    # the element is described in the mesh, and created from there
+    model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
+    model.mesh.setElementSet("all", [1])
     with model.topology.changes():
-        model.createAuxiliaryElement(element)
-    model.elementSets["all"] = ElementSet("all", [element])
+        model.createElementsOfMesh()
+    element = model.elements[1]
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
     model.nodeSets["bottom"] = NodeSet("bottom", [n1, n2])
     model.nodeSets["top"] = NodeSet("top", [n3, n4])
@@ -261,21 +258,16 @@ def _buildPatchModel(youngsModulus: float, poissonsRatio: float, thickness: floa
             nodes[label] = Node(label, np.array([float(i), float(j)]))
             label += 1
 
-    ElementClass = getElementClass("CPE4", "edelweiss")
-    elements = {}
-    # CCW node order per element, matching the Quad4 shape functions (see the first test)
-    for elNumber, connectivity in enumerate([(1, 2, 5, 4), (2, 3, 6, 5), (4, 5, 8, 7), (5, 6, 9, 8)], start=1):
-        element = ElementClass("CPE4", elNumber)
-        element.setNodes([nodes[label] for label in connectivity])
-        elements[elNumber] = element
-
     model = FEModel(2)
     model.nodes.update(nodes)
+    # the elements are described in the mesh, and created from there;
+    # CCW node order per element, matching the Quad4 shape functions (see the first test)
+    for elNumber, connectivity in enumerate([(1, 2, 5, 4), (2, 3, 6, 5), (4, 5, 8, 7), (5, 6, 9, 8)], start=1):
+        model.mesh.addElement(elNumber, "CPE4", "edelweiss", connectivity)
+    model.mesh.setElementSet("all", list(model.mesh.elements))
     with model.topology.changes():
-        for element in elements.values():
-            model.createAuxiliaryElement(element)
-
-    model.elementSets["all"] = ElementSet("all", list(elements.values()))
+        model.createElementsOfMesh()
+    elements = model.elements
     model.nodeSets["all"] = NodeSet("all", list(nodes.values()))
     model.nodeSets["bottom"] = NodeSet("bottom", [nodes[1], nodes[2], nodes[3]])
     model.nodeSets["middle"] = NodeSet("middle", [nodes[4], nodes[5], nodes[6]])

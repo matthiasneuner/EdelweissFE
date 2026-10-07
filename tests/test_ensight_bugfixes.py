@@ -46,14 +46,12 @@ Bug 2
 import numpy as np
 import pytest
 
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.config.materiallibrary import getMaterialClass
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.outputmanagers.ensight import EnsightConfigurationSchema, OutputManager
 from edelweissfe.points.node import Node
 from edelweissfe.sections.plane import PlaneSectionSchema, Section
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.misc import asBool, strtobool
 
@@ -66,18 +64,17 @@ def _buildMinimalGeometryModel() -> FEModel:
     n3 = Node(3, np.array([1.0, 1.0]))
     n4 = Node(4, np.array([0.0, 1.0]))
 
-    ElementClass = getElementClass("CPE4", "edelweiss")
-    element = ElementClass("CPE4", 1)
-    element.setNodes([n1, n2, n3, n4])
-
     material = getMaterialClass("linearelastic", "edelweiss")(np.array([1000.0, 0.3]))
 
     model = FEModel(2)
     for n in (n1, n2, n3, n4):
         model.nodes[n.label] = n
+    # the element is described in the mesh, and created from there
+    model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
+    model.mesh.setElementSet("all", [1])
     with model.topology.changes():
-        model.createAuxiliaryElement(element)
-    model.elementSets["all"] = ElementSet("all", [element])
+        model.createElementsOfMesh()
+    element = model.elements[1]
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
 
     section = Section(

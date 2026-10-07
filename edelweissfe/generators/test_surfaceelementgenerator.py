@@ -44,7 +44,6 @@ from edelweissfe.constraints.nodetodeformablesurfacepenalty import (
     NodeToDeformableSurfacePenaltySchema,
 )
 from edelweissfe.elements.contactsurfaceelement import Tria3ContactFacet
-from edelweissfe.elements.displacementelement.element import DisplacementElement
 from edelweissfe.generators.surfaceelementgenerator import (
     buildContactFacets,
     canonicalParentFace,
@@ -113,9 +112,8 @@ class TestContactFacetNodalWeights(unittest.TestCase):
 
         with model.topology.changes():
             (elNumber,) = model.topology.reserveElementNumbers(1)
-            element = DisplacementElement("C3D20", elNumber)
-            element.setNodes(nodes)
-            model.createAuxiliaryElement(element)
+            model.mesh.addElement(elNumber, "C3D20", "edelweiss", [node.label for node in nodes])
+            element = model.createElementOfMesh(elNumber)
         model.mesh.setElementSet("theFace", [element.elNumber])
         model.mesh.addSurface("theSurface", {1: "theFace"})
         model.createElementsOfMesh()
@@ -242,9 +240,8 @@ class TestContactFacetNodalWeights(unittest.TestCase):
 
         with model.topology.changes():
             (elNumber,) = model.topology.reserveElementNumbers(1)
-            element = DisplacementElement("CPE8", elNumber)
-            element.setNodes(nodes)
-            model.createAuxiliaryElement(element)
+            model.mesh.addElement(elNumber, "CPE8", "edelweiss", [node.label for node in nodes])
+            element = model.createElementOfMesh(elNumber)
         model.mesh.setElementSet("theEdge", [element.elNumber])
         model.mesh.addSurface("theSurface", {1: "theEdge"})
         model.createElementsOfMesh()

@@ -46,26 +46,40 @@ from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType as _MCT
+from edelweissfe.points.node import Node
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.utils.exceptions import TopologyError
 
 _REPO_ROOT = _Path(__file__).resolve().parents[1]
 
 
-class _StubElement:
-    """A bare element stand-in: the allocator, the window and the fingerprint only look at
-    ``elNumber``, ``elType`` and ``nodes``; describing it in the mesh adds ``fields``,
-    ``ensightType``, ``nDof`` and ``hasKernels``."""
+_SQUARE = {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0), 3: (1.0, 1.0, 0.0), 4: (0.0, 1.0, 0.0)}
 
-    elType = "STUB"
-    nodes = ()
-    fields = ()
-    ensightType = "stub"
-    nDof = 0
-    hasKernels = False
 
-    def __init__(self, elNumber: int):
-        self.elNumber = elNumber
+def _describeAndCreateElement(model: FEModel, number: int):
+    """What a model modifier does to add an element: describe it in the mesh and create it from
+    there (:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`). The allocator, the
+    window and the fingerprint only look at its number, type and nodes, so every element is the
+    same quad on the nodes of a unit square, which are added to the model the first time.
+
+    Parameters
+    ----------
+    model
+        The model.
+    number
+        The element number, reserved from the model's allocator.
+
+    Returns
+    -------
+    element
+        The new element.
+    """
+
+    for label, coordinates in _SQUARE.items():
+        if label not in model.nodes:
+            model.nodes[label] = Node(label, np.array(coordinates))
+    model.mesh.addElement(number, "CPE4", "edelweiss", list(_SQUARE))
+    return model.createElementOfMesh(number)
 
 
 def _modelWithSetupElements(*labels: int) -> FEModel:
@@ -96,7 +110,7 @@ def test_numbers_are_never_recycled_after_removal():
     model = _modelWithSetupElements()
     with model.topology.changes():
         (number,) = model.topology.reserveElementNumbers(1)
-        model.createAuxiliaryElement(_StubElement(number))
+        _describeAndCreateElement(model, number)
         model.removeElement(number)
 
         (afterRemoval,) = model.topology.reserveElementNumbers(1)
@@ -113,7 +127,7 @@ def test_allocator_ignores_the_current_maximum():
     with model.topology.changes():
         numbers = model.topology.reserveElementNumbers(4)
         for number in numbers:
-            model.createAuxiliaryElement(_StubElement(number))
+            _describeAndCreateElement(model, number)
         for number in numbers:
             model.removeElement(number)
 
@@ -155,7 +169,7 @@ def test_reserve_outside_a_topology_change_raises():
 def test_create_outside_a_topology_change_raises():
     model = _modelWithSetupElements()
     with pytest.raises(TopologyError, match="outside a topology change"):
-        model.createAuxiliaryElement(_StubElement(1))
+        _describeAndCreateElement(model, 1)
 
 
 def test_remove_outside_a_topology_change_raises():
@@ -168,7 +182,7 @@ def test_creating_a_taken_number_raises():
     model = _modelWithSetupElements(1)
     with model.topology.changes():
         with pytest.raises(TopologyError, match="already taken"):
-            model.createAuxiliaryElement(_StubElement(1))
+            _describeAndCreateElement(model, 1)
 
 
 def test_windows_nest_without_closing_early():
@@ -272,7 +286,7 @@ class _StubModifier:
         # as well would record it twice; see TopologyPipeline.recordChange.
         self._log.append(plan["who"])
         (number,) = model.topology.reserveElementNumbers(1)
-        model.createAuxiliaryElement(_StubElement(number))
+        _describeAndCreateElement(model, number)
         change = ModelChange(kind=_MCT.REFINEMENT)
         change.addedElements.add(number)
         return change
@@ -631,7 +645,7 @@ def test_a_consumer_cannot_mutate_the_topology():
     class _MutatingConsumer(_StubMeshDependent):
         def refresh(self, model, change):
             (number,) = model.topology.reserveElementNumbers(1)  # must raise: window is closed
-            model.createAuxiliaryElement(_StubElement(number))
+            _describeAndCreateElement(model, number)
             return True
 
     log = []

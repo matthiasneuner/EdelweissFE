@@ -61,10 +61,19 @@ class FEModel:
     It takes care of the correct number of variables,
     for nodes and scalar degrees of freedem, and it manages the fields.
 
-    The model is built in two stages. First the mesh is described as data in :attr:`mesh`
-    (:class:`~edelweissfe.models.mesh.Mesh`): elements by number, type, provider and node labels,
-    element sets and surfaces. Then :meth:`createElementsOfMesh` creates the element objects from it
-    and resolves the element sets and surfaces to them. The fields at the nodes, and with them the
+    What the model holds:
+
+    * :attr:`mesh` (:class:`~edelweissfe.models.mesh.Mesh`) holds the element connectivity, the
+      element sets and the surfaces, as data: elements by number, type, provider and node labels.
+    * :attr:`nodes` holds the nodes, as objects; they are not (yet) part of the mesh.
+    * :attr:`elements` holds the element objects created from the mesh. It is never assigned
+      directly: :meth:`prepareYourself` refuses an element the mesh does not describe. (Auxiliary
+      elements -- contact facets, point masses -- are added by :meth:`createAuxiliaryElement`,
+      which describes them in the mesh as well.)
+
+    The model is therefore built in two stages. First the mesh is described in :attr:`mesh`. Then
+    :meth:`createElementsOfMesh` creates the element objects from it and resolves the element sets
+    and surfaces to them. The fields at the nodes, and with them the
     layout of the degrees of freedom, follow from the mesh alone (see :meth:`~edelweissfe.models.mesh.Mesh.typeOf`).
 
 
@@ -78,9 +87,13 @@ class FEModel:
 
     def __init__(self, dimension: int):
         self.time = 0.0  #: Current time of the model.
-        self.nodes = {}  #: Nodes in the model.
-        self.mesh = Mesh()  #: The mesh, as data: the elements, element sets and surfaces described for the model.
-        self.elements = {}  #: The element objects created from the mesh, by number, in mesh order.
+        #: The nodes of the model, by label; not (yet) part of :attr:`mesh`.
+        self.nodes = {}
+        #: The mesh, as data: the element connectivity, the element sets and the surfaces.
+        self.mesh = Mesh()
+        #: The element objects created from :attr:`mesh`, by number, in mesh order. Never assigned
+        #: directly: describe an element in :attr:`mesh` and call :meth:`createElementsOfMesh`.
+        self.elements = {}
         #: Which elements of the mesh this process creates (:meth:`createElementsOfMesh` asks it), and
         #: how results of the whole model are read from the processes that computed them; every
         #: element, here, unless a domain-decomposed run sets another (see

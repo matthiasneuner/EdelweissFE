@@ -27,6 +27,10 @@
 #  ---------------------------------------------------------------------
 """The mesh of a model, as data.
 
+``model.mesh`` holds the element connectivity, the element sets and the surfaces. The nodes are
+``model.nodes`` (they are not part of the mesh yet), and ``model.elements`` are the element objects
+created from the mesh -- never assigned directly.
+
 A model is built in two stages:
 
 1. **Describe the mesh.** The ``*element``/``*elset``/``*surface`` keywords and the mesh generators
@@ -162,7 +166,8 @@ class MeshElement:
 
 
 class Mesh:
-    """The mesh of a model: its elements, element sets and surfaces, as data.
+    """The mesh of a model: its element connectivity, element sets and surfaces, as data. The nodes
+    are held by the model (``model.nodes``), not here.
 
     Element numbers are never chosen here: the input file gives them, or the model's number
     allocator (:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`)

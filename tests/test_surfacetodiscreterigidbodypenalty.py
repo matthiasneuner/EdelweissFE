@@ -46,7 +46,6 @@ from edelweissfe.constraints.surfacetodiscreterigidbodypenalty import (
 from edelweissfe.constraints.surfacetodiscreterigidbodypenalty import (
     SurfaceToDiscreteRigidBodyPenaltySchema,
 )
-from edelweissfe.elements.displacementelement.element import DisplacementElement
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.generators.discreterigidbodygenerator import (
     generateDiscreteRigidBodyFromMeshFile,
@@ -105,9 +104,8 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
                 model.nodes[label] = node
                 nodes.append(node)
             (elNumber,) = model.topology.reserveElementNumbers(1)
-            element = DisplacementElement("C3D20", elNumber)
-            element.setNodes(nodes)
-            model.createAuxiliaryElement(element)
+            model.mesh.addElement(elNumber, "C3D20", "edelweiss", [node.label for node in nodes])
+            element = model.createElementOfMesh(elNumber)
 
             slaveElements = [element]
             if mixedElements:
@@ -118,9 +116,8 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
                     model.nodes[label] = node
                     hexa8Nodes.append(node)
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                hexa8 = DisplacementElement("C3D8", elNumber)
-                hexa8.setNodes(hexa8Nodes)
-                model.createAuxiliaryElement(hexa8)
+                model.mesh.addElement(elNumber, "C3D8", "edelweiss", [node.label for node in hexa8Nodes])
+                hexa8 = model.createElementOfMesh(elNumber)
                 slaveElements.append(hexa8)
                 nodes += hexa8Nodes
 

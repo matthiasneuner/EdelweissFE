@@ -50,7 +50,6 @@ from edelweissfe.constraints.surfacetodeformablesurfacepenalty import (
     SurfaceToDeformableSurfacePenaltySchema,
 )
 from edelweissfe.elements.contactsurfaceelement import Tria3ContactFacet
-from edelweissfe.elements.displacementelement.element import DisplacementElement
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.generators.surfaceelementgenerator import buildContactFacets
 from edelweissfe.journal.journal import Journal
@@ -90,9 +89,8 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                     nodes.append(node)
                     label += 1
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                element = DisplacementElement("C3D20", elNumber)
-                element.setNodes(nodes)
-                model.createAuxiliaryElement(element)
+                model.mesh.addElement(elNumber, "C3D20", "edelweiss", [node.label for node in nodes])
+                element = model.createElementOfMesh(elNumber)
                 elements[key] = element
 
             model.mesh.setElementSet("m", [elements["upper"].elNumber])
@@ -316,9 +314,8 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                     nodes.append(node)
                     label += 1
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                element = DisplacementElement("C3D20", elNumber)
-                element.setNodes(nodes)
-                model.createAuxiliaryElement(element)
+                model.mesh.addElement(elNumber, "C3D20", "edelweiss", [node.label for node in nodes])
+                element = model.createElementOfMesh(elNumber)
                 elements[key] = element
 
             model.mesh.setElementSet("m", [elements["masterLeft"].elNumber, elements["masterRight"].elNumber])

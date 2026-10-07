@@ -36,14 +36,12 @@ changed which nodes a constraint couples.
 
 import numpy as np
 
-from edelweissfe.config.elementlibrary import getElementClass
 from edelweissfe.config.materiallibrary import getMaterialClass
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.points.node import Node
 from edelweissfe.sections.plane import PlaneSectionSchema, Section
-from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 
 
@@ -70,20 +68,18 @@ class _FakeConstraint:
 
 def _buildTwoElementModel():
     n = [Node(i + 1, np.array(xy)) for i, xy in enumerate([(0, 0), (1, 0), (2, 0), (2, 1), (1, 1), (0, 1)])]
-    ElementClass = getElementClass("CPE4", "edelweiss")
-    e1 = ElementClass("CPE4", 1)
-    e1.setNodes([n[0], n[1], n[4], n[5]])
-    e2 = ElementClass("CPE4", 2)
-    e2.setNodes([n[1], n[2], n[3], n[4]])
     material = getMaterialClass("linearelastic", "edelweiss")(np.array([1000.0, 0.3]))
 
     model = FEModel(2)
     for node in n:
         model.nodes[node.label] = node
+    # the elements are described in the mesh, and created from there
+    model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 5, 6])
+    model.mesh.addElement(2, "CPE4", "edelweiss", [2, 3, 4, 5])
+    model.mesh.setElementSet("all", [1, 2])
     with model.topology.changes():
-        for element in (e1, e2):
-            model.createAuxiliaryElement(element)
-    model.elementSets["all"] = ElementSet("all", [e1, e2])
+        model.createElementsOfMesh()
+    e1, e2 = model.elements[1], model.elements[2]
     model.nodeSets["all"] = NodeSet("all", n)
     model.materials["linearelastic"] = material
     section = Section(
