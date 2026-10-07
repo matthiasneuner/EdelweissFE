@@ -82,7 +82,7 @@ class ElementSet(OrderedSet):
 
     def __init__(
         self,
-        label: str,
+        name: str,
         elements,
     ):
         self.allowedObjectTypes = [BaseElement]
@@ -93,7 +93,7 @@ class ElementSet(OrderedSet):
             else None
         )
 
-        super().__init__(label, elements)
+        super().__init__(name, elements)
         self._nodes = None
 
     @property
@@ -281,8 +281,8 @@ class ElementSetOfMesh(ElementSet):
         The nodes of the model, by label; the nodes of the whole set are taken from them.
     """
 
-    def __init__(self, label: str, elements, mesh, nodesOfModel: dict):
-        super().__init__(label, elements)
+    def __init__(self, name: str, elements, mesh, nodesOfModel: dict):
+        super().__init__(name, elements)
         self.describedBy(mesh, nodesOfModel)
 
     def describedBy(self, mesh, nodesOfModel: dict):
