@@ -682,6 +682,10 @@ class TopologyPipeline:
             True if any consumer reported that its DOF footprint changed.
         """
 
+        # Every plan is applied: the element objects must agree with the mesh again, as when the model
+        # was prepared, before any consumer reads them.
+        self._model.checkElementsAgreeWithMesh()
+
         # materialise the list: any() would short-circuit and leave later consumers unrefreshed
         return any([consumer.refreshIfMeshChanged(self._model) for consumer in self.meshDependents])
 

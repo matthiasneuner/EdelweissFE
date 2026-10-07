@@ -396,7 +396,7 @@ class FEModel:
         elementSet.requireComplete(reader)
         return elementSet
 
-    def _checkElementsAgreeWithMesh(self):
+    def checkElementsAgreeWithMesh(self):
         """Raise unless :attr:`elements` and :attr:`mesh` describe the same elements, in both directions.
 
         * Every element of the mesh was either local or declared not local by :attr:`elementDistribution`
@@ -774,7 +774,7 @@ class FEModel:
             The journal instance.
         """
 
-        self._checkElementsAgreeWithMesh()
+        self.checkElementsAgreeWithMesh()
         self.topology.adoptSetupElementNumbers()
         self.topology.ensureSurfaceFacetModifier(journal)
         self.topology.checkModelModifierDomains()

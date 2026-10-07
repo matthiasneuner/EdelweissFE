@@ -327,6 +327,20 @@ def test_an_element_assigned_to_the_model_but_not_described_in_the_mesh_is_refus
         model.prepareYourself(Journal(verbose=False))
 
 
+def test_an_element_assigned_to_the_model_during_a_topology_change_is_refused_at_the_refresh(tmp_path):
+    """The same agreement holds after every topology update, before any mesh-dependent consumer
+    reads the changed model."""
+
+    model = _buildModel(tmp_path)
+    record = model.mesh.elements[1]
+    element = model.mesh.elementClassOf(record)(record.elType, 5000)
+    element.setNodes([model.nodes[label] for label in record.nodeLabels])
+    with model.topology.changes():
+        model.elements[5000] = element
+    with pytest.raises(TopologyError, match="not described in the mesh"):
+        model.topology.refreshMeshDependents()
+
+
 def test_completeness_is_derived_from_the_mesh_and_repeated_making_changes_nothing(tmp_path):
     part = _buildModel(tmp_path, lambda number: number != 1002)
     picked = part.elementSets["picked"]
