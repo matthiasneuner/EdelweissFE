@@ -53,6 +53,7 @@ from edelweissfe.sets.elementset import (
     ElementSet,
     ElementSetOfMesh,
     ElementSetOfSurfaceFace,
+    whyElementsAreMissingHere,
 )
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
@@ -363,8 +364,8 @@ class FEModel:
         notCreatedHere = self.mesh.elements.keys() - self.elements.keys()
         if notCreatedHere:
             raise TopologyError(
-                "{:} needs every element of the model, but {:} of them were not created in this process".format(
-                    reader, len(notCreatedHere)
+                "{:} needs every element of the model, but {:} of them have no element object here: {:}".format(
+                    reader, len(notCreatedHere), whyElementsAreMissingHere()
                 )
             )
 
@@ -450,8 +451,8 @@ class FEModel:
             )
 
     def removeElement(self, elNumber: int):
-        """Remove an element from the mesh and, if it is local, from the model. Its number is
-        retired, never reissued.
+        """Remove an element from the mesh and, if it is local, from the model; see
+        :meth:`removeElements`.
 
         Parameters
         ----------
@@ -459,14 +460,30 @@ class FEModel:
             The number of the element to remove.
         """
 
+        self.removeElements((elNumber,))
+
+    def removeElements(self, numbers):
+        """Remove elements from the mesh -- and so from its element sets and surfaces
+        (:meth:`~edelweissfe.models.mesh.Mesh.removeElements`) -- and, those local, from the model.
+        Their numbers are retired, never reissued. The element sets and surfaces of the model follow
+        when they are next resolved (:meth:`resolveSetsAndSurfacesOfMesh`).
+
+        Parameters
+        ----------
+        numbers
+            The numbers of the elements to remove.
+        """
+
+        numbers = list(numbers)
         if not self.topology.isOpen:
             raise TopologyError(
-                "element {:} was deleted outside a topology change: only model modifiers may create "
-                "or delete elements, inside TopologyPipeline.changes()".format(elNumber)
+                "element(s) {:} were deleted outside a topology change: only model modifiers may create "
+                "or delete elements, inside TopologyPipeline.changes()".format(numbers[:5])
             )
 
-        self.mesh.removeElement(elNumber)
-        self.elements.pop(elNumber, None)
+        self.mesh.removeElements(numbers)
+        for number in numbers:
+            self.elements.pop(number, None)
 
     def _activateNodeFieldsFromMesh(
         self,

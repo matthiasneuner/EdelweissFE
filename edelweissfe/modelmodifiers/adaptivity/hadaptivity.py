@@ -923,9 +923,10 @@ class ModelModifier(ModelModifierBase):
         transient intermediates included (sorted, so the changeset is built in a reproducible
         order)."""
 
-        for eid in sorted(set(self._eidToNumber) - active):
-            number = self._eidToNumber.pop(eid)
-            model.removeElement(number)
+        removed = [self._eidToNumber.pop(eid) for eid in sorted(set(self._eidToNumber) - active)]
+        # in one pass over the element sets and surfaces of the mesh
+        model.removeElements(removed)
+        for number in removed:
             self._sectionOf.pop(number, None)
             self._elementPropertiesOf.pop(number, None)
             change.removedElements.add(number)

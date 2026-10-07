@@ -247,6 +247,47 @@ def test_an_element_can_be_created_and_removed_at_any_time(tmp_path):
         part.createElementOfMesh(5)
 
 
+def test_removing_an_element_removes_it_from_every_set_and_surface(tmp_path):
+    """A serial run: after an element is removed, every set and surface that listed it is whole
+    again -- none names an element the mesh no longer describes -- and reading them raises nothing."""
+
+    model = _buildModel(tmp_path)
+    picked = model.elementSets["picked"]
+    with model.topology.changes():
+        model.mesh.setSurfaceElements("byNumbers", {1: [1, 3, 1002], 3: [5]})
+        model.removeElements([3, 1002])
+    model.resolveSetsAndSurfacesOfMesh()
+
+    mesh = model.mesh
+    assert mesh.elementSets["odd"] == [1, 5, 7]
+    assert mesh.elementSets["picked"] == [6, 2] and mesh.elementSets["union"] == [1, 5, 7, 6, 2]
+    assert mesh.elementSets["extra"] == [] and mesh.elementSets["all"] == list(mesh.elements)
+    # a face listing elements by number loses them; a face naming a set follows the set
+    assert mesh.elementNumbersOfSurface("byNumbers") == {1: [1], 3: [5]}
+    assert mesh.elementNumbersOfSurface("gen_bottom") == {1: [1, 5, 7]}
+    assert mesh.elementNumbersOfSurface("right") == {2: []}
+    # the sets of the model are whole -- the same objects, updated in place -- and read as such
+    assert model.elementSets["picked"] is picked and [element.elNumber for element in picked] == [6, 2]
+    for elementSet in model.elementSets.values():
+        assert elementSet.isComplete
+        list(elementSet)
+    model.checkElementsAgreeWithMesh()
+
+
+def test_an_incomplete_set_of_a_serial_run_says_why_without_naming_processes(tmp_path):
+    """Elements described after the elements were made, and never made: a serial run explains it in
+    its own terms."""
+
+    model = _buildModel(tmp_path, lambda number: number != 6)
+    for read in (list, lambda elementSet: elementSet.requireComplete("the test")):
+        with pytest.raises(TopologyError, match="described in the mesh but never created") as raised:
+            read(model.elementSets["picked"])
+        assert "process" not in str(raised.value)
+    with pytest.raises(TopologyError, match="described in the mesh but never created") as raised:
+        model.requireCompleteMesh("the test")
+    assert "process" not in str(raised.value)
+
+
 def test_an_auxiliary_element_is_described_from_the_object():
     from edelweissfe.elements.pointmass import PointMass
 

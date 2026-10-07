@@ -48,10 +48,30 @@ if checkSuccessfulExtension("edelweissfe.materials.marmot.marmothypoelastic") or
 else:
     MarmotMaterialWrappingElement = None
 
+from edelweissfe.domaindecomposition.mpienvironment import numberOfProcesses
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.sets.orderedset import OrderedSet
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
+
+
+def whyElementsAreMissingHere() -> str:
+    """Why elements of the mesh have no element object here, for an error message: in a run on
+    several processes, because another process creates them; in a serial run, because they were
+    described after the elements were created.
+
+    Returns
+    -------
+    str
+        The explanation.
+    """
+
+    if numberOfProcesses() > 1:
+        return "the others are local to other processes -- a reader of the local part asks for localElements()"
+    return (
+        "the others were described in the mesh but never created -- elements described after "
+        "FEModel.createElementsOfMesh must be made by calling it again"
+    )
 
 
 class ElementSet(OrderedSet):
@@ -180,8 +200,10 @@ class ElementSet(OrderedSet):
         """
 
         raise TopologyError(
-            "element set {:} was read as a whole ({:} it), but only {:} of its elements are local to this process "
-            "-- a reader of the local part asks for localElements()".format(self.name, reading, len(self.data))
+            "element set {:} was read as a whole ({:} it), but only {:} of its {:} elements have an element object "
+            "here: {:}".format(
+                self.name, reading, len(self.data), len(self.elementNumbersOfWholeSet()), whyElementsAreMissingHere()
+            )
         )
 
     def elementNumbersOfWholeSet(self) -> list:
@@ -215,8 +237,8 @@ class ElementSet(OrderedSet):
 
         if not self.isComplete:
             raise TopologyError(
-                "{:} needs the whole element set {:}, but only part of it is local to this process".format(
-                    reader, self.name
+                "{:} needs the whole element set {:}, but only part of it has element objects here: {:}".format(
+                    reader, self.name, whyElementsAreMissingHere()
                 )
             )
 

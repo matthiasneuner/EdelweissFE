@@ -115,7 +115,8 @@ update, meaning "evaluate freshly".
 ``model.mesh`` (:meth:`~edelweissfe.models.mesh.Mesh.addElement`) and create it from there
 (:meth:`~edelweissfe.models.femodel.FEModel.createElementOfMesh`) -- or, for an auxiliary element a model entity
 makes itself, :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement` -- and
-:meth:`~edelweissfe.models.femodel.FEModel.removeElement`, and their node-side counterparts
+:meth:`~edelweissfe.models.femodel.FEModel.removeElements` (which also removes the elements from every
+element set and surface of the mesh listing them), and their node-side counterparts
 :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers` and
 :meth:`~edelweissfe.models.femodel.FEModel.createNode`.
 

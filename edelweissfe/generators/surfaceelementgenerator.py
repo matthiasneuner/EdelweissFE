@@ -474,9 +474,11 @@ def buildContactFacets(
     nodesSetName = f"{prefix}_nodes"
 
     # remove any facets a previous call under this prefix created, so re-running is idempotent
-    for staleFacetNumber in model.mesh.elementSets.get(facetsSetName, []):
-        if staleFacetNumber in model.mesh.elements:
-            model.removeElement(staleFacetNumber)
+    staleFacetNumbers = [
+        number for number in model.mesh.elementSets.get(facetsSetName, []) if number in model.mesh.elements
+    ]
+    if staleFacetNumbers:
+        model.removeElements(staleFacetNumbers)
 
     # Facet numbers come from the model's monotonic allocator, NOT from max(model.elements)+1. The
     # old expression read the maximum *after* the stale facets above were deleted, so a rebuild

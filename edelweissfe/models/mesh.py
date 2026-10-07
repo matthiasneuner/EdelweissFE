@@ -242,10 +242,8 @@ class Mesh:
         return record
 
     def removeElement(self, number: int):
-        """Remove an element from the mesh. Its number is retired, never reissued.
-
-        The element sets are left as they are: whoever removes elements updates the sets it changes
-        (see :meth:`setElementSet`).
+        """Remove an element from the mesh, and from every element set and surface; see
+        :meth:`removeElements`.
 
         Parameters
         ----------
@@ -253,7 +251,38 @@ class Mesh:
             The element number.
         """
 
-        del self.elements[number]
+        self.removeElements((number,))
+
+    def removeElements(self, numbers):
+        """Remove elements from the mesh, and from every element set and every surface listing them,
+        so that a set or a surface never names an element the mesh no longer describes. Their
+        numbers are retired, never reissued.
+
+        The sets and surfaces keep their other members, in their order, and their identity: a set
+        is changed in place. A surface whose face names an element set follows that set.
+
+        Parameters
+        ----------
+        numbers
+            The element numbers; removed in one pass over the sets, which a model modifier removing
+            many elements at once should use.
+        """
+
+        removed = set(numbers)
+        for number in removed:
+            del self.elements[number]
+
+        for members in self.elementSets.values():
+            if not removed.isdisjoint(members):
+                members[:] = [number for number in members if number not in removed]
+
+        for faces in self.surfaces.values():
+            for face, surfaceFace in faces.items():
+                listed = surfaceFace.elementNumbers
+                if listed is not None and not removed.isdisjoint(listed):
+                    faces[face] = SurfaceFace(
+                        elementNumbers=tuple(number for number in listed if number not in removed)
+                    )
 
     def setElementSet(self, name: str, numbers):
         """Define (or redefine) an element set.
