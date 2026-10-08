@@ -142,15 +142,15 @@ def partitionElementsOfMesh(
 
         communicator.Bcast(parts, root=0)
 
-        # The same in every process, since every process holds the broadcast partition.
+        # Shares are given no smaller than MINIMUM_SHARE_OF_AN_EQUAL_SHARE so that no part is empty;
+        # checked, the same in every process, since every process holds the broadcast partition. (Equal
+        # shares of a mesh of hardly more elements than processes may leave a process without
+        # elements, as they always could.)
         emptyParts = np.flatnonzero(np.bincount(parts, minlength=nParts) == 0)
-        if len(numbers) >= nParts and emptyParts.size:
+        if processShares is not None and emptyParts.size:
             raise RuntimeError(
-                "the partition of {:} elements into {:} parts{:} left part(s) {:} without elements".format(
-                    len(numbers),
-                    nParts,
-                    "" if processShares is None else " of shares {:}".format(np.round(processShares, 4).tolist()),
-                    emptyParts.tolist(),
+                "the partition of {:} elements into {:} parts of shares {:} left part(s) {:} without elements".format(
+                    len(numbers), nParts, np.round(processShares, 4).tolist(), emptyParts.tolist()
                 )
             )
 
