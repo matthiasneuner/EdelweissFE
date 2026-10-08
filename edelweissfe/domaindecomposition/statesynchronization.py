@@ -80,6 +80,23 @@ def elementsWithoutState(elements: dict) -> list:
     return numbers
 
 
+def _copiedArrays(data: dict) -> dict[str, np.ndarray]:
+    """A copy of a mapping of arrays, to send: the arrays a constraint returns may be its own.
+
+    Parameters
+    ----------
+    data
+        The mapping of names to arrays (or values convertible to arrays).
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        The copied arrays, by name.
+    """
+
+    return {entry: np.array(values) for entry, values in data.items()}
+
+
 class ModelStateSynchronization:
     """The layout of one exchange of element and constraint states, for one partition of a model.
 
@@ -176,10 +193,7 @@ class ModelStateSynchronization:
             results = constraint.getOutputResults()
             # A constraint carrying nothing between increments, and reporting nothing, has nothing to send.
             if state or results:
-                owned[name] = (
-                    {entry: np.array(values) for entry, values in state.items()},
-                    {entry: np.array(values) for entry, values in results.items()},
-                )
+                owned[name] = (_copiedArrays(state), _copiedArrays(results))
 
         gathered = self.communicator.allgather(owned) if toEveryProcess else self.communicator.gather(owned, root=0)
         for owner, received in enumerate(gathered or []):
