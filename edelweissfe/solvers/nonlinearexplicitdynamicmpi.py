@@ -184,6 +184,7 @@ from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import (
+    ElementPlan,
     computeElementsForExplicit,
 )
 from edelweissfe.solvers.nonlinearexplicitdynamic import (
@@ -528,9 +529,9 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
         # planned again for this subdomain at the next search
         self._forgetReceivePlans()
-        self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
+        self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementLoop)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
-        self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if timesKernels else None
+        self._elementCosts = np.zeros(len(plan.elementLoop.elements)) if timesKernels else None
         self._nMeasuredIncrements = 0
         return plan
 
@@ -568,17 +569,19 @@ class NEDMPI(NEDParallel):
         """
 
         if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
-            numbers = np.array(list(self._incrementPlan.elementPlan.elements.keys()), dtype=float)
+            numbers = np.array(list(self._incrementPlan.elementLoop.elements.keys()), dtype=float)
             return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements, None
         return self._elementCosts, self._nMeasuredIncrements, self.options["output-frequency"]
 
-    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
+    def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
         freedom of the model: completed at the interface like the forces, and shared from the
         owners. Collective.
 
         Parameters
         ----------
+        elementLoop
+            The plan of the elements computed here, contact facets included.
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 
@@ -588,9 +591,9 @@ class NEDMPI(NEDParallel):
             The assembled diagonal.
         """
 
-        vector, contributions = self.assembleLumpedDiagonalOfPlan(elementContribution)
+        vector, contributions = self.lumpedDiagonalAndContributions(elementLoop, elementContribution)
         with performancetiming.timeit("interface forces"):
-            self.subdomain.interfaceAssemblyFor(self._lumpedOperatorPlan).assemble(contributions, vector)
+            self.subdomain.interfaceAssemblyFor(elementLoop).assemble(contributions, vector)
             self.subdomain.allgatherOwnedValues(vector)
         return vector
 
@@ -623,7 +626,7 @@ class NEDMPI(NEDParallel):
         P[:] = 0.0
         with self.communicator.allRanksFailTogether("Evaluating the elements"):
             psi, contributions = computeElementsForExplicit(
-                self._incrementPlan.elementPlan, U_np, dU, P, timeStep, self._elementCosts
+                self._incrementPlan.elementLoop, U_np, dU, P, timeStep, self._elementCosts
             )
         self._nMeasuredIncrements += 1
 
@@ -862,7 +865,7 @@ class NEDMPI(NEDParallel):
             # computed by another process from now on must arrive there with its current state.
             startOfRebalancing = perf_counter()
             interfaceBefore = self.subdomain.interface
-            if self.subdomain.rebalance(self._incrementPlan.elementPlan, *self._elementCostsForRebalancing()):
+            if self.subdomain.rebalance(self._incrementPlan.elementLoop, *self._elementCostsForRebalancing()):
                 if self.subdomain.elementsMustMove():
                     self._moveElements(model, step)
                 else:

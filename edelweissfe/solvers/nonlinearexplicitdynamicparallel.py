@@ -43,8 +43,6 @@ more than one thread and may differ in its last digits. **Use this solver for pr
 one thread.
 """
 
-from dataclasses import replace
-
 import numpy as np
 
 import edelweissfe.utils.performancetiming as performancetiming
@@ -61,7 +59,7 @@ from edelweissfe.solvers.base.parallelelementcomputation import (
     computeLumpedDiagonalForExplicit,
     planElements,
 )
-from edelweissfe.solvers.nonlinearexplicitdynamic import NED, IncrementPlan
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED
 from edelweissfe.timesteppers.timestep import TimeStep
 
 
@@ -78,13 +76,7 @@ class NEDParallel(NED):
 
     identification = "NEDPSolver"
 
-    def __init__(self, jobInfo, journal, **kwargs):
-        super().__init__(jobInfo, journal, **kwargs)
-        #: The plan of the elements computed here, contact facets included, while the lumped operators
-        #: are assembled (:meth:`_assembleLumpedOperators`); None otherwise.
-        self._lumpedOperatorPlan: ElementPlan | None = None
-
-    def reportElementLoop(self, model: FEModel):
+    def reportHowElementsAreComputed(self, model: FEModel):
         """Report the threads available to the element loop.
 
         Parameters
@@ -107,31 +99,28 @@ class NEDParallel(NED):
 
         return getNumberOfThreads() if isFreeThreadingSupported() else 1
 
-    def planIncrement(self, model: FEModel) -> IncrementPlan:
-        """The increment plan of :meth:`NED.planIncrement`, with the chunked element loop
+    def planElementLoop(self, elements: dict) -> ElementPlan:
+        """The element loop of :meth:`NED.planElementLoop`, in bulk: the chunks of elements, how they
+        gather their degrees of freedom and how their contributions are assembled
         (:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`).
 
         Parameters
         ----------
-        model
-            The model tree.
+        elements
+            The elements, by number, in element order.
 
         Returns
         -------
-        IncrementPlan
+        ElementPlan
             The plan.
         """
 
-        plan = super().planIncrement(model)
-        return replace(
-            plan,
-            elementPlan=planElements(
-                self.elementsWithKernels(),
-                self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-                self.partition.dofs,
-                self.theDofManager.nDof,
-                self.elementLoopThreads(),
-            ),
+        return planElements(
+            elements,
+            self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
+            self.partition.dofs,
+            self.theDofManager.nDof,
+            self.elementLoopThreads(),
         )
 
     @performancetiming.timeit("elements")
@@ -159,41 +148,16 @@ class NEDParallel(NED):
         """
 
         P[:] = 0.0
-        psi, _ = computeElementsForExplicit(self._incrementPlan.elementPlan, U_np, dU, P, timeStep)
+        psi, _ = computeElementsForExplicit(self._incrementPlan.elementLoop, U_np, dU, P, timeStep)
         return P, psi
 
-    def _assembleLumpedOperators(self, verbosity: int):
-        """Assemble the lumped operators of :meth:`NED._assembleLumpedOperators`, with the plan of the
-        elements computed here, contact facets included, made once for both.
-
-        Parameters
-        ----------
-        verbosity
-            The journal level to report at.
-
-        Returns
-        -------
-        tuple[DofVector, DofVector]
-            As for :meth:`NED._assembleLumpedOperators`.
-        """
-
-        self._lumpedOperatorPlan = planElements(
-            self.partition.elements,
-            self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-            self.partition.dofs,
-            self.theDofManager.nDof,
-            nThreads=1,
-        )
-        try:
-            return super()._assembleLumpedOperators(verbosity)
-        finally:
-            self._lumpedOperatorPlan = None
-
-    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
+    def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of :meth:`NED.assembleLumpedDiagonal`, in bulk.
 
         Parameters
         ----------
+        elementLoop
+            The plan of the elements computed here, contact facets included (:meth:`planElementLoop`).
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 
@@ -203,13 +167,17 @@ class NEDParallel(NED):
             The assembled diagonal.
         """
 
-        return self.assembleLumpedDiagonalOfPlan(elementContribution)[0]
+        return self.lumpedDiagonalAndContributions(elementLoop, elementContribution)[0]
 
-    def assembleLumpedDiagonalOfPlan(self, elementContribution) -> tuple[DofVector, np.ndarray]:
-        """Assemble a lumped operator with the plan of the elements computed here.
+    def lumpedDiagonalAndContributions(
+        self, elementLoop: ElementPlan, elementContribution
+    ) -> tuple[DofVector, np.ndarray]:
+        """Assemble a lumped operator with a plan, and keep what it was assembled from.
 
         Parameters
         ----------
+        elementLoop
+            The plan of the elements.
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 
@@ -222,5 +190,5 @@ class NEDParallel(NED):
 
         vector = self.theDofManager.constructDofVector()
         vector[:] = 0.0
-        contributions = computeLumpedDiagonalForExplicit(self._lumpedOperatorPlan, elementContribution, vector)
+        contributions = computeLumpedDiagonalForExplicit(elementLoop, elementContribution, vector)
         return vector, contributions

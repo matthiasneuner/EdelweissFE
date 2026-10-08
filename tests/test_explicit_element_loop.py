@@ -59,21 +59,31 @@ _DECKS = [
 ]
 
 _BOTH_LOOPS_SCRIPT = """
-import contextlib, io, sys
+import contextlib, dataclasses, io, sys
 import numpy as np
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.solvers.nonlinearexplicitdynamic import NED
 from edelweissfe.solvers.nonlinearexplicitdynamicparallel import NEDParallel
 from edelweissfe.utils.inputfileparser import parseInputFile
 
+# --reversed: the plain loop in reverse element order, which must be found to differ
+order = reversed if "--reversed" in sys.argv else list
 counts = {"increments": 0, "forces differ": 0, "energy differs": 0, "operators": 0, "operators differ": 0}
 assembleInternalForces = NEDParallel.assembleInternalForces
 assembleLumpedDiagonal = NEDParallel.assembleLumpedDiagonal
 
 
+def plainLoop(self, elements):
+    return list(order(NED.planElementLoop(self, elements)))
+
+
 def bothElementLoops(self, U, dU, P, timeStep):
-    plain = self.theDofManager.constructDofVector()
-    plain, plainEnergy = NED.assembleInternalForces(self, U, dU, plain, timeStep)
+    plan = self._incrementPlan
+    self._incrementPlan = dataclasses.replace(plan, elementLoop=plainLoop(self, self.elementsWithKernels()))
+    try:
+        plain, plainEnergy = NED.assembleInternalForces(self, U, dU, self.theDofManager.constructDofVector(), timeStep)
+    finally:
+        self._incrementPlan = plan
     P, energy = assembleInternalForces(self, U, dU, P, timeStep)
     counts["increments"] += 1
     counts["forces differ"] += int(np.asarray(plain).tobytes() != np.asarray(P).tobytes())
@@ -81,9 +91,9 @@ def bothElementLoops(self, U, dU, P, timeStep):
     return P, energy
 
 
-def bothLumpedLoops(self, elementContribution):
-    plain = NED.assembleLumpedDiagonal(self, elementContribution)
-    vector = assembleLumpedDiagonal(self, elementContribution)
+def bothLumpedLoops(self, elementLoop, elementContribution):
+    plain = NED.assembleLumpedDiagonal(self, plainLoop(self, self.partition.elements), elementContribution)
+    vector = assembleLumpedDiagonal(self, elementLoop, elementContribution)
     counts["operators"] += 1
     counts["operators differ"] += int(np.asarray(plain).tobytes() != np.asarray(vector).tobytes())
     return vector
@@ -97,15 +107,9 @@ print("COUNTS", counts)
 """
 
 
-@pytest.mark.parametrize("nThreads", [1, 4])
-@pytest.mark.parametrize("suite, deck", _DECKS, ids=["/".join(deck) for deck in _DECKS])
-def test_the_plain_element_loop_gives_the_bits_of_the_plan(tmp_path, suite, deck, nThreads):
-    if suite == "marmot":
-        pytest.importorskip("edelweissfe.elements.marmotelement.element")
-    if (suite, deck) == ("edelweiss-only", "NED") and nThreads > 1:
-        # its pure-Python von Mises material shares state between threads: NEDParallel on several
-        # threads does not even reproduce itself there (a known defect of the material, not of a loop)
-        pytest.skip("the pure-Python von Mises material races on several threads")
+def _bothLoops(tmp_path, suite: str, deck: str, nThreads: int, options: tuple[str, ...] = ()) -> dict:
+    """Run a test case with NEDParallel and :data:`_BOTH_LOOPS_SCRIPT`, and return its counts."""
+
     shutil.copytree(os.path.join(_TESTFILES, suite, deck), tmp_path / deck)
     directory = tmp_path / deck
     inputFile = (directory / "test.inp").read_text()
@@ -118,13 +122,38 @@ def test_the_plain_element_loop_gives_the_bits_of_the_plan(tmp_path, suite, deck
         OMP_NUM_THREADS=str(nThreads),
     )
     output = subprocess.run(
-        [sys.executable, "run.py"], cwd=directory, env=environment, capture_output=True, text=True, timeout=600
+        [sys.executable, "run.py", *options],
+        cwd=directory,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
     counts = [line for line in output.stdout.splitlines() if line.startswith("COUNTS")]
     assert len(counts) == 1, output.stdout + output.stderr
     counts = ast.literal_eval(counts[0][len("COUNTS ") :])
-
     assert counts["increments"] > 0 and counts["operators"] >= 2, counts
+    return counts
+
+
+@pytest.mark.parametrize("nThreads", [1, 4])
+@pytest.mark.parametrize("suite, deck", _DECKS, ids=["/".join(deck) for deck in _DECKS])
+def test_the_plain_element_loop_gives_the_bits_of_the_plan(tmp_path, suite, deck, nThreads):
+    if suite == "marmot":
+        pytest.importorskip("edelweissfe.elements.marmotelement.element")
+    if (suite, deck) == ("edelweiss-only", "NED") and nThreads > 1:
+        # its pure-Python von Mises material shares state between threads: NEDParallel on several
+        # threads does not even reproduce itself there (a known defect of the material, not of a loop)
+        pytest.skip("the pure-Python von Mises material races on several threads")
+
+    counts = _bothLoops(tmp_path, suite, deck, nThreads)
     assert counts["forces differ"] == 0 and counts["operators differ"] == 0, counts
     if nThreads == 1:
         assert counts["energy differs"] == 0, counts
+
+
+def test_a_loop_in_another_order_is_found_to_differ(tmp_path):
+    # The comparison above can fail: summed in reverse element order, the forces and the lumped
+    # operators of a model differ from those of the plan in their last bits.
+    counts = _bothLoops(tmp_path, "edelweiss-only", "TieNED", 1, ("--reversed",))
+    assert counts["forces differ"] > 0 and counts["operators differ"] > 0, counts

@@ -367,33 +367,26 @@ _ELEMENTS_WORTH_THE_PLAN = 5000
 
 @dataclass(frozen=True)
 class IncrementPlan:
-    """What every increment needs prepared, once per equation system: the elements of the element
-    loop and their degrees of freedom, the first-order degrees of freedom, and the fold of the
-    multi-point-constraint slave forces. Derived again by :meth:`NED.planIncrement` whenever the
-    equation system or the partition changes.
+    """What every increment needs prepared, once per equation system: the element loop, the
+    first-order degrees of freedom, and the fold of the multi-point-constraint slave forces. Derived
+    again by :meth:`NED.planIncrement` whenever the equation system or the partition changes.
 
     Parameters
     ----------
-    elements
-        The elements computed here that have kernels, in element order, each with its degrees of
-        freedom and whether it names one of them more than once (a degenerate element with repeated
-        nodes; see :func:`~edelweissfe.numerics.assembly.addNodalForces`).
+    elementLoop
+        The element loop over the elements computed here that have kernels, as the solver runs it
+        (:meth:`NED.planElementLoop`).
     firstOrderDofs
         The first-order degrees of freedom integrated here.
     mpcForceFold
         The fold of the multi-point-constraint slave forces onto their masters, as a matrix on the
         degrees of freedom integrated here; None without multi-point constraints. See
         :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldExplicitForceOperator`.
-    elementPlan
-        The chunked element loop of :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel`
-        (:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`); None for the plain
-        loop of :class:`NED`.
     """
 
-    elements: list[tuple]
+    elementLoop: list[tuple] | ElementPlan
     firstOrderDofs: np.ndarray
     mpcForceFold: csr_matrix | None
-    elementPlan: ElementPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -561,7 +554,7 @@ class NED(NonlinearSolverBase):
             The output managers.
         """
 
-        self.reportElementLoop(model)
+        self.reportHowElementsAreComputed(model)
         self.validateModelCapabilities(model)
 
         # Against this the timing table reports what it did *not* measure, so it has to span
@@ -1458,7 +1451,7 @@ class NED(NonlinearSolverBase):
         time, dT = timeStep.totalTime, timeStep.timeIncrement
 
         psi = 0.0
-        for element, dofs, namesDofMoreThanOnce in self._incrementPlan.elements:
+        for element, dofs, namesDofMoreThanOnce in self._incrementPlan.elementLoop:
             Pe = np.zeros(dofs.shape[0])
             element.computeKernelsExplicit(Pe, U[dofs], dU[dofs], time, dT)
             addNodalForces(forces, dofs, Pe, namesDofMoreThanOnce)  # P[dofs] += Pe
@@ -1701,13 +1694,36 @@ class NED(NonlinearSolverBase):
 
         return ModelPartition.wholeModel(model)
 
-    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
-        """Assemble a lumped operator -- the inertia or the damping -- of the elements computed here,
-        contact facets included: element after element, in element order, add its diagonal into the
-        vector at its degrees of freedom.
+    def planElementLoop(self, elements: dict) -> list[tuple]:
+        """The element loop over the given elements, as :meth:`assembleInternalForces` and
+        :meth:`assembleLumpedDiagonal` run it: the elements in element order, each with its degrees of
+        freedom and whether it names one of them more than once (a degenerate element with repeated
+        nodes; see :func:`~edelweissfe.numerics.assembly.addNodalForces`).
 
         Parameters
         ----------
+        elements
+            The elements, by number, in element order.
+
+        Returns
+        -------
+        list[tuple]
+            ``(element, dofs, namesDofMoreThanOnce)`` per element.
+        """
+
+        dofsOf = self.theDofManager.idcsOfHigherOrderEntitiesInDofVector
+        return [(element, dofsOf[element], hasRepeatedDofs(dofsOf[element])) for element in elements.values()]
+
+    def assembleLumpedDiagonal(self, elementLoop: list[tuple], elementContribution) -> DofVector:
+        """Assemble a lumped operator -- the inertia or the damping -- of the elements of a loop:
+        element after element, in element order, add its diagonal into the vector at its degrees of
+        freedom.
+
+        Parameters
+        ----------
+        elementLoop
+            The element loop over the elements computed here, contact facets included
+            (:meth:`planElementLoop`).
         elementContribution
             ``elementContribution(element, Ve)`` writes an element's diagonal into the zero ``Ve``.
 
@@ -1719,12 +1735,10 @@ class NED(NonlinearSolverBase):
 
         vector = self.theDofManager.constructDofVector()
         vector[:] = 0.0
-        dofsOf = self.theDofManager.idcsOfHigherOrderEntitiesInDofVector
-        for element in self.partition.elements.values():
-            dofs = dofsOf[element]
+        for element, dofs, namesDofMoreThanOnce in elementLoop:
             Ve = np.zeros(dofs.shape[0])
             elementContribution(element, Ve)
-            addNodalForces(vector.asPlainArray(), dofs, Ve, hasRepeatedDofs(dofs))
+            addNodalForces(vector.asPlainArray(), dofs, Ve, namesDofMoreThanOnce)
         return vector
 
     def elementsWithKernels(self) -> dict:
@@ -1739,8 +1753,8 @@ class NED(NonlinearSolverBase):
 
         return {number: element for number, element in self.partition.elements.items() if element.hasKernels}
 
-    def reportElementLoop(self, model: FEModel):
-        """Recommend :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel` for a
+    def reportHowElementsAreComputed(self, model: FEModel):
+        """Report how the elements are computed: one at a time. Recommend :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel` for a
         large model: its element loop gives the same bits, faster, even on one thread. Changes nothing.
 
         Parameters
@@ -1778,13 +1792,9 @@ class NED(NonlinearSolverBase):
         dofs = self.partition.dofs
         integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
         integrated[dofs] = True
-        dofsOf = self.theDofManager.idcsOfHigherOrderEntitiesInDofVector
 
         return IncrementPlan(
-            elements=[
-                (element, dofsOf[element], hasRepeatedDofs(dofsOf[element]))
-                for element in self.elementsWithKernels().values()
-            ],
+            elementLoop=self.planElementLoop(self.elementsWithKernels()),
             firstOrderDofs=self.ids_1st[integrated[self.ids_1st]],
             mpcForceFold=(
                 None if self.mpcTransformation is None else self.mpcTransformation.foldExplicitForceOperator(dofs)
@@ -1846,13 +1856,14 @@ class NED(NonlinearSolverBase):
 
         # The lumped operators are assembled over the elements computed here -- contact facets
         # included, which have an inertia but no kernels.
-        M = self.assembleLumpedDiagonal(lambda element, Me: element.computeLumpedInertia(Me))
+        operatorLoop = self.planElementLoop(self.partition.elements)
+        M = self.assembleLumpedDiagonal(operatorLoop, lambda element, Me: element.computeLumpedInertia(Me))
         Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
         # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
         # always (whether or not that field also has an inertia -- see computeLumpedInertia()
         # above, the SECOND-derivative coefficient).
-        damping = self.assembleLumpedDiagonal(lambda element, Ce: element.computeLumpedDamping(Ce))
+        damping = self.assembleLumpedDiagonal(operatorLoop, lambda element, Ce: element.computeLumpedDamping(Ce))
 
         # Checked here, because the inertia check below never sees it at a second-order DOF: there
         # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
