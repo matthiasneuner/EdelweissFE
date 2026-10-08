@@ -42,7 +42,9 @@ owner is still unique.
 Constraints are not partitioned by geometry: each is one object, evaluated by one process, and is
 dealt out round-robin in name order. The assignment depends on the constraint names only, so it
 survives a topology change -- a stateful constraint keeps the process that holds its authoritative
-state.
+state. A process evaluating a costly constraint is given correspondingly fewer elements instead: the
+elements are partitioned into parts of unequal shares (:func:`elementSharesBesideConstraints`), and
+part *p* is computed by process *p*.
 """
 
 import numpy as np
@@ -61,7 +63,14 @@ def _elementWeight(typeInfo: ElementTypeInfo) -> int:
     return max(1, typeInfo.nDof) if typeInfo.hasKernels else 1
 
 
-def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicator, measuredCosts: dict = None) -> dict:
+def partitionElementsOfMesh(
+    mesh: Mesh,
+    nParts: int,
+    domainSize: int,
+    communicator,
+    measuredCosts: dict = None,
+    processShares: np.ndarray | None = None,
+) -> dict:
     """Assign every element of the mesh to one of ``nParts`` processes.
 
     Parameters
@@ -79,6 +88,9 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
         The measured cost of elements, by element number, as seen on rank 0; where given, it
         replaces the estimate. An element without a measurement -- a contact facet, a child created
         since -- is weighed by the median measured cost per degree of freedom.
+    processShares
+        The share of the weight of the elements each process is to receive, by rank (see
+        :func:`elementSharesBesideConstraints`); None for equal shares.
 
     Returns
     -------
@@ -105,7 +117,13 @@ def partitionElementsOfMesh(mesh: Mesh, nParts: int, domainSize: int, communicat
             else:
                 weights = np.array([_elementWeight(typeInfo) for typeInfo in typeInfos], dtype=np.int64)
             parts[:] = partitionMeshDual(
-                offsets, np.array(connectivity, dtype=np.int64), len(nodeIndex), nParts, weights, max(1, domainSize)
+                offsets,
+                np.array(connectivity, dtype=np.int64),
+                len(nodeIndex),
+                nParts,
+                weights,
+                max(1, domainSize),
+                processShares,
             )
 
         communicator.Bcast(parts, root=0)
@@ -142,14 +160,18 @@ def processOfAuxiliaryElement(record: MeshElement, owners: dict) -> int:
     return owners[record.hostElement]
 
 
-def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -> dict:
+def keepElementsWhereTheyWere(
+    owners: dict, previousOwners: dict, nParts: int, processShares: np.ndarray | None = None
+) -> dict:
     """Renumber the parts of a new partition so that as many elements as possible keep their process.
 
     METIS numbers the parts of a partition arbitrarily: a repartition close to the previous one may
     still give every part another number, and so move every element to another process. Each new part
     is given the number of the previous part it shares the most elements with, largest overlaps first;
     the parts left over keep their order. The parts themselves -- which elements are computed
-    together -- do not change, only which process computes them.
+    together -- do not change, only which process computes them. A part made for a share of its own
+    (``processShares``) is meant for its process, and is renumbered only to a process of the same
+    share.
 
     Parameters
     ----------
@@ -159,6 +181,8 @@ def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -
         The rank of every element, by number, in the previous partition; the same elements.
     nParts
         The number of processes.
+    processShares
+        The shares the new partition was made for, by part (= rank); None for equal shares.
 
     Returns
     -------
@@ -171,6 +195,8 @@ def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -
     previous = np.array([previousOwners[number] for number in numbers], dtype=np.int64)
     overlap = np.zeros((nParts, nParts), dtype=np.int64)
     np.add.at(overlap, (new, previous), 1)
+    shares = np.full(nParts, 1.0 / nParts) if processShares is None else np.asarray(processShares)
+    sameShare = shares[:, None] == shares[None, :]
 
     renumbered = np.full(nParts, -1, dtype=np.int64)
     taken = np.zeros(nParts, dtype=bool)
@@ -178,15 +204,61 @@ def keepElementsWhereTheyWere(owners: dict, previousOwners: dict, nParts: int) -
     # process arrives at the same renumbering.
     newParts, previousParts = np.unravel_index(np.argsort(-overlap, axis=None, kind="stable"), overlap.shape)
     for newPart, previousPart in zip(newParts, previousParts):
-        if renumbered[newPart] < 0 and not taken[previousPart] and overlap[newPart, previousPart] > 0:
+        if (
+            renumbered[newPart] < 0
+            and not taken[previousPart]
+            and overlap[newPart, previousPart] > 0
+            and sameShare[newPart, previousPart]
+        ):
             renumbered[newPart] = previousPart
             taken[previousPart] = True
-    leftOver = iter(np.flatnonzero(~taken).tolist())
     for newPart in range(nParts):
         if renumbered[newPart] < 0:
-            renumbered[newPart] = next(leftOver)
+            renumbered[newPart] = np.flatnonzero(~taken & sameShare[newPart])[0]
+            taken[renumbered[newPart]] = True
 
     return dict(zip(numbers, renumbered[new].tolist()))
+
+
+def elementSharesBesideConstraints(elementCost: float, constraintCosts: np.ndarray) -> np.ndarray | None:
+    """The share of the elements' work each process is to receive, so that every process is equally
+    busy with its elements and the constraints it evaluates -- as far as that is possible: a process
+    whose constraints alone cost more than the others' elements and constraints is given almost no
+    elements (a share of 0.001 of an equal one, since METIS needs a positive share), and the others
+    share the elements among them.
+
+    Parameters
+    ----------
+    elementCost
+        The cost of all elements, e.g. their kernel time per increment summed over all processes.
+    constraintCosts
+        The cost of the constraints each process evaluates, in the same unit, by rank.
+
+    Returns
+    -------
+    np.ndarray | None
+        The shares, by rank, summing to 1; None if no process evaluates a costly constraint (equal
+        shares).
+    """
+
+    constraintCosts = np.asarray(constraintCosts, dtype=float)
+    nProcesses = constraintCosts.shape[0]
+    if not np.any(constraintCosts > 0.0) or elementCost <= 0.0:
+        return None
+
+    # The level every process is filled to: of the processes below it, the elements and constraints
+    # divided equally; a process whose constraints exceed the level is left out, and the level computed
+    # again for the others.
+    below = np.ones(nProcesses, dtype=bool)
+    while True:
+        level = (elementCost + constraintCosts[below].sum()) / below.sum()
+        exceeding = below & (constraintCosts >= level)
+        if not exceeding.any():
+            break
+        below &= ~exceeding
+
+    elementWork = np.where(below, level - constraintCosts, 1e-3 * elementCost / nProcesses)
+    return elementWork / elementWork.sum()
 
 
 def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.ndarray:

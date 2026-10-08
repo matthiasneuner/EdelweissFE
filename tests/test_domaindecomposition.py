@@ -1094,6 +1094,36 @@ def test_a_repartition_keeps_elements_where_they_were():
     assert keepElementsWhereTheyWere(repartitioned, previous, 3) == {1: 0, 2: 0, 3: 1, 4: 2, 5: 2, 6: 2}
 
 
+def test_a_part_made_for_a_share_of_its_own_stays_with_its_process():
+    from edelweissfe.domaindecomposition.partitioning import keepElementsWhereTheyWere
+
+    previous = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    repartitioned = {1: 2, 2: 2, 3: 0, 4: 1, 5: 1, 6: 1}
+    # Part 0 was made smaller, for process 0 (which evaluates a costly constraint, say): it is not
+    # given to process 1, although it overlaps with process 1's elements most; parts 1 and 2, of equal
+    # shares, are renumbered among themselves.
+    shares = np.array([0.2, 0.4, 0.4])
+
+    assert keepElementsWhereTheyWere(repartitioned, previous, 3, shares) == {1: 1, 2: 1, 3: 0, 4: 2, 5: 2, 6: 2}
+
+
+def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
+    from edelweissfe.domaindecomposition.partitioning import (
+        elementSharesBesideConstraints,
+    )
+
+    assert elementSharesBesideConstraints(12.0, np.zeros(4)) is None
+    # (12 + 4) / 4 = 4 per process: process 3 is busy with its constraints alone
+    shares = elementSharesBesideConstraints(12.0, np.array([0.0, 0.0, 0.0, 4.0]))
+    assert np.allclose(shares, [4.0 / 12.0, 4.0 / 12.0, 4.0 / 12.0, 0.0], atol=1e-3)
+    assert np.isclose(shares.sum(), 1.0) and np.all(shares > 0.0)
+    # Process 0 is busier with its constraint than any process can be with the elements; the others
+    # are filled to (3 + 1) / 3 each: process 1 with 1/3 of elements beside its constraint.
+    shares = elementSharesBesideConstraints(3.0, np.array([10.0, 1.0, 0.0, 0.0]))
+    assert np.allclose(shares, [0.0, 1.0 / 9.0, 4.0 / 9.0, 4.0 / 9.0], atol=1e-3)
+    assert shares[0] > 0.0 and shares[2] == shares[3]
+
+
 class _SecondOfTwoProcessesExchanging(_SecondOfTwoProcesses):
     """Rank 1 of 2, as in :class:`_SecondOfTwoProcesses`, exchanging element states with rank 0: what
     rank 0 sends is the state given."""
