@@ -1166,51 +1166,43 @@ def test_a_random_thickness_is_the_same_wherever_and_whenever_an_element_is_crea
     assert {number: element._t for number, element in model.elements.items()} == thicknesses
 
 
-#: Runs each deck given twice -- plainly, and with the solution, the velocity, the net force and the
-#: node fields set to NaN, after every increment, outside the degrees of freedom a process integrates,
-#: wherever the process does not hold the whole solution -- and reports, per process, whether the two
-#: final node fields are the same bits. With ``--without-fetches``, the entries a process receives from
-#: their owners point to point are not received, which the poisoned run must notice.
+#: Runs each deck given twice -- plainly, and with ``debug-poison-stale-solution``, which sets the
+#: solution, the velocity, the net force and the node fields to NaN, after every increment, outside the
+#: degrees of freedom a process integrates, wherever the process does not hold the whole solution -- and
+#: reports, per process, whether the two final node fields are the same bits. With
+#: ``--without-fetches``, the entries a process receives from their owners point to point are not
+#: received, which the poisoned run must notice.
 _STALE_SOLUTION_POISONED_SCRIPT = """
-import contextlib, io, os, sys
+import contextlib, io, os, re, sys
 import numpy as np
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.domaindecomposition.subdomaininterface import ValuesFromOwners
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
-from edelweissfe.solvers.nonlinearexplicitdynamic import NED
-from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 rank = worldCommunicator().Get_rank()
-acceptIncrement = NEDMPI.acceptIncrement
 if "--without-fetches" in sys.argv:
     sys.argv.remove("--without-fetches")
     ValuesFromOwners.receive = lambda self, vectors: None
 
 
-def poisonedWhereNotWhole(self, step, model, timeStep):
-    acceptIncrement(self, step, model, timeStep)
-    if self._wholeSolutionHere:
-        return
-    outside = np.ones(self._U.shape[0], dtype=bool)
-    outside[self.partition.dofs] = False
-    for vector in (self._U, self._V, self._P):
-        vector.asPlainArray()[outside] = np.nan
-    NED.publishNodeFields(self, model, self._U, self._V, self._P)
-
-
-def finalFields(directory):
+def finalFields(directory, poisoned):
     os.chdir(directory)
+    deck = open("test.inp").read()
+    if poisoned:
+        deck = re.sub(r"^(\\*solver,.*NEDMPI.*)$", r"\\1\\ndebug-poison-stale-solution=True", deck, flags=re.M)
+    with open("poisoned.inp" if poisoned else "plain.inp", "w") as f:
+        f.write(deck)
     with contextlib.redirect_stdout(io.StringIO()):
-        model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+        model, _ = finiteElementSimulation(
+            parseInputFile("poisoned.inp" if poisoned else "plain.inp"), verbose=False, suppressPlots=True
+        )
     return np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
 
 
 for directory in sys.argv[1:]:
-    plain = finalFields(directory)
-    NEDMPI.acceptIncrement = poisonedWhereNotWhole
-    poisoned = finalFields(directory)
-    NEDMPI.acceptIncrement = acceptIncrement
+    plain = finalFields(directory, poisoned=False)
+    poisoned = finalFields(directory, poisoned=True)
     same = np.array_equal(plain.view(np.int64), poisoned.view(np.int64))
     print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", flush=True)
 """

@@ -5,6 +5,7 @@
 #   2. bit-identity: the serial run on this runner writes fresh references (--create, in a copy), and the
 #      runs over several processes must reproduce them exactly (--tolerance 0). The committed U.ref files
 #      cannot serve here, since results differ between machines in the last bits.
+# 3. bit-identity again with debug-poison-stale-solution, which poisons what a process must not read.
 # And per process count, which way each test case held its model -- distributed, or the whole model in every
 # process -- since both give the same result (testfiles/mpi/check_element_distribution.py).
 #
@@ -97,4 +98,23 @@ jobs:
           done
           for processes in 2 3; do
             $mpirun -n $processes python testfiles/mpi/check_element_distribution.py
+          done
+
+      - name: Run tests over MPI processes with the stale solution poisoned
+        shell: bash -leo pipefail {0}
+        run: |
+          # debug-poison-stale-solution sets the solution, velocity, net force and node fields to NaN outside
+          # the degrees of freedom a process integrates, wherever it does not hold the whole solution: nothing
+          # may read them there, so every test case must still reproduce the fresh serial references exactly.
+          runTests="$(command -v run_tests_edelweissfe)"
+          mpirun="mpirun --bind-to none --oversubscribe"
+          poisoned="$RUNNER_TEMP/mpi-poisoned"
+          rm -rf "$poisoned"
+          cp -r "$RUNNER_TEMP/mpi-fresh" "$poisoned"
+          rm -f "$poisoned"/*/*/restart_*.h5
+          sed -i '/^\*solver,.*NEDMPI/a debug-poison-stale-solution=True' "$poisoned"/*/*/test.inp
+          for suite in edelweiss-only marmot; do
+            for processes in 2 3; do
+              $mpirun -n $processes "$runTests" "$poisoned/$suite" --tolerance 0
+            done
           done

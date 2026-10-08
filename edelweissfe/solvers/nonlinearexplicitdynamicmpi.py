@@ -227,6 +227,18 @@ class NEDMPISchema(NEDSchema):
         default="measured",
         optionName="load-balance-costs",
     )
+    debugPoisonStaleSolution: bool = schemaField(
+        description=(
+            "A check, not for production runs: after every increment, set the solution, the velocity, the "
+            "net force and the node fields to NaN outside the degrees of freedom a process integrates, "
+            "wherever the process does not hold the whole solution. Nothing may read them there, so the "
+            "result must be the same bits; a reader of data it did not receive turns it into NaN. Costs a "
+            "pass over the vectors and the node fields per increment."
+        ),
+        dtype=bool,
+        default=False,
+        optionName="debug-poison-stale-solution",
+    )
 
 
 @dataclass(frozen=True)
@@ -286,6 +298,7 @@ class NEDMPI(NEDParallel):
     SolverSpecificOptions = NED.SolverSpecificOptions | {
         "load-balance-tolerance": 0.1,
         "load-balance-costs": "measured",
+        "debug-poison-stale-solution": False,
     }
 
     def __init__(self, jobInfo, journal, **kwargs):
@@ -813,6 +826,28 @@ class NEDMPI(NEDParallel):
                     self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [self._U, self._V, self._P])
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
 
+        if self.options["debug-poison-stale-solution"] and not self._wholeSolutionHere:
+            self._poisonStaleSolution(model)
+
+    def _poisonStaleSolution(self, model: FEModel):
+        """Set the solution, the velocity, the net force and the node fields to NaN outside the degrees
+        of freedom this process integrates (``debug-poison-stale-solution``): there they hold what the
+        last synchronization that reached this process left, which nothing may read. A contact search
+        receives the positions it reads afresh (:meth:`_receiveSolutionReadBySearches`), so a position
+        it reads without naming its node is NaN as well.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        outside = np.ones(self._U.shape[0], dtype=bool)
+        outside[self.partition.dofs] = False
+        for vector in (self._U, self._V, self._P):
+            vector.asPlainArray()[outside] = np.nan
+        super().publishNodeFields(model, self._U, self._V, self._P)
+
     def wholeModelReadEverywhereNext(self) -> bool:
         """Whether every process reads the whole model before the next increment, and so the output
         synchronization of the increment just accepted makes it current in every process, rather
@@ -1211,6 +1246,10 @@ class NEDMPI(NEDParallel):
         nodesRead = {name: constraint.nodesReadByConnectivityUpdate() for name, constraint in searchable.items()}
         self._searchesPlanned = True
         self._searchesReadWholeSolution = any(nodes is None for nodes in nodesRead.values())
+        # every process must take the same branch below: either collective
+        self.communicator.requireSameOnAllRanks(
+            self._searchesReadWholeSolution, "whether the contact searches read the whole solution"
+        )
         if self._searchesReadWholeSolution:
             self._solutionReadBySearches = None
             return
@@ -1306,7 +1345,43 @@ class NEDMPI(NEDParallel):
         searched = self.subdomain.constraintsSearchedHere(model, constraints)
         with self.communicator.allRanksFailTogether("Updating the constraint connectivity"):
             changed = super().updateConnectivityOf(model, searched)
+            for name, constraint in searched.items():
+                self._requireCoupledNodesAmongNodesRead(name, constraint)
         return self.communicator.allreduceAny(changed)
+
+    @staticmethod
+    def _requireCoupledNodesAmongNodesRead(name: str, constraint):
+        """Refuse a constraint that, after its connectivity update, couples a node it does not name
+        among those its update reads
+        (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.nodesReadByConnectivityUpdate`):
+        its search read the position of that node too, which this process may not have received.
+        Nothing to check for a constraint naming none (it receives the whole solution), nor for one
+        whose update reads no positions (its footprint is not the outcome of a search).
+
+        Parameters
+        ----------
+        name
+            The name of the constraint.
+        constraint
+            The constraint.
+
+        Raises
+        ------
+        RuntimeError
+            If it couples a node it does not name.
+        """
+
+        nodesRead = constraint.nodesReadByConnectivityUpdate()
+        if not nodesRead:
+            return
+        labelsRead = {node.label for node in nodesRead}
+        notNamed = sorted({node.label for node in constraint.nodes if node.label not in labelsRead})
+        if notNamed:
+            raise RuntimeError(
+                "Constraint {:} couples {:} node(s) its connectivity update does not name among the nodes it reads "
+                "(nodesReadByConnectivityUpdate), e.g. {:}: a domain-decomposed search would read their positions "
+                "without having received them.".format(name, len(notNamed), notNamed[:5])
+            )
 
     def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
         """Run the model modifiers and the mesh refresh of
