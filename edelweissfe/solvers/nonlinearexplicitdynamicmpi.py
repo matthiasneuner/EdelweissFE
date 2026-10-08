@@ -47,14 +47,32 @@ bits as without decomposition; the critical time step is the minimum over the su
 lumped operators of the whole model are therefore known everywhere, which is what lets a contact
 search move a constraint onto nodes another process integrated until then.
 
-**Where the whole model is read.** Field outputs, output managers, a marker deciding a refinement,
-the refinement itself, and a contact search all read more than one subdomain. Before each of them,
-every process receives the current solution of every degree of freedom, and -- except before a
-contact search, which reads positions only -- the current state of every stateful constraint and,
-where every process holds the whole model, of every element
-(:mod:`edelweissfe.domaindecomposition.statesynchronization`). That happens on the
-``output-frequency`` cadence, at every ``contact-update-frequency`` search and at the end of a step.
-A distributed model synchronizes no element states: its element field outputs gather their results,
+**Where the whole model is read -- and by whom.** Field outputs, output managers, a marker deciding
+a refinement, the refinement itself, and a contact search all read more than one subdomain. Each of
+them receives what it reads, and only the processes reading it receive it:
+
+* on an output increment, rank 0 -- which writes the output and the checkpoints -- receives the
+  current solution at every degree of freedom, the state of every stateful constraint and the
+  results of every element field output; the other processes keep theirs, current at the degrees of
+  freedom they integrate (:meth:`NEDMPI.acceptIncrement`, :meth:`NEDMPI.writeIncrementOutput`);
+* on an output increment the topology check follows, and at the end of a step, every process
+  receives all of it, and the field outputs the markers read (:meth:`NEDMPI.wholeModelReadEverywhereNext`):
+  every process refines the same mesh, interpolates the node fields onto it and builds its equation
+  system from them;
+* before a periodic contact search, the process evaluating the constraint receives the positions of
+  the nodes the search reads, point to point, surface-sized
+  (:meth:`NEDMPI.updateConstraintConnectivity`);
+* after a contact search or a repartition changed which degrees of freedom a process integrates, it
+  receives the solution, the velocity and the force at those it newly integrates from their previous
+  owners (:meth:`NEDMPI.buildEquationSystem`).
+
+What a process did not receive it does not read: reading the whole solution where it is not current
+(:meth:`NEDMPI.requireWholeSolutionHere`), a field output gathered to rank 0 only
+(:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`), or a constraint
+copy not synchronized before a topology update, raises. Where every process holds the whole model,
+every element state is received by every process on every output increment, since a repartition may
+give any element to any process (:mod:`edelweissfe.domaindecomposition.statesynchronization`). A
+distributed model synchronizes no element states: its element field outputs gather their results,
 and its checkpoints the element states, from the processes computing them.
 A contact search itself -- at a contact update and at a topology check -- runs on the process that
 evaluates the constraint only, since nothing but that evaluation reads its outcome.
@@ -154,7 +172,10 @@ from edelweissfe.domaindecomposition.mpienvironment import (
     worldCommunicator,
 )
 from edelweissfe.domaindecomposition.subdomain import Subdomain
-from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly
+from edelweissfe.domaindecomposition.subdomaininterface import (
+    InterfaceForceAssembly,
+    ValuesFromOwners,
+)
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofVector
@@ -227,6 +248,24 @@ class NodeFieldSlot:
     dofs: slice | np.ndarray
 
 
+@dataclass(frozen=True)
+class SolutionReadBySearches:
+    """The part of the solution the contact searches of this process read and it does not integrate
+    itself: received from the owners before every periodic search, and published into the node
+    fields there.
+
+    Parameters
+    ----------
+    received
+        The exchange with the owners.
+    slots
+        Where the received degrees of freedom are published in the node fields.
+    """
+
+    received: ValuesFromOwners
+    slots: list[NodeFieldSlot]
+
+
 class NEDMPI(NEDParallel):
     """The nonlinear explicit dynamic solver, domain-decomposed over MPI processes.
 
@@ -282,6 +321,17 @@ class NEDMPI(NEDParallel):
         #: external work was last read, in increment order: one array of products per increment,
         #: added to the external work by :meth:`gatherExternalWork`.
         self._pendingWorkAtPrescribedDofs: list[np.ndarray] = []
+        #: Whether this process holds the whole solution -- ``U``, ``V`` and ``P`` at every degree of
+        #: freedom, and published into the node fields -- as of the last accepted increment; else
+        #: only at the degrees of freedom it integrates. See :meth:`requireWholeSolutionHere`.
+        self._wholeSolutionHere = True
+        #: What the periodic contact searches of this process read, planned for the current
+        #: subdomain at the first search: :meth:`_planSolutionReadBySearches`; None before.
+        self._solutionReadBySearches: SolutionReadBySearches | None = None
+        #: Whether the periodic contact searches read the whole solution, because a searched
+        #: constraint does not name the nodes it reads; decided with the plan above.
+        self._searchesReadWholeSolution = False
+        self._searchesPlanned = False
 
     def beginStep(
         self,
@@ -413,6 +463,9 @@ class NEDMPI(NEDParallel):
 
         plan = super().planIncrement(model)
         self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
+        # planned again for this subdomain at the next search
+        self._searchesPlanned = False
+        self._solutionReadBySearches = None
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
         self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if timesKernels else None
@@ -715,10 +768,12 @@ class NEDMPI(NEDParallel):
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then make
-        the whole model current in every process -- the output that follows reads all of it, and so
-        do a checkpoint written with it and the topology check at the start of the next increment --
-        and rebalance the subdomains; if that moved elements between processes, build the equation
-        system again for the elements now held here. Collective.
+        the whole model current where it is read (:meth:`wholeModelReadEverywhereNext`) -- on rank 0,
+        which writes the output and a checkpoint with it, or, if the topology check at the start of
+        the next increment follows, in every process -- and rebalance the subdomains; if that moved
+        elements between processes, build the equation system again for the elements now held here,
+        and if it changed only the subdomains, complete the vectors at the degrees of freedom a
+        process integrates from now on. Collective.
 
         Parameters
         ----------
@@ -731,23 +786,69 @@ class NEDMPI(NEDParallel):
         """
 
         super().acceptIncrement(step, model, timeStep)
+        # the increment changed the solution at the degrees of freedom integrated here only
+        self._wholeSolutionHere = False
 
         if self.isOutputIncrement(timeStep):
             # the output and a checkpoint written after it read the external work
             self.gatherExternalWork()
-            self._synchronizeModel(model, timeStep, includeStates=True)
+            self._synchronizeModel(
+                model, timeStep, includeStates=True, toEveryProcess=self.wholeModelReadEverywhereNext()
+            )
 
             # Right after every element state was synchronized -- or, where each process holds
             # only its own elements, accepted by the process computing it -- because an element
             # computed by another process from now on must arrive there with its current state.
             startOfRebalancing = perf_counter()
+            interfaceBefore = self.subdomain.interface
             if self.subdomain.rebalance(self._incrementPlan.elementPlan, *self._elementCostsForRebalancing()):
                 if self.subdomain.elementsMustMove():
                     self._moveElements(model, step)
                 else:
                     self.partition = self.subdomain.partition
                     self._incrementPlan = self.planIncrement(model)
+                    self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [self._U, self._V, self._P])
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
+
+    def wholeModelReadEverywhereNext(self) -> bool:
+        """Whether every process reads the whole model before the next increment, and so the output
+        synchronization of the increment just accepted makes it current in every process, rather
+        than on rank 0 only.
+
+        Rank 0 writes the output and the checkpoints, and so reads the whole model on every output
+        increment. The other processes read it only where the topology check follows at the start
+        of the next increment (:meth:`NED.topologyCheckDueAfter`): the refinement is replicated, and
+        every process interpolates the node fields onto the refined mesh and builds its equation
+        system from them, and checks that every copy of a constraint is its owner's
+        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+
+        Returns
+        -------
+        bool
+            True if every process receives the whole model.
+        """
+
+        return self.topologyCheckDueAfter(self.prevTimeStep)
+
+    def fieldOutputsReadEverywhereNext(self) -> set[str] | None:
+        """The field outputs every process reads before the next increment, and so receives -- the
+        others are gathered to rank 0 only, where the output is written: those the markers of the
+        model modifiers read (:meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.fieldOutputsRead`),
+        if the topology check follows (:meth:`wholeModelReadEverywhereNext`); else none.
+
+        Returns
+        -------
+        set[str] | None
+            The names of the field outputs; None for all of them, if a modifier does not name those
+            it reads.
+        """
+
+        if not self.wholeModelReadEverywhereNext():
+            return set()
+        readByModifiers = [modifier.fieldOutputsRead() for modifier in self._liveTopologyModifiers]
+        if any(names is None for names in readByModifiers):
+            return None
+        return {name for names in readByModifiers for name in names}
 
     def advanceModelToTime(self, model: FEModel, time: float):
         """Let the elements and the constraints of this subdomain accept the state the increment
@@ -887,6 +988,8 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots = []
         self._interfaceAssembly = None
         self._elementCosts = None
+        self._searchesPlanned = False
+        self._solutionReadBySearches = None
         return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
@@ -897,9 +1000,13 @@ class NEDMPI(NEDParallel):
            field outputs, and -- if a checkpoint is written now, which only rank 0, holding the output
            managers, knows, and each process holds only its own elements -- their states; failing on
            all ranks together if it fails on one.
-        2. The parts are gathered: the results of every element set to every process, the element
-           states to rank 0.
-        3. The field outputs store the gathered results, and the output managers of rank 0 write --
+        2. The parts are gathered: the results of every element set to rank 0 -- and to every
+           process those the markers of a topology check following now read
+           (:meth:`fieldOutputsReadEverywhereNext`) --, the element states to rank 0.
+        3. The field outputs store the gathered results -- a field output not gathered to a process
+           records there that its result is held on rank 0
+           (:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`) --,
+           and the output managers of rank 0 write --
            a checkpoint from the gathered states
            (:meth:`~edelweissfe.models.femodel.FEModel.elementStatesFromElsewhere`) --, failing on all
            ranks together if it fails on one: a conditional stop is decided by an output manager of
@@ -928,7 +1035,9 @@ class NEDMPI(NEDParallel):
                 fieldOutputController.readResultsHere()
                 statesHere = self.subdomain.elementStatesOwnedHere(model) if gathersStates else None
 
-            fieldOutputController.gatherResultsOfWholeSet()
+            fieldOutputController.gatherResultsOfWholeSet(
+                readOnEveryProcess=self.fieldOutputsReadEverywhereNext(), writesOutput=self.subdomain.rank == 0
+            )
             with performancetiming.timeit("gather states"):
                 states = self.subdomain.gatherElementStatesToRoot(statesHere) if gathersStates else None
 
@@ -936,8 +1045,8 @@ class NEDMPI(NEDParallel):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
-        """Make the whole model current in every process, then let the step actions finish the step.
-        Collective.
+        """Make the whole model current in every process -- the end of a step, and the start of the
+        next, read all of it -- then let the step actions finish the step. Collective.
 
         Parameters
         ----------
@@ -948,7 +1057,7 @@ class NEDMPI(NEDParallel):
         """
 
         if self._system is not None:
-            self._synchronizeModel(model, self.prevTimeStep, includeStates=True)
+            self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
         # the end of a step reads the external work, and so does the output written after it
         self.gatherExternalWork()
         super().applyStepActionsAtStepEnd(model, stepActions)
@@ -956,8 +1065,10 @@ class NEDMPI(NEDParallel):
     @performancetiming.timeit("publish node fields")
     def publishNodeFields(self, model: FEModel, U: DofVector, V: DofVector, P: DofVector):
         """Publish the degrees of freedom integrated here; see :meth:`NED.publishNodeFields`. The
-        others are current only in the processes integrating them, and are published here by
-        :meth:`_synchronizeModel` before anything reads them.
+        others are current only in the processes integrating them, and are published by
+        :meth:`_synchronizeModel` in the processes reading them -- rank 0 on an output increment,
+        every process before a topology check -- and by :meth:`_receiveSolutionReadBySearches` at the
+        nodes a contact search reads.
 
         Parameters
         ----------
@@ -971,9 +1082,26 @@ class NEDMPI(NEDParallel):
             The net force vector.
         """
 
-        for slot in self._integratedNodeFieldSlots:
+        self._publishIntoNodeFields(self._integratedNodeFieldSlots, ((U, "U"), (P, "P"), (V, "V")))
+
+        for variable in model.scalarVariables.values():
+            variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
+
+    @staticmethod
+    def _publishIntoNodeFields(slots: list[NodeFieldSlot], vectors: tuple[tuple[DofVector, str], ...]):
+        """Publish the degrees of freedom of the slots into the node fields.
+
+        Parameters
+        ----------
+        slots
+            Where the degrees of freedom are published.
+        vectors
+            Each vector, with the node field entry it is published into.
+        """
+
+        for slot in slots:
             nodeField = slot.nodeField
-            for vector, entry in ((U, "U"), (P, "P"), (V, "V")):
+            for vector, entry in vectors:
                 if entry not in nodeField:
                     nodeField.createFieldValueEntry(entry)
                 values = nodeField[entry]
@@ -981,9 +1109,6 @@ class NEDMPI(NEDParallel):
                 if not values.flags.c_contiguous:
                     raise RuntimeError("Node field entry {:}/{:} is not contiguous.".format(nodeField.name, entry))
                 values.reshape(-1)[slot.positions] = vector.asPlainArray()[slot.dofs]
-
-        for variable in model.scalarVariables.values():
-            variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
 
     def _nodeFieldSlotsOf(self, model: FEModel, dofs: slice | np.ndarray) -> list[NodeFieldSlot]:
         """Where the given degrees of freedom are published in the node fields.
@@ -1019,11 +1144,16 @@ class NEDMPI(NEDParallel):
     # --- Searches and topology updates ---------------------------------------------------------------
 
     def updateConstraintConnectivity(self, model: FEModel) -> bool:
-        """Make the solution current in every process, then run the periodic contact search; see
-        :meth:`NED.updateConstraintConnectivity`. Collective.
+        """Receive the positions the contact searches of this process read, then run the periodic
+        contact search; see :meth:`NED.updateConstraintConnectivity`. Collective.
 
-        A search reads the positions of every candidate node, not only of those this process
-        integrates.
+        A search runs on the process owning the constraint (:meth:`updateConnectivityOf`), and reads
+        the positions of every node it may couple -- the nodes the constraint names
+        (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.nodesReadByConnectivityUpdate`)
+        --, not only of those this process integrates. Those it does not integrate are received from
+        their owners, point to point, surface-sized (:meth:`_receiveSolutionReadBySearches`). If a
+        searched constraint does not name its nodes, every process receives the whole solution
+        instead.
 
         Parameters
         ----------
@@ -1036,8 +1166,69 @@ class NEDMPI(NEDParallel):
             Whether any constraint's DOF footprint changed.
         """
 
-        self._synchronizeModel(model, self.prevTimeStep, includeStates=False)
+        self._receiveSolutionReadBySearches(model)
         return super().updateConstraintConnectivity(model)
+
+    def _receiveSolutionReadBySearches(self, model: FEModel):
+        """Receive the solution the periodic contact searches of this process read at the degrees of
+        freedom it does not integrate, from their owners, and publish it into the node fields. The
+        solution is the displacement of the nodes, which is what a search reads; the velocity and the
+        net force there stay as they were. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        if not self._searchesPlanned:
+            self._planSolutionReadBySearches(model)
+
+        if self._searchesReadWholeSolution:
+            self._synchronizeModel(model, self.prevTimeStep, includeStates=False, toEveryProcess=True)
+            return
+
+        with performancetiming.timeit("positions for searches"):
+            searched = self._solutionReadBySearches
+            searched.received.receive([self._U])
+            self._publishIntoNodeFields(searched.slots, ((self._U, "U"),))
+
+    def _planSolutionReadBySearches(self, model: FEModel):
+        """Plan what the periodic contact searches of this process read: the degrees of freedom, at
+        the nodes each searched constraint names, that this process does not integrate; or the whole
+        solution, if any constraint of the model whose connectivity is searched names none. The same
+        decision in every process. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        searchable = self._dynamicConnectivityConstraints
+        nodesRead = {name: constraint.nodesReadByConnectivityUpdate() for name, constraint in searchable.items()}
+        self._searchesPlanned = True
+        self._searchesReadWholeSolution = any(nodes is None for nodes in nodesRead.values())
+        if self._searchesReadWholeSolution:
+            self._solutionReadBySearches = None
+            return
+
+        searchedHere = self.subdomain.constraintsSearchedHere(model, searchable)
+        dofsOfFields = self.theDofManager.idcsOfFieldVariablesInDofVector
+        dofs = [
+            dofsOfFields[fieldVariable]
+            for name in searchedHere
+            for node in nodesRead[name]
+            for fieldVariable in node.fields.values()
+            if fieldVariable in dofsOfFields
+        ]
+        dofs = np.unique(np.concatenate(dofs)) if dofs else np.empty(0, dtype=np.int64)
+        integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
+        integrated[self.partition.dofs] = True
+        notIntegrated = dofs[~integrated[dofs]]
+        self._solutionReadBySearches = SolutionReadBySearches(
+            self.subdomain.valuesFromOwners(notIntegrated), self._nodeFieldSlotsOf(model, notIntegrated)
+        )
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let those of the given constraints update their connectivity whose search runs in this
@@ -1091,6 +1282,8 @@ class NEDMPI(NEDParallel):
 
         self.subdomain.requireConstraintCopiesCurrent(model)
         with self.communicator.allRanksFailTogether("Updating the topology"):
+            # the modifiers and the refresh of the mesh read the node fields at every node
+            self.requireWholeSolutionHere("A topology update")
             changed = super().updateTopology(model, step, offerModelModifiers)
         self.communicator.requireSameOnAllRanks(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
@@ -1107,10 +1300,17 @@ class NEDMPI(NEDParallel):
             self.subdomain.rebalanceAfterTopologyChange(model, horizon)
         return changed
 
-    def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool):
-        """Make the model in this process complete before something reads all of it: every degree of
-        freedom of the vectors, published into the node fields, and optionally every element and
-        constraint state, as the process computing it last left it. Collective.
+    def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool, toEveryProcess: bool):
+        """Make the model complete before something reads all of it -- in every process, or on rank 0
+        only: every degree of freedom of the vectors, published into the node fields, and optionally
+        every constraint state -- and, where every process holds every element, every element state,
+        in every process -- as the process computing it last left it. Collective.
+
+        A process not receiving the whole model keeps the vectors and the node fields complete at the
+        degrees of freedom it integrates only, and its copies of the constraints owned elsewhere in
+        the state of their last synchronization; :meth:`requireWholeSolutionHere` and
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`
+        refuse to read them as whole.
 
         Parameters
         ----------
@@ -1120,19 +1320,87 @@ class NEDMPI(NEDParallel):
             The last completed time step, or None before the first one.
         includeStates
             Whether the element and constraint states are synchronized as well, or only the vectors.
+        toEveryProcess
+            Whether every process receives the whole model, or rank 0 only.
         """
 
         U, V, P = self._U, self._V, self._P
-        for vector in (U, V, P):
-            self.subdomain.allgatherOwnedValues(vector)
-        # every degree of freedom is current now, not only those integrated here
-        super().publishNodeFields(model, U, V, P)
+        with performancetiming.timeit("gather solution"):
+            for vector in (U, V, P):
+                if toEveryProcess:
+                    self.subdomain.allgatherOwnedValues(vector)
+                else:
+                    self.subdomain.gatherOwnedValuesToRoot(vector)
+        wholeSolutionHere = toEveryProcess or self.subdomain.rank == 0
+        if wholeSolutionHere:
+            # every degree of freedom is current now, not only those integrated here
+            super().publishNodeFields(model, U, V, P)
+            self._wholeSolutionHere = True
 
         if includeStates:
-            self.subdomain.synchronizeStates(includeElements=True)
+            self.subdomain.synchronizeStates(includeElements=True, toEveryProcess=toEveryProcess)
 
         # A rigid body's surface follows its reference node, which only some processes integrated:
         # it was moved in acceptIncrement from what this process integrates, and is moved again now
         # from the complete solution.
-        if timeStep is not None:
+        if timeStep is not None and wholeSolutionHere:
             self.updateRigidBodies(model, timeStep)
+
+    def requireWholeSolutionHere(self, reader: str):
+        """Refuse to let something read the whole solution -- the vectors at every degree of freedom,
+        or the node fields at every node -- unless this process holds it as of the last accepted
+        increment: after an output synchronization that reached it (:meth:`_synchronizeModel`), at
+        the end of a step, or before the first increment. Between those, a process holds the solution
+        at the degrees of freedom it integrates only, and rank 0 alone receives it on an output
+        increment no topology check follows (:meth:`wholeModelReadEverywhereNext`).
+
+        Parameters
+        ----------
+        reader
+            What reads the whole solution, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            If this process holds only part of it.
+        """
+
+        if not self._wholeSolutionHere:
+            raise RuntimeError(
+                "{:} reads the whole solution, but process {:} holds it only at the degrees of freedom it "
+                "integrates: the last output synchronization gathered it to rank 0 only. A reader on every "
+                "process must be known to NEDMPI.wholeModelReadEverywhereNext.".format(reader, self.subdomain.rank)
+            )
+
+    def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
+        """Build the equation system; see :meth:`NED.buildEquationSystem`. Collective.
+
+        Built afresh, it reads the solution from the node fields, which must therefore be whole here
+        (:meth:`requireWholeSolutionHere`). Rebuilt with the vectors carried over -- after a contact
+        search moved a constraint, or elements moved between processes -- the subdomain is defined
+        afresh, and the vectors are completed at the degrees of freedom this process integrates from
+        now on (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.receiveNewlyIntegratedValues`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        step
+            The step being solved.
+        previous
+            The system being replaced, or None.
+
+        Returns
+        -------
+        ExplicitSystem
+            The built system.
+        """
+
+        if previous is None:
+            self.requireWholeSolutionHere("Building the equation system from the node fields")
+            return super().buildEquationSystem(model, step)
+
+        interfaceBefore = self.subdomain.interface
+        theSystem = super().buildEquationSystem(model, step, previous)
+        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [theSystem.U, theSystem.V, theSystem.P])
+        return theSystem
