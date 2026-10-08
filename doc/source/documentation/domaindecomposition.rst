@@ -315,14 +315,18 @@ output increment                   to **rank 0**, which writes the output and th
                                    solution, the velocity and the net force at every degree of freedom
                                    (published into its node fields), the state of every stateful
                                    constraint, the results of every element field output, and -- if a
-                                   checkpoint is written -- the element states
+                                   checkpoint is written -- the element states; and to **every
+                                   process** the solution at the reference nodes of the rigid bodies,
+                                   whose surfaces every process moves (they are nodes of the model)
 output increment the topology      to **every process**: all of the above but the element states, and
 check follows (every               of the element field outputs those the markers read; every process
 ``topology-check-frequency``-th)   refines the same mesh, interpolates its node fields onto the refined
                                    mesh, and builds its equation system from them
 end of a step                      to **every process**, as before a topology check: the next step
                                    starts with a topology update and an equation system built from the
-                                   node fields
+                                   node fields; a field output whose last result went to rank 0 only is
+                                   read again, so that every process holds it (a step-start marker or
+                                   ``setField`` may read it)
 periodic contact search            to the **process evaluating the constraint**: the positions of the
 (``contact-update-frequency``)     nodes the search reads that it does not integrate itself, point to
                                    point (see `Contact, ties and rigid bodies`_)
@@ -358,13 +362,20 @@ not at all. None of this is read as if it were whole:
   result or its history in another process raises, until a result is stored there again
   (:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`);
 * before a topology update, the constraint copies are compared with their owners
-  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`);
+* after every connectivity update, a constraint that names the nodes its search reads must couple no
+  other node -- else the search read a position it may not have received -- and the run stops
+  naming the constraint.
 
-``tests/test_domaindecomposition.py`` checks that nothing reads the rest: a run with the solution,
-the velocity, the net force and the node fields set to NaN, after every increment, outside the
-degrees of freedom a process integrates -- wherever it does not hold the whole solution -- gives the
-same bits; and that it would notice: without the positions received for the contact search, it does
-not.
+``debug-poison-stale-solution=True`` (a check, not for production runs) makes the rest loud as well:
+after every increment it sets the solution, the velocity, the net force and the node fields to NaN
+outside the degrees of freedom a process integrates, wherever the process does not hold the whole
+solution. Nothing may read them there, so the result must stay the same bits; a reader of data it did
+not receive -- a search reading a node it does not name, say -- turns it into NaN. The MPI workflow and
+the verification harness run ``testfiles/mpi`` with it.
+
+``tests/test_domaindecomposition.py`` checks with it that a poisoned run gives the same bits, and
+that the poison would notice: without the positions received for the contact search, it does not.
 
 What it saves, on the c1_150 edge-breakout model (about 1 million degrees of freedom; output and a
 contact search every 50 increments, a topology check every 250; summed over all processes):
