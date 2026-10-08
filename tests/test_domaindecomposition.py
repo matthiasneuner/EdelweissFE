@@ -1511,3 +1511,92 @@ def test_processes_holding_different_models_are_refused(tmp_path, deck, patch):
 
     assert exitCode != 0, output
     assert "The processes hold different models" in output, output
+
+
+#: A material failing to integrate at 1.6 times the stable time step: increment 5 fails on every
+#: process together (the refused cutback), after an increment that wrote no output.
+_FAILING_STEP_DECK = """
+*material, name=VonMises, id=myMaterial, provider=edelweiss
+210000, 0.3, 550, 1000, 200, 1400, 1
+*section, name=section1, material=myMaterial, type=plane, thickness=1
+all
+*job, name=failingstepjob, domain=2d
+*fieldOutput
+>>perNode, name=U, elSet=all, field=displacement, result=U
+>>perElement, name=S, elSet=all, result=stress, quadraturePoint=0
+*solver, solver=SOLVER, name=theSolver
+output-frequency=3
+courant-number=1.6
+*modelGenerator, generator=planeRectQuad, name=gen
+l=10
+h=10
+nX=6
+nY=6
+elType=CPE4
+elProvider=edelweiss
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1e0, minInc=1e-2, maxNumInc=100000, maxIter=25, stepLength=1
+>>dirichlet, name=left, nSet=gen_left, field=displacement, 1=0, 2=0
+>>dirichlet, name=right, nSet=gen_right, field=displacement, 1=0.5
+"""
+
+#: Runs the deck in this directory, and saves on rank 0 what the job leaves: the solution, the
+#: velocity and the net force of every node field, and the last result of every field output.
+_FINAL_STATE_SCRIPT = """
+import contextlib, io
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import processRank
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+journal = io.StringIO()
+with contextlib.redirect_stdout(journal):
+    model, fieldOutputs = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.getvalue().splitlines() if "failed" in line]
+print("PROCESS", processRank(), failures, flush=True)
+if processRank() == 0:
+    final = {name + " " + entry: field[entry] for name, field in model.nodeFields.items() for entry in ("U", "V", "P")}
+    final |= {name: np.asarray(output.getLastResult()) for name, output in fieldOutputs.fieldOutputs.items()}
+    np.savez("final.npz", **final)
+"""
+
+
+def _finalState(directory, nProcesses: int | None) -> dict:
+    """Run :data:`_FINAL_STATE_SCRIPT` in a directory, serially or under the launcher, and return
+    what the job left, as bytes."""
+
+    if nProcesses is None:
+        environment = dict(
+            os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+        )
+        subprocess.run([sys.executable, "run.py"], cwd=directory, env=environment, check=True, timeout=180)
+    else:
+        output, exitCode = _runUnderMPI(directory, nProcesses)
+        if output is None:
+            pytest.fail("the job on {:} processes did not end".format(nProcesses))
+        assert exitCode == 0, output
+    with np.load(directory / "final.npz") as final:
+        return {name: final[name].tobytes() for name in final.files}
+
+
+@pytest.mark.parametrize("wholeModel", [False, True], ids=["distributed", "whole model"])
+@pytest.mark.parametrize("nProcesses", [2, 3])
+def test_a_step_failing_on_every_process_leaves_the_state_of_a_serial_run(tmp_path, nProcesses, wholeModel):
+    # The failed increment changed the solution, velocity and force of each process at the degrees of
+    # freedom it integrates; the job must end with the last accepted increment everywhere, as the serial
+    # run does, also where the field outputs read the model a last time at the end of the step.
+    serial, decomposed = tmp_path / "serial", tmp_path / "decomposed"
+    for directory, solver in ((serial, "NED"), (decomposed, "NEDMPI")):
+        directory.mkdir()
+        deck = _FAILING_STEP_DECK.replace("SOLVER", solver)
+        if wholeModel:
+            # code run while the mesh is described: every process holds the whole model
+            deck += "*modelGenerator, generator=executePythonCode, name=nothing\npass\n"
+        (directory / "test.inp").write_text(deck)
+        (directory / "run.py").write_text(_FINAL_STATE_SCRIPT)
+
+    expected = _finalState(serial, None)
+    assert expected and all(expected.values())
+    result = _finalState(decomposed, nProcesses)
+    assert result.keys() == expected.keys()
+    assert [name for name in expected if result[name] != expected[name]] == []

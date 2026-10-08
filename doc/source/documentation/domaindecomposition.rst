@@ -725,7 +725,12 @@ failed step only if every process raised the failure together
 (:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`): a failure of the
 agreement, and the step failures of an increment, which are decided from values every process holds
 alike -- a refused cutback, a diverged energy balance
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Any other failure
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Such a step ends as a
+serial one does, with the model of the last accepted increment in every process -- the failed increment
+changed the vectors of each process at the degrees of freedom it integrates, which are taken back
+from the node fields published when that increment was accepted, and the model is synchronized from
+them before the field outputs and the output managers read it a last time
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`). Any other failure
 may have happened in one process alone, while the others wait for it in their next exchange; that
 process stops all of them as soon as the step ends
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`), before the end of the step

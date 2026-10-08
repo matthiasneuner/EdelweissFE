@@ -423,7 +423,10 @@ class NEDMPI(NEDParallel):
         """Finish the step; see :meth:`NED.endStep`. A step that failed without the processes agreeing
         on it -- in this process alone, perhaps, while the others wait for it in their next exchange
         -- stops every process right here: unwinding further, this process would gather the results
-        of the end of the step with processes that never arrive.
+        of the end of the step with processes that never arrive. A step that failed on every process
+        together ends as a serial one does, with the model of the last accepted increment
+        (:meth:`_synchronizeAcceptedModel`), which the field outputs and the output managers then read
+        a last time. Collective after a failure on every process.
 
         Parameters
         ----------
@@ -436,12 +439,40 @@ class NEDMPI(NEDParallel):
         """
 
         super().endStep(step, model, failure)
-        if failure is not None and not isinstance(failure, StepFailedOnAllRanks):
+        if failure is None:
+            return
+        if not isinstance(failure, StepFailedOnAllRanks):
             abortAllProcesses(
                 "the step failed without the agreement of the other processes ({:}: {:})".format(
                     type(failure).__name__, failure
                 )
             )
+        self._synchronizeAcceptedModel(model)
+
+    def _synchronizeAcceptedModel(self, model: FEModel):
+        """Make the model of the last accepted increment whole in every process, after an increment
+        failed on every process together. Collective.
+
+        The failed increment changed the solution, the velocity and the net force at the degrees of
+        freedom each process integrates, in the vectors; the node fields still hold the last accepted
+        increment there, published when it was accepted -- which is what a serial run leaves. The
+        vectors are therefore taken back from the node fields at those degrees of freedom, and the model
+        synchronized from them, as at the end of a step (:meth:`applyStepActionsAtStepEnd`), and with
+        it the external work, which the failed increment added to as it does in a serial run.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        if self._system is not None:
+            for slot in self._integratedNodeFieldSlots:
+                values = slot.nodeField
+                for vector, entry in ((self._U, "U"), (self._P, "P"), (self._V, "V")):
+                    vector.asPlainArray()[slot.dofs] = values[entry].reshape(-1)[slot.positions]
+            self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
+        self.gatherExternalWork()
 
     # --- The subdomain ------------------------------------------------------------------------------
 
