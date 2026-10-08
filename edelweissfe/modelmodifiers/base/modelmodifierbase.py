@@ -106,7 +106,7 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
 
         A domain-decomposed run gathers a field output to every process before a topology check only
         if a modifier reads it, since every process plans the same change (see
-        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsReadEverywhereNext`).
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsGatheredToEveryProcess`).
         The default, None, may read any of them, and so has every field output gathered to every
         process.
 

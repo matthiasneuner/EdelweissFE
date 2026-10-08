@@ -333,7 +333,7 @@ repartition moved elements         previous owners, point to point
 
 Which processes read what is decided from the model, not by a blanket rule. A topology check follows
 an output increment when the solver says so (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.topologyCheckDueAfter`,
-:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.wholeModelReadEverywhereNext`); a
+:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.outputSynchronizationReachesEveryProcess`); a
 marker names the field outputs it reads
 (:meth:`~edelweissfe.adaptivity.marking.MarkerBase.fieldOutputsRead`, gathered for its model modifier
 by :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.fieldOutputsRead`); a

@@ -56,7 +56,7 @@ them receives what it reads, and only the processes reading it receive it:
   results of every element field output; the other processes keep theirs, current at the degrees of
   freedom they integrate (:meth:`NEDMPI.acceptIncrement`, :meth:`NEDMPI.writeIncrementOutput`);
 * on an output increment the topology check follows, and at the end of a step, every process
-  receives all of it, and the field outputs the markers read (:meth:`NEDMPI.wholeModelReadEverywhereNext`):
+  receives all of it, and the field outputs the markers read (:meth:`NEDMPI.outputSynchronizationReachesEveryProcess`):
   every process refines the same mesh, interpolates the node fields onto it and builds its equation
   system from them;
 * before a periodic contact search, the process evaluating the constraint receives the positions of
@@ -785,7 +785,7 @@ class NEDMPI(NEDParallel):
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then make
-        the whole model current where it is read (:meth:`wholeModelReadEverywhereNext`) -- on rank 0,
+        the whole model current where it is read (:meth:`outputSynchronizationReachesEveryProcess`) -- on rank 0,
         which writes the output and a checkpoint with it, or, if the topology check at the start of
         the next increment follows, in every process -- and rebalance the subdomains; if that moved
         elements between processes, build the equation system again for the elements now held here,
@@ -810,7 +810,7 @@ class NEDMPI(NEDParallel):
             # the output and a checkpoint written after it read the external work
             self.gatherExternalWork()
             self._synchronizeModel(
-                model, timeStep, includeStates=True, toEveryProcess=self.wholeModelReadEverywhereNext()
+                model, timeStep, includeStates=True, toEveryProcess=self.outputSynchronizationReachesEveryProcess()
             )
 
             # Right after every element state was synchronized -- or, where each process holds
@@ -849,7 +849,7 @@ class NEDMPI(NEDParallel):
             vector.asPlainArray()[outside] = np.nan
         super().publishNodeFields(model, self._U, self._V, self._P)
 
-    def wholeModelReadEverywhereNext(self) -> bool:
+    def outputSynchronizationReachesEveryProcess(self) -> bool:
         """Whether every process reads the whole model before the next increment, and so the output
         synchronization of the increment just accepted makes it current in every process, rather
         than on rank 0 only.
@@ -869,11 +869,11 @@ class NEDMPI(NEDParallel):
 
         return self.topologyCheckDueAfter(self.prevTimeStep)
 
-    def fieldOutputsReadEverywhereNext(self) -> set[str] | None:
+    def fieldOutputsGatheredToEveryProcess(self) -> set[str] | None:
         """The field outputs every process reads before the next increment, and so receives -- the
         others are gathered to rank 0 only, where the output is written: those the markers of the
         model modifiers read (:meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.fieldOutputsRead`),
-        if the topology check follows (:meth:`wholeModelReadEverywhereNext`); else none.
+        if the topology check follows (:meth:`outputSynchronizationReachesEveryProcess`); else none.
 
         Returns
         -------
@@ -882,7 +882,7 @@ class NEDMPI(NEDParallel):
             it reads.
         """
 
-        if not self.wholeModelReadEverywhereNext():
+        if not self.outputSynchronizationReachesEveryProcess():
             return set()
         return fieldOutputsReadByAll(self._liveTopologyModifiers)
 
@@ -1038,7 +1038,7 @@ class NEDMPI(NEDParallel):
            all ranks together if it fails on one.
         2. The parts are gathered: the results of every element set to rank 0 -- and to every
            process those the markers of a topology check following now read
-           (:meth:`fieldOutputsReadEverywhereNext`) --, the element states to rank 0.
+           (:meth:`fieldOutputsGatheredToEveryProcess`) --, the element states to rank 0.
         3. The field outputs store the gathered results -- a field output not gathered to a process
            records there that its result is held on rank 0
            (:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`) --,
@@ -1072,7 +1072,7 @@ class NEDMPI(NEDParallel):
                 statesHere = self.subdomain.elementStatesOwnedHere(model) if gathersStates else None
 
             fieldOutputController.gatherResultsOfWholeSet(
-                readOnEveryProcess=self.fieldOutputsReadEverywhereNext(), writesOutput=self.subdomain.rank == 0
+                readOnEveryProcess=self.fieldOutputsGatheredToEveryProcess(), writesOutput=self.subdomain.rank == 0
             )
             with performancetiming.timeit("gather states"):
                 states = self.subdomain.gatherElementStatesToRoot(statesHere) if gathersStates else None
@@ -1483,7 +1483,7 @@ class NEDMPI(NEDParallel):
         increment: after an output synchronization that reached it (:meth:`_synchronizeModel`), at
         the end of a step, or before the first increment. Between those, a process holds the solution
         at the degrees of freedom it integrates only, and rank 0 alone receives it on an output
-        increment no topology check follows (:meth:`wholeModelReadEverywhereNext`).
+        increment no topology check follows (:meth:`outputSynchronizationReachesEveryProcess`).
 
         Parameters
         ----------
@@ -1500,7 +1500,9 @@ class NEDMPI(NEDParallel):
             raise RuntimeError(
                 "{:} reads the whole solution, but process {:} holds it only at the degrees of freedom it "
                 "integrates: the last output synchronization gathered it to rank 0 only. A reader on every "
-                "process must be known to NEDMPI.wholeModelReadEverywhereNext.".format(reader, self.subdomain.rank)
+                "process must be known to NEDMPI.outputSynchronizationReachesEveryProcess.".format(
+                    reader, self.subdomain.rank
+                )
             )
 
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:

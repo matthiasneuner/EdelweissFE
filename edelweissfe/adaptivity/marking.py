@@ -206,7 +206,7 @@ class MarkerBase(OptionSchemaProvider):
         A domain-decomposed run gathers a field output to every process only where it is read there
         -- by a marker, every process marking the same elements --, and to the process writing the
         output otherwise (see
-        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsReadEverywhereNext`).
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsGatheredToEveryProcess`).
         The default, None, may read any of them, and so has every field output gathered to every
         process before a topology check; a marker reading none derives from
         :class:`MarkerReadingNoFieldOutput`.
