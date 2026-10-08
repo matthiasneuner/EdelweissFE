@@ -214,6 +214,9 @@ class _FieldOutputBase:
         #: writing the output -- and not here: a domain-decomposed run gathered it there only.
         self._lastResultHeldElsewhere = False
         self._historyHeldElsewhere = False
+        #: Whether the last result was gathered to every process (or read whole here): the same in every
+        #: process, unlike whether it is held here; see :meth:`finalizeStep`.
+        self._lastResultReachedEveryProcess = True
 
     def getLastResult(
         self,
@@ -443,6 +446,7 @@ class _FieldOutputBase:
         self.timeHistory = [float(t) for t in data["timeHistory"]]
         self._exportedBytes = int(data["exportedBytes"])
         self._lastResultHeldElsewhere = self._historyHeldElsewhere = False
+        self._lastResultReachedEveryProcess = True
         if self.appendResults:
             self.result, offset = [], 0
             for shape in data["resultShapes"]:
@@ -505,6 +509,7 @@ class _FieldOutputBase:
         """
 
         self._storesNextResultHere = storedHere
+        self._lastResultReachedEveryProcess = toEveryProcess
 
     def finalizeStep(
         self,
@@ -524,9 +529,23 @@ class _FieldOutputBase:
         cannot disagree: whenever a manager writes a final frame the result behind it has just been
         refreshed, and a step ending on an increment that already stored a result does not store a
         second one at the same time and duplicate the last point of a history export.
+
+        A step ending on an output increment whose result was gathered to the process writing the
+        output only (:meth:`gatherResultsOfWholeSet`) leaves the other processes without it, while the
+        next step may start by reading it in every process -- a marker of the step-start topology
+        update, a ``setField`` step action. So that result is read again, from the model the end of the
+        step made whole in every process, and replaces the last one, in every process alike (the bits
+        are those stored on rank 0): the end of a step leaves every field output's last result in every
+        process. The history of a process that did not store every result stays incomplete.
         """
         if not self.timeHistory or self.model.time - self.timeHistory[-1] > 1e-12:
             self.updateResults(self.model)
+        elif not self._lastResultReachedEveryProcess:
+            self.timeHistory.pop()
+            if self.appendResults and not self._lastResultHeldElsewhere:
+                self.result.pop()
+            self.updateResults(self.model)
+            self._lastResultReachedEveryProcess = True
 
     def finalizeJob(
         self,

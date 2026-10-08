@@ -1400,3 +1400,43 @@ def test_a_rigid_body_is_moved_alike_in_every_process_when_elements_move(tmp_pat
         assert (tmp_path / (solver + ".npy")).exists(), output.stdout + output.stderr
     serial, decomposed = np.load(tmp_path / "NED.npy"), np.load(tmp_path / "NEDMPI.npy")
     assert serial.view(np.int64).tobytes() == decomposed.view(np.int64).tobytes()
+
+
+def test_the_end_of_a_step_on_an_output_increment_leaves_its_result_in_every_process(tmp_path):
+    from edelweissfe.helpers.inputfilehelpers import (
+        createFieldOutputFromInputFile,
+        fillFEModelFromInputFile,
+    )
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*fieldOutput
+>>perElement, name=sTop, elSet=gen_top, result=stress, quadraturePoint=0, saveHistory=True
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    model = fillFEModelFromInputFile(FEModel(2), inputFile, Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["sTop"]
+    fieldOutput.finalizeIncrement()
+
+    # The last output increment of the step, gathered to the process writing the output only.
+    fieldOutput.readResultsHere()
+    fieldOutput.gatherResultsOfWholeSet(toEveryProcess=False, storedHere=False)
+    model.time = 1.0
+    fieldOutput.finalizeIncrement()
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getLastResult()
+
+    # The step ends right there: its result is read again, the time is not recorded twice, and the next
+    # step may read it in this process too -- not the history, which misses a result.
+    fieldOutput.finalizeStep()
+    assert fieldOutput.getTimeHistory().tolist() == [0.0, 1.0]
+    assert fieldOutput.getLastResult().shape[0] == len(model.elementSets["gen_top"])
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getResultHistory()
