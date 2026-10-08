@@ -102,8 +102,9 @@ class MeasuredLoad:
         repartition whenever the tolerance is exceeded, for costs that are not times (element
         numbers).
     elementTime
-        The time per increment the process is busy with its elements (the wall time of its element
-        loop), in the unit of the costs.
+        What the process is busy with its elements per increment, in the unit of the costs: the wall
+        time of its element loop for measured costs; the sum of the element numbers for element
+        numbers.
     constraintTime
         The time per increment it is busy evaluating its constraints, in the same unit; 0 where the
         costs are no times.

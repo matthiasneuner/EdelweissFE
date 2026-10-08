@@ -52,6 +52,20 @@ import numpy as np
 from edelweissfe.domaindecomposition.metis import partitionMeshDual
 from edelweissfe.models.mesh import ElementTypeInfo, Mesh, MeshElement
 
+#: The smallest share of the elements' work a process is given, as a fraction of an equal share
+#: (:func:`elementSharesBesideConstraints`). METIS bisects recursively, and a part of a much smaller
+#: share than the others comes out empty -- on a 64 x 64 grid in 32 parts already at a tenth of an
+#: equal share --, while METIS still reports success; at half an equal share every part kept a
+#: quarter of an equal part's elements in every test. A process without elements is never intended.
+MINIMUM_SHARE_OF_AN_EQUAL_SHARE = 0.5
+
+#: By how much, as a fraction of an equal share, the share a part was made for and the share of the
+#: process computing it may differ when a repartition keeps elements where they were
+#: (:func:`keepElementsWhereTheyWere`). The speed of the processes alone scatters by 5--8 % for the
+#: same element (measured on rabbit, 2026-10-07), so shares closer than that are not told apart by
+#: the measurement they come from.
+INTERCHANGEABLE_SHARES = 0.05
+
 
 def _elementWeight(typeInfo: ElementTypeInfo) -> int:
     """The expected cost of one element's increment, as a positive integer.
@@ -128,6 +142,18 @@ def partitionElementsOfMesh(
 
         communicator.Bcast(parts, root=0)
 
+        # The same in every process, since every process holds the broadcast partition.
+        emptyParts = np.flatnonzero(np.bincount(parts, minlength=nParts) == 0)
+        if len(numbers) >= nParts and emptyParts.size:
+            raise RuntimeError(
+                "the partition of {:} elements into {:} parts{:} left part(s) {:} without elements".format(
+                    len(numbers),
+                    nParts,
+                    "" if processShares is None else " of shares {:}".format(np.round(processShares, 4).tolist()),
+                    emptyParts.tolist(),
+                )
+            )
+
     owners = dict(zip(numbers, parts.tolist()))
     for number, record in mesh.elements.items():
         if record.isAuxiliary:
@@ -161,17 +187,26 @@ def processOfAuxiliaryElement(record: MeshElement, owners: dict) -> int:
 
 
 def keepElementsWhereTheyWere(
-    owners: dict, previousOwners: dict, nParts: int, processShares: np.ndarray | None = None
+    owners: dict,
+    previousOwners: dict,
+    nParts: int,
+    processShares: np.ndarray | None = None,
+    shareTolerance: float = INTERCHANGEABLE_SHARES,
 ) -> dict:
     """Renumber the parts of a new partition so that as many elements as possible keep their process.
 
     METIS numbers the parts of a partition arbitrarily: a repartition close to the previous one may
     still give every part another number, and so move every element to another process. Each new part
     is given the number of the previous part it shares the most elements with, largest overlaps first;
-    the parts left over keep their order. The parts themselves -- which elements are computed
-    together -- do not change, only which process computes them. A part made for a share of its own
-    (``processShares``) is meant for its process, and is renumbered only to a process of the same
-    share.
+    the parts left over are paired in the order of their shares. The parts themselves -- which
+    elements are computed together -- do not change, only which process computes them.
+
+    A part made for a share (``processShares``) is meant for its process: it may go to another
+    process only if their shares differ by no more than ``shareTolerance`` of an equal share
+    (:data:`INTERCHANGEABLE_SHARES`) -- a
+    process evaluating a costly constraint keeps its smaller part, while the others, whose shares
+    differ a little, are renumbered among themselves. If the parts left over cannot be paired within
+    the tolerance, the parts are not renumbered at all: part *p* goes to process *p*, as made.
 
     Parameters
     ----------
@@ -183,6 +218,9 @@ def keepElementsWhereTheyWere(
         The number of processes.
     processShares
         The shares the new partition was made for, by part (= rank); None for equal shares.
+    shareTolerance
+        By how much, as a fraction of an equal share, the shares of a part and of the process it goes
+        to may differ.
 
     Returns
     -------
@@ -196,7 +234,7 @@ def keepElementsWhereTheyWere(
     overlap = np.zeros((nParts, nParts), dtype=np.int64)
     np.add.at(overlap, (new, previous), 1)
     shares = np.full(nParts, 1.0 / nParts) if processShares is None else np.asarray(processShares)
-    sameShare = shares[:, None] == shares[None, :]
+    interchangeable = np.abs(shares[:, None] - shares[None, :]) <= shareTolerance / nParts + 1e-15
 
     renumbered = np.full(nParts, -1, dtype=np.int64)
     taken = np.zeros(nParts, dtype=bool)
@@ -208,24 +246,25 @@ def keepElementsWhereTheyWere(
             renumbered[newPart] < 0
             and not taken[previousPart]
             and overlap[newPart, previousPart] > 0
-            and sameShare[newPart, previousPart]
+            and interchangeable[newPart, previousPart]
         ):
             renumbered[newPart] = previousPart
             taken[previousPart] = True
-    for newPart in range(nParts):
-        if renumbered[newPart] < 0:
-            renumbered[newPart] = np.flatnonzero(~taken & sameShare[newPart])[0]
-            taken[renumbered[newPart]] = True
+    leftOver = np.flatnonzero(renumbered < 0)
+    free = np.flatnonzero(~taken)
+    renumbered[leftOver[np.argsort(shares[leftOver], kind="stable")]] = free[np.argsort(shares[free], kind="stable")]
+    if not np.all(interchangeable[np.arange(nParts), renumbered]):
+        return dict(owners)
 
     return dict(zip(numbers, renumbered[new].tolist()))
 
 
 def elementSharesBesideConstraints(elementCost: float, constraintCosts: np.ndarray) -> np.ndarray | None:
     """The share of the elements' work each process is to receive, so that every process is equally
-    busy with its elements and the constraints it evaluates -- as far as that is possible: a process
-    whose constraints alone cost more than the others' elements and constraints is given almost no
-    elements (a share of 0.001 of an equal one, since METIS needs a positive share), and the others
-    share the elements among them.
+    busy with its elements and the constraints it evaluates -- as far as that is possible: no process
+    is given less than :data:`MINIMUM_SHARE_OF_AN_EQUAL_SHARE` of an equal share, so that every process
+    keeps elements -- a process whose constraints cost that much is busier than the others --, and
+    the others share the rest of the elements among them.
 
     Parameters
     ----------
@@ -257,8 +296,16 @@ def elementSharesBesideConstraints(elementCost: float, constraintCosts: np.ndarr
             break
         below &= ~exceeding
 
-    elementWork = np.where(below, level - constraintCosts, 1e-3 * elementCost / nProcesses)
-    return elementWork / elementWork.sum()
+    shares = np.where(below, level - constraintCosts, 0.0) / elementCost
+    # Raise the shares below the minimum to it, and scale the others down to make room, until none
+    # falls below it.
+    minimum = MINIMUM_SHARE_OF_AN_EQUAL_SHARE / nProcesses
+    raised = np.zeros(nProcesses, dtype=bool)
+    while True:
+        raised |= shares < minimum
+        shares = np.where(raised, minimum, shares * (1.0 - minimum * raised.sum()) / shares[~raised].sum())
+        if not np.any(shares[~raised] < minimum):
+            return shares
 
 
 def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.ndarray:

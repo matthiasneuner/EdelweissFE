@@ -1107,21 +1107,75 @@ def test_a_part_made_for_a_share_of_its_own_stays_with_its_process():
     assert keepElementsWhereTheyWere(repartitioned, previous, 3, shares) == {1: 1, 2: 1, 3: 0, 4: 2, 5: 2, 6: 2}
 
 
+def test_parts_of_nearly_equal_shares_are_renumbered_among_their_processes():
+    from edelweissfe.domaindecomposition.partitioning import keepElementsWhereTheyWere
+
+    # Every process evaluates some constraint, so no two shares are equal (c1_150: ten constraints on
+    # eight processes). Within the tolerance they are interchangeable, and elements keep their process.
+    previous = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
+    repartitioned = {1: 2, 2: 2, 3: 0, 4: 0, 5: 1, 6: 1}
+    shares = np.array([0.335, 0.332, 0.333])
+
+    assert keepElementsWhereTheyWere(repartitioned, previous, 3, shares) == previous
+    # Without a tolerance, no part may change its process: the partition is kept as made.
+    assert keepElementsWhereTheyWere(repartitioned, previous, 3, shares, 0.0) == repartitioned
+    # A part of a share of its own still stays with its process, the others are renumbered.
+    shares = np.array([0.2, 0.401, 0.399])
+    renumbered = keepElementsWhereTheyWere(repartitioned, previous, 3, shares)
+    assert renumbered == {1: 1, 2: 1, 3: 0, 4: 0, 5: 2, 6: 2}
+
+
+def test_no_process_is_left_without_elements():
+    from edelweissfe.domaindecomposition.partitioning import (
+        MINIMUM_SHARE_OF_AN_EQUAL_SHARE,
+        elementSharesBesideConstraints,
+    )
+
+    metis = _metis()
+    offsets, nodes, nNodes = _quadGrid(64)
+    # Process 7 evaluates a constraint costing more than all elements: it was given a share of 0.001
+    # of an equal one, and METIS left its part empty (while reporting success).
+    shares = elementSharesBesideConstraints(8.0, np.array([0.0] * 7 + [20.0]))
+    assert shares[7] == pytest.approx(MINIMUM_SHARE_OF_AN_EQUAL_SHARE / 8)
+    counts = np.bincount(metis.partitionMeshDual(offsets, nodes, nNodes, 8, np.ones(4096, dtype=int), 2, shares))
+    assert counts.shape == (8,) and counts.min() > 0
+
+
+def test_a_partition_leaving_a_process_without_elements_is_refused(monkeypatch):
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition import partitioning
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.models.mesh import Mesh
+
+    mesh = Mesh()
+    for number in range(1, 5):
+        mesh.addElement(number, "CPE4", "edelweiss", [number, number + 1, number + 6, number + 5])
+    # METIS reports success with an empty part: the partition must not be used.
+    monkeypatch.setattr(partitioning, "partitionMeshDual", lambda *arguments: np.array([0, 0, 1, 1]))
+
+    with pytest.raises(RuntimeError, match="without elements"):
+        partitioning.partitionElementsOfMesh(mesh, 3, 2, Communicator(MPI.COMM_SELF), None, np.full(3, 1.0 / 3))
+
+
 def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
     from edelweissfe.domaindecomposition.partitioning import (
         elementSharesBesideConstraints,
     )
 
     assert elementSharesBesideConstraints(12.0, np.zeros(4)) is None
-    # (12 + 4) / 4 = 4 per process: process 3 is busy with its constraints alone
+    # (24 + 2) / 4 = 6.5 per process: process 3 gets 6.5 - 2 = 4.5 of the 24 of element work
+    shares = elementSharesBesideConstraints(24.0, np.array([0.0, 0.0, 0.0, 2.0]))
+    assert np.allclose(shares, [6.5 / 24.0, 6.5 / 24.0, 6.5 / 24.0, 4.5 / 24.0])
+    # (12 + 4) / 4 = 4 per process: process 3 would be busy with its constraints alone, and keeps half
+    # an equal share
     shares = elementSharesBesideConstraints(12.0, np.array([0.0, 0.0, 0.0, 4.0]))
-    assert np.allclose(shares, [4.0 / 12.0, 4.0 / 12.0, 4.0 / 12.0, 0.0], atol=1e-3)
-    assert np.isclose(shares.sum(), 1.0) and np.all(shares > 0.0)
-    # Process 0 is busier with its constraint than any process can be with the elements; the others
-    # are filled to (3 + 1) / 3 each: process 1 with 1/3 of elements beside its constraint.
+    assert np.allclose(shares, [0.875 / 3.0, 0.875 / 3.0, 0.875 / 3.0, 0.125])
+    assert np.isclose(shares.sum(), 1.0)
+    # Process 0 is busier with its constraint than any process can be with the elements; process 1
+    # would be filled with 1/9 of the elements, less than the minimum, too: both keep half an equal
+    # share, the others share the rest.
     shares = elementSharesBesideConstraints(3.0, np.array([10.0, 1.0, 0.0, 0.0]))
-    assert np.allclose(shares, [0.0, 1.0 / 9.0, 4.0 / 9.0, 4.0 / 9.0], atol=1e-3)
-    assert shares[0] > 0.0 and shares[2] == shares[3]
+    assert np.allclose(shares, [0.125, 0.125, 0.375, 0.375])
 
 
 def test_the_balance_is_measured_against_what_a_partition_can_attain():
