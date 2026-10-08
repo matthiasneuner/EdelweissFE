@@ -731,10 +731,12 @@ changed the vectors of each process at the degrees of freedom it integrates, whi
 from the node fields published when that increment was accepted, and the model is synchronized from
 them before the field outputs and the output managers read it a last time
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`). Any other failure
-may have happened in one process alone, while the others wait for it in their next exchange; that
-process stops all of them as soon as the step ends
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`), before the end of the step
-would gather results with processes that never arrive.
+may have happened in one process alone, while the others wait for it in their next exchange -- also
+at the start or the end of a step, outside any increment; that process stops all of them as soon as
+the exception leaves the step
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.stepFailed`), before the end of the
+step would gather results with processes that never arrive, and before a caller catching the exception
+-- the test runner, which goes on to the next test case -- could leave them waiting.
 
 Nothing inside such an agreement may communicate: a process that failed before a collective operation
 would skip it, and leave the others waiting in it. That is enforced: the communicator

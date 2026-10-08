@@ -652,6 +652,20 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             conditional stop and the maximum number of increments included).
         """
 
+    def stepFailed(self, step, failure: BaseException):
+        """The step failed: an exception is leaving it, from wherever in the step -- its start, an
+        increment, its end. Called once, after :meth:`endStep` if the step got that far, and before
+        the field outputs and the output managers finish the step. Nothing to do for a solver computing
+        the whole model in one process, which may clean up after any failure.
+
+        Parameters
+        ----------
+        step
+            The step that failed.
+        failure
+            The exception leaving it.
+        """
+
     @abstractmethod
     def solveIncrement(self, *args):
         pass

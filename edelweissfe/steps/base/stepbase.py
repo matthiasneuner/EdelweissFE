@@ -252,6 +252,12 @@ class StepBase(ABC):
 
             solver.applyStepActionsAtStepEnd(model, self.actions)
 
+        except BaseException as exception:
+            # Before anything below reads the model: a domain-decomposed solver stops every process
+            # here after a failure the processes did not agree on.
+            solver.stepFailed(self, exception)
+            raise
+
         finally:
             fieldOutputController.finalizeStep()
             for manager in outputManagers:

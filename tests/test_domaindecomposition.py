@@ -1600,3 +1600,45 @@ def test_a_step_failing_on_every_process_leaves_the_state_of_a_serial_run(tmp_pa
     result = _finalState(decomposed, nProcesses)
     assert result.keys() == expected.keys()
     assert [name for name in expected if result[name] != expected[name]] == []
+
+
+#: A step action failing at the start of the step, in process 1 alone, outside any step the processes
+#: agree on: the others go on into the first exchange of the step, while the failing process unwinds
+#: through the end of the step, whose field outputs gather element results.
+_STEP_START_FAILING_ALONE_PATCH = """
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+
+applyStepActionsAtStepStart = NEDMPI.applyStepActionsAtStepStart
+
+
+def failingInProcessOne(self, model, step):
+    if rank == 1:
+        raise RuntimeError("a step action failed in process 1 alone")
+    return applyStepActionsAtStepStart(self, model, step)
+
+
+NEDMPI.applyStepActionsAtStepStart = failingInProcessOne
+"""
+
+
+def test_a_failure_in_one_process_alone_aborts_before_the_end_of_the_step_communicates(tmp_path):
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK.replace("output-frequency=2", "output-frequency=1"))
+    # The job is run as the test runner runs one: an exception leaving it is caught, and the next job
+    # would follow. So the process failing alone must stop the others itself, before it unwinds through
+    # anything that communicates.
+    script = _FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _STEP_START_FAILING_ALONE_PATCH).replace(
+        '    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)',
+        "    try:\n"
+        '        finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)\n'
+        "    except Exception as exception:\n"
+        '        print("CAUGHT", exception)',
+    )
+    assert "CAUGHT" in script
+    (tmp_path / "run.py").write_text(script)
+    output, exitCode = _runUnderMPI(tmp_path, timeout=60)
+    if output is None:
+        pytest.fail("a failure in one process alone left the others waiting")
+
+    assert exitCode != 0, output
+    assert "a step action failed in process 1 alone" in output, output
+    assert "in MPI process 1 of 3; aborting all processes" in output, output
