@@ -108,9 +108,12 @@ subdomain and then added, and may differ from a serial run's in their last digit
 nothing but the table.
 
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
-softening material costs more where it softens, so every element kernel is timed, and on an output
-increment the model is repartitioned with the measured costs whenever the slowest process falls
-more than ``load-balance-tolerance`` behind the mean. A distributed model then moves the elements
+softening material costs more where it softens, so every element kernel is timed, and so is every
+constraint -- its evaluation and its contact search, by the process evaluating it. On an output
+increment the model is repartitioned with the measured costs whenever the busiest process -- with its
+elements and its constraints -- falls more than ``load-balance-tolerance`` behind what a partition
+can attain; a process evaluating a costly contact is given correspondingly fewer elements. A
+distributed model then moves the elements
 whose process changes (migration: the new process creates them from the mesh and receives their
 state, the old one drops them; see
 :meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`), and
@@ -170,7 +173,7 @@ from edelweissfe.domaindecomposition.mpienvironment import (
     abortAllProcesses,
     worldCommunicator,
 )
-from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.domaindecomposition.subdomain import MeasuredLoad, Subdomain
 from edelweissfe.domaindecomposition.subdomaininterface import (
     InterfaceForceAssembly,
     ValuesFromOwners,
@@ -207,11 +210,12 @@ class NEDMPISchema(NEDSchema):
 
     loadBalanceTolerance: float | None = schemaField(
         description=(
-            "How far the slowest process may fall behind the mean, as a fraction, before the model is "
-            "repartitioned with the measured element costs as weights. Checked on every output "
-            "increment. The first partition can only estimate an element's cost -- by its number of "
-            "degrees of freedom -- and a softening material costs more where it softens, so a partition "
-            "balanced at the start drifts out of balance as damage localizes. 0 disables it."
+            "How far the busiest process -- with its elements and the constraints it evaluates -- may fall "
+            "behind the mean, as a fraction, before the model is repartitioned with the measured element "
+            "and constraint costs. Checked on every output increment. The first partition can only "
+            "estimate an element's cost -- by its number of degrees of freedom -- and a softening material "
+            "costs more where it softens, so a partition balanced at the start drifts out of balance as "
+            "damage localizes. 0 disables it."
         ),
         dtype=float,
         default=0.1,
@@ -324,6 +328,14 @@ class NEDMPI(NEDParallel):
         self._elementCosts: np.ndarray | None = None
         #: The increments computed with the current increment plan.
         self._nMeasuredIncrements = 0
+        #: The time this process spent computing its elements -- the element loop, on all its threads
+        #: -- and evaluating its constraints, over :attr:`_nMeasuredIncrements` increments; see
+        #: :meth:`_measuredLoad`.
+        self._elementLoopTime = 0.0
+        self._constraintEvaluationTime = 0.0
+        #: The forces of the constraints evaluated here, evaluated with the elements of the current
+        #: increment and not yet assembled, by name; None otherwise. See :meth:`assembleInternalForces`.
+        self._constraintForcesOfIncrement: dict | None = None
         #: The increments of the step done at the last topology change (or 0, at the start of the
         #: step), for the horizon a migration after a topology change is weighed over.
         self._incrementsDoneAtLastTopologyChange = 0
@@ -533,6 +545,7 @@ class NEDMPI(NEDParallel):
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
         self._elementCosts = np.zeros(len(plan.elementLoop.elements)) if timesKernels else None
         self._nMeasuredIncrements = 0
+        self._elementLoopTime = self._constraintEvaluationTime = 0.0
         return plan
 
     def _loadBalanceCosts(self) -> str:
@@ -554,24 +567,36 @@ class NEDMPI(NEDParallel):
             raise ValueError("load-balance-costs must be 'measured' or 'elementNumber', not '{:}'".format(costs))
         return costs
 
-    def _elementCostsForRebalancing(self) -> tuple[np.ndarray | None, int, int | None]:
-        """What :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance` weighs: the
-        cost of every element of the increment plan, in plan order -- the measured kernel times, or
-        the element numbers (``load-balance-costs``) -- the number of increments it was summed over,
-        and the increments until the next check, to weigh a repartition's gain against its cost
-        (None for element numbers, which are no times).
+    def _measuredLoad(self) -> MeasuredLoad:
+        """What :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance` weighs: the cost
+        of every element of the increment plan, in plan order -- the measured kernel times, or the
+        element numbers (``load-balance-costs``) -- the number of increments it was summed over, the
+        increments until the next check, to weigh a repartition's gain against its cost (None for
+        element numbers, which are no times), and the time per increment this process was busy with
+        its elements and its constraints.
+
+        The busy times are wall times, as the time of an increment is: the time of the element loop
+        on all the threads of the process -- not the sum of the kernel times, which is a multiple of it
+        on several threads --, and of evaluating the constraints. For element numbers, the elements are
+        busy with the sum of their numbers, and the constraints with none.
 
         Returns
         -------
-        tuple[np.ndarray | None, int, int | None]
-            The costs, None if nothing was measured; the number of increments; the increments until
-            the next check, or None.
+        MeasuredLoad
+            The load of this process; its element costs None if nothing was measured.
         """
 
+        nIncrements = self._nMeasuredIncrements
         if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
             numbers = np.array(list(self._incrementPlan.elementLoop.elements.keys()), dtype=float)
-            return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements, None
-        return self._elementCosts, self._nMeasuredIncrements, self.options["output-frequency"]
+            return MeasuredLoad(numbers * nIncrements, nIncrements, None, float(numbers.sum()), 0.0)
+        return MeasuredLoad(
+            self._elementCosts,
+            nIncrements,
+            self.options["output-frequency"],
+            self._elementLoopTime / max(nIncrements, 1),
+            self._constraintEvaluationTime / max(nIncrements, 1),
+        )
 
     def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
@@ -603,8 +628,18 @@ class NEDMPI(NEDParallel):
     def assembleInternalForces(
         self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements of the subdomain, failing on all ranks together if it fails on one, and complete their
-        internal force at the interface; see :meth:`NED.assembleInternalForces`. Collective.
+        """Evaluate the elements of the subdomain, and the constraints evaluated here, failing on all ranks together if
+        it fails on one, and complete the internal force at the interface; see :meth:`NED.assembleInternalForces`.
+        Collective.
+
+        The constraints are evaluated here, right after the elements, and their forces sent and added
+        later, in :meth:`assembleConstraintForces`, where ``NED`` evaluates them: a constraint reads
+        the solution and its increment only, which do not change in between, and its forces are added
+        in the same order onto the same bits, so the result is the same. A process evaluating a
+        costly constraint -- a large contact -- does so before the exchange at the interface, while
+        the others are still computing the elements the load balancing gave them in its place
+        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`), instead of every
+        process waiting for it after the exchange.
 
         Parameters
         ----------
@@ -624,10 +659,20 @@ class NEDMPI(NEDParallel):
         """
 
         P[:] = 0.0
-        with self.communicator.allRanksFailTogether("Evaluating the elements"):
+        # Both timed for the load balancing -- inside the agreement, which waits for the other processes.
+        with self.communicator.allRanksFailTogether("Evaluating the elements and the constraints"):
+            startOfElements = perf_counter()
             psi, contributions = computeElementsForExplicit(
                 self._incrementPlan.elementLoop, U_np, dU, P, timeStep, self._elementCosts
             )
+            startOfConstraints = perf_counter()
+            with performancetiming.timeit("evaluate constraints"):
+                self._constraintForcesOfIncrement = {
+                    name: self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
+                    for name, constraint in self.partition.constraints.items()
+                }
+            self._elementLoopTime += startOfConstraints - startOfElements
+            self._constraintEvaluationTime += perf_counter() - startOfConstraints
         self._nMeasuredIncrements += 1
 
         # At a degree of freedom shared with another subdomain, the contributions of that
@@ -700,9 +745,10 @@ class NEDMPI(NEDParallel):
     def assembleConstraintForces(
         self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> DofVector:
-        """Evaluate the constraints of the subdomain, failing on all ranks together if it fails on one, send their forces
-        to the processes integrating their degrees of freedom, and add those of every constraint at the degrees of
-        freedom integrated here, in model order; see :meth:`NED.assembleConstraintForces` and
+        """Send the forces of the constraints evaluated here -- with the elements, in
+        :meth:`assembleInternalForces` -- to the processes integrating their degrees of freedom, and
+        add those of every constraint at the degrees of freedom integrated here, in model order; see
+        :meth:`NED.assembleConstraintForces` and
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.addConstraintForces`. Collective.
 
         Parameters
@@ -722,13 +768,19 @@ class NEDMPI(NEDParallel):
         -------
         DofVector
             The augmented net force vector.
+
+        Raises
+        ------
+        RuntimeError
+            If the constraints were not evaluated with the elements of this increment.
         """
 
-        forces = {}
-        with self.communicator.allRanksFailTogether("Evaluating the constraints"):
-            for name, constraint in constraints.items():
-                forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
-
+        forces, self._constraintForcesOfIncrement = self._constraintForcesOfIncrement, None
+        if forces is None or forces.keys() != constraints.keys():
+            raise RuntimeError(
+                "the constraints evaluated here must be evaluated with the elements of the increment "
+                "(NEDMPI.assembleInternalForces) before their forces are assembled"
+            )
         self.subdomain.addConstraintForces(forces, P)
         return P
 
@@ -865,7 +917,7 @@ class NEDMPI(NEDParallel):
             # computed by another process from now on must arrive there with its current state.
             startOfRebalancing = perf_counter()
             interfaceBefore = self.subdomain.interface
-            if self.subdomain.rebalance(self._incrementPlan.elementLoop, *self._elementCostsForRebalancing()):
+            if self.subdomain.rebalance(self._incrementPlan.elementLoop, self._measuredLoad()):
                 if self.subdomain.elementsMustMove():
                     self._moveElements(model, step)
                 else:

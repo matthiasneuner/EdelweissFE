@@ -1124,6 +1124,21 @@ def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
     assert shares[0] > 0.0 and shares[2] == shares[3]
 
 
+def test_the_balance_is_measured_against_what_a_partition_can_attain():
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.subdomain import Subdomain
+
+    subdomain = Subdomain(Communicator(MPI.COMM_SELF), None, "test", 0.1)
+    # Busy with elements and constraints: the mean, 9, is attainable; the busiest takes 12.
+    imbalance, beyond = subdomain._imbalance(np.array([8.0, 8.0, 8.0, 12.0]), np.array([0.0, 0.0, 0.0, 4.0]))
+    assert imbalance == pytest.approx(12.0 / 9.0) and beyond == pytest.approx(12.0 - 1.1 * 9.0)
+    # One process' constraints alone cost more than the mean: no partition of the elements does better
+    # than that process' constraints, so it is within the tolerance, and not repartitioned again and again.
+    imbalance, beyond = subdomain._imbalance(np.array([6.0, 6.0, 6.0, 16.5]), np.array([0.0, 0.0, 0.0, 16.0]))
+    assert imbalance == pytest.approx(16.5 / 16.0) and beyond < 0.0
+
+
 class _SecondOfTwoProcessesExchanging(_SecondOfTwoProcesses):
     """Rank 1 of 2, as in :class:`_SecondOfTwoProcesses`, exchanging element states with rank 0: what
     rank 0 sends is the state given."""

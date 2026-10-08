@@ -45,6 +45,7 @@ bit-identical to one in a single process.
 """
 
 import hashlib
+from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
@@ -61,6 +62,7 @@ from edelweissfe.domaindecomposition.loadsonsubdomain import (
 )
 from edelweissfe.domaindecomposition.partitioning import (
     assignConstraints,
+    elementSharesBesideConstraints,
     keepElementsWhereTheyWere,
     partitionElementsOfMesh,
 )
@@ -81,6 +83,37 @@ from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransform
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
 from edelweissfe.utils.exceptions import TopologyError
+
+
+@dataclass(frozen=True)
+class MeasuredLoad:
+    """What one process measured of its load since its increment plan was made, for
+    :meth:`Subdomain.rebalance`.
+
+    Parameters
+    ----------
+    elementCosts
+        The cost of every element of the plan, in plan order, summed over ``nIncrements`` increments
+        -- the weights of a repartition --, or None if nothing was measured.
+    nIncrements
+        The increments it was measured over.
+    incrementsUntilNextCheck
+        The increments until the next check, for the expected gain of a repartition; None to
+        repartition whenever the tolerance is exceeded, for costs that are not times (element
+        numbers).
+    elementTime
+        The time per increment the process is busy with its elements (the wall time of its element
+        loop), in the unit of the costs.
+    constraintTime
+        The time per increment it is busy evaluating its constraints, in the same unit; 0 where the
+        costs are no times.
+    """
+
+    elementCosts: np.ndarray | None
+    nIncrements: int
+    incrementsUntilNextCheck: int | None
+    elementTime: float
+    constraintTime: float
 
 
 class Subdomain:
@@ -113,9 +146,17 @@ class Subdomain:
         #: What moving the elements of the last migration cost alone, in seconds, in the slowest
         #: process -- without building the equation system again; None before the first.
         self._lastMigrationCost = None
-        #: The mean measured kernel time of one element per increment, at the last rebalancing check
-        #: that measured times; None before.
+        #: The mean time one element keeps its process busy per increment -- the element loops' wall
+        #: times over the number of elements --, at the last rebalancing check that measured times;
+        #: None before.
         self._meanElementCost = None
+        #: The measured time per increment of the constraints each process evaluates, by rank, at the
+        #: last rebalancing check that measured times; zeros before.
+        self._constraintCosts = np.zeros(self.nProcesses)
+        #: The share of the element work each process is given beside its constraints, by rank
+        #: (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`), as
+        #: of the last rebalancing check; None for equal shares.
+        self._processShares = None
 
         #: The rank of every element and of every constraint, and the element keys the partition was
         #: made for.
@@ -241,11 +282,13 @@ class Subdomain:
         if distribution.replicatesElements or byMeasuredCosts:
             with performancetiming.timeit("partition"):
                 owners = partitionElementsOfMesh(
-                    model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts
+                    model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts, self._processShares
                 )
                 if byMeasuredCosts:
                     # A repartition of the same elements: those that can stay in their process do.
-                    owners = keepElementsWhereTheyWere(owners, self._elementOwners, self.nProcesses)
+                    owners = keepElementsWhereTheyWere(
+                        owners, self._elementOwners, self.nProcesses, self._processShares
+                    )
             self._elementOwners = owners
         else:
             # A copy: the distribution changes its own as the mesh changes (see
@@ -878,21 +921,31 @@ class Subdomain:
 
         return bool(self.loadBalanceTolerance)
 
-    def rebalance(
-        self, plan: ElementPlan, costs: np.ndarray | None, nIncrements: int, incrementsUntilNextCheck: int | None
-    ) -> bool:
-        """Repartition with the measured element costs if the costliest process has fallen more than
-        ``loadBalanceTolerance`` behind the mean, and if that is worth it. Collective; only right
-        after an increment was accepted and, where every process holds the whole model, every
-        element state synchronized, since an element changing process must arrive with its current
-        state.
+    def rebalance(self, plan: ElementPlan, load: MeasuredLoad) -> bool:
+        """Repartition with the measured costs if the busiest process has fallen more than
+        ``loadBalanceTolerance`` behind what a partition can attain, and if that is worth it.
+        Collective; only right after an increment was accepted and, where every process holds the
+        whole model, every element state synchronized, since an element changing process must arrive
+        with its current state.
 
-        Worth it means: the time the repartition is expected to save until the next check -- the
-        imbalance beyond the tolerance, times the mean time of a process per increment, times the
+        A process is busy with its elements and with the constraints it evaluates. The constraints
+        stay where they are (see :mod:`~edelweissfe.domaindecomposition.partitioning`), so a
+        partition can attain at best that every process is as busy as the mean -- or, if one
+        process' constraints alone cost more, as busy as that process. The new partition gives each
+        process the share of the elements that comes closest to it
+        (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`): the
+        process evaluating a large contact computes correspondingly fewer elements.
+
+        Worth it means: the time the repartition is expected to save until the next check -- what the
+        busiest process takes beyond the attainable time and the tolerance, per increment, times the
         increments until the next check -- exceeds what the last repartition cost
-        (:meth:`recordRepartitionCost`). The first repartition is always made. This keeps a model
-        that cannot be balanced better -- fewer elements than processes, say -- from repartitioning,
-        and a distributed one from migrating, on every check.
+        (:meth:`recordRepartitionCost`). Both are wall times. The first repartition is always made.
+        This keeps a model that cannot be balanced better -- fewer elements than processes, or a
+        single constraint costing more than all elements, say -- from repartitioning, and a
+        distributed one from migrating, on every check.
+
+        Every process takes the same decision: it is made from the busy times of all processes,
+        gathered to every process.
 
         Where every process holds the whole model, the subdomain is defined afresh at once. A
         distributed model has to move its elements to their new processes first
@@ -902,13 +955,8 @@ class Subdomain:
         ----------
         plan
             The plan of the elements whose kernels are computed here.
-        costs
-            The measured kernel time of every element of the plan, in plan order, or None.
-        nIncrements
-            The increments the costs were measured over.
-        incrementsUntilNextCheck
-            The increments until the next check, for the expected gain; None to repartition
-            whenever the tolerance is exceeded, for costs that are not times (element numbers).
+        load
+            What this process measured.
 
         Returns
         -------
@@ -917,18 +965,24 @@ class Subdomain:
             derived again.
         """
 
+        costs, nIncrements = load.elementCosts, load.nIncrements
         tolerance = self.loadBalanceTolerance
         if not tolerance or self.nProcesses == 1 or costs is None or not nIncrements:
             return False
 
-        busyTimes = np.array(self.communicator.allgather(float(costs.sum())))
-        imbalance = busyTimes.max() / max(busyTimes.mean(), 1e-300)
+        incrementsUntilNextCheck = load.incrementsUntilNextCheck
+        measuredTimes = np.array(self.communicator.allgather((load.elementTime, load.constraintTime)))
+        elementTimes, constraintTimes = measuredTimes[:, 0], measuredTimes[:, 1]
+        busyTimes = elementTimes + constraintTimes
+        imbalance, timeBeyondTolerance = self._imbalance(busyTimes, constraintTimes)
         if incrementsUntilNextCheck is not None:
             nElements = self.communicator.allreduce(costs.shape[0])
-            self._meanElementCost = float(busyTimes.sum()) / max(nElements, 1) / nIncrements
-        if imbalance <= 1.0 + tolerance:
+            self._meanElementCost = float(elementTimes.sum()) / max(nElements, 1)
+        self._constraintCosts = constraintTimes
+        self._processShares = elementSharesBesideConstraints(float(elementTimes.sum()), constraintTimes)
+        if timeBeyondTolerance <= 0.0:
             self.journal.message(
-                "Load imbalance {:.3f} (the costliest process / the mean of all) within 1 + {:}".format(
+                "Load imbalance {:.3f} (the busiest process / the attainable) within 1 + {:}".format(
                     imbalance, tolerance
                 ),
                 self.identification,
@@ -937,7 +991,7 @@ class Subdomain:
             return False
 
         if incrementsUntilNextCheck is not None and self._lastRepartitionCost is not None:
-            expectedGain = (imbalance - 1.0 - tolerance) * busyTimes.mean() / nIncrements * incrementsUntilNextCheck
+            expectedGain = timeBeyondTolerance * incrementsUntilNextCheck
             if expectedGain <= self._lastRepartitionCost:
                 self.journal.message(
                     "Load imbalance {:.3f} exceeds 1 + {:}, but repartitioning would save an expected {:.3g} s until "
@@ -958,8 +1012,18 @@ class Subdomain:
                 measuredCosts.update(elementCosts)
 
         self.journal.message(
-            "Load imbalance {:.3f} (the costliest process / the mean of all) exceeds 1 + {:}: repartitioning "
-            "with the element costs".format(imbalance, tolerance),
+            "Load imbalance {:.3f} (the busiest process / the attainable) exceeds 1 + {:}: repartitioning with the "
+            "element costs{:}".format(
+                imbalance,
+                tolerance,
+                (
+                    ""
+                    if self._processShares is None
+                    else ", beside constraints costing {:} ms per increment".format(
+                        "/".join("{:.2f}".format(1e3 * cost) for cost in constraintTimes)
+                    )
+                ),
+            ),
             self.identification,
             1,
         )
@@ -972,6 +1036,29 @@ class Subdomain:
                 self._defineInterface(model, ownershipChanged=True)
             self._reportSubdomains(topologyChanged=True)
         return True
+
+    def _imbalance(self, busyTimes: np.ndarray, constraintTimes: np.ndarray) -> tuple[float, float]:
+        """How far the busiest process is behind what a partition of the elements can attain: the mean
+        of the processes' busy times, or the time of the costliest constraints of one process if that
+        is more (a constraint is not divided among processes).
+
+        Parameters
+        ----------
+        busyTimes
+            The time each process is busy, with its elements and constraints, by rank.
+        constraintTimes
+            The time of the constraints each process evaluates, by rank, in the same unit.
+
+        Returns
+        -------
+        tuple[float, float]
+            The busiest time over the attainable one, and the time the busiest process takes beyond
+            the attainable time times ``1 + loadBalanceTolerance`` (positive if out of balance).
+        """
+
+        attainable = max(float(busyTimes.mean()), float(constraintTimes.max()), 1e-300)
+        busiest = float(busyTimes.max())
+        return busiest / attainable, busiest - (1.0 + self.loadBalanceTolerance) * attainable
 
     def recordRepartitionCost(self, seconds: float):
         """Record what the last repartition cost -- deciding it, partitioning, moving the elements
@@ -993,15 +1080,17 @@ class Subdomain:
         before the equation system is built again, which it is anyway: a migration here costs only
         the moving of the elements.
 
-        No measurement is needed for the imbalance: it is estimated from the number of elements with
-        kernels each process computes. It pays if the time it is expected to save -- the imbalance
-        beyond ``loadBalanceTolerance``, times the elements of a mean process, times the mean
-        measured cost of an element per increment, times ``horizon`` increments -- exceeds what moving
-        the elements cost last time (only the moving, see :meth:`moveElements`). Before the first
-        migration, or before any element cost was measured, the tolerance alone decides. The new
-        partition is the estimate-weighted partition of the changed mesh, with every element that can
-        stay where it is kept there (:func:`keepElementsWhereTheyWere`). The decision is logged at
-        level 2. A model held whole on every process is partitioned afresh anyway.
+        No new measurement is needed for the imbalance: it is estimated from the number of elements
+        with kernels each process computes, at the mean measured cost of an element, beside the
+        measured cost of the constraints it evaluates (as in :meth:`rebalance`; before any
+        measurement, from the number of elements alone). It pays if the time it is expected to save
+        -- what the busiest process takes beyond the attainable time and ``loadBalanceTolerance``,
+        times ``horizon`` increments -- exceeds what moving the elements cost last time (only the
+        moving, see :meth:`moveElements`). Before the first migration, or before any element cost was
+        measured, the tolerance alone decides. The new partition is the estimate-weighted partition of
+        the changed mesh, for the shares of the last measurement, with every element that can stay
+        where it is kept there (:func:`keepElementsWhereTheyWere`). The decision is logged at level
+        2. A model held whole on every process is partitioned afresh anyway.
 
         Parameters
         ----------
@@ -1022,8 +1111,12 @@ class Subdomain:
         counts = np.zeros(self.nProcesses)
         for number, owner in inherited.items():
             counts[owner] += mesh.typeOf(mesh.elements[number]).hasKernels
-        imbalance = counts.max() / max(counts.mean(), 1e-300)
-        if imbalance <= 1.0 + tolerance:
+        if self._meanElementCost is None:
+            imbalance, timeBeyondTolerance = self._imbalance(counts, np.zeros(self.nProcesses))
+        else:
+            busyTimes = counts * self._meanElementCost + self._constraintCosts
+            imbalance, timeBeyondTolerance = self._imbalance(busyTimes, self._constraintCosts)
+        if timeBeyondTolerance <= 0.0:
             self.journal.message(
                 "After the topology change: element imbalance {:.3f} within 1 + {:}".format(imbalance, tolerance),
                 self.identification,
@@ -1032,7 +1125,7 @@ class Subdomain:
             return
 
         if self._meanElementCost is not None and self._lastMigrationCost is not None:
-            expectedGain = (imbalance - 1.0 - tolerance) * counts.mean() * self._meanElementCost * horizon
+            expectedGain = timeBeyondTolerance * horizon
             if expectedGain <= self._lastMigrationCost:
                 self.journal.message(
                     "After the topology change: element imbalance {:.3f} exceeds 1 + {:}, but moving elements would "
@@ -1055,8 +1148,10 @@ class Subdomain:
             2,
         )
         with performancetiming.timeit("partition"):
-            owners = partitionElementsOfMesh(mesh, self.nProcesses, model.domainSize, self.communicator)
-            owners = keepElementsWhereTheyWere(owners, inherited, self.nProcesses)
+            owners = partitionElementsOfMesh(
+                mesh, self.nProcesses, model.domainSize, self.communicator, processShares=self._processShares
+            )
+            owners = keepElementsWhereTheyWere(owners, inherited, self.nProcesses, self._processShares)
         self._model = model
         self._elementOwners = owners
         self.moveElements()
