@@ -1432,3 +1432,82 @@ def test_the_end_of_a_step_on_an_output_increment_leaves_its_result_in_every_pro
     assert fieldOutput.getLastResult().shape[0] == len(model.elementSets["gen_top"])
     with pytest.raises(RuntimeError, match="held by the process writing the output"):
         fieldOutput.getResultHistory()
+
+
+#: On process 1 only, the first element set of the mesh is moved behind the others: the same sets,
+#: in another order -- which changes the place of a load contribution in the order of all of them.
+_ELEMENT_SET_ORDER_PATCH = """
+from edelweissfe.domaindecomposition.subdomain import Subdomain
+
+define = Subdomain.define
+
+
+def reorderedInProcessOne(self, model, *args):
+    if rank == 1:
+        sets = model.mesh.elementSets
+        first = next(iter(sets))
+        sets[first] = sets.pop(first)
+    return define(self, model, *args)
+
+
+Subdomain.define = reorderedInProcessOne
+"""
+
+#: On process 1 only, the first surface of the mesh is moved behind the others.
+_SURFACE_ORDER_PATCH = _ELEMENT_SET_ORDER_PATCH.replace("model.mesh.elementSets", "model.mesh.surfaces")
+
+#: Two patches bonded by a tie, a multi-point constraint.
+with open(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "testfiles",
+        "mpi",
+        "edelweiss-only",
+        "TieNED",
+        "test.inp",
+    )
+) as _deck:
+    _TIE_DECK = _deck.read()
+
+#: On process 1 only, one weight of the tie differs by an ulp.
+_MPC_WEIGHT_PATCH = """
+import numpy as np
+
+from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
+
+construct = MultiPointConstraintTransformation.__init__
+
+
+def perturbedInProcessOne(self, records, *args, **kwargs):
+    if rank == 1:
+        slave, masters = records[0]
+        master, weight = masters[0]
+        records = [(slave, [(master, np.nextafter(weight, np.inf))] + list(masters[1:]))] + list(records[1:])
+    construct(self, records, *args, **kwargs)
+
+
+MultiPointConstraintTransformation.__init__ = perturbedInProcessOne
+"""
+
+
+@pytest.mark.parametrize(
+    "deck, patch",
+    [
+        (_FIELD_OUTPUT_DECK, _ELEMENT_SET_ORDER_PATCH),
+        (_FIELD_OUTPUT_DECK, _SURFACE_ORDER_PATCH),
+        (_TIE_DECK, _MPC_WEIGHT_PATCH),
+    ],
+    ids=["element set order", "surface order", "multi-point constraint weight"],
+)
+def test_processes_holding_different_models_are_refused(tmp_path, deck, patch):
+    # The order of the element sets decides the order the loads are added in, and the weights of a
+    # multi-point constraint its fold and slave motion: a process differing in either would compute
+    # another model, silently.
+    (tmp_path / "test.inp").write_text(deck)
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", patch))
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("processes holding different models left each other waiting")
+
+    assert exitCode != 0, output
+    assert "The processes hold different models" in output, output

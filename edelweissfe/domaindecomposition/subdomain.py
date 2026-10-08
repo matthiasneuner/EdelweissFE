@@ -406,15 +406,13 @@ class Subdomain:
         return np.concatenate([touched, np.flatnonzero(linked & np.isin(group, groupsTouched))])
 
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
-        """Refuse to continue unless every process built the same mesh and degree-of-freedom layout.
+        """Refuse to continue unless every process built the same mesh and degree-of-freedom layout
+        (:func:`layoutFingerprint`). Collective.
 
-        The interface exchange addresses degrees of freedom by index, which is only meaningful if
-        every process numbered them identically; after a refinement that rests on every process
-        having refined identically. A fingerprint of the mesh -- the element numbers and the node
-        labels of every element -- the degree of freedom of every node of every field, the node
-        coordinates and the size of the system is compared across all processes. It is made from
-        the mesh and the nodes, which every process holds whole, and not from the element objects,
-        of which a process may hold only its own. Collective.
+        The interface exchange addresses degrees of freedom by index, and the load assembly tags a
+        load contribution by its place in the element sets and surfaces of the mesh; both are only
+        meaningful if every process numbered and ordered them identically, which after a refinement
+        rests on every process having refined identically.
 
         Parameters
         ----------
@@ -429,39 +427,15 @@ class Subdomain:
             On every process, if any two fingerprints differ.
         """
 
-        digest = hashlib.sha1()
-        meshElements = model.mesh.elements
-        digest.update(np.asarray(list(meshElements.keys()), dtype=np.int64).tobytes())
-        if meshElements:
-            digest.update(
-                np.concatenate([np.asarray(record.nodeLabels, dtype=np.int64) for record in meshElements.values()])
-                .astype(np.int64)
-                .tobytes()
-            )
-        dofsOfFieldVariables = dofManager.idcsOfFieldVariablesInDofVector
-        for name, field in model.nodeFields.items():
-            digest.update(name.encode())
-            digest.update(np.asarray([node.label for node in field.nodes], dtype=np.int64).tobytes())
-            digest.update(
-                np.concatenate(
-                    [np.atleast_1d(dofsOfFieldVariables[node.fields[name]]) for node in field.nodes]
-                    or [np.empty(0, dtype=np.int64)]
-                )
-                .astype(np.int64)
-                .tobytes()
-            )
-        if model.nodes:
-            digest.update(
-                np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()]).tobytes()
-            )
-        digest.update(np.int64(dofManager.nDof).tobytes())
-
-        fingerprints = self.communicator.allgather(digest.hexdigest())
+        fingerprints = self.communicator.allgather(layoutFingerprint(model, dofManager, self._mpcTransformation))
         if len(set(fingerprints)) > 1:
             raise RuntimeError(
                 "The processes hold different models: their layout fingerprints are {:}. Every process "
-                "must build, and refine, the model identically for the subdomain interface to be "
-                "meaningful.".format(", ".join(sorted(set(fingerprints))))
+                "must build, and refine, the model identically -- the same elements, element sets and "
+                "surfaces in the same order, the same degrees of freedom and multi-point constraints -- for "
+                "the subdomain interface and the order of the loads to be meaningful.".format(
+                    ", ".join(sorted(set(fingerprints)))
+                )
             )
 
     def _reportSubdomains(self, topologyChanged: bool):
@@ -1135,3 +1109,80 @@ class Subdomain:
                 self.identification,
                 1,
             )
+
+
+def layoutFingerprint(
+    model: FEModel, dofManager: DofManager, mpcTransformation: MultiPointConstraintTransformation | None
+) -> str:
+    """A fingerprint of everything the processes of a domain-decomposed run must hold identically: the
+    mesh -- the element numbers and the node labels of every element --, the element sets and the
+    surfaces of the mesh, each with its elements in order and all of them in order, the degree of
+    freedom of every node of every field, the node coordinates, the size of the system, and the
+    multi-point constraints -- every slave, master and weight. It is made from the mesh, the nodes and
+    the equation system, which every process holds whole, and not from the element objects, of which
+    a process may hold only its own.
+
+    Parameters
+    ----------
+    model
+        The model tree.
+    dofManager
+        The degree-of-freedom layout.
+    mpcTransformation
+        The multi-point-constraint transformation of the equation system, or None.
+
+    Returns
+    -------
+    str
+        The fingerprint.
+    """
+
+    digest = hashlib.sha1()
+
+    def add(name: str, values):
+        """Add a name and an array, each preceded by its length, so that no two sequences of them
+        digest alike."""
+
+        encoded = name.encode()
+        array = np.ascontiguousarray(values)
+        digest.update(np.int64(len(encoded)).tobytes() + encoded)
+        digest.update(np.int64(array.nbytes).tobytes() + array.tobytes())
+
+    mesh = model.mesh
+    add("elements", np.asarray(list(mesh.elements.keys()), dtype=np.int64))
+    add(
+        "connectivity",
+        np.concatenate(
+            [np.asarray(record.nodeLabels, dtype=np.int64) for record in mesh.elements.values()]
+            or [np.empty(0, dtype=np.int64)]
+        ),
+    )
+    for name, numbers in mesh.elementSets.items():
+        add("element set " + name, np.asarray(numbers, dtype=np.int64))
+    for name in mesh.surfaces:
+        for face, numbers in mesh.elementNumbersOfSurface(name).items():
+            add("surface {:} face {:}".format(name, face), np.asarray(numbers, dtype=np.int64))
+
+    dofsOfFieldVariables = dofManager.idcsOfFieldVariablesInDofVector
+    for name, field in model.nodeFields.items():
+        add("nodes of field " + name, np.asarray([node.label for node in field.nodes], dtype=np.int64))
+        add(
+            "degrees of freedom of field " + name,
+            np.concatenate(
+                [np.atleast_1d(dofsOfFieldVariables[node.fields[name]]) for node in field.nodes]
+                or [np.empty(0, dtype=np.int64)]
+            ).astype(np.int64),
+        )
+    add(
+        "coordinates",
+        np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()] or [np.empty(0)]),
+    )
+    add("size", np.int64(dofManager.nDof))
+
+    if mpcTransformation is not None:
+        slaves, masters, weights = mpcTransformation.slaveMasterDofWeights()
+        add("multi-point constraint slaves", slaves.astype(np.int64))
+        add("multi-point constraint masters", masters.astype(np.int64))
+        add("multi-point constraint weights", np.asarray(weights, dtype=float))
+
+    return digest.hexdigest()

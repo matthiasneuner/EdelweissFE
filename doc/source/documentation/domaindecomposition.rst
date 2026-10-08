@@ -560,9 +560,18 @@ markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
   needs no gather of its own.
 
 Every process therefore refines the same mesh, and numbers it the same way. That is verified, not
-assumed: after every build of the equation system, a fingerprint of the mesh (element numbers and
-connectivity), the degree of freedom of every node of every field, the node coordinates and the size
-of the system is compared across all processes, and the run stops if any two differ.
+assumed: after every build of the equation system, a fingerprint
+(:func:`~edelweissfe.domaindecomposition.subdomain.layoutFingerprint`) of the mesh (element numbers and
+connectivity), its element sets and surfaces with their elements, all in order -- the order the loads
+are added in follows from them --, the degree of freedom of every node of every field, the node
+coordinates, the size of the system and every slave, master and weight of the multi-point constraints
+is compared across all processes, and the run stops if any two differ.
+
+Every process must therefore build its model in the same order. Python orders a ``dict`` by insertion,
+the same in every process, but a ``set`` of strings by their hashes, which differ between processes
+unless ``PYTHONHASHSEED`` is fixed. Code deciding the model's order by iterating such a set would stop
+the run at the fingerprint check; until it is fixed, ``PYTHONHASHSEED=0`` (passed with ``-x
+PYTHONHASHSEED`` to every process) makes the processes agree.
 
 **Owner-local: the elements and their states.** The child of a refined element is computed by the
 process that computed its parent

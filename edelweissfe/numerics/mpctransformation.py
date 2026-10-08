@@ -232,13 +232,31 @@ class MultiPointConstraintTransformation:
         self._TTranspose = None
         self._amgclSpgemmHelper = None
 
-    def slaveMasterDofPairs(self) -> tuple[np.ndarray, np.ndarray]:
-        """Every dependency of the condensation, as pairs of a slave DOF and one of its masters.
+    def slaveMasterDofWeights(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Every dependency of the condensation: a slave DOF, one of its masters, and the weight of
+        that master in the slave's motion, ordered by slave, then by master.
 
-        After chained records are flattened, so a master is always an independent DOF. A domain
-        decomposition reads this to keep a slave and all of its masters in the set of DOFs one
-        process integrates: folding a slave's force onto its masters, and interpolating its velocity
-        from them, are only correct where all of them are.
+        After chained records are flattened, so a master is always an independent DOF. The order
+        does not depend on the order the constraints were given in, so that two processes holding
+        the same constraints describe them identically (see
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.define`).
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, np.ndarray]
+            The slave DOF, the master DOF and the weight of each dependency, of equal length.
+        """
+
+        W = self._W.sorted_indices().tocoo()
+        return self.slaveDofIndices[W.row], W.col.astype(int), W.data
+
+    def slaveMasterDofPairs(self) -> tuple[np.ndarray, np.ndarray]:
+        """Every dependency of the condensation, as pairs of a slave DOF and one of its masters
+        (:meth:`slaveMasterDofWeights` without the weights).
+
+        A domain decomposition reads this to keep a slave and all of its masters in the set of DOFs
+        one process integrates: folding a slave's force onto its masters, and interpolating its
+        velocity from them, are only correct where all of them are.
 
         Returns
         -------
@@ -246,8 +264,8 @@ class MultiPointConstraintTransformation:
             The slave DOF and the master DOF of each dependency, of equal length.
         """
 
-        W = self._W.tocoo()
-        return self.slaveDofIndices[W.row], W.col.astype(int)
+        slaves, masters, _ = self.slaveMasterDofWeights()
+        return slaves, masters
 
     @property
     def nEliminatedDof(self) -> int:
