@@ -822,9 +822,13 @@ class ElementFieldOutput(_FieldOutputBase):
                 "which were not read (readResultsHere)".format(self.name)
             )
         resultsHere, self._resultsHere, self._resultsHereRead = self._resultsHere, None, False
-        self._resultsOfWholeSet = self.model.elementDistribution.resultsOfWholeSet(
+        resultsOfWholeSet = self.model.elementDistribution.resultsOfWholeSet(
             self.associatedSet, self._numbersOwnedHere, resultsHere, toEveryProcess
         )
+        # Kept only if stored here: where every process holds every element, the whole result is here
+        # even if it was gathered for the process writing the output, and kept, it would be stored by
+        # the next update instead of the result read then (the end of a step, say).
+        self._resultsOfWholeSet = resultsOfWholeSet if storedHere else None
 
     def updateResults(self, model: FEModel):
         """Update the field output: read the results of the elements owned here, gather those of the

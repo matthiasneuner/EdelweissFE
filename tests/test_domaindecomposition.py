@@ -1303,3 +1303,46 @@ def test_a_field_output_gathered_elsewhere_refuses_to_be_read_here(tmp_path):
     assert fieldOutput.getLastResult().shape == (6, 2)
     with pytest.raises(RuntimeError, match="held by the process writing the output"):
         fieldOutput.getResultHistory()
+
+
+def test_an_element_field_output_gathered_elsewhere_reads_afresh_at_the_end_of_a_step(tmp_path):
+    from edelweissfe.helpers.inputfilehelpers import (
+        createFieldOutputFromInputFile,
+        fillFEModelFromInputFile,
+    )
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*fieldOutput
+>>perElement, name=sTop, elSet=gen_top, result=stress, quadraturePoint=0
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    model = fillFEModelFromInputFile(FEModel(2), inputFile, Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["sTop"]
+
+    # An output increment whose result was gathered to the process writing the output only. Where every
+    # process holds every element, the gather leaves the whole result here all the same -- it must not
+    # be kept for the next result stored here.
+    fieldOutput.readResultsHere()
+    fieldOutput.gatherResultsOfWholeSet(toEveryProcess=False, storedHere=False)
+    model.time = 1.0
+    fieldOutput.finalizeIncrement()
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getLastResult()
+
+    # The end of a step, later: the result is read afresh from the elements, not the one of the output
+    # increment.
+    reads = []
+    readResultsHere = fieldOutput.readResultsHere
+    fieldOutput.readResultsHere = lambda: (reads.append(model.time), readResultsHere())
+    model.time = 2.0
+    fieldOutput.finalizeStep()
+    assert reads == [2.0]
+    assert fieldOutput.getLastResult().shape[0] == len(model.elementSets["gen_top"])
