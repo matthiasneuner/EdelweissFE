@@ -232,11 +232,12 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``publishNodeFields``                       publishes the degrees of freedom integrated here
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
 ``advanceModelToTime``                      accepts the states of the own elements and constraints only
-``updateConstraintConnectivity``            the synchronization before a contact search
+``updateConstraintConnectivity``            the positions a contact search reads, from their owners
 ``updateConnectivityOf``                    runs a search on the constraint's process only
 ``updateTopology``                          the agreement on a topology update
 ``writeIncrementOutput``                    reads locally, agrees, gathers, then writes (below)
 ``applyStepActionsAtStepEnd``               the synchronization at the end of a step
+``buildEquationSystem``                     completes the vectors at newly integrated degrees of freedom
 ``releaseEquationSystem``                   (its own) releases the system before elements move
 ==========================================  =========================================================
 
@@ -300,19 +301,94 @@ is the minimum over the subdomains.
 Where the whole model is read
 -----------------------------
 
-A process keeps current only what it computes. Field outputs, output managers, restart checkpoints,
-the marker of an adaptive refinement and the refinement itself, and a contact search all read more
-than one subdomain. Before each of them every process receives the current solution at every degree
-of freedom from its owner (the vectors are global-length in every process). What happens to the
-element states depends on how the model is held.
+A process keeps current only what it computes: the solution, the velocity and the net force at the
+degrees of freedom it integrates, and the states of its own elements and constraints. Field outputs,
+output managers, restart checkpoints, the marker of an adaptive refinement and the refinement itself,
+and a contact search read more than one subdomain. Each of them receives what it reads from the
+processes computing it -- every entry of a vector from its owner -- and only the processes that read
+it receive it:
 
-**The whole model on every process.** Every process receives the current state of every element and
-stateful constraint from the process that computed it -- except before a contact search, which reads
-positions only (:mod:`~edelweissfe.domaindecomposition.statesynchronization`). The states travel
-through the same interface restart checkpoints use: whatever a checkpoint must carry to resume a run
-is what another process must receive to continue it. Every reader then reads the model as a serial
-run does. This synchronization happens every ``output-frequency`` increments, at every
-``contact-update-frequency`` search, and at the end of a step.
+=================================  ==================================================================
+Synchronization point              What is gathered, to whom
+=================================  ==================================================================
+output increment                   to **rank 0**, which writes the output and the checkpoints: the
+                                   solution, the velocity and the net force at every degree of freedom
+                                   (published into its node fields), the state of every stateful
+                                   constraint, the results of every element field output, and -- if a
+                                   checkpoint is written -- the element states
+output increment the topology      to **every process**: all of the above but the element states, and
+check follows (every               of the element field outputs those the markers read; every process
+``topology-check-frequency``-th)   refines the same mesh, interpolates its node fields onto the refined
+                                   mesh, and builds its equation system from them
+end of a step                      to **every process**, as before a topology check: the next step
+                                   starts with a topology update and an equation system built from the
+                                   node fields
+periodic contact search            to the **process evaluating the constraint**: the positions of the
+(``contact-update-frequency``)     nodes the search reads that it does not integrate itself, point to
+                                   point (see `Contact, ties and rigid bodies`_)
+the subdomain changes: a contact   to **each process**, at the degrees of freedom it integrates from
+search moved a constraint, or a    now on: the solution, the velocity and the net force, from their
+repartition moved elements         previous owners, point to point
+=================================  ==================================================================
+
+Which processes read what is decided from the model, not by a blanket rule. A topology check follows
+an output increment when the solver says so (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.topologyCheckDueAfter`,
+:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.wholeModelReadEverywhereNext`); a
+marker names the field outputs it reads
+(:meth:`~edelweissfe.adaptivity.marking.MarkerBase.fieldOutputsRead`, gathered for its model modifier
+by :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.fieldOutputsRead`); a
+constraint names the nodes its search reads
+(:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.nodesReadByConnectivityUpdate`).
+Each says None where it cannot name them -- a marker or a modifier of another package, a constraint
+not declaring its nodes -- and is then sent all of it: every field output, or the whole solution to
+every process before a search.
+
+**What a process holds, and what refuses to be read.** Between two synchronizations that reached it,
+a process holds the vectors and the node fields current at the degrees of freedom it integrates only
+-- elsewhere they hold what the last synchronization left there --, its copies of the constraints
+owned elsewhere in the state of their last synchronization, and the field outputs gathered to rank 0
+not at all. None of this is read as if it were whole:
+
+* the readers of the whole solution -- a topology update, an equation system built from the node
+  fields -- first require it to be here
+  (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.requireWholeSolutionHere`), and
+  raise otherwise;
+* a field output that was gathered to rank 0 only records the time of the increment (so that every
+  process decides alike whether the end of a step stores another result), and reading its last
+  result or its history in another process raises, until a result is stored there again
+  (:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`);
+* before a topology update, the constraint copies are compared with their owners
+  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+
+``tests/test_domaindecomposition.py`` checks that nothing reads the rest: a run with the solution,
+the velocity, the net force and the node fields set to NaN, after every increment, outside the
+degrees of freedom a process integrates -- wherever it does not hold the whole solution -- gives the
+same bits; and that it would notice: without the positions received for the contact search, it does
+not.
+
+What it saves, on the c1_150 edge-breakout model (about 1 million degrees of freedom; output and a
+contact search every 50 increments, a topology check every 250; summed over all processes):
+
+==============================  ========================  ========================
+                                8 processes x 4 threads   32 processes x 1 thread
+==============================  ========================  ========================
+output increment, before        313 MB, 0.30 s            1386 MB, 0.50 s
+output increment, now           39 MB, 0.20 s             43 MB, 0.22 s
+contact search, before          191 MB, 0.26 s            847 MB, 0.32 s
+contact search, now             0.13 MB, 0.18 s           0.18 MB, 0.17 s
+==============================  ========================  ========================
+
+An output increment a topology check follows costs what it did. What is left of a contact search
+is the search itself; an increment without output or search, and the peak memory of a process, are
+unchanged.
+
+What happens to the element states depends on how the model is held.
+
+**The whole model on every process.** Every process receives the current state of every element
+from the process that computed it on every output increment, since a repartition may give any
+element to any process (:mod:`~edelweissfe.domaindecomposition.statesynchronization`). The states
+travel through the same interface restart checkpoints use: whatever a checkpoint must carry to resume
+a run is what another process must receive to continue it.
 
 **Distributed.** No element state is synchronized -- a process holds no element it does not compute
 -- and each whole-model reader goes through
@@ -324,9 +400,10 @@ what is here):
 Reader                                  How it reads a distributed model
 ======================================  =================================================================
 element field output over a set         ``resultsOfWholeSet``: each process collects the results of the
-(``>>perElement``)                      elements of the set it computes, and they are gathered to every
-                                        process, by mesh element number, in set order -- so a field
-                                        output is the same in every process, as without decomposition
+(``>>perElement``)                      elements of the set it computes, and they are gathered, by mesh
+                                        element number, in set order, to rank 0 -- and to every process
+                                        if a marker reads it before a topology check --, so a field
+                                        output is the same wherever it is read, as without decomposition
 node field output over an element set   the nodes of the whole set, from the mesh
 (``>>perNode, elSet=``)                 (``extractNodeSet`` of the set, also of a partial set, and
                                         again after a refinement); the node fields are global-length
@@ -357,14 +434,14 @@ forces are sent with the degrees of freedom of the owner's search. Whether a sea
 footprint is decided by the owners and communicated to all processes.
 
 Restoring a constraint's state restores it completely -- a contact constraint adopts the owner's
-search, and with it the nodes it couples -- so after a synchronization every process' copy of a
-constraint is its owner's. Between two synchronizations a copy keeps that footprint, with the mesh
+search, and with it the nodes it couples -- so after a synchronization that reached it a process'
+copy of a constraint is its owner's. Between two such synchronizations a copy keeps that footprint, with the mesh
 refreshes since applied to it as to the owner's. Its degree-of-freedom indices are never read, since
 a constraint is evaluated, and its forces exchanged, with its owner's indices only. The footprint
 itself is read in one place: a topology change activates fields on the nodes of every constraint
-copy. That is harmless because a topology update always follows a synchronization -- a topology
-check is due only on an output increment, the start of a step follows the end of the last one or a
-checkpoint -- and it is asserted rather than assumed: before every topology update the nodes and
+copy. That is harmless because a topology update always follows a synchronization of every process
+-- a topology check is due only on an output increment, whose synchronization then reaches every
+process, the start of a step follows the end of the last one or a checkpoint -- and it is asserted rather than assumed: before every topology update the nodes and
 fields every constraint couples are compared across processes
 (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
 
@@ -385,14 +462,28 @@ contact facets of its surfaces          made by every process, from the surface 
                                         refuses a partial set; a facet's parent face (for the
                                         surface-to-surface quadrature) is stamped on the facet itself
 node sets                               every process holds every node set
-nodes, their coordinates and fields     every process holds every node; the solution at every node is
-                                        current in every process before a search (see
-                                        `Where the whole model is read`_)
+nodes, their coordinates and fields     every process holds every node; the positions of the nodes a
+                                        search reads are current on the constraint's process before the
+                                        search (below)
 rigid bodies                            made by every process (``discreteRigidBodyGenerator``), with the
                                         point mass of the reference node; its surface follows the
                                         reference node, moved from the complete solution in every process
 the degrees of freedom it couples       global numbers, the same in every process
 ======================================  =================================================================
+
+**What a search receives.** A contact search runs on the process evaluating the constraint, and
+reads the current positions of every node it may couple -- the slave nodes (or the nodes of the
+faces carrying the contact points), the nodes of every master facet, the reference node of a rigid
+body --, of which that process integrates only those the constraint couples now. The constraint
+names them (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.nodesReadByConnectivityUpdate`);
+before every periodic search the process receives their displacement from the owners of the
+degrees of freedom, point to point, and publishes it into its node fields
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.updateConstraintConnectivity`).
+Which entries go where is agreed once per subdomain, at its first search; a search then moves the
+values alone. If the search changes what the constraint couples, the process integrates further
+degrees of freedom, and receives the solution, the velocity and the net force there from their
+previous owners when the equation system is rebuilt. A constraint naming no nodes has the whole
+solution sent to every process before a search instead.
 
 A tie also moves (snaps) slave nodes when it is constructed: every process constructs every
 constraint and so moves its nodes identically, before any element is initialized; an element created
@@ -447,8 +538,10 @@ are derived from the mesh, the nodes and the node fields -- which every process 
 never from an element object (:mod:`~edelweissfe.modelmodifiers.adaptivity.hadaptivity`). The
 markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
 
-* a field-output marker thresholds the result of an element field output, which is a result of the
-  whole set in every process (``resultsOfWholeSet``), row by row in the set order of the mesh;
+* a field-output marker thresholds the result of an element field output, row by row in the set
+  order of the mesh; it names that field output
+  (:meth:`~edelweissfe.adaptivity.marking.MarkerBase.fieldOutputsRead`), which is therefore gathered
+  to every process on the output increment a topology check follows (``resultsOfWholeSet``);
 * the element-set, node-set and surface markers read the sets and surfaces of the mesh;
 * the recovery-error marker reads the node coordinates and a node field at the nodes of the
   refineable elements of the mesh -- global data only, current in every process after the output
@@ -525,8 +618,8 @@ the increment was accepted, in every process:
 
 Everything indexed by the elements a process holds is then built again, as after a change of the
 topology: the solver rebuilds the equation system for the elements now held, carrying the solution,
-the velocity and the force -- which the output synchronization has just made complete in every
-process -- over, and with it the degree-of-freedom indices of the elements, the subdomain and its
+the velocity and the force over -- each process completes them at the degrees of freedom it
+integrates from now on, from their previous owners --, and with it the degree-of-freedom indices of the elements, the subdomain and its
 interface, the loads of the elements computed here, the lumped inertia and damping (assembled from the
 elements now computed here, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
@@ -710,6 +803,8 @@ Limitations
   is computed by every process on the whole mesh, and the mirror is held by every process: about
   4.7 KB of Python objects per root element (110 MB for 24 000 GC3D20R elements, 334 MB for the
   c1_150 model).
+* Before every topology check the whole solution, and the field outputs the markers read, are
+  gathered to every process, since every process refines the whole mesh.
 * A constraint is evaluated whole, by one process, while the others wait; a single large contact
   constraint is not split (see `Contact, ties and rigid bodies`_). The implicit-only constraint types
   still hold the whole model on every process.
