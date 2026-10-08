@@ -468,7 +468,8 @@ class NEDMPI(NEDParallel):
 
         The failed increment changed the solution, the velocity and the net force at the degrees of
         freedom each process integrates, in the vectors; the node fields still hold the last accepted
-        increment there, published when it was accepted -- which is what a serial run leaves. The
+        increment there, published when it was accepted, or when the process began to integrate them
+        (:meth:`_receiveNewlyIntegratedValues`) -- which is what a serial run leaves. The
         vectors are therefore taken back from the node fields at those degrees of freedom, and the model
         synchronized from them, as at the end of a step (:meth:`applyStepActionsAtStepEnd`), and with
         it the external work, which the failed increment added to as it does in a serial run.
@@ -867,7 +868,7 @@ class NEDMPI(NEDParallel):
                 else:
                     self.partition = self.subdomain.partition
                     self._incrementPlan = self.planIncrement(model)
-                    self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [self._U, self._V, self._P])
+                    self._receiveNewlyIntegratedValues(interfaceBefore, self._U, self._V, self._P)
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
 
         if self.options["debug-poison-stale-solution"] and not self._wholeSolutionHere:
@@ -1578,5 +1579,28 @@ class NEDMPI(NEDParallel):
 
         interfaceBefore = self.subdomain.interface
         theSystem = super().buildEquationSystem(model, step, previous)
-        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [theSystem.U, theSystem.V, theSystem.P])
+        self._receiveNewlyIntegratedValues(interfaceBefore, theSystem.U, theSystem.V, theSystem.P)
         return theSystem
+
+    def _receiveNewlyIntegratedValues(self, interfaceBefore, U: DofVector, V: DofVector, P: DofVector):
+        """Complete the solution, the velocity and the net force at the degrees of freedom this process
+        integrates from now on, from their previous owners
+        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.receiveNewlyIntegratedValues`), and
+        publish them into the node fields, as an accepted increment publishes what it integrates: the
+        node fields hold the last accepted increment at every degree of freedom a process integrates,
+        which the end of a failed step reads back (:meth:`_synchronizeAcceptedModel`). Collective.
+
+        Parameters
+        ----------
+        interfaceBefore
+            The interface of the subdomain before it changed.
+        U
+            The solution vector.
+        V
+            The velocity vector.
+        P
+            The net force vector.
+        """
+
+        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [U, V, P])
+        self._publishIntoNodeFields(self._integratedNodeFieldSlots, ((U, "U"), (P, "P"), (V, "V")))

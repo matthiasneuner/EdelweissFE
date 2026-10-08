@@ -33,6 +33,7 @@ decomposition -- is covered by the decks in ``testfiles/mpi``, run under ``mpiru
 process, which must not leave the others waiting, by a test starting ``mpirun`` itself."""
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1642,3 +1643,120 @@ def test_a_failure_in_one_process_alone_aborts_before_the_end_of_the_step_commun
     assert exitCode != 0, output
     assert "a step action failed in process 1 alone" in output, output
     assert "in MPI process 1 of 3; aborting all processes" in output, output
+
+
+#: Increment 3, the first after elements moved between the processes on output increment 2, fails on
+#: every process together, before it changes anything.
+_FAIL_AFTER_A_MIGRATION_PATCH = """
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED
+from edelweissfe.utils.exceptions import CutbackRequest
+
+solveIncrement = NED.solveIncrement
+
+
+def failingInIncrementThree(self, U, dU, V, P, Minv, stepActions, model, timeStep, prevTimeStep):
+    if timeStep.number == 3:
+        raise CutbackRequest("the increment after the migration", 0.5)
+    return solveIncrement(self, U, dU, V, P, Minv, stepActions, model, timeStep, prevTimeStep)
+
+
+NED.solveIncrement = failingInIncrementThree
+"""
+
+with open(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "testfiles",
+        "mpi",
+        "edelweiss-only",
+        "NEDContact",
+        "test.inp",
+    )
+) as _deck:
+    # the upper block slides across the lower one, so that the contact searches move the constraint
+    _SLIDING_CONTACT_DECK = (
+        _deck.read()
+        .replace("nSet=upper_front, field=displacement, 3=-0.2", "nSet=upper_front, field=displacement, 1=0.8, 3=-0.2")
+        .replace(
+            "nSet=upper_bottomLeftBack, field=displacement, 1=0.0, 2=0.0",
+            "nSet=upper_bottomLeftBack, field=displacement, 2=0.0",
+        )
+    )
+
+
+def test_a_step_failing_after_elements_moved_leaves_the_state_of_a_serial_run(tmp_path):
+    # After a migration a process integrates degrees of freedom it did not before, completed in its
+    # vectors from their previous owners; the end of a failed step reads them back from the node fields,
+    # which must therefore hold them too.
+    deck = _MIGRATING_DECK.replace("solver=NEDMPI", "solver=SOLVER").replace(
+        "load-balance-costs=elementNumber", "LOADBALANCE"
+    )
+    patch = _FAIL_AFTER_A_MIGRATION_PATCH
+    serial, decomposed = tmp_path / "serial", tmp_path / "decomposed"
+    for directory, solver, loadBalance in (
+        (serial, "NED", ""),
+        (decomposed, "NEDMPI", "load-balance-costs=elementNumber\nload-balance-tolerance=0.1"),
+    ):
+        directory.mkdir()
+        text = deck.replace("SOLVER", solver).replace("LOADBALANCE", loadBalance)
+        (directory / "test.inp").write_text(text)
+        (directory / "run.py").write_text(
+            _FINAL_STATE_SCRIPT.replace("journal = io.StringIO()", patch + "\njournal = io.StringIO()")
+        )
+
+    expected = _finalState(serial, None)
+    result = _finalState(decomposed, 3)
+    assert result.keys() == expected.keys()
+    assert [name for name in expected if result[name] != expected[name]] == []
+
+
+#: After every rebuild of the equation system with the vectors carried over -- here a contact search
+#: moving the constraint --, every process compares its node fields with its vectors at the degrees of
+#: freedom it integrates, and prints how many entries differ.
+_NODE_FIELDS_AFTER_A_REBUILD_SCRIPT = """
+import contextlib, io
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import processRank
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+buildEquationSystem = NEDMPI.buildEquationSystem
+differing = []
+
+
+def checkedRebuild(self, model, step, previous=None):
+    system = buildEquationSystem(self, model, step, previous)
+    if previous is not None:
+        count = 0
+        for slot in self._integratedNodeFieldSlots:
+            for vector, entry in ((system.U, "U"), (system.V, "V"), (system.P, "P")):
+                published = slot.nodeField[entry].reshape(-1)[slot.positions]
+                count += int(np.count_nonzero(published != np.asarray(vector)[slot.dofs]))
+        differing.append(count)
+    return system
+
+
+NEDMPI.buildEquationSystem = checkedRebuild
+with contextlib.redirect_stdout(io.StringIO()):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+print("PROCESS", processRank(), len(differing), sum(differing), flush=True)
+"""
+
+
+def test_the_node_fields_hold_what_a_process_integrates_after_a_contact_search_moved_a_constraint(tmp_path):
+    # A process newly integrating degrees of freedom after the search completes its vectors there from
+    # their previous owners; the node fields must hold them too, since the end of a failed step reads
+    # the last accepted increment back from them (NEDMPI._synchronizeAcceptedModel).
+    deck = re.sub(r"^(\*solver,.*NEDMPI.*)$", r"\1\nload-balance-tolerance=0", _SLIDING_CONTACT_DECK, flags=re.M)
+    (tmp_path / "test.inp").write_text(deck)
+    (tmp_path / "run.py").write_text(_NODE_FIELDS_AFTER_A_REBUILD_SCRIPT)
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("the job did not end")
+    assert exitCode == 0, output
+
+    reports = sorted(line.split()[1:] for line in output.splitlines() if line.startswith("PROCESS"))
+    assert [rank for rank, _, _ in reports] == ["0", "1", "2"], output
+    assert all(int(rebuilds) > 0 for _, rebuilds, _ in reports), output
+    assert [int(differing) for _, _, differing in reports] == [0, 0, 0], output
