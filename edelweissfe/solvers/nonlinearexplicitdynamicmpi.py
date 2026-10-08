@@ -108,7 +108,8 @@ communication, each in an override of a method of ``NED``:
 * :meth:`NEDMPI.assembleInternalForces` completes the element forces at the interface;
 * :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
   shares them from the owners;
-* :meth:`NEDMPI.assembleConstraintForces` shares the constraint forces;
+* :meth:`NEDMPI.assembleConstraintForces` sends the constraint forces to the processes integrating
+  their degrees of freedom;
 * :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements computed here, and completes
   them at the interface like the forces;
 * :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
@@ -585,9 +586,10 @@ class NEDMPI(NEDParallel):
     def assembleConstraintForces(
         self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> DofVector:
-        """Evaluate the constraints of the subdomain, failing on all ranks together if it fails on one, share their forces
-        with every process, and add those of every constraint of the model, in model order; see
-        :meth:`NED.assembleConstraintForces`. Collective.
+        """Evaluate the constraints of the subdomain, failing on all ranks together if it fails on one, send their forces
+        to the processes integrating their degrees of freedom, and add those of every constraint at the degrees of
+        freedom integrated here, in model order; see :meth:`NED.assembleConstraintForces` and
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.addConstraintForces`. Collective.
 
         Parameters
         ----------

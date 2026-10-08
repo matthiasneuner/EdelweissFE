@@ -34,7 +34,8 @@ assigns to it, the constraints dealt to it, and the degrees of freedom those tou
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` (:attr:`Subdomain.partition`). It
 also carries out every exchange between the processes the domain-decomposed solver needs: the
 element forces are completed at the interface with the neighbouring subdomains
-(:mod:`.subdomaininterface`), the constraint forces are shared with every process, sums are formed
+(:mod:`.subdomaininterface`), the constraint forces are sent to the processes integrating their
+degrees of freedom (:class:`~.subdomaininterface.ConstraintForceExchange`), sums are formed
 over all processes in rank order, and the vectors and states of the whole model are made current
 from the processes computing them (:mod:`.statesynchronization`). The loads of the elements a
 subdomain computes are described in :mod:`.loadsonsubdomain`, and how the processes agree -- on a
@@ -330,7 +331,7 @@ class Subdomain:
             self._refuseElementsWithoutState(model)
 
         self._constraintForceExchange = ConstraintForceExchange(
-            self.communicator, model.constraints, self._ownedConstraints, dofManager.idcsOfConstraintsInDofVector
+            self._interface, model.constraints, self._ownedConstraints, dofManager.idcsOfConstraintsInDofVector
         )
         self._loadsOnSubdomain = None
 
@@ -732,11 +733,14 @@ class Subdomain:
         self._interface.allgatherOwnedValues(vector)
 
     def addConstraintForces(self, forces: dict, P: DofVector):
-        """Share the forces of the constraints evaluated here with every process, and add those of
-        every constraint of the model into ``P``, in model order. Collective.
+        """Send the forces of the constraints evaluated here to the processes integrating their
+        degrees of freedom, and add those of every constraint acting on a degree of freedom
+        integrated here into ``P``, in model order
+        (:class:`~.subdomaininterface.ConstraintForceExchange`). Collective among neighbours.
 
         The degrees of freedom are the owner's: another process' copy of a contact constraint
-        couples the nodes of its last synchronization.
+        couples the nodes of its last synchronization. ``P`` holds the constraint forces at the
+        degrees of freedom integrated here only.
 
         Parameters
         ----------

@@ -301,17 +301,19 @@ def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path)
 
 
 #: Adds adversarial constraint forces over three processes, each owning a random part of the
-#: constraints, and checks the whole net force vector against the serial sum in model order.
+#: constraints and integrating their degrees of freedom and a few more of its elements, and checks the
+#: net force vector against the serial sum in model order: bitwise at every degree of freedom integrated
+#: here, and not written anywhere else -- the forces reach only the processes integrating them.
 _CONSTRAINT_EXCHANGE_SCRIPT = """
 import numpy as np
 from mpi4py import MPI
-from edelweissfe.domaindecomposition.subdomaininterface import ConstraintForceExchange
+from edelweissfe.domaindecomposition.subdomaininterface import ConstraintForceExchange, SubdomainInterface
 from edelweissfe.numerics.assembly import addNodalForces
 
 communicator = MPI.COMM_WORLD
 rank = communicator.Get_rank()
 rng = np.random.default_rng(9)
-nDof, nConstraints = 30, 80
+nDof, nConstraints = 60, 80
 names = ["constraint{:}".format(i) for i in rng.permutation(nConstraints)]
 constraints = {name: name for name in names}
 dofs = {name: rng.integers(0, nDof, int(rng.integers(1, 7))) for name in names}  # a DOF may repeat
@@ -322,17 +324,25 @@ for name in names[::5]:
 initial = rng.standard_normal(nDof) * 1e6
 initial[::4] = -0.0
 owner = {name: int(rng.integers(0, communicator.Get_size())) for name in names}
+elementDofs = [rng.choice(nDof, 5, replace=False) for _ in range(communicator.Get_size())]
 
 expected = initial.copy()
 for name in names:
     addNodalForces(expected, dofs[name], forces[name], len(np.unique(dofs[name])) != len(dofs[name]))
 
 owned = {name: constraints[name] for name in names if owner[name] == rank}
-exchange = ConstraintForceExchange(communicator, constraints, owned, {constraints[name]: dofs[name] for name in names})
+touched = np.concatenate([elementDofs[rank]] + [dofs[name] for name in owned])
+interface = SubdomainInterface(communicator, touched, nDof)
+exchange = ConstraintForceExchange(interface, constraints, owned, {constraints[name]: dofs[name] for name in names})
 vector = initial.copy()
 exchange.addAllConstraintForces({name: forces[name] for name in owned}, vector)
-same = np.array_equal(vector.view(np.int64), expected.view(np.int64))
-print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", len(owned) > 0, flush=True)
+
+integrated = np.zeros(nDof, dtype=bool)
+integrated[interface.subdomainDofs] = True
+same = np.array_equal(vector[integrated].view(np.int64), expected[integrated].view(np.int64))
+untouched = np.array_equal(vector[~integrated].view(np.int64), initial[~integrated].view(np.int64))
+print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", "UNTOUCHED" if untouched else "WRITTEN",
+      len(owned) > 0 and interface.nInterfaceDofs > 0 and not integrated.all(), flush=True)
 """
 
 
@@ -355,7 +365,7 @@ def test_constraint_forces_are_added_in_model_order_on_every_process(tmp_path):
         timeout=120,
     ).stdout
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
-    assert reports == ["PROCESS {:} BITWISE True".format(rank) for rank in range(3)], output
+    assert reports == ["PROCESS {:} BITWISE UNTOUCHED True".format(rank) for rank in range(3)], output
 
 
 class _SpringElement:
