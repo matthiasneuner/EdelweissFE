@@ -1346,3 +1346,57 @@ def test_an_element_field_output_gathered_elsewhere_reads_afresh_at_the_end_of_a
     fieldOutput.finalizeStep()
     assert reads == [2.0]
     assert fieldOutput.getLastResult().shape[0] == len(model.elementSets["gen_top"])
+
+
+#: Runs the deck in this directory and writes, from rank 0 (or the one process), the final node fields
+#: to the file given.
+_FINAL_FIELDS_SCRIPT = """
+import contextlib, io, sys
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+with contextlib.redirect_stdout(io.StringIO()):
+    model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+if isRootProcess():
+    np.save(sys.argv[1], np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f]))
+"""
+
+
+def test_a_rigid_body_is_moved_alike_in_every_process_when_elements_move(tmp_path):
+    # An output increment gathers the solution to rank 0 only, but every process moves the surfaces of
+    # the rigid bodies, which are nodes of the model: the reference nodes reach every process. A
+    # migration -- forced here by element-number costs -- builds the equation system again and compares
+    # the node coordinates of every process; with a surface left behind on some, the processes would
+    # hold different models.
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    for solver, launcher in (("NED", []), ("NEDMPI", [mpirun, "--bind-to", "none", "-n", "3"])):
+        directory = tmp_path / solver
+        shutil.copytree(os.path.join(testfiles, "edelweiss-only", "NEDNodeToDiscreteRigidBodyContact"), directory)
+        deck = (directory / "test.inp").read_text().replace("solver=NEDMPI", "solver=" + solver)
+        if solver == "NEDMPI":
+            deck = deck.replace(
+                "contact-update-frequency=10",
+                "contact-update-frequency=10\nload-balance-costs=elementNumber\nload-balance-tolerance=0.01",
+            )
+        (directory / "test.inp").write_text(deck)
+        (directory / "run.py").write_text(_FINAL_FIELDS_SCRIPT)
+        output = subprocess.run(
+            launcher + [sys.executable, "run.py", str(tmp_path / (solver + ".npy"))],
+            cwd=directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert (tmp_path / (solver + ".npy")).exists(), output.stdout + output.stderr
+    serial, decomposed = np.load(tmp_path / "NED.npy"), np.load(tmp_path / "NEDMPI.npy")
+    assert serial.view(np.int64).tobytes() == decomposed.view(np.int64).tobytes()

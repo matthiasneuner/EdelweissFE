@@ -249,10 +249,10 @@ class NodeFieldSlot:
 
 
 @dataclass(frozen=True)
-class SolutionReadBySearches:
-    """The part of the solution the contact searches of this process read and it does not integrate
-    itself: received from the owners before every periodic search, and published into the node
-    fields there.
+class ReceivedSolution:
+    """The solution at nodes this process reads but whose degrees of freedom it does not integrate
+    itself -- the nodes a contact search of this process reads, the reference nodes of the rigid
+    bodies --: received from the owners, and published into the node fields here.
 
     Parameters
     ----------
@@ -327,11 +327,15 @@ class NEDMPI(NEDParallel):
         self._wholeSolutionHere = True
         #: What the periodic contact searches of this process read, planned for the current
         #: subdomain at the first search: :meth:`_planSolutionReadBySearches`; None before.
-        self._solutionReadBySearches: SolutionReadBySearches | None = None
+        self._solutionReadBySearches: ReceivedSolution | None = None
         #: Whether the periodic contact searches read the whole solution, because a searched
         #: constraint does not name the nodes it reads; decided with the plan above.
         self._searchesReadWholeSolution = False
         self._searchesPlanned = False
+        #: The solution at the reference nodes of the rigid bodies, received by every process on an
+        #: output increment synchronized to rank 0 only: :meth:`_receiveRigidBodyReferences`; planned
+        #: for the current subdomain at its first use, None before.
+        self._rigidBodyReferences: ReceivedSolution | None = None
 
     def beginStep(
         self,
@@ -464,8 +468,7 @@ class NEDMPI(NEDParallel):
         plan = super().planIncrement(model)
         self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
         # planned again for this subdomain at the next search
-        self._searchesPlanned = False
-        self._solutionReadBySearches = None
+        self._forgetReceivePlans()
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementPlan)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
         self._elementCosts = np.zeros(len(plan.elementPlan.elements)) if timesKernels else None
@@ -988,8 +991,7 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots = []
         self._interfaceAssembly = None
         self._elementCosts = None
-        self._searchesPlanned = False
-        self._solutionReadBySearches = None
+        self._forgetReceivePlans()
         return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
@@ -1214,11 +1216,31 @@ class NEDMPI(NEDParallel):
             return
 
         searchedHere = self.subdomain.constraintsSearchedHere(model, searchable)
+        self._solutionReadBySearches = self._receivedSolutionAt(
+            model, [node for name in searchedHere for node in nodesRead[name]]
+        )
+
+    def _receivedSolutionAt(self, model: FEModel, nodes: list) -> ReceivedSolution:
+        """How this process receives the solution at the given nodes, at the degrees of freedom of every
+        field there it does not integrate itself. Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        nodes
+            The nodes, in any order and with repetitions.
+
+        Returns
+        -------
+        ReceivedSolution
+            The exchange, and where it is published.
+        """
+
         dofsOfFields = self.theDofManager.idcsOfFieldVariablesInDofVector
         dofs = [
             dofsOfFields[fieldVariable]
-            for name in searchedHere
-            for node in nodesRead[name]
+            for node in nodes
             for fieldVariable in node.fields.values()
             if fieldVariable in dofsOfFields
         ]
@@ -1226,9 +1248,41 @@ class NEDMPI(NEDParallel):
         integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
         integrated[self.partition.dofs] = True
         notIntegrated = dofs[~integrated[dofs]]
-        self._solutionReadBySearches = SolutionReadBySearches(
+        return ReceivedSolution(
             self.subdomain.valuesFromOwners(notIntegrated), self._nodeFieldSlotsOf(model, notIntegrated)
         )
+
+    def _forgetReceivePlans(self):
+        """Forget what this process receives at chosen nodes -- for the searches, for the rigid bodies
+        --: planned for the subdomain the vectors were last defined for, and planned again at their
+        next use."""
+
+        self._searchesPlanned = False
+        self._solutionReadBySearches = None
+        self._rigidBodyReferences = None
+
+    def _receiveRigidBodyReferences(self, model: FEModel):
+        """Receive the solution, the velocity and the net force at the reference nodes of the rigid
+        bodies from their owners, and publish them into the node fields: every process moves the
+        surfaces of the rigid bodies with them, which are nodes of the model as well, and so part of
+        what every process must hold alike (the layout fingerprint of
+        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.define` compares their coordinates).
+        A few degrees of freedom per body, on an output increment synchronized to rank 0 only.
+        Collective.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        if self._rigidBodyReferences is None:
+            self._rigidBodyReferences = self._receivedSolutionAt(
+                model, [rigidBody.rpNode for rigidBody in model.rigidBodies.values()]
+            )
+        U, V, P = self._U, self._V, self._P
+        self._rigidBodyReferences.received.receive([U, V, P])
+        self._publishIntoNodeFields(self._rigidBodyReferences.slots, ((U, "U"), (P, "P"), (V, "V")))
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let those of the given constraints update their connectivity whose search runs in this
@@ -1342,8 +1396,11 @@ class NEDMPI(NEDParallel):
 
         # A rigid body's surface follows its reference node, which only some processes integrated:
         # it was moved in acceptIncrement from what this process integrates, and is moved again now
-        # from the complete solution.
-        if timeStep is not None and wholeSolutionHere:
+        # from the complete solution -- in every process, which receives the reference nodes where it
+        # does not receive the whole solution.
+        if not toEveryProcess and model.rigidBodies:
+            self._receiveRigidBodyReferences(model)
+        if timeStep is not None:
             self.updateRigidBodies(model, timeStep)
 
     def requireWholeSolutionHere(self, reader: str):
