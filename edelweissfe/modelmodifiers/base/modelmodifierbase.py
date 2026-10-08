@@ -41,6 +41,27 @@ from edelweissfe.utils.checkpointedstate import packState, unpackState
 from edelweissfe.utils.schema import OptionSchemaProvider
 
 
+def fieldOutputsReadByAll(readers) -> set[str] | None:
+    """The field outputs any of the given readers -- markers, model modifiers -- read: the union of
+    their ``fieldOutputsRead()``, or None (any field output) if one of them names none.
+
+    Parameters
+    ----------
+    readers
+        Objects with a ``fieldOutputsRead()`` method.
+
+    Returns
+    -------
+    set[str] | None
+        The names, or None for any field output.
+    """
+
+    readByEach = [reader.fieldOutputsRead() for reader in readers]
+    if any(names is None for names in readByEach):
+        return None
+    return {name for names in readByEach for name in names}
+
+
 class ModelModifierBase(OptionSchemaProvider, ABC):
     """Abstract base class for entities that dynamically mutate the FEModel topology,
     mesh, or state variables during analysis steps.

@@ -197,10 +197,6 @@ class MarkerBase(OptionSchemaProvider):
     #: The L2 option schema for this marker's ``>>marker`` block, overridden per subclass.
     schema = None
 
-    #: Whether :meth:`mark` may read field outputs. A marker reading only the mesh, its sets and
-    #: surfaces, the nodes and the node fields says False; see :meth:`fieldOutputsRead`.
-    readsFieldOutputs = True
-
     def __init__(self, initialOnly=False):
         self.initialOnly = initialOnly
 
@@ -211,8 +207,9 @@ class MarkerBase(OptionSchemaProvider):
         -- by a marker, every process marking the same elements --, and to the process writing the
         output otherwise (see
         :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsReadEverywhereNext`).
-        Here: none, if the marker reads no field output (:attr:`readsFieldOutputs`); else None, any
-        of them, which has every field output gathered to every process before a topology check.
+        The default, None, may read any of them, and so has every field output gathered to every
+        process before a topology check; a marker reading none derives from
+        :class:`MarkerReadingNoFieldOutput`.
 
         Returns
         -------
@@ -220,7 +217,7 @@ class MarkerBase(OptionSchemaProvider):
             The names, or None for any field output.
         """
 
-        return None if self.readsFieldOutputs else ()
+        return None
 
     def mark(self, model, refineElements: RefineableElements, mesh):
         """Decide which elements to refine.
@@ -345,6 +342,22 @@ class FieldOutputMarkerSchema(MarkerOptionsBase):
     )
 
 
+class MarkerReadingNoFieldOutput(MarkerBase):
+    """A marker reading the mesh, its sets and surfaces, the nodes and the node fields -- no field
+    output."""
+
+    def fieldOutputsRead(self) -> tuple[str, ...]:
+        """None; see :meth:`MarkerBase.fieldOutputsRead`.
+
+        Returns
+        -------
+        tuple[str, ...]
+            No names.
+        """
+
+        return ()
+
+
 class FieldOutputMarker(MarkerBase):
     """Marks every element whose fieldOutput result satisfies ``value <operator> threshold`` at any
     entry (any quadrature point / component).
@@ -430,9 +443,8 @@ class ElementSetMarkerSchema(MarkerOptionsBase):
     )
 
 
-class ElementSetMarker(MarkerBase):
+class ElementSetMarker(MarkerReadingNoFieldOutput):
     schema = ElementSetMarkerSchema
-    readsFieldOutputs = False
 
     def __init__(self, elSetName, initialOnly=False):
         super().__init__(initialOnly)
@@ -461,9 +473,8 @@ class NodeSetMarkerSchema(MarkerOptionsBase):
     )
 
 
-class NodeSetMarker(MarkerBase):
+class NodeSetMarker(MarkerReadingNoFieldOutput):
     schema = NodeSetMarkerSchema
-    readsFieldOutputs = False
 
     def __init__(self, nSetName, initialOnly=False):
         super().__init__(initialOnly)
@@ -493,9 +504,8 @@ class SurfaceMarkerSchema(MarkerOptionsBase):
     )
 
 
-class SurfaceMarker(MarkerBase):
+class SurfaceMarker(MarkerReadingNoFieldOutput):
     schema = SurfaceMarkerSchema
-    readsFieldOutputs = False
 
     def __init__(self, surfaceName, initialOnly=False):
         super().__init__(initialOnly)
@@ -786,7 +796,7 @@ class RecoveryErrorMarkerSchema(MarkerOptionsBase):
     )
 
 
-class RecoveryErrorMarker(MarkerBase):
+class RecoveryErrorMarker(MarkerReadingNoFieldOutput):
     r"""Zienkiewicz-Zhu recovery-based error indicator on the *gradient* of a nodal field, with
     Doerfler bulk marking. Aimed at gradient-enhanced damage: the nonlocal driving field
     :math:`\bar\varepsilon` (governed by a screened-Poisson/Helmholtz equation) is smooth, but its
@@ -860,7 +870,6 @@ class RecoveryErrorMarker(MarkerBase):
     _RECOVERY_METHODS = ("averaging", "spr")
 
     schema = RecoveryErrorMarkerSchema
-    readsFieldOutputs = False
 
     @classmethod
     def fromOptions(cls, options):

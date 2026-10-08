@@ -51,7 +51,10 @@ from edelweissfe.config.registry import RegistryLookupError
 from edelweissfe.config.statetransferstrategies import getStateTransferStrategyClass
 from edelweissfe.constraints.hangingnode import Constraint as HangingNodeConstraint
 from edelweissfe.journal.journal import Journal
-from edelweissfe.modelmodifiers.base.modelmodifierbase import ModelModifierBase
+from edelweissfe.modelmodifiers.base.modelmodifierbase import (
+    ModelModifierBase,
+    fieldOutputsReadByAll,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange, coalesce
 from edelweissfe.models.modelchangeobserver import ModelChangeType
@@ -545,10 +548,7 @@ class ModelModifier(ModelModifierBase):
             The names, or None if a marker may read any field output.
         """
 
-        readByMarkers = [marker.fieldOutputsRead() for marker in self.markers]
-        if any(names is None for names in readByMarkers):
-            return None
-        return {name for names in readByMarkers for name in names}
+        return fieldOutputsReadByAll(self.markers)
 
     @timeit("AMR")
     def plan(self, model: FEModel, change, step) -> "RefinementPlan | None":

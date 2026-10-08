@@ -177,6 +177,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
     ValuesFromOwners,
 )
 from edelweissfe.fields.nodefield import NodeField
+from edelweissfe.modelmodifiers.base.modelmodifierbase import fieldOutputsReadByAll
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
@@ -883,10 +884,7 @@ class NEDMPI(NEDParallel):
 
         if not self.wholeModelReadEverywhereNext():
             return set()
-        readByModifiers = [modifier.fieldOutputsRead() for modifier in self._liveTopologyModifiers]
-        if any(names is None for names in readByModifiers):
-            return None
-        return {name for names in readByModifiers for name in names}
+        return fieldOutputsReadByAll(self._liveTopologyModifiers)
 
     def advanceModelToTime(self, model: FEModel, time: float):
         """Let the elements and the constraints of this subdomain accept the state the increment
@@ -915,8 +913,9 @@ class NEDMPI(NEDParallel):
         Everything indexed by the elements held here -- the equation system
         (:meth:`releaseEquationSystem`) and the subdomain -- is released before the elements move,
         so that no element a process drops stays alive, and built again afterwards, as after a
-        change of the topology. The solution, the velocity and the net force,
-        just made complete in every process by the output synchronization, are carried over.
+        change of the topology. The solution, the velocity and the net force are carried over, and
+        each process completes them at the degrees of freedom it integrates from now on, from their
+        previous owners (:meth:`buildEquationSystem`).
 
         The lumped operators are assembled again, from the elements now held here, and must be the
         same bits as before (:meth:`_requireSameLumpedOperators`): a serial run keeps them between
