@@ -54,6 +54,13 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: Undeclared, it cannot be checkpointed.
     checkpointedState: dict | None = None
 
+    #: The results of its last evaluation that an output may read -- a contact's normal forces and
+    #: gaps, say -- by attribute name and type, as :attr:`checkpointedState` declares its state. They
+    #: are not carried from one increment to the next, so a checkpoint does not store them; but the
+    #: process writing the output of a domain-decomposed run receives them from the process
+    #: evaluating the constraint, with its state (:meth:`getOutputResults`).
+    outputResults: dict = {}
+
     #: Why a domain-decomposed job using this class needs every element object in every process
     #: (replicated elements), or None if it works with distributed elements; declared once per class,
     #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
@@ -215,6 +222,29 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
         """
 
         unpackState(self, data)
+
+    def getOutputResults(self) -> dict[str, np.ndarray]:
+        """The results of the last evaluation declared in :attr:`outputResults`.
+
+        Returns
+        -------
+        dict[str, numpy.ndarray]
+            A flat mapping of array name to array.
+        """
+
+        return packState(self, self.outputResults)
+
+    def setOutputResults(self, data: dict[str, np.ndarray]):
+        """Adopt the results :meth:`getOutputResults` returned -- those of the process that evaluated
+        this constraint.
+
+        Parameters
+        ----------
+        data
+            The mapping of arrays.
+        """
+
+        unpackState(self, data, self.outputResults)
 
     def getNumberOfAdditionalNeededScalarVariables(
         self,

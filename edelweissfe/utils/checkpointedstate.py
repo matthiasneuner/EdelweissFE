@@ -84,13 +84,16 @@ def _declaration(component) -> dict:
     return declaration
 
 
-def packState(component) -> dict[str, np.ndarray]:
+def packState(component, declaration: dict | None = None) -> dict[str, np.ndarray]:
     """The declared state of ``component``, as a flat mapping of arrays.
 
     Parameters
     ----------
     component
         Any object with a ``checkpointedState`` declaration.
+    declaration
+        Another declaration of attributes to pack, in place of ``checkpointedState``; e.g. the
+        results a constraint reports (:attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.outputResults`).
 
     Returns
     -------
@@ -99,7 +102,7 @@ def packState(component) -> dict[str, np.ndarray]:
     """
 
     state = {}
-    for name, kind in _declaration(component).items():
+    for name, kind in (_declaration(component) if declaration is None else declaration).items():
         value = component.__dict__[name]
         if value is None:
             continue
@@ -113,7 +116,7 @@ def packState(component) -> dict[str, np.ndarray]:
     return state
 
 
-def unpackState(component, state: dict[str, np.ndarray]):
+def unpackState(component, state: dict[str, np.ndarray], declaration: dict | None = None):
     """Set the declared attributes of ``component`` from what :func:`packState` returned.
 
     Parameters
@@ -122,9 +125,11 @@ def unpackState(component, state: dict[str, np.ndarray]):
         Any object with a ``checkpointedState`` declaration.
     state
         The mapping of arrays.
+    declaration
+        The declaration :func:`packState` was given in place of ``checkpointedState``, if any.
     """
 
-    for name, kind in _declaration(component).items():
+    for name, kind in (_declaration(component) if declaration is None else declaration).items():
         if kind is dict:
             keys = state.get(name + ".keys")
             component.__dict__[name] = (

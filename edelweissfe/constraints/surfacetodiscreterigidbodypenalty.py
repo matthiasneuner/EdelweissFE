@@ -200,6 +200,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     #: It reads the contact facets of its surface, the nodes and the rigid body, which every process
     #: holds whole; see ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = None
+    #: The normal force and the gap of every contact point and their sum, read by
+    #: getNormalPressures, getGaps, getSlaveNodalNormalForces and totalNormalForce; see
+    #: ConstraintBase.outputResults.
+    outputResults = {"_normalForceCurrent": np.ndarray, "_gapCurrent": np.ndarray, "totalNormalForce": float}
 
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = SurfaceToDiscreteRigidBodyPenaltySchema

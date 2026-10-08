@@ -507,7 +507,12 @@ integrate the whole group; the forces at those degrees of freedom are completed 
 whichever element objects a process holds. A refinement of a contact or tie surface retiles it with
 new facets, made by every process and computed by the process of their host element, a child, and
 the constraint projects onto them afresh. A restart checkpoint carries the constraint states as
-before: they are synchronized from their owners before every output.
+before: they are synchronized from their owners before every output. So are the results of a
+constraint's last evaluation an output may read -- a contact's normal forces and gaps
+(``getNormalPressures``, ``totalNormalForce``, ...), which a checkpoint does not carry: each
+constraint declares them
+(:attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.outputResults`), and an
+expression field output reads on rank 0 what the process evaluating the constraint computed.
 
 **How the constraint forces travel.** The owner of a constraint integrates every degree of freedom
 it acts on, so another process integrating one of them shares it with the owner. The owner sends each

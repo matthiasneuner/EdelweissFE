@@ -1760,3 +1760,93 @@ def test_the_node_fields_hold_what_a_process_integrates_after_a_contact_search_m
     assert [rank for rank, _, _ in reports] == ["0", "1", "2"], output
     assert all(int(rebuilds) > 0 for _, rebuilds, _ in reports), output
     assert [int(differing) for _, _, differing in reports] == [0, 0, 0], output
+
+
+_EXPRESSION_HISTORIES_SCRIPT = """
+import contextlib, io, sys
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+with contextlib.redirect_stdout(io.StringIO()):
+    _, fieldOutputs = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+if isRootProcess():
+    names = sys.argv[2:]
+    np.savez(sys.argv[1], **{name: np.asarray(fieldOutputs.fieldOutputs[name].result, dtype=float) for name in names})
+"""
+
+#: Contact decks of testfiles/mpi, a node set of one node in each (an expression field output must name
+#: a set, and its result is reshaped to one row per node), and expression field outputs reading the
+#: results of the contact constraint's last evaluation, which only the process evaluating it computes.
+_ONE_NODE_SET = {
+    "NEDContact": "upper_bottomLeftBack",
+    "NEDSurfaceContact": "upper_bottomLeftBack",
+    "NEDSurfaceToDiscreteRigidBodyContact": "support_rp",
+    "NEDNodeToDiscreteRigidBodyContact": "cylinder_rp",
+}
+_CONTACT_RESULTS_READ_BY_OUTPUTS = {
+    "NEDContact": {
+        "pressures": 'model.constraints["contact"].getNormalPressures()',
+        "total": 'np.array([model.constraints["contact"].totalNormalForce])',
+    },
+    "NEDSurfaceContact": {
+        "pressures": 'model.constraints["contact"].getNormalPressures()',
+        "nodalForces": 'model.constraints["contact"].getSlaveNodalNormalForces()',
+    },
+    "NEDSurfaceToDiscreteRigidBodyContact": {
+        "pressures": 'model.constraints["contact"].getNormalPressures()',
+        "gaps": 'model.constraints["contact"].getGaps()',
+        "total": 'np.array([model.constraints["contact"].totalNormalForce])',
+    },
+    "NEDNodeToDiscreteRigidBodyContact": {
+        "total": 'np.array([model.constraints["contact"].totalNormalForce])',
+    },
+}
+
+
+@pytest.mark.parametrize("deck", sorted(_CONTACT_RESULTS_READ_BY_OUTPUTS))
+def test_an_output_reads_the_contact_results_of_the_process_evaluating_the_contact(tmp_path, deck):
+    # The normal forces and gaps of a contact are no state -- a checkpoint does not carry them -- but
+    # an expression field output reads them on rank 0. With 2 processes the contact is evaluated by
+    # rank 1, and rank 0's copy held zeros (reproduced: every history all zeros) until the results
+    # travelled with the state of the constraint (ConstraintBase.outputResults).
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    expressions = _CONTACT_RESULTS_READ_BY_OUTPUTS[deck]
+    outputs = "".join(
+        ">>fromExpression, name={:}, nSet={:}, expression='{:}', saveHistory=True\n".format(
+            name, _ONE_NODE_SET[deck], expression
+        )
+        for name, expression in expressions.items()
+    )
+    histories = {}
+    for solver, launcher in (("NED", []), ("NEDMPI", [mpirun, "--bind-to", "none", "-n", "2"])):
+        directory = tmp_path / solver
+        shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), directory)
+        text = (directory / "test.inp").read_text().replace("solver=NEDMPI", "solver=" + solver)
+        text = re.sub(r"^\*fieldOutput\n", "*fieldOutput\n" + outputs, text, count=1, flags=re.M)
+        (directory / "test.inp").write_text(text)
+        (directory / "run.py").write_text(_EXPRESSION_HISTORIES_SCRIPT)
+        result = tmp_path / (solver + ".npz")
+        output = subprocess.run(
+            launcher + [sys.executable, "run.py", str(result)] + list(expressions),
+            cwd=directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.exists(), output.stdout + output.stderr
+        histories[solver] = np.load(result)
+
+    for name in expressions:
+        serial, decomposed = histories["NED"][name], histories["NEDMPI"][name]
+        assert np.any(serial), "{:}: the serial run reports no contact".format(name)
+        assert serial.shape == decomposed.shape and serial.tobytes() == decomposed.tobytes(), name

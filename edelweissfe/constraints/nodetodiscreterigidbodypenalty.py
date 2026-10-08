@@ -190,6 +190,9 @@ class Constraint(ConstraintBase, MeshDependent):
     #: Carries nothing from one increment to the next.
     checkpointedState = {}
 
+    #: The sum of the normal forces of the last evaluation; see ConstraintBase.outputResults.
+    outputResults = {"totalNormalForce": float}
+
     def __init__(
         self,
         name: str,

@@ -332,6 +332,16 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     #: see ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = None
 
+    #: The normal and tangential force and the gap of every slave node, and the sum of the normal
+    #: forces, read by getNormalPressures, getTangentialTractions, getGaps and totalNormalForce; see
+    #: ConstraintBase.outputResults.
+    outputResults = {
+        "_normalForceCurrent": np.ndarray,
+        "_tangentialForceCurrent": np.ndarray,
+        "_gapCurrent": np.ndarray,
+        "totalNormalForce": float,
+    }
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDeformableSurfacePenaltySchema
 

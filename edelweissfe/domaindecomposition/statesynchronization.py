@@ -39,7 +39,9 @@ synchronizes its constraints only (see
 
 It uses the interface the restart checkpoints use (``getStateVars``/``setStateVars`` on elements,
 ``getRestartData``/``setRestartData`` on constraints): whatever a checkpoint must carry to resume a
-run is exactly what another process must receive to continue it.
+run is exactly what another process must receive to continue it. A constraint sends in addition the
+results of its last evaluation an output may read -- a contact's normal forces, say --, which a
+checkpoint does not carry (``getOutputResults``/``setOutputResults``).
 
 Restoring a constraint's restart data restores the constraint completely: a contact constraint
 adopts the owner's frozen contact search, and with it the degrees of freedom it couples (see
@@ -157,7 +159,8 @@ class ModelStateSynchronization:
                 element.setStateVars(received[offsets[position] : offsets[position + 1]].copy())
 
     def synchronizeConstraintStates(self, toEveryProcess: bool = True):
-        """Give every stateful constraint the state of its owner -- in every process, or on rank 0
+        """Give every constraint the state of its owner, and the results of its owner's last
+        evaluation that an output may read (``getOutputResults``) -- in every process, or on rank 0
         only, where the output is written. Collective.
 
         Parameters
@@ -168,14 +171,21 @@ class ModelStateSynchronization:
 
         owned = {}
         for name in self._ownedConstraints:
-            # A constraint carrying nothing between increments has nothing to send.
-            data = self._constraints[name].getRestartData()
-            if data:
-                owned[name] = {entry: np.array(values) for entry, values in data.items()}
+            constraint = self._constraints[name]
+            state = constraint.getRestartData()
+            results = constraint.getOutputResults()
+            # A constraint carrying nothing between increments, and reporting nothing, has nothing to send.
+            if state or results:
+                owned[name] = (
+                    {entry: np.array(values) for entry, values in state.items()},
+                    {entry: np.array(values) for entry, values in results.items()},
+                )
 
         gathered = self.communicator.allgather(owned) if toEveryProcess else self.communicator.gather(owned, root=0)
         for owner, received in enumerate(gathered or []):
             if owner == self._rank:
                 continue
-            for name, data in received.items():
-                self._constraints[name].setRestartData(data)
+            for name, (state, results) in received.items():
+                if state:
+                    self._constraints[name].setRestartData(state)
+                self._constraints[name].setOutputResults(results)
