@@ -127,6 +127,17 @@ class Constraint(ConstraintBase):
     def nDof(self) -> int:
         return 0
 
+    def nodesReadByConnectivityUpdate(self) -> list:
+        """No nodes: :meth:`updateConnectivity` reads no positions.
+
+        Returns
+        -------
+        list
+            No nodes.
+        """
+
+        return []
+
     def updateConnectivity(self, model: FEModel) -> bool:
         """Called once per increment, before the equation system is (re)built -- exactly the tick
         at which a freshly refined mesh's ``model.topology.version`` has already advanced. Raises if the

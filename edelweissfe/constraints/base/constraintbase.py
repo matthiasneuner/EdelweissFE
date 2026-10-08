@@ -163,6 +163,28 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
 
         return False
 
+    def nodesReadByConnectivityUpdate(self) -> list | None:
+        """The nodes whose current positions :meth:`updateConnectivity` may read -- for a contact
+        search, every node it may couple, not only those it couples now.
+
+        A domain-decomposed explicit run searches on the process evaluating the constraint, and sends
+        it the positions of these nodes only, instead of the whole solution
+        (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.updateConstraintConnectivity`).
+        So the list must be complete: a position not named here is read as of the last
+        synchronization of the whole model.
+
+        The default, None, names no nodes, and so has every process receive the whole solution
+        before a search -- correct for any constraint, and costly. A constraint whose
+        :meth:`updateConnectivity` reads no positions returns an empty list.
+
+        Returns
+        -------
+        list | None
+            The nodes, or None if the whole solution may be read.
+        """
+
+        return None
+
     def acceptLastState(self):
         """Called by :meth:`~edelweissfe.models.femodel.FEModel.advanceToTime` when an increment
         is accepted, so a stateful constraint (e.g. frictional contact) can promote the state of

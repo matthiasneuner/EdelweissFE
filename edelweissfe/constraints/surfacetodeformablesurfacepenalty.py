@@ -388,6 +388,20 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """The unique slave facet nodes, see :attr:`ContactPointsOnSlaveSurface.surfaceNodes`."""
         return self.slave.surfaceNodes
 
+    def nodesReadByConnectivityUpdate(self) -> list:
+        """The nodes of the parent faces of the slave contact points and the nodes of every master
+        facet: the search reads their positions.
+
+        Returns
+        -------
+        list
+            The nodes.
+        """
+
+        return [node for nodes in self.slave.parentNodes for node in nodes] + [
+            node for facet in self.facetElements for node in facet.nodes
+        ]
+
     def updateConnectivity(self, model: FEModel) -> bool:
         """Freeze each contact point's closest-point projection onto the master surface, and
         redeclare the constraint's DOF footprint accordingly.

@@ -340,6 +340,18 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """The unique slave facet nodes, see :attr:`ContactPointsOnSlaveSurface.surfaceNodes`."""
         return self.slave.surfaceNodes
 
+    def nodesReadByConnectivityUpdate(self) -> list:
+        """The nodes of the parent faces of the slave contact points and the reference node of the
+        rigid body: the search reads their positions, and the rotation of the reference node.
+
+        Returns
+        -------
+        list
+            The nodes.
+        """
+
+        return [node for nodes in self.slave.parentNodes for node in nodes] + [self.rpNode]
+
     def updateConnectivity(self, model: FEModel) -> bool:
         """The contact search: assign each contact point its closest rigid triangle, in the last
         converged configuration, and freeze that triangle's normal and plane offset.

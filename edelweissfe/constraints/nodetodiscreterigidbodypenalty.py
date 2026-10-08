@@ -287,6 +287,17 @@ class Constraint(ConstraintBase, MeshDependent):
         self._rebuildFromSlaveNodes()
         return True
 
+    def nodesReadByConnectivityUpdate(self) -> list:
+        """No nodes: :meth:`updateConnectivity` reads no positions.
+
+        Returns
+        -------
+        list
+            No nodes.
+        """
+
+        return []
+
     def updateConnectivity(self, model: FEModel) -> bool:
         # refreshed by TopologyPipeline.refreshMeshDependents; nothing extra to do at this tick
         return False

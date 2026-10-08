@@ -480,6 +480,17 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     def nDof(self) -> int:
         return self._nDof
 
+    def nodesReadByConnectivityUpdate(self) -> list:
+        """The slave nodes and the nodes of every master facet: the search reads their positions.
+
+        Returns
+        -------
+        list
+            The nodes.
+        """
+
+        return self.slaveNodes + [node for facet in self.facetElements for node in facet.nodes]
+
     def updateConnectivity(self, model: FEModel) -> bool:
         """Re-assign each slave node to its single closest facet, based on the last converged
         configuration. Called once per increment by the solver, before the equation system is
