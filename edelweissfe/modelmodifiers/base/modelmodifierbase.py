@@ -80,6 +80,23 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
 
         return not self.initiatesTopologyChanges
 
+    def fieldOutputsRead(self) -> set[str] | None:
+        """The names of the field outputs this modifier reads when it plans a topology change.
+
+        A domain-decomposed run gathers a field output to every process before a topology check only
+        if a modifier reads it, since every process plans the same change (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsReadEverywhereNext`).
+        The default, None, may read any of them, and so has every field output gathered to every
+        process.
+
+        Returns
+        -------
+        set[str] | None
+            The names, or None for any field output.
+        """
+
+        return None
+
     def __init__(self, name: str, model: FEModel, journal: Journal, **kwargs):
         self._name = name
         self._model = model

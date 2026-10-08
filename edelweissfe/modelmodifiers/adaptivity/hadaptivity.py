@@ -535,6 +535,21 @@ class ModelModifier(ModelModifierBase):
 
         return all(marker.initialOnly for marker in self.markers)
 
+    def fieldOutputsRead(self) -> set[str] | None:
+        """Those the markers read; see
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.fieldOutputsRead`.
+
+        Returns
+        -------
+        set[str] | None
+            The names, or None if a marker may read any field output.
+        """
+
+        readByMarkers = [marker.fieldOutputsRead() for marker in self.markers]
+        if any(names is None for names in readByMarkers):
+            return None
+        return {name for names in readByMarkers for name in names}
+
     @timeit("AMR")
     def plan(self, model: FEModel, change, step) -> "RefinementPlan | None":
         """Evaluate the markers and decide which octree cells to refine. See

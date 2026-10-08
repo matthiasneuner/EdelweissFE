@@ -197,8 +197,30 @@ class MarkerBase(OptionSchemaProvider):
     #: The L2 option schema for this marker's ``>>marker`` block, overridden per subclass.
     schema = None
 
+    #: Whether :meth:`mark` may read field outputs. A marker reading only the mesh, its sets and
+    #: surfaces, the nodes and the node fields says False; see :meth:`fieldOutputsRead`.
+    readsFieldOutputs = True
+
     def __init__(self, initialOnly=False):
         self.initialOnly = initialOnly
+
+    def fieldOutputsRead(self) -> tuple[str, ...] | None:
+        """The names of the field outputs :meth:`mark` reads.
+
+        A domain-decomposed run gathers a field output to every process only where it is read there
+        -- by a marker, every process marking the same elements --, and to the process writing the
+        output otherwise (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.fieldOutputsReadEverywhereNext`).
+        Here: none, if the marker reads no field output (:attr:`readsFieldOutputs`); else None, any
+        of them, which has every field output gathered to every process before a topology check.
+
+        Returns
+        -------
+        tuple[str, ...] | None
+            The names, or None for any field output.
+        """
+
+        return None if self.readsFieldOutputs else ()
 
     def mark(self, model, refineElements: RefineableElements, mesh):
         """Decide which elements to refine.
@@ -373,6 +395,17 @@ class FieldOutputMarker(MarkerBase):
             initialOnly=opts.initialOnly,
         )
 
+    def fieldOutputsRead(self) -> tuple[str, ...]:
+        """The thresholded field output; see :meth:`MarkerBase.fieldOutputsRead`.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Its name.
+        """
+
+        return (self.fieldOutputName,)
+
     def mark(self, model, refineElements, mesh):
         elements, values = _perElementFieldOutputResult(model, self.fieldOutputName)
         if not len(elements):
@@ -399,6 +432,7 @@ class ElementSetMarkerSchema(MarkerOptionsBase):
 
 class ElementSetMarker(MarkerBase):
     schema = ElementSetMarkerSchema
+    readsFieldOutputs = False
 
     def __init__(self, elSetName, initialOnly=False):
         super().__init__(initialOnly)
@@ -429,6 +463,7 @@ class NodeSetMarkerSchema(MarkerOptionsBase):
 
 class NodeSetMarker(MarkerBase):
     schema = NodeSetMarkerSchema
+    readsFieldOutputs = False
 
     def __init__(self, nSetName, initialOnly=False):
         super().__init__(initialOnly)
@@ -460,6 +495,7 @@ class SurfaceMarkerSchema(MarkerOptionsBase):
 
 class SurfaceMarker(MarkerBase):
     schema = SurfaceMarkerSchema
+    readsFieldOutputs = False
 
     def __init__(self, surfaceName, initialOnly=False):
         super().__init__(initialOnly)
@@ -824,6 +860,7 @@ class RecoveryErrorMarker(MarkerBase):
     _RECOVERY_METHODS = ("averaging", "spr")
 
     schema = RecoveryErrorMarkerSchema
+    readsFieldOutputs = False
 
     @classmethod
     def fromOptions(cls, options):
