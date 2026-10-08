@@ -44,6 +44,15 @@ the central-difference method in four named steps:
 The equation system is built by :meth:`NED.buildEquationSystem`, the lumped operators by
 :meth:`NED._assembleLumpedOperators`. Everything else in the module is diagnostics and validation.
 
+**The element loop, and the solver for production runs.** :meth:`NED.assembleInternalForces` is the
+element loop as a textbook writes it: element after element, gather its solution, compute its nodal
+forces, add them into the global vector at its degrees of freedom; the lumped operators are assembled
+the same way (:meth:`NED.assembleLumpedDiagonal`). One element at a time is also the slowest way: the
+gather and the scatter of one element cost about what a fast element kernel does.
+:class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel` runs the same loop in bulk,
+with the same result bit for bit, also on one thread -- **use it for production runs**. ``NED`` says
+so at the start of a step of a model with more than 5000 elements.
+
 An increment solves no equation system. Second-order fields are advanced by central differences
 (a leapfrog, with the velocity staggered half an increment behind the displacement), first-order
 fields -- a nonlocal damage field, for instance -- by forward Euler, and both divide by a **lumped**
@@ -154,7 +163,7 @@ import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesKineticEnergy, carriesLinearMomentum
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.numerics.assembly import addNodalForces
+from edelweissfe.numerics.assembly import addNodalForces, hasRepeatedDofs
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
@@ -166,12 +175,7 @@ from edelweissfe.solvers.base.conservationchecks import (
 )
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
-from edelweissfe.solvers.base.parallelelementcomputation import (
-    ElementPlan,
-    computeElementsForExplicit,
-    computeLumpedDiagonalForExplicit,
-    planElements,
-)
+from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.exceptions import CutbackRequest, StepFailed
 from edelweissfe.utils.fieldoutput import FieldOutputController
@@ -357,28 +361,39 @@ class _ReusableExplicitOperators:
     mpcTransformation: MultiPointConstraintTransformation | None
 
 
+#: From how many elements with kernels on, serial NED recommends NEDParallel at the start of a step.
+_ELEMENTS_WORTH_THE_PLAN = 5000
+
+
 @dataclass(frozen=True)
 class IncrementPlan:
-    """What every increment needs prepared, once per equation system: the element loop, the
-    first-order degrees of freedom, and the fold of the multi-point-constraint slave forces. Derived
-    again by :meth:`NED.planIncrement` whenever the equation system or the partition changes.
+    """What every increment needs prepared, once per equation system: the elements of the element
+    loop and their degrees of freedom, the first-order degrees of freedom, and the fold of the
+    multi-point-constraint slave forces. Derived again by :meth:`NED.planIncrement` whenever the
+    equation system or the partition changes.
 
     Parameters
     ----------
-    elementPlan
-        How the elements gather their degrees of freedom and how their forces are assembled; see
-        :func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`.
+    elements
+        The elements computed here that have kernels, in element order, each with its degrees of
+        freedom and whether it names one of them more than once (a degenerate element with repeated
+        nodes; see :func:`~edelweissfe.numerics.assembly.addNodalForces`).
     firstOrderDofs
         The first-order degrees of freedom integrated here.
     mpcForceFold
         The fold of the multi-point-constraint slave forces onto their masters, as a matrix on the
         degrees of freedom integrated here; None without multi-point constraints. See
         :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldExplicitForceOperator`.
+    elementPlan
+        The chunked element loop of :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel`
+        (:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`); None for the plain
+        loop of :class:`NED`.
     """
 
-    elementPlan: ElementPlan
+    elements: list[tuple]
     firstOrderDofs: np.ndarray
     mpcForceFold: csr_matrix | None
+    elementPlan: ElementPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -523,17 +538,6 @@ class NED(NonlinearSolverBase):
         #: equation system, see :meth:`partitionModel`.
         self.partition = None
 
-    def elementLoopThreads(self) -> int:
-        """The number of threads the element loop runs on: one.
-
-        Returns
-        -------
-        int
-            The number of threads.
-        """
-
-        return 1
-
     def beginStep(
         self,
         step,
@@ -557,6 +561,7 @@ class NED(NonlinearSolverBase):
             The output managers.
         """
 
+        self.reportElementLoop(model)
         self.validateModelCapabilities(model)
 
         # Against this the timing table reports what it did *not* measure, so it has to span
@@ -1421,9 +1426,15 @@ class NED(NonlinearSolverBase):
         timeStep: TimeStep,
     ) -> tuple[DofVector, float]:
         """Evaluate the elements computed here and assemble their internal force,
-        :math:`f^{int} = \\mathop{\\mathsf{A}}_e f^{int}_e`: every element gathers its degrees of freedom
-        from the solution, computes its nodal forces, and these are added into ``P`` in element
-        order; see :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
+        :math:`f^{int} = \\mathop{\\mathsf{A}}_e f^{int}_e`: the element loop of every finite element code.
+        Element after element, in element order: gather its solution from the global vector, compute
+        its nodal forces, and add them into ``P`` at its degrees of freedom.
+
+        One element at a time is the plainest way to write it, and the slowest: the gather and the
+        scatter cost about what a fast element kernel does. :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel`
+        runs the same loop in bulk, gathering and assembling many elements at once
+        (:class:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan`), on one thread or
+        several, with the same bits -- use it for production runs.
 
         Parameters
         ----------
@@ -1442,8 +1453,17 @@ class NED(NonlinearSolverBase):
             The internal force vector, and the internal energy the elements report.
         """
 
-        P[:] = 0.0
-        psi, _ = computeElementsForExplicit(self._incrementPlan.elementPlan, U_np, dU, P, timeStep)
+        U, dU, P[:] = U_np.asPlainArray(), dU.asPlainArray(), 0.0
+        forces = P.asPlainArray()
+        time, dT = timeStep.totalTime, timeStep.timeIncrement
+
+        psi = 0.0
+        for element, dofs, namesDofMoreThanOnce in self._incrementPlan.elements:
+            Pe = np.zeros(dofs.shape[0])
+            element.computeKernelsExplicit(Pe, U[dofs], dU[dofs], time, dT)
+            addNodalForces(forces, dofs, Pe, namesDofMoreThanOnce)  # P[dofs] += Pe
+            psi += element.computeInternalEnergy()
+
         return P, psi
 
     def validateModelCapabilities(self, model: FEModel):
@@ -1681,13 +1701,13 @@ class NED(NonlinearSolverBase):
 
         return ModelPartition.wholeModel(model)
 
-    def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
-        """Assemble a lumped operator -- the inertia or the damping -- of the elements of a plan.
+    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
+        """Assemble a lumped operator -- the inertia or the damping -- of the elements computed here,
+        contact facets included: element after element, in element order, add its diagonal into the
+        vector at its degrees of freedom.
 
         Parameters
         ----------
-        plan
-            The plan of the elements computed here, with or without kernels.
         elementContribution
             ``elementContribution(element, Ve)`` writes an element's diagonal into the zero ``Ve``.
 
@@ -1699,8 +1719,44 @@ class NED(NonlinearSolverBase):
 
         vector = self.theDofManager.constructDofVector()
         vector[:] = 0.0
-        computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
+        dofsOf = self.theDofManager.idcsOfHigherOrderEntitiesInDofVector
+        for element in self.partition.elements.values():
+            dofs = dofsOf[element]
+            Ve = np.zeros(dofs.shape[0])
+            elementContribution(element, Ve)
+            addNodalForces(vector.asPlainArray(), dofs, Ve, hasRepeatedDofs(dofs))
         return vector
+
+    def elementsWithKernels(self) -> dict:
+        """The elements computed here that have kernels to call -- not the contact facets --, by
+        number, in element order.
+
+        Returns
+        -------
+        dict
+            The elements.
+        """
+
+        return {number: element for number, element in self.partition.elements.items() if element.hasKernels}
+
+    def reportElementLoop(self, model: FEModel):
+        """Recommend :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel` for a
+        large model: its element loop gives the same bits, faster, even on one thread. Changes nothing.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        nElements = sum(1 for element in model.elements.values() if element.hasKernels)
+        if nElements > _ELEMENTS_WORTH_THE_PLAN:
+            self.journal.message(
+                "{:} elements: NEDParallel computes the same result faster, also on one thread "
+                "(solver=NEDParallel)".format(nElements),
+                self.identification,
+                0,
+            )
 
     def planIncrement(self, model: FEModel) -> IncrementPlan:
         """Derive what an increment computes here from the current partition and equation system.
@@ -1722,15 +1778,13 @@ class NED(NonlinearSolverBase):
         dofs = self.partition.dofs
         integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
         integrated[dofs] = True
+        dofsOf = self.theDofManager.idcsOfHigherOrderEntitiesInDofVector
 
         return IncrementPlan(
-            elementPlan=planElements(
-                {number: element for number, element in self.partition.elements.items() if element.hasKernels},
-                self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-                dofs,
-                self.theDofManager.nDof,
-                self.elementLoopThreads(),
-            ),
+            elements=[
+                (element, dofsOf[element], hasRepeatedDofs(dofsOf[element]))
+                for element in self.elementsWithKernels().values()
+            ],
             firstOrderDofs=self.ids_1st[integrated[self.ids_1st]],
             mpcForceFold=(
                 None if self.mpcTransformation is None else self.mpcTransformation.foldExplicitForceOperator(dofs)
@@ -1792,22 +1846,13 @@ class NED(NonlinearSolverBase):
 
         # The lumped operators are assembled over the elements computed here -- contact facets
         # included, which have an inertia but no kernels.
-        operatorPlan = planElements(
-            self.partition.elements,
-            self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-            self.partition.dofs,
-            self.theDofManager.nDof,
-            nThreads=1,
-        )
-
-        # initialize mass and damping matrices
-        M = self.assembleLumpedDiagonal(operatorPlan, lambda element, Me: element.computeLumpedInertia(Me))
+        M = self.assembleLumpedDiagonal(lambda element, Me: element.computeLumpedInertia(Me))
         Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
         # Each field's FIRST-derivative coefficient: zero mechanically, the non-local viscosity
         # always (whether or not that field also has an inertia -- see computeLumpedInertia()
         # above, the SECOND-derivative coefficient).
-        damping = self.assembleLumpedDiagonal(operatorPlan, lambda element, Ce: element.computeLumpedDamping(Ce))
+        damping = self.assembleLumpedDiagonal(lambda element, Ce: element.computeLumpedDamping(Ce))
 
         # Checked here, because the inertia check below never sees it at a second-order DOF: there
         # the divisor stays the positive inertia and the damping enters only as the rate C/M. A
@@ -2174,9 +2219,7 @@ class NED(NonlinearSolverBase):
             # A constraint may name the same DOF more than once -- a slave node that also appears in
             # its own master facet's node list. Whether it does is decided once, here, instead of on
             # every constraint of every increment; see addNodalForces.
-            constraintForce = ConstraintForce(
-                np.zeros(constraint.nDof), indices, len(np.unique(indices)) != len(indices)
-            )
+            constraintForce = ConstraintForce(np.zeros(constraint.nDof), indices, hasRepeatedDofs(indices))
             self._constraintForces[name] = constraintForce
 
         # Reused, so it must be cleared: applyConstraintExplicit augments what it is handed.

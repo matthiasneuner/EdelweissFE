@@ -31,8 +31,26 @@
 import numpy as np
 
 
+def hasRepeatedDofs(dofs: np.ndarray) -> bool:
+    """Whether a degree of freedom appears in ``dofs`` more than once: a slave node that also appears
+    in its own master facet's node list, a degenerate element with repeated nodes.
+
+    Parameters
+    ----------
+    dofs
+        The degrees of freedom of one entity.
+
+    Returns
+    -------
+    bool
+        True if any appears more than once.
+    """
+
+    return len(np.unique(dofs)) != len(dofs)
+
+
 def addNodalForces(vector: np.ndarray, dofs: np.ndarray, forces: np.ndarray, namesDofMoreThanOnce: bool):
-    """Add the nodal forces of one entity -- a constraint -- into a plain vector, in place.
+    """Add the nodal forces of one entity -- an element, a constraint -- into a plain vector, in place.
 
     Parameters
     ----------
@@ -43,8 +61,8 @@ def addNodalForces(vector: np.ndarray, dofs: np.ndarray, forces: np.ndarray, nam
     forces
         The forces.
     namesDofMoreThanOnce
-        Whether a degree of freedom appears in ``dofs`` more than once -- a slave node that also
-        appears in its own master facet's node list. ``+=`` would then keep only the last write
+        Whether a degree of freedom appears in ``dofs`` more than once (:func:`hasRepeatedDofs`).
+        ``+=`` would then keep only the last write
         instead of summing, so the (much slower) ``np.add.at`` is used then, and only then.
     """
 

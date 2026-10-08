@@ -184,9 +184,7 @@ from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import (
-    ElementPlan,
     computeElementsForExplicit,
-    computeLumpedDiagonalForExplicit,
 )
 from edelweissfe.solvers.nonlinearexplicitdynamic import (
     NED,
@@ -573,15 +571,13 @@ class NEDMPI(NEDParallel):
             return numbers * self._nMeasuredIncrements, self._nMeasuredIncrements, None
         return self._elementCosts, self._nMeasuredIncrements, self.options["output-frequency"]
 
-    def assembleLumpedDiagonal(self, plan: ElementPlan, elementContribution) -> DofVector:
+    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
         """Assemble a lumped operator of the elements computed here, complete at every degree of
         freedom of the model: completed at the interface like the forces, and shared from the
         owners. Collective.
 
         Parameters
         ----------
-        plan
-            The plan of the elements computed here.
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 
@@ -591,11 +587,9 @@ class NEDMPI(NEDParallel):
             The assembled diagonal.
         """
 
-        vector = self.theDofManager.constructDofVector()
-        vector[:] = 0.0
-        contributions = computeLumpedDiagonalForExplicit(plan, elementContribution, vector)
+        vector, contributions = self.assembleLumpedDiagonalOfPlan(elementContribution)
         with performancetiming.timeit("interface forces"):
-            self.subdomain.interfaceAssemblyFor(plan).assemble(contributions, vector)
+            self.subdomain.interfaceAssemblyFor(self._lumpedOperatorPlan).assemble(contributions, vector)
             self.subdomain.allgatherOwnedValues(vector)
         return vector
 

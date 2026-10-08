@@ -28,24 +28,45 @@
 # Created on Mon Sep 24 13:52:01 2018
 
 # @author: matthias
-"""The nonlinear explicit dynamic solver, with the element loop on several threads.
+"""The nonlinear explicit dynamic solver, with the element loop in bulk, on one thread or several.
 
-:class:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED` with one difference: its element loop
-runs on ``OMP_NUM_THREADS`` threads (with the GIL disabled; see
-:doc:`/documentation/parallelization`). The loop is the same one -- the same chunks, the same
-assembly in element order -- so the result is bit-identical to ``NED``.
+:class:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED` with one difference: its element loop. ``NED``
+computes the elements one at a time -- gather, evaluate, scatter, element after element --, the plainest
+form of the loop and the slowest, since the gather and the scatter of one element cost about what a fast
+element kernel does. This solver runs the same loop in bulk: the elements are cut into chunks, each chunk
+gathers its solution in one indexed read, and the forces of all elements are assembled at once, summed
+at every degree of freedom in element order (:class:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan`).
+The chunks run on ``OMP_NUM_THREADS`` threads (with the GIL disabled; see
+:doc:`/documentation/parallelization`). The result is the same, bit for bit, as ``NED``'s on any number of
+threads -- the forces, and so the solution; the internal energy of the energy table is summed per chunk on
+more than one thread and may differ in its last digits. **Use this solver for production runs**, also on
+one thread.
 """
 
+from dataclasses import replace
+
+import numpy as np
+
+import edelweissfe.utils.performancetiming as performancetiming
+from edelweissfe.models.femodel import FEModel
+from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.parallelizationutilities import (
     getNumberOfThreads,
     isFreeThreadingSupported,
     reportThreadAvailability,
 )
-from edelweissfe.solvers.nonlinearexplicitdynamic import NED
+from edelweissfe.solvers.base.parallelelementcomputation import (
+    ElementPlan,
+    computeElementsForExplicit,
+    computeLumpedDiagonalForExplicit,
+    planElements,
+)
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED, IncrementPlan
+from edelweissfe.timesteppers.timestep import TimeStep
 
 
 class NEDParallel(NED):
-    """The nonlinear explicit dynamic solver, with the element loop on several threads.
+    """The nonlinear explicit dynamic solver, with the element loop in bulk, on one thread or several.
 
     Parameters
     ----------
@@ -57,23 +78,22 @@ class NEDParallel(NED):
 
     identification = "NEDPSolver"
 
-    def beginStep(self, step, model, fieldOutputController, outputmanagers):
-        """Report the threads available, then start the step; see :meth:`NED.beginStep`.
+    def __init__(self, jobInfo, journal, **kwargs):
+        super().__init__(jobInfo, journal, **kwargs)
+        #: The plan of the elements computed here, contact facets included, while the lumped operators
+        #: are assembled (:meth:`_assembleLumpedOperators`); None otherwise.
+        self._lumpedOperatorPlan: ElementPlan | None = None
+
+    def reportElementLoop(self, model: FEModel):
+        """Report the threads available to the element loop.
 
         Parameters
         ----------
-        step
-            The step to solve.
         model
             The model tree.
-        fieldOutputController
-            The field output controller.
-        outputmanagers
-            The output managers.
         """
 
         reportThreadAvailability(getNumberOfThreads(), self.journal, self.identification)
-        return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     def elementLoopThreads(self) -> int:
         """The number of threads the element loop runs on: ``OMP_NUM_THREADS``, if the interpreter
@@ -86,3 +106,121 @@ class NEDParallel(NED):
         """
 
         return getNumberOfThreads() if isFreeThreadingSupported() else 1
+
+    def planIncrement(self, model: FEModel) -> IncrementPlan:
+        """The increment plan of :meth:`NED.planIncrement`, with the chunked element loop
+        (:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        IncrementPlan
+            The plan.
+        """
+
+        plan = super().planIncrement(model)
+        return replace(
+            plan,
+            elementPlan=planElements(
+                self.elementsWithKernels(),
+                self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
+                self.partition.dofs,
+                self.theDofManager.nDof,
+                self.elementLoopThreads(),
+            ),
+        )
+
+    @performancetiming.timeit("elements")
+    def assembleInternalForces(
+        self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
+    ) -> tuple[DofVector, float]:
+        """The element loop of :meth:`NED.assembleInternalForces`, in bulk: see
+        :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
+
+        Parameters
+        ----------
+        U_np
+            The current solution vector.
+        dU
+            The solution increment vector.
+        P
+            The internal force vector; overwritten.
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        tuple[DofVector, float]
+            The internal force vector, and the internal energy the elements report.
+        """
+
+        P[:] = 0.0
+        psi, _ = computeElementsForExplicit(self._incrementPlan.elementPlan, U_np, dU, P, timeStep)
+        return P, psi
+
+    def _assembleLumpedOperators(self, verbosity: int):
+        """Assemble the lumped operators of :meth:`NED._assembleLumpedOperators`, with the plan of the
+        elements computed here, contact facets included, made once for both.
+
+        Parameters
+        ----------
+        verbosity
+            The journal level to report at.
+
+        Returns
+        -------
+        tuple[DofVector, DofVector]
+            As for :meth:`NED._assembleLumpedOperators`.
+        """
+
+        self._lumpedOperatorPlan = planElements(
+            self.partition.elements,
+            self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
+            self.partition.dofs,
+            self.theDofManager.nDof,
+            nThreads=1,
+        )
+        try:
+            return super()._assembleLumpedOperators(verbosity)
+        finally:
+            self._lumpedOperatorPlan = None
+
+    def assembleLumpedDiagonal(self, elementContribution) -> DofVector:
+        """Assemble a lumped operator of :meth:`NED.assembleLumpedDiagonal`, in bulk.
+
+        Parameters
+        ----------
+        elementContribution
+            As for :meth:`NED.assembleLumpedDiagonal`.
+
+        Returns
+        -------
+        DofVector
+            The assembled diagonal.
+        """
+
+        return self.assembleLumpedDiagonalOfPlan(elementContribution)[0]
+
+    def assembleLumpedDiagonalOfPlan(self, elementContribution) -> tuple[DofVector, np.ndarray]:
+        """Assemble a lumped operator with the plan of the elements computed here.
+
+        Parameters
+        ----------
+        elementContribution
+            As for :meth:`NED.assembleLumpedDiagonal`.
+
+        Returns
+        -------
+        tuple[DofVector, np.ndarray]
+            The assembled diagonal, and the contribution buffer it was assembled from
+            (:func:`~edelweissfe.solvers.base.parallelelementcomputation.computeLumpedDiagonalForExplicit`).
+        """
+
+        vector = self.theDofManager.constructDofVector()
+        vector[:] = 0.0
+        contributions = computeLumpedDiagonalForExplicit(self._lumpedOperatorPlan, elementContribution, vector)
+        return vector, contributions

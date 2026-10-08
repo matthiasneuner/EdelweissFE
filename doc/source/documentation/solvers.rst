@@ -117,6 +117,14 @@ momentum and kinetic energy in that case.
 ``NED`` - Nonlinear Explicit Dynamic
 -------------------------------------
 
+.. note::
+
+   ``NED`` computes its elements one at a time -- the plain element loop, written to be read. For
+   production runs use ``NEDParallel``: the same solver with the element loop in bulk, which gives the
+   same result, bit for bit, and is faster also on one thread (its element loop 2.8 times on a 40 000-element
+   CPE4 model with a Marmot material). ``NED`` says so at the start of a step of a model with more
+   than 5000 elements.
+
 .. automodule:: edelweissfe.solvers.nonlinearexplicitdynamic
    :members:
 
@@ -169,6 +177,12 @@ the update runs on whole vectors instead of indexed subsets, and gives the same 
 
 ``NEDParallel`` - Nonlinear Explicit Dynamic (parallel)
 --------------------------------------------------------
+
+The explicit dynamic solver for production runs, on one thread or ``OMP_NUM_THREADS``: ``NED`` with
+the element loop in bulk (:class:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan`).
+``tests/test_explicit_element_loop.py`` checks, increment by increment on models with Python and
+Marmot elements, contact facets, a tie and a live refinement, that both loops give the same forces and
+lumped operators, bit for bit, on 1 and on 4 threads.
 
 .. automodule:: edelweissfe.solvers.nonlinearexplicitdynamicparallel
    :members:

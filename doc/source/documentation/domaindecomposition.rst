@@ -267,11 +267,12 @@ result.
 **What the order rests on.** Within one process the contributions at each degree of freedom are
 summed by :func:`numpy.bincount` (:meth:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan.assembleInto`,
 :class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`), which adds the
-weights into each bin one after another, in the order given -- a left fold, the sum a loop over the
-elements forms. That is how NumPy implements it, not a documented guarantee, so it is tested rather
+weights into each bin one after another, in the order given -- a left fold, the sum the plain
+element loop of ``NED`` forms, element after element. That is how NumPy implements it, not a documented guarantee, so it is tested rather
 than assumed: ``tests/test_domaindecomposition.py`` sums values of very different magnitudes and
 signed zeros, whose sum differs in any other order, through the element loop and -- over three
-processes -- through the interface exchange, and compares the bits with the left fold. It was last
+processes -- through the interface exchange, and compares the bits with the left fold;
+``tests/test_explicit_element_loop.py`` compares the two loops on whole models. It was last
 verified with NumPy 2.5.2; run these tests after upgrading NumPy.
 
 **Loads.** A distributed load or a body force acting on an element is a contribution of that element,
@@ -846,6 +847,11 @@ Limitations
   constraint is not split (see `Contact, ties and rigid bodies`_). The implicit-only constraint types
   still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
+* A failure in one process alone while the model is set up, before the first step -- reading the input,
+  building the mesh, creating the elements -- is not agreed on: the process aborts all of them only
+  when its exception goes uncaught. A caller catching it -- the test runner, which goes on to the next
+  test case -- leaves the others waiting. (A failure in a step aborts all processes before anything
+  else, see `Failures`_.)
 
 Package reference
 -----------------
