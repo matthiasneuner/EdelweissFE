@@ -1164,3 +1164,142 @@ def test_a_random_thickness_is_the_same_wherever_and_whenever_an_element_is_crea
     model.assignSectionsAndPropertiesToElements(created)
 
     assert {number: element._t for number, element in model.elements.items()} == thicknesses
+
+
+#: Runs each deck given twice -- plainly, and with the solution, the velocity, the net force and the
+#: node fields set to NaN, after every increment, outside the degrees of freedom a process integrates,
+#: wherever the process does not hold the whole solution -- and reports, per process, whether the two
+#: final node fields are the same bits. With ``--without-fetches``, the entries a process receives from
+#: their owners point to point are not received, which the poisoned run must notice.
+_STALE_SOLUTION_POISONED_SCRIPT = """
+import contextlib, io, os, sys
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.domaindecomposition.subdomaininterface import ValuesFromOwners
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+acceptIncrement = NEDMPI.acceptIncrement
+if "--without-fetches" in sys.argv:
+    sys.argv.remove("--without-fetches")
+    ValuesFromOwners.receive = lambda self, vectors: None
+
+
+def poisonedWhereNotWhole(self, step, model, timeStep):
+    acceptIncrement(self, step, model, timeStep)
+    if self._wholeSolutionHere:
+        return
+    outside = np.ones(self._U.shape[0], dtype=bool)
+    outside[self.partition.dofs] = False
+    for vector in (self._U, self._V, self._P):
+        vector.asPlainArray()[outside] = np.nan
+    NED.publishNodeFields(self, model, self._U, self._V, self._P)
+
+
+def finalFields(directory):
+    os.chdir(directory)
+    with contextlib.redirect_stdout(io.StringIO()):
+        model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+    return np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+
+
+for directory in sys.argv[1:]:
+    plain = finalFields(directory)
+    NEDMPI.acceptIncrement = poisonedWhereNotWhole
+    poisoned = finalFields(directory)
+    NEDMPI.acceptIncrement = acceptIncrement
+    same = np.array_equal(plain.view(np.int64), poisoned.view(np.int64))
+    print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", flush=True)
+"""
+
+
+def _runPoisonedDecks(tmp_path, decks: list[str], options: list[str]) -> tuple[list[str], str]:
+    """Run :data:`_STALE_SOLUTION_POISONED_SCRIPT` over the edelweiss-only MPI decks given, on 3
+    processes, and return its reports, sorted, and its whole output."""
+
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    for deck in decks:
+        shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), tmp_path / deck, dirs_exist_ok=True)
+    (tmp_path / "run.py").write_text(_STALE_SOLUTION_POISONED_SCRIPT)
+
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    output = subprocess.run(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"]
+        + options
+        + [str(tmp_path / deck) for deck in decks],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    ).stdout
+    return sorted(line for line in output.splitlines() if line.startswith("PROCESS")), output
+
+
+def test_a_process_reads_no_solution_it_did_not_receive(tmp_path):
+    # Between two synchronizations of the whole model a process holds the solution, the velocity and
+    # the net force only at the degrees of freedom it integrates, and an output increment gathers the
+    # whole model to rank 0 only. Whatever a process reads beyond that -- the positions a contact search
+    # reads, the entries it integrates from now on after a search moved a constraint -- it receives
+    # from their owners. Poisoned with NaN everywhere else, the result is the same bits.
+    decks = ["NEDContact", "NEDSurfaceToDiscreteRigidBodyContact", "TieNED"]
+    reports, output = _runPoisonedDecks(tmp_path, decks, [])
+    assert reports == sorted("PROCESS {:} {:} SAME".format(rank, deck) for rank in range(3) for deck in decks), output
+
+    # ... and the poison bites: without receiving the positions from their owners, the contact search
+    # reads NaN where the process does not integrate a node.
+    reports, output = _runPoisonedDecks(tmp_path, ["NEDContact"], ["--without-fetches"])
+    assert any(report.endswith("DIFFERENT") for report in reports), output
+
+
+def test_a_field_output_gathered_elsewhere_refuses_to_be_read_here(tmp_path):
+    from edelweissfe.helpers.inputfilehelpers import (
+        createFieldOutputFromInputFile,
+        fillFEModelFromInputFile,
+    )
+    from edelweissfe.journal.journal import Journal
+    from edelweissfe.models.femodel import FEModel
+    from edelweissfe.utils.inputfileparser import parseInputFile
+
+    deck = tmp_path / "test.inp"
+    deck.write_text(
+        _DISTRIBUTION_DECK
+        + """
+*fieldOutput
+>>perNode, name=uLeft, elSet=gen_left, field=displacement, result=U, saveHistory=True
+"""
+    )
+    inputFile = parseInputFile(str(deck))
+    model = fillFEModelFromInputFile(FEModel(2), inputFile, Journal(verbose=False))
+    model.prepareYourself(Journal(verbose=False))
+    for nodeField in model.nodeFields.values():
+        nodeField.createFieldValueEntry("U")
+    fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["uLeft"]
+    fieldOutput.finalizeIncrement()
+    assert fieldOutput.getLastResult().shape == (6, 2)
+
+    # gathered to the process writing the output, not here: the time is recorded, the result is not
+    fieldOutput.gatherResultsOfWholeSet(toEveryProcess=False, storedHere=False)
+    model.time = 1.0
+    fieldOutput.finalizeIncrement()
+    assert fieldOutput.getTimeHistory().tolist() == [0.0, 1.0]
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getLastResult()
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getResultHistory()
+
+    # stored here again: the last result is readable, the history -- missing a result -- is not
+    model.time = 2.0
+    fieldOutput.finalizeIncrement()
+    assert fieldOutput.getLastResult().shape == (6, 2)
+    with pytest.raises(RuntimeError, match="held by the process writing the output"):
+        fieldOutput.getResultHistory()
