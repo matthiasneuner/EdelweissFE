@@ -202,7 +202,9 @@ class ElementDistribution:
 
         return list(elements)
 
-    def resultsOfWholeSet(self, elementSet, numbersOwnedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(
+        self, elementSet, numbersOwnedHere: list, results: np.ndarray | None, toEveryProcess: bool = True
+    ) -> np.ndarray | None:
         """The results of every element of a set, in set order, from the results of the elements
         owned here. Here: the results given, since every element is owned here.
 
@@ -215,10 +217,13 @@ class ElementDistribution:
             order.
         results
             Their results, one row per element; None if there are none.
+        toEveryProcess
+            Whether every process receives the results, or the process writing the output only;
+            here, the one process.
 
         Returns
         -------
-        np.ndarray
+        np.ndarray | None
             The results of every element of the set, one row per element, in set order.
         """
 

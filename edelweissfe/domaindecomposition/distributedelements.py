@@ -475,10 +475,13 @@ class DistributedElements(ElementDistribution):
 
         return [element for element in elements if self.owners[element.elNumber] == self.rank]
 
-    def resultsOfWholeSet(self, elementSet, numbersOwnedHere: list, results: np.ndarray | None) -> np.ndarray:
+    def resultsOfWholeSet(
+        self, elementSet, numbersOwnedHere: list, results: np.ndarray | None, toEveryProcess: bool = True
+    ) -> np.ndarray | None:
         """The results of every element of a set, in the order of the set in the mesh, gathered from
-        the processes computing them -- to every process, so that a field output is the same in
-        every process, as without decomposition. Collective.
+        the processes computing them -- to every process, so that a field output read in every
+        process is the same there, as without decomposition, or to rank 0 only, which writes the
+        output. Collective.
 
         Parameters
         ----------
@@ -488,11 +491,14 @@ class DistributedElements(ElementDistribution):
             The numbers of the elements of the set computed here, in set order.
         results
             Their results, one row per element; None if there are none.
+        toEveryProcess
+            Whether every process receives the results, or rank 0 only.
 
         Returns
         -------
-        np.ndarray
-            The results of every element of the set, one row per element, in set order.
+        np.ndarray | None
+            The results of every element of the set, one row per element, in set order; None on a
+            process other than rank 0, if gathered to rank 0 only.
 
         Raises
         ------
@@ -500,9 +506,12 @@ class DistributedElements(ElementDistribution):
             If an element of the set is computed by no process.
         """
 
-        numbers = elementSet.elementNumbersOfWholeSet()
-        pieces = self.communicator.allgather((list(numbersOwnedHere), results))
+        piece = (list(numbersOwnedHere), results)
+        pieces = self.communicator.allgather(piece) if toEveryProcess else self.communicator.gather(piece, root=0)
+        if pieces is None:
+            return None
 
+        numbers = elementSet.elementNumbersOfWholeSet()
         rowOf = {number: row for row, number in enumerate(numbers)}
         whole = None
         filled = np.zeros(len(numbers), dtype=bool)

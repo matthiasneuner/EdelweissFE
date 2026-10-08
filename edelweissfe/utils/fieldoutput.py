@@ -207,6 +207,13 @@ class _FieldOutputBase:
         self._exportedBytes = 0
         self._exportFileTruncated = False
         self._reshape_to_dimensions = reshape_to_dimensions
+        #: Whether the next :meth:`finalizeIncrement` stores a result here; see
+        #: :meth:`gatherResultsOfWholeSet`.
+        self._storesNextResultHere = True
+        #: Whether the last result, and whether the history, is held by another process -- the one
+        #: writing the output -- and not here: a domain-decomposed run gathered it there only.
+        self._lastResultHeldElsewhere = False
+        self._historyHeldElsewhere = False
 
     def getLastResult(
         self,
@@ -217,9 +224,38 @@ class _FieldOutputBase:
         -------
         np.ndarray
             The result array.
+
+        Raises
+        ------
+        RuntimeError
+            If the last result is held by another process only (:meth:`gatherResultsOfWholeSet`).
         """
 
+        if self._lastResultHeldElsewhere:
+            raise RuntimeError(self._heldElsewhereMessage("last result"))
         return self.result[-1] if self.appendResults else self.result
+
+    def _heldElsewhereMessage(self, what: str) -> str:
+        """Why a result of this field output cannot be read in this process.
+
+        Parameters
+        ----------
+        what
+            What was to be read.
+
+        Returns
+        -------
+        str
+            The message.
+        """
+
+        return (
+            "fieldOutput {:}: its {:} is held by the process writing the output only, to which a "
+            "domain-decomposed run gathers a field output that nothing in the other processes reads. A reader "
+            "in every process must name the field outputs it reads (e.g. MarkerBase.fieldOutputsRead).".format(
+                self.name, what
+            )
+        )
 
     def getResultHistory(
         self,
@@ -239,6 +275,8 @@ class _FieldOutputBase:
             raise Exception(
                 "fieldOutput {:} does not save any history; please define it with saveHistory=True!".format(self.name)
             )
+        if self._historyHeldElsewhere:
+            raise RuntimeError(self._heldElsewhereMessage("history"))
 
         if self.result:
             firstShape = np.shape(self.result[0])
@@ -287,6 +325,17 @@ class _FieldOutputBase:
             self.result.append(result.copy())
         else:
             self.result = result
+        self._lastResultHeldElsewhere = False
+
+    def _recordResultHeldElsewhere(self):
+        """Record that the result of this increment is stored by another process, not here: the time
+        is recorded as for a stored result -- so that every process decides alike whether the end of a
+        step stores another one (:meth:`finalizeStep`) --, and reading the last result, or the history,
+        raises until a result is stored here again (or the history restored from a checkpoint)."""
+
+        self.timeHistory.append(self.model.time)
+        self._lastResultHeldElsewhere = True
+        self._historyHeldElsewhere = self._historyHeldElsewhere or self.appendResults
 
     def _resultTableForExport(self) -> np.ndarray:
         """Assemble the result table that ``f_export`` is applied to.
@@ -393,6 +442,7 @@ class _FieldOutputBase:
 
         self.timeHistory = [float(t) for t in data["timeHistory"]]
         self._exportedBytes = int(data["exportedBytes"])
+        self._lastResultHeldElsewhere = self._historyHeldElsewhere = False
         if self.appendResults:
             self.result, offset = [], 0
             for shape in data["resultShapes"]:
@@ -417,7 +467,14 @@ class _FieldOutputBase:
     def finalizeIncrement(
         self,
     ):
-        """Finalize an increment, i.e. store the current results."""
+        """Finalize an increment, i.e. store the current results -- unless the result of this increment
+        was gathered to another process only (:meth:`gatherResultsOfWholeSet`)."""
+
+        if not self._storesNextResultHere:
+            self._storesNextResultHere = True
+            self._recordResultHeldElsewhere()
+            return
+
         self.updateResults(self.model)
 
         if self.export:
@@ -431,12 +488,23 @@ class _FieldOutputBase:
         whole: every result but that of an element set.
         """
 
-    def gatherResultsOfWholeSet(self):
+    def gatherResultsOfWholeSet(self, toEveryProcess: bool = True, storedHere: bool = True):
         """Complete the part read by :meth:`readResultsHere` to the result of the whole set, from the
-        processes holding the rest; the next :meth:`updateResults` stores it. Collective where the
-        elements are distributed over several processes. Nothing, for a result every process holds
-        whole.
+        processes holding the rest -- in every process, or in the process writing the output only --;
+        the next :meth:`finalizeIncrement` stores it, if it is stored here at all. Collective where the
+        elements are distributed over several processes. For a result every process holds whole,
+        nothing is gathered.
+
+        Parameters
+        ----------
+        toEveryProcess
+            Whether every process receives the result of the whole set, or rank 0 only.
+        storedHere
+            Whether the next :meth:`finalizeIncrement` stores the result here; if not, it records that
+            the result is held by the process writing the output.
         """
+
+        self._storesNextResultHere = storedHere
 
     def finalizeStep(
         self,
@@ -732,11 +800,21 @@ class ElementFieldOutput(_FieldOutputBase):
         self._resultsHere = self.elementResultCollector.getCurrentResults() if self.elementResultCollector else None
         self._resultsHereRead = True
 
-    def gatherResultsOfWholeSet(self):
+    def gatherResultsOfWholeSet(self, toEveryProcess: bool = True, storedHere: bool = True):
         """Gather the results of the whole set from those read here and those owned elsewhere
         (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`);
         see :meth:`_FieldOutputBase.gatherResultsOfWholeSet`. Collective where the elements are
-        distributed."""
+        distributed.
+
+        Parameters
+        ----------
+        toEveryProcess
+            Whether every process receives the result of the whole set, or rank 0 only.
+        storedHere
+            Whether the next :meth:`finalizeIncrement` stores the result here.
+        """
+
+        super().gatherResultsOfWholeSet(toEveryProcess, storedHere)
 
         if not self._resultsHereRead:
             raise RuntimeError(
@@ -745,7 +823,7 @@ class ElementFieldOutput(_FieldOutputBase):
             )
         resultsHere, self._resultsHere, self._resultsHereRead = self._resultsHere, None, False
         self._resultsOfWholeSet = self.model.elementDistribution.resultsOfWholeSet(
-            self.associatedSet, self._numbersOwnedHere, resultsHere
+            self.associatedSet, self._numbersOwnedHere, resultsHere, toEveryProcess
         )
 
     def updateResults(self, model: FEModel):
@@ -1091,14 +1169,28 @@ class FieldOutputController:
         for output in self.fieldOutputs.values():
             output.readResultsHere()
 
-    def gatherResultsOfWholeSet(self):
+    def gatherResultsOfWholeSet(self, readOnEveryProcess: set[str] | None = None, writesOutput: bool = True):
         """Let every field output complete the part read by :meth:`readResultsHere` to the result of
         its whole set, for the next :meth:`finalizeIncrement`. Collective where the elements are
         distributed over several processes: every process gathers the field outputs in the same
-        order."""
+        order.
 
-        for output in self.fieldOutputs.values():
-            output.gatherResultsOfWholeSet()
+        A field output read in every process is gathered to every process and stored everywhere;
+        any other is gathered to rank 0 and stored only by the process writing the output. Where it
+        is not stored, it records that its result is held elsewhere, and reading it there raises
+        (:meth:`_FieldOutputBase.getLastResult`).
+
+        Parameters
+        ----------
+        readOnEveryProcess
+            The names of the field outputs read in every process; None for all of them.
+        writesOutput
+            Whether this process writes the output, and so stores every result.
+        """
+
+        for name, output in self.fieldOutputs.items():
+            everywhere = readOnEveryProcess is None or name in readOnEveryProcess
+            output.gatherResultsOfWholeSet(toEveryProcess=everywhere, storedHere=everywhere or writesOutput)
 
     def finalizeStep(
         self,
