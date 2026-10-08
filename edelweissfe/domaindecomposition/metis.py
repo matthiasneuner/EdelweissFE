@@ -132,8 +132,10 @@ def partitionMeshDual(
     nParts: int,
     elementWeights: np.ndarray,
     nCommon: int,
+    partShares: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Partition the elements of a mesh into ``nParts`` parts of balanced weight.
+    """Partition the elements of a mesh into ``nParts`` parts of balanced weight -- of equal weight, or
+    of the given shares of the total weight.
 
     Parameters
     ----------
@@ -149,6 +151,9 @@ def partitionMeshDual(
         A positive integer weight per element: its expected computing cost.
     nCommon
         How many nodes two elements must share to be adjacent in the dual graph.
+    partShares
+        The share of the total weight each part is to receive (METIS' target part weights,
+        ``tpwgts``): ``nParts`` positive numbers summing to 1. None for equal shares.
 
     Returns
     -------
@@ -167,6 +172,10 @@ def partitionMeshDual(
         raise ValueError("METIS partitions into at least 2 parts, not {:}.".format(nParts))
     if elementWeights.shape[0] != nElements or np.any(elementWeights < 1):
         raise ValueError("One positive integer weight per element is required.")
+    if partShares is not None:
+        partShares = np.ascontiguousarray(partShares, dtype=np.float32)
+        if partShares.shape != (nParts,) or np.any(partShares <= 0.0) or abs(float(partShares.sum()) - 1.0) > 1e-4:
+            raise ValueError("One positive share per part, summing to 1, is required.")
 
     options = np.zeros(_METIS_NOPTIONS, dtype=np.int32)
     library.METIS_SetDefaultOptions(_pointer(options))
@@ -192,7 +201,7 @@ def partitionMeshDual(
         None,
         ctypes.byref(ncommon),
         ctypes.byref(nparts),
-        None,
+        None if partShares is None else _pointer(partShares, _realPointer),
         _pointer(options),
         ctypes.byref(objval),
         _pointer(elementParts),

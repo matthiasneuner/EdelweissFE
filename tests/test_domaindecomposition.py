@@ -130,6 +130,21 @@ def test_metis_balances_weight_not_count():
     assert np.bincount(parts, minlength=2).min() < 32
 
 
+def test_metis_gives_each_part_its_share():
+    # A process busy with something else -- evaluating a large contact -- is given fewer elements.
+    metis = _metis()
+    offsets, nodes, nNodes = _quadGrid(16)
+
+    parts = metis.partitionMeshDual(
+        offsets, nodes, nNodes, 4, np.ones(256, dtype=int), 2, np.array([0.1, 0.3, 0.3, 0.3])
+    )
+
+    counts = np.bincount(parts, minlength=4)
+    assert abs(counts[0] - 25.6) <= 0.05 * 256 and all(abs(count - 76.8) <= 0.05 * 256 for count in counts[1:])
+    with pytest.raises(ValueError):
+        metis.partitionMeshDual(offsets, nodes, nNodes, 4, np.ones(256, dtype=int), 2, np.array([0.5, 0.5, 0.0, 0.0]))
+
+
 def test_metis_rejects_nonpositive_weights():
     metis = _metis()
     offsets, nodes, nNodes = _quadGrid(2)
