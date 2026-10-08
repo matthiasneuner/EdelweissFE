@@ -980,7 +980,11 @@ class Subdomain:
             nElements = self.communicator.allreduce(costs.shape[0])
             self._meanElementCost = float(elementTimes.sum()) / max(nElements, 1)
         self._constraintCosts = constraintTimes
-        self._processShares = elementSharesBesideConstraints(float(elementTimes.sum()), constraintTimes)
+        self._processShares = elementSharesBesideConstraints(
+            float(elementTimes.sum()),
+            constraintTimes,
+            sum(not record.isAuxiliary for record in self._model.mesh.elements.values()),
+        )
         if timeBeyondTolerance <= 0.0:
             self.journal.message(
                 "Load imbalance {:.3f} (the busiest process / the attainable) within 1 + {:}".format(

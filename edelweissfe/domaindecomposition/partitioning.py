@@ -59,6 +59,11 @@ from edelweissfe.models.mesh import ElementTypeInfo, Mesh, MeshElement
 #: quarter of an equal part's elements in every test. A process without elements is never intended.
 MINIMUM_SHARE_OF_AN_EQUAL_SHARE = 0.5
 
+#: The fewest elements per process for which the elements are partitioned into unequal shares at all
+#: (:func:`elementSharesBesideConstraints`): at 8 elements per part, half an equal share still kept 2
+#: elements in every test; with fewer, a part of a smaller share may come out empty.
+ELEMENTS_PER_PROCESS_FOR_SHARES = 8
+
 #: By how much, as a fraction of an equal share, the share a part was made for and the share of the
 #: process computing it may differ when a repartition keeps elements where they were
 #: (:func:`keepElementsWhereTheyWere`). The speed of the processes alone scatters by 5--8 % for the
@@ -259,7 +264,9 @@ def keepElementsWhereTheyWere(
     return dict(zip(numbers, renumbered[new].tolist()))
 
 
-def elementSharesBesideConstraints(elementCost: float, constraintCosts: np.ndarray) -> np.ndarray | None:
+def elementSharesBesideConstraints(
+    elementCost: float, constraintCosts: np.ndarray, nElements: int
+) -> np.ndarray | None:
     """The share of the elements' work each process is to receive, so that every process is equally
     busy with its elements and the constraints it evaluates -- as far as that is possible: no process
     is given less than :data:`MINIMUM_SHARE_OF_AN_EQUAL_SHARE` of an equal share, so that every process
@@ -272,17 +279,22 @@ def elementSharesBesideConstraints(elementCost: float, constraintCosts: np.ndarr
         The cost of all elements, e.g. their kernel time per increment summed over all processes.
     constraintCosts
         The cost of the constraints each process evaluates, in the same unit, by rank.
+    nElements
+        The number of elements to partition (without the auxiliary ones).
 
     Returns
     -------
     np.ndarray | None
-        The shares, by rank, summing to 1; None if no process evaluates a costly constraint (equal
-        shares).
+        The shares, by rank, summing to 1; None for equal shares: if no process evaluates a costly
+        constraint, or if there are fewer than :data:`ELEMENTS_PER_PROCESS_FOR_SHARES` elements per
+        process.
     """
 
     constraintCosts = np.asarray(constraintCosts, dtype=float)
     nProcesses = constraintCosts.shape[0]
     if not np.any(constraintCosts > 0.0) or elementCost <= 0.0:
+        return None
+    if nElements < ELEMENTS_PER_PROCESS_FOR_SHARES * nProcesses:
         return None
 
     # The level every process is filled to: of the processes below it, the elements and constraints

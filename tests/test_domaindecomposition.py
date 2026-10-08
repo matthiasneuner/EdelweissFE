@@ -1135,7 +1135,7 @@ def test_no_process_is_left_without_elements():
     offsets, nodes, nNodes = _quadGrid(64)
     # Process 7 evaluates a constraint costing more than all elements: it was given a share of 0.001
     # of an equal one, and METIS left its part empty (while reporting success).
-    shares = elementSharesBesideConstraints(8.0, np.array([0.0] * 7 + [20.0]))
+    shares = elementSharesBesideConstraints(8.0, np.array([0.0] * 7 + [20.0]), 1000)
     assert shares[7] == pytest.approx(MINIMUM_SHARE_OF_AN_EQUAL_SHARE / 8)
     counts = np.bincount(metis.partitionMeshDual(offsets, nodes, nNodes, 8, np.ones(4096, dtype=int), 2, shares))
     assert counts.shape == (8,) and counts.min() > 0
@@ -1162,19 +1162,21 @@ def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
         elementSharesBesideConstraints,
     )
 
-    assert elementSharesBesideConstraints(12.0, np.zeros(4)) is None
+    assert elementSharesBesideConstraints(12.0, np.zeros(4), 1000) is None
+    # Too few elements per process for unequal shares: METIS might leave a part empty.
+    assert elementSharesBesideConstraints(12.0, np.array([0.0, 0.0, 0.0, 4.0]), 31) is None
     # (24 + 2) / 4 = 6.5 per process: process 3 gets 6.5 - 2 = 4.5 of the 24 of element work
-    shares = elementSharesBesideConstraints(24.0, np.array([0.0, 0.0, 0.0, 2.0]))
+    shares = elementSharesBesideConstraints(24.0, np.array([0.0, 0.0, 0.0, 2.0]), 1000)
     assert np.allclose(shares, [6.5 / 24.0, 6.5 / 24.0, 6.5 / 24.0, 4.5 / 24.0])
     # (12 + 4) / 4 = 4 per process: process 3 would be busy with its constraints alone, and keeps half
     # an equal share
-    shares = elementSharesBesideConstraints(12.0, np.array([0.0, 0.0, 0.0, 4.0]))
+    shares = elementSharesBesideConstraints(12.0, np.array([0.0, 0.0, 0.0, 4.0]), 1000)
     assert np.allclose(shares, [0.875 / 3.0, 0.875 / 3.0, 0.875 / 3.0, 0.125])
     assert np.isclose(shares.sum(), 1.0)
     # Process 0 is busier with its constraint than any process can be with the elements; process 1
     # would be filled with 1/9 of the elements, less than the minimum, too: both keep half an equal
     # share, the others share the rest.
-    shares = elementSharesBesideConstraints(3.0, np.array([10.0, 1.0, 0.0, 0.0]))
+    shares = elementSharesBesideConstraints(3.0, np.array([10.0, 1.0, 0.0, 0.0]), 1000)
     assert np.allclose(shares, [0.125, 0.125, 0.375, 0.375])
 
 
