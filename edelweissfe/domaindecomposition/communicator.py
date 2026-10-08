@@ -250,6 +250,22 @@ class Communicator:
         self._requireCommunicationAllowed("Allgatherv")
         self.mpiCommunicator.Allgatherv(sendbuf, recvbuf)
 
+    def Gatherv(self, sendbuf, recvbuf, root: int = 0):
+        """Gather buffers of varying size of every process to ``root``; see ``mpi4py``. Collective.
+
+        Parameters
+        ----------
+        sendbuf
+            This process' buffer.
+        recvbuf
+            The receive buffer specification on ``root``; None elsewhere.
+        root
+            The rank gathering.
+        """
+
+        self._requireCommunicationAllowed("Gatherv")
+        self.mpiCommunicator.Gatherv(sendbuf, recvbuf, root=root)
+
     def allreduce(self, obj, op=MPI.SUM):
         """Reduce a Python object over every process; see ``mpi4py``. Collective.
 

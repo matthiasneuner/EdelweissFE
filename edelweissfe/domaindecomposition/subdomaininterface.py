@@ -55,6 +55,7 @@ from mpi4py import MPI
 from edelweissfe.numerics.assembly import addNodalForces
 
 _INTERFACE_TAG = 7
+_VALUES_TAG = 8
 #: The bound on the entries of one constraint: an entry of a constraint force is ordered by the
 #: position of its constraint in the model times this, plus its index within the constraint.
 _ENTRIES_PER_CONSTRAINT = 2**32
@@ -179,6 +180,30 @@ class SubdomainInterface:
             [self._gatherBuffer, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE],
         )
         plain[self._gatheredOrder] = self._gatherBuffer
+
+    def gatherOwnedValuesToRoot(self, vector: np.ndarray):
+        """Overwrite every entry of a vector on rank 0 with its owner's value, in place, so that it is
+        the complete vector there -- as :meth:`allgatherOwnedValues` does on every process. The other
+        processes send their owned entries and keep their vector as it was: complete at the degrees
+        of freedom they integrate only.
+
+        Collective.
+
+        Parameters
+        ----------
+        vector
+            A vector over the whole equation system, correct at least at the owned entries.
+        """
+
+        plain = vector.view(np.ndarray)
+        send = np.ascontiguousarray(plain[self._ownedDofs])
+        if self.communicator.Get_rank() == 0:
+            self.communicator.Gatherv(
+                send, [self._gatherBuffer, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE], root=0
+            )
+            plain[self._gatheredOrder] = self._gatherBuffer
+        else:
+            self.communicator.Gatherv(send, None, root=0)
 
 
 class _TaggedContributions:
@@ -542,16 +567,80 @@ class ConstraintForceExchange:
             addNodalForces(plain, dofs, exchange.merged[entries], namesDofMoreThanOnce)
 
 
-def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict):
-    """Exchange one buffer with each neighbour, both ways. Collective among neighbours."""
+class ValuesFromOwners:
+    """Copies of vector entries at chosen degrees of freedom, received point to point from the
+    processes owning them -- instead of the whole vector, where a process needs a few entries it does
+    not integrate: the positions a contact search reads, or the entries at degrees of freedom it
+    integrates from now on.
+
+    Which entries each process sends to which is agreed once, here; :meth:`receive` then moves the
+    values alone. Only the owners of the entries asked for and the processes asking take part in
+    that; a process asking for nothing and owning nothing asked for sends and receives no message.
+    A copy is a copy: the received entries are the owner's bits.
+
+    Constructed collectively: every process of the communicator must construct its instance at the
+    same time.
+
+    Parameters
+    ----------
+    communicator
+        The communicator of the processes sharing the model.
+    neededDofs
+        The degrees of freedom whose entries this process needs, in any order and with repetitions.
+        Those it owns itself are not asked for.
+    dofOwners
+        The owner of every degree of freedom of the model, the same in every process.
+    """
+
+    def __init__(self, communicator, neededDofs: np.ndarray, dofOwners: np.ndarray):
+        self.communicator = communicator
+        rank = communicator.Get_rank()
+        size = communicator.Get_size()
+
+        neededDofs = np.unique(np.asarray(neededDofs, dtype=np.int64))
+        owners = dofOwners[neededDofs]
+        asks = [neededDofs[owners == other] if other != rank else np.empty(0, dtype=np.int64) for other in range(size)]
+        askedOfThisProcess = communicator.alltoall(asks)
+
+        #: The degrees of freedom received from each owner, by rank.
+        self._receiveDofs = {other: dofs for other, dofs in enumerate(asks) if dofs.shape[0]}
+        #: The degrees of freedom sent to each process asking, by rank.
+        self._sendDofs = {other: dofs for other, dofs in enumerate(askedOfThisProcess) if dofs.shape[0]}
+
+    @property
+    def nReceived(self) -> int:
+        """The number of entries of each vector this process receives."""
+
+        return sum(dofs.shape[0] for dofs in self._receiveDofs.values())
+
+    def receive(self, vectors: list[np.ndarray]):
+        """Overwrite the needed entries of the vectors with their owners' values, in place, and send
+        the owned entries other processes need. Collective among the processes taking part.
+
+        Parameters
+        ----------
+        vectors
+            Vectors over the whole equation system, the same vectors in every process, correct at
+            least at the owned entries.
+        """
+
+        plains = [vector.view(np.ndarray) for vector in vectors]
+        receiveBuffers = {other: np.empty((len(plains), dofs.shape[0])) for other, dofs in self._receiveDofs.items()}
+        sendBuffers = {other: np.stack([plain[dofs] for plain in plains]) for other, dofs in self._sendDofs.items()}
+        _exchange(self.communicator, sendBuffers, receiveBuffers, tag=_VALUES_TAG)
+        for other, dofs in self._receiveDofs.items():
+            for plain, received in zip(plains, receiveBuffers[other]):
+                plain[dofs] = received
+
+
+def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict, tag: int = _INTERFACE_TAG):
+    """Send a buffer to each process of ``sendBuffers`` and receive one from each of ``receiveBuffers``,
+    with the message tag ``tag``. Collective among those processes."""
 
     requests = [
-        communicator.Irecv(receiveBuffers[neighbour], source=neighbour, tag=_INTERFACE_TAG)
-        for neighbour in receiveBuffers
+        communicator.Irecv(receiveBuffers[neighbour], source=neighbour, tag=tag) for neighbour in receiveBuffers
     ]
-    requests += [
-        communicator.Isend(sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG) for neighbour in sendBuffers
-    ]
+    requests += [communicator.Isend(sendBuffers[neighbour], dest=neighbour, tag=tag) for neighbour in sendBuffers]
     # Waits on the requests, not the communicator: the guard against communicating inside an
     # agreement (Communicator.withoutCommunication) already refused the Isend/Irecv above.
     MPI.Request.Waitall(requests)

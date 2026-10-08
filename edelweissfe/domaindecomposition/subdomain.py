@@ -73,6 +73,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
     InterfaceForceAssembly,
     InterfaceLoadAssembly,
     SubdomainInterface,
+    ValuesFromOwners,
 )
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
@@ -732,6 +733,73 @@ class Subdomain:
 
         self._interface.allgatherOwnedValues(vector)
 
+    def gatherOwnedValuesToRoot(self, vector: DofVector):
+        """Make a vector, correct at the degrees of freedom owned here, the complete vector on rank 0,
+        in place: every entry from its owner. The other processes keep theirs, complete at the degrees
+        of freedom they integrate only. Collective.
+
+        Parameters
+        ----------
+        vector
+            A vector of the whole model.
+        """
+
+        self._interface.gatherOwnedValuesToRoot(vector)
+
+    @property
+    def interface(self) -> SubdomainInterface:
+        """The interface of the current definition: the degrees of freedom this process integrates,
+        and the owner of every degree of freedom of the model.
+
+        Returns
+        -------
+        SubdomainInterface
+            The interface.
+        """
+
+        return self._interface
+
+    def valuesFromOwners(self, neededDofs: np.ndarray) -> ValuesFromOwners:
+        """How this process receives the entries of vectors at the given degrees of freedom from their
+        owners, point to point (:class:`~.subdomaininterface.ValuesFromOwners`). Collective.
+
+        Parameters
+        ----------
+        neededDofs
+            The degrees of freedom whose entries this process needs.
+
+        Returns
+        -------
+        ValuesFromOwners
+            The exchange.
+        """
+
+        return ValuesFromOwners(self.communicator, neededDofs, self._interface.dofOwners)
+
+    def receiveNewlyIntegratedValues(self, before: SubdomainInterface, vectors: list[DofVector]):
+        """After the subdomain was defined afresh for the same degree-of-freedom layout -- a contact
+        search moved a constraint, or elements moved between the processes -- complete the vectors at
+        the degrees of freedom this process integrates now but did not before, from the processes that
+        owned them before. Collective.
+
+        A process holds a vector current at the degrees of freedom it integrates only (between two
+        synchronizations of the whole model, see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.acceptIncrement`); a degree of
+        freedom it starts to integrate holds whatever the last synchronization left there. Its owner
+        under the previous definition integrated it, and so holds it current: the entries are its
+        bits.
+
+        Parameters
+        ----------
+        before
+            The interface of the previous definition.
+        vectors
+            The vectors carried over to the new definition.
+        """
+
+        newlyIntegrated = np.setdiff1d(self._interface.subdomainDofs, before.subdomainDofs, assume_unique=True)
+        ValuesFromOwners(self.communicator, newlyIntegrated, before.dofOwners).receive(vectors)
+
     def addConstraintForces(self, forces: dict, P: DofVector):
         """Send the forces of the constraints evaluated here to the processes integrating their
         degrees of freedom, and add those of every constraint acting on a degree of freedom
@@ -759,19 +827,26 @@ class Subdomain:
             )
 
     @performancetiming.timeit("subdomain synchronization")
-    def synchronizeStates(self, includeElements: bool):
+    def synchronizeStates(self, includeElements: bool, toEveryProcess: bool = True):
         """Give every stateful constraint -- and, if asked, every element -- of this process' model
         the state the process computing it last left it in. Collective.
+
+        The constraint states are received by every process, or by rank 0 only, where the output is
+        written; the copies elsewhere then keep the state of their last synchronization. The element
+        states -- synchronized only where every process holds every element -- are always received
+        by every process: a repartition may give any element to any process.
 
         Parameters
         ----------
         includeElements
             Whether the element states are synchronized as well.
+        toEveryProcess
+            Whether every process receives the constraint states, or rank 0 only.
         """
 
         if includeElements:
             self._stateSynchronization.synchronizeElementStates()
-        self._stateSynchronization.synchronizeConstraintStates()
+        self._stateSynchronization.synchronizeConstraintStates(toEveryProcess)
 
     def elementStatesOwnedHere(self, model: FEModel) -> dict:
         """The converged state of every element this process owns, by number, in model order: its

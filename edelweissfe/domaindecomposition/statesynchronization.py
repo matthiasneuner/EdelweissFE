@@ -156,8 +156,15 @@ class ModelStateSynchronization:
             for position, element in enumerate(ownersElements):
                 element.setStateVars(received[offsets[position] : offsets[position + 1]].copy())
 
-    def synchronizeConstraintStates(self):
-        """Give every stateful constraint the state of its owner. Collective."""
+    def synchronizeConstraintStates(self, toEveryProcess: bool = True):
+        """Give every stateful constraint the state of its owner -- in every process, or on rank 0
+        only, where the output is written. Collective.
+
+        Parameters
+        ----------
+        toEveryProcess
+            Whether every process receives the states, or rank 0 only.
+        """
 
         owned = {}
         for name in self._ownedConstraints:
@@ -166,7 +173,8 @@ class ModelStateSynchronization:
             if data:
                 owned[name] = {entry: np.array(values) for entry, values in data.items()}
 
-        for owner, received in enumerate(self.communicator.allgather(owned)):
+        gathered = self.communicator.allgather(owned) if toEveryProcess else self.communicator.gather(owned, root=0)
+        for owner, received in enumerate(gathered or []):
             if owner == self._rank:
                 continue
             for name, data in received.items():
