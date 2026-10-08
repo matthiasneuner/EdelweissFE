@@ -651,7 +651,12 @@ depend on the partition at all.
 The new partition weighs every element by its measured kernel time, and gives each process the share
 of them that makes it as busy as the others with its constraints
 (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`, METIS' target
-part weights): the process evaluating a large contact computes correspondingly fewer elements. That
+part weights): the process evaluating a large contact computes correspondingly fewer elements --
+but never less than half an equal share, since METIS leaves a part of a much smaller share empty while
+reporting success; a mesh of fewer than 8 elements per process keeps equal shares, and a partition
+by shares leaving a process without elements is refused, loudly
+(:data:`~edelweissfe.domaindecomposition.partitioning.MINIMUM_SHARE_OF_AN_EQUAL_SHARE`,
+:data:`~edelweissfe.domaindecomposition.partitioning.ELEMENTS_PER_PROCESS_FOR_SHARES`). That
 helps only because the constraints are evaluated *with* the elements -- right after them, inside the
 same agreement on failures, before the forces are exchanged at the interface
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.assembleInternalForces`) --, while
@@ -665,8 +670,12 @@ change (see `Adaptive refinement`_) uses the shares of the last measurement.
 The new parts are numbered so that as many elements as possible keep their process
 (:func:`~edelweissfe.domaindecomposition.partitioning.keepElementsWhereTheyWere`): METIS numbers
 parts arbitrarily, and a renumbered but otherwise similar partition would move almost every element.
-A part made for a share of its own -- for a process evaluating a costly constraint -- stays with its
-process.
+A part goes to another process only if their shares differ by no more than 5 % of an equal share
+(:data:`~edelweissfe.domaindecomposition.partitioning.INTERCHANGEABLE_SHARES`, about the scatter of
+the processes' speed for the same element): a process evaluating a costly constraint keeps its
+smaller part, while the others -- whose shares differ a little, as every process evaluates some small
+constraint -- are renumbered among themselves. (Requiring equal shares moved almost every element on
+c1_150 at 8x4, where every process evaluates a constraint.)
 
 Where every process holds the whole model, a repartition changes nothing but which elements each
 process computes. A **distributed** model *migrates* the elements whose process changes
