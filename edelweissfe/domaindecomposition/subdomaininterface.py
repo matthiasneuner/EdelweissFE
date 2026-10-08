@@ -52,6 +52,8 @@ which process counts a quantity that must be counted once -- a concentrated load
 import numpy as np
 from mpi4py import MPI
 
+from edelweissfe.numerics.assembly import addNodalForces
+
 _INTERFACE_TAG = 7
 #: The bound on the entries of one constraint: an entry of a constraint force is ordered by the
 #: position of its constraint in the model times this, plus its index within the constraint.
@@ -370,38 +372,42 @@ class InterfaceForceAssembly:
         )
 
 
-class _ContributionsAddedInOrder:
-    """Nodal contributions, each with its place in the order a single process adds them, added onto a
-    vector one after another in that order at every degree of freedom integrated here; what
-    :class:`InterfaceLoadAssembly` and :class:`ConstraintForceExchange` have in common.
+class InterfaceLoadAssembly:
+    """The nodal forces of the loads acting on the elements of one subdomain -- distributed loads and
+    body forces -- and how to add them, at every degree of freedom, in the order a single process
+    adds them.
 
-    Each process holds its contributions in one buffer. At a degree of freedom another process
-    integrates too, that process receives the entries (:class:`_TaggedContributions`), so every process
-    integrating a degree of freedom holds all the contributions there. They are *added* onto the vector,
-    which already holds the same bits on every process integrating the degree of freedom, one after
-    another, in the order of their tags: floating-point addition is not associative, so the sums are
-    formed as a single process forms them -- the first contribution at every degree of freedom, then the
-    second, and so on. Within one such *layer* no degree of freedom appears twice, so each is one
-    vectorized addition.
+    A load acting on an element is a contribution of that element, so it is evaluated where the
+    element is: by the process computing it, with its current solution. Each process evaluates the
+    loads of its elements into one buffer, an entry per element and degree of freedom, in the order
+    of the loads -- the load in deck order, the face of its surface, the element in the set. At a
+    degree of freedom another process integrates too, that process receives the entries, tagged with
+    the place of the contribution in the order of all loads of the model; so every process
+    integrating a degree of freedom holds all the load contributions there.
 
-    Only the entries of the vector at the degrees of freedom integrated here are written.
+    They are *added* onto the vector, one after another, in that order: a single process adds every
+    load contribution onto the net force the elements and the concentrated loads already left there
+    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads`), and
+    floating-point addition is not associative, so the sums are formed the same way here -- the
+    first contribution at every degree of freedom, then the second, and so on. Within one such
+    *layer* no degree of freedom appears twice, so each is one vectorized addition.
 
-    Constructed collectively among neighbours.
+    Constructed collectively among neighbours, whenever the subdomain or the loads change.
 
     Parameters
     ----------
     interface
         The subdomain interface.
     entryDofs
-        The degree of freedom of every entry of this process' buffer.
-    entryOrder
-        The place of every entry in the order a single process adds all contributions in.
+        The degree of freedom of every entry of this process' load buffer.
+    entryLoadOrder
+        The place of every entry in the order of all load contributions of the model.
     """
 
-    def __init__(self, interface: SubdomainInterface, entryDofs: np.ndarray, entryOrder: np.ndarray):
+    def __init__(self, interface: SubdomainInterface, entryDofs: np.ndarray, entryLoadOrder: np.ndarray):
         entryDofs = np.asarray(entryDofs, dtype=np.int64)
         self._contributions = _TaggedContributions(
-            interface, entryDofs, entryOrder, np.arange(entryDofs.shape[0], dtype=np.int64)
+            interface, entryDofs, entryLoadOrder, np.arange(entryDofs.shape[0], dtype=np.int64)
         )
         order = self._contributions.order
         sortedDofs = self._contributions.tagDofs[order]
@@ -419,13 +425,13 @@ class _ContributionsAddedInOrder:
         ]
 
     def assemble(self, contributions: np.ndarray, vector: np.ndarray):
-        """Add the contributions of all processes at the degrees of freedom integrated here onto
-        ``vector``, in the order a single process adds them. Collective among neighbours.
+        """Add the load contributions of all processes at the degrees of freedom integrated here onto
+        ``vector``, in the order of the loads of the model. Collective among neighbours.
 
         Parameters
         ----------
         contributions
-            This process' buffer, one entry per contribution.
+            This process' load buffer, one entry per loaded element and degree of freedom.
         vector
             The vector to add into.
         """
@@ -437,56 +443,28 @@ class _ContributionsAddedInOrder:
             plain[dofs] += exchange.merged[entries]
 
 
-class InterfaceLoadAssembly(_ContributionsAddedInOrder):
-    """The nodal forces of the loads acting on the elements of one subdomain -- distributed loads and
-    body forces -- and how to add them, at every degree of freedom, in the order a single process
-    adds them.
-
-    A load acting on an element is a contribution of that element, so it is evaluated where the
-    element is: by the process computing it, with its current solution. Each process evaluates the
-    loads of its elements into one buffer, an entry per element and degree of freedom, in the order
-    of the loads -- the load in deck order, the face of its surface, the element in the set. Each
-    entry is tagged with the place of the contribution in the order of all loads of the model, and
-    added onto the net force the elements and the concentrated loads already left there, as a single
-    process adds every load contribution
-    (:meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads`); see
-    :class:`_ContributionsAddedInOrder`.
-
-    Constructed collectively among neighbours, whenever the subdomain or the loads change.
-
-    Parameters
-    ----------
-    interface
-        The subdomain interface.
-    entryDofs
-        The degree of freedom of every entry of this process' load buffer.
-    entryOrder
-        The place of every entry in the order of all load contributions of the model.
-    """
-
-
-class ConstraintForceExchange(_ContributionsAddedInOrder):
+class ConstraintForceExchange:
     """How the processes exchange the forces of the constraints they evaluate, every increment.
 
     A constraint is evaluated whole, by the process that owns it, which integrates every degree of
     freedom it acts on. Another process integrating one of them shares that degree of freedom with the
     owner, and needs the constraint's forces there -- only there. So the owner sends each neighbour,
     point to point, the forces of its constraints at the degrees of freedom the two share, and nothing
-    else; no process receives a constraint whole unless it integrates all of it.
+    else (:class:`_TaggedContributions`); no process receives a constraint it does not integrate.
 
-    Every process then adds, at each degree of freedom it integrates, the forces of all constraints
-    acting there in model order -- a constraint after the constraints before it in the model, and the
-    entries of one constraint in their own order, as :func:`~edelweissfe.numerics.assembly.addNodalForces`
-    adds them -- which is the order a single process adds them in, so the sum is the same bits; see
-    :class:`_ContributionsAddedInOrder`. Each entry is tagged with that place: the position of its
-    constraint in the model and its index within the constraint.
+    Every process then adds the forces it holds constraint by constraint, in model order, each as a
+    single process adds it (:func:`~edelweissfe.numerics.assembly.addNodalForces`). At a degree of
+    freedom integrated here those are the forces of every constraint acting there, so they are added in
+    the order, and onto the same bits, as without decomposition: the sum is the same bits. Each entry is
+    tagged with its place in that order: the position of its constraint in the model and its index
+    within the constraint.
 
     Which degrees of freedom each constraint acts on changes only when the equation system is rebuilt,
     so the layout -- which entries go to which neighbour, and their tags -- is exchanged once per
     rebuild, here; an increment exchanges the forces alone.
 
-    The net force vector holds the constraint forces at the degrees of freedom integrated here only;
-    elsewhere it holds none, and is not read before it is next gathered from the owners
+    The net force vector so holds the constraint forces at the degrees of freedom integrated here only.
+    Elsewhere it holds none, and is not read before it is next gathered from the owners
     (:meth:`SubdomainInterface.allgatherOwnedValues`).
 
     Constructed collectively among neighbours.
@@ -516,18 +494,28 @@ class ConstraintForceExchange(_ContributionsAddedInOrder):
 
         if any(dofs.shape[0] >= _ENTRIES_PER_CONSTRAINT for _, _, dofs in owned):
             raise ValueError("A constraint acts on more degrees of freedom than its forces can be ordered by.")
-        entryDofs = np.concatenate([dofs for _, _, dofs in owned]) if owned else np.empty(0, dtype=np.int64)
-        entryOrder = (
-            np.concatenate(
-                [
-                    position * _ENTRIES_PER_CONSTRAINT + np.arange(dofs.shape[0], dtype=np.int64)
-                    for position, _, dofs in owned
-                ]
-            )
-            if owned
-            else np.empty(0, dtype=np.int64)
+        entryDofs = [np.empty(0, dtype=np.int64)] + [dofs for _, _, dofs in owned]
+        entryOrder = [np.empty(0, dtype=np.int64)] + [
+            position * _ENTRIES_PER_CONSTRAINT + np.arange(dofs.shape[0], dtype=np.int64) for position, _, dofs in owned
+        ]
+        self._contributions = _TaggedContributions(
+            interface,
+            np.concatenate(entryDofs),
+            np.concatenate(entryOrder),
+            np.arange(self._ownedForces.shape[0], dtype=np.int64),
         )
-        super().__init__(interface, entryDofs, entryOrder)
+
+        # The merged entries, constraint by constraint in model order, each in its own order.
+        tagOrder = self._contributions.tagOrder
+        byOrder = np.argsort(tagOrder)
+        constraintPositions = tagOrder[byOrder] // _ENTRIES_PER_CONSTRAINT
+        #: Per constraint held here: its merged entries, their degrees of freedom, and whether one of
+        #: them is named more than once (see addNodalForces).
+        self._additions = []
+        for entries in np.split(byOrder, np.flatnonzero(np.diff(constraintPositions)) + 1):
+            if entries.shape[0]:
+                dofs = self._contributions.tagDofs[entries]
+                self._additions.append((entries, dofs, np.unique(dofs).shape[0] != dofs.shape[0]))
 
     def addAllConstraintForces(self, ownedForces: dict, vector: np.ndarray):
         """Send this process' constraint forces to the neighbours integrating their degrees of freedom,
@@ -546,7 +534,12 @@ class ConstraintForceExchange(_ContributionsAddedInOrder):
 
         for i, name in enumerate(self._ownedNames):
             self._ownedForces[self._ownedOffsets[i] : self._ownedOffsets[i + 1]] = ownedForces[name]
-        self.assemble(self._ownedForces, vector)
+
+        exchange = self._contributions
+        exchange.exchange(self._ownedForces)
+        plain = vector.view(np.ndarray)
+        for entries, dofs, namesDofMoreThanOnce in self._additions:
+            addNodalForces(plain, dofs, exchange.merged[entries], namesDofMoreThanOnce)
 
 
 def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict):
