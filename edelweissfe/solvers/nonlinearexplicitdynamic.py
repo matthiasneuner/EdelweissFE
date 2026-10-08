@@ -631,13 +631,7 @@ class NED(NonlinearSolverBase):
         # And the pairing of U with the half-step-staggered V is unambiguous only between increments.
         # The zero increment is never recorded as the last increment, so a live marker is never
         # evaluated on the initial condition.
-        topologyCheckFrequency = self.options["topology-check-frequency"]
-        if not (
-            self._liveTopologyModifiers
-            and topologyCheckFrequency
-            and self.prevTimeStep is not None
-            and self.prevTimeStep.number % topologyCheckFrequency == 0
-        ):
+        if not self.topologyCheckDueAfter(self.prevTimeStep):
             return
 
         theSystem, V = self._system, self._V
@@ -685,6 +679,31 @@ class NED(NonlinearSolverBase):
                     1,
                 )
                 step.timeStepper.enforceTimeIncrement(theSystem.criticalTimeStep)
+
+    def topologyCheckDueAfter(self, timeStep: TimeStep | None) -> bool:
+        """Whether the mid-run topology check is due after an increment: after every
+        ``topology-check-frequency``-th one, if a model modifier can act once the analysis is running.
+        It runs at the start of the next increment (:meth:`prepareIncrement`), and since the frequency
+        is a multiple of ``output-frequency``, always right after an output increment.
+
+        Parameters
+        ----------
+        timeStep
+            The last completed increment, or None before the first one.
+
+        Returns
+        -------
+        bool
+            Whether the topology check is due.
+        """
+
+        topologyCheckFrequency = self.options["topology-check-frequency"]
+        return bool(
+            self._liveTopologyModifiers
+            and topologyCheckFrequency
+            and timeStep is not None
+            and timeStep.number % topologyCheckFrequency == 0
+        )
 
     def _buildSystem(self, theSystem):
         """Adopt a (re)built equation system, and the vectors the increments work on.
