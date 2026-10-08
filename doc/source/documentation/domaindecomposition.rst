@@ -189,7 +189,9 @@ of its host element -- a facet by that of the solid element whose face it tiles,
 of freedom are already in that subdomain -- or, if it has none, as a point mass, by the process given
 part 0 of the partition (rank 0, unless a repartition renumbered the parts)
 (:func:`~edelweissfe.domaindecomposition.partitioning.processOfAuxiliaryElement`). The constraints
-are dealt out by name, one process each.
+are dealt out by name, one process each; part *p* of the partition is computed by process *p*, and
+once a constraint's cost has been measured, the process evaluating it is given a correspondingly
+smaller part (see `Load balancing`_).
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
 degrees of freedom. A degree of freedom touched by several processes lies on their *interface*. Each
@@ -221,10 +223,11 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``NEDMPI`` method                            adds
 ==========================================  =========================================================
 ``partitionModel``                          the subdomain, instead of the whole model
-``assembleInternalForces``                  the interface exchange of the element forces
+``assembleInternalForces``                  evaluates the own constraints with the elements, and the
+                                            interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
 ``assembleLoads``                           the loads of the own elements, completed at the interface
-``assembleConstraintForces``                evaluates the own constraints, sends forces to neighbours
+``assembleConstraintForces``                sends the own constraints' forces to neighbours, adds them
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the sums over the subdomains
 ``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned
@@ -533,15 +536,31 @@ model (`Where the whole model is read`_). ``tests/test_domaindecomposition.py`` 
 exchange writes nothing outside the subdomain, and a run with the net force set to NaN there gives the
 same bits.
 
-What it costs: the constraint owners evaluate their constraints while the others wait. On the c1_150
-edge-breakout model (five penalty contacts, five ties, 8 processes of 4 threads) the largest contact
-(the support under the slab, surface to rigid body) costs its process about 7 ms of a 90 ms increment,
-the others 0.5--1 ms. Exchanging and adding the constraint forces costs rank 0 about 1.2 ms at 8x4
+What it costs: on the c1_150 edge-breakout model (five penalty contacts, five ties, 8 processes of 4
+threads) the largest contact (the support under the slab, surface to rigid body) costs its process
+about 7--9 ms of a 85--90 ms increment, the others 0.5--1 ms. Evaluated after the exchange of the
+element forces, every other process waited for it; the load balancing now gives its process fewer
+elements and it is evaluated with them (see `Load balancing`_). Exchanging and adding the constraint forces costs rank 0 about 1.2 ms at 8x4
 and 0.5 ms at 32 processes of one thread, and moves 2.5 MB (8x4) or 3.1 MB (32x1) per increment over
 all processes. The former exchange, which shared every constraint's forces with every process (an
 ``Allgatherv``), moved 19.5 MB and 86.5 MB: at 32 processes one process' large contact was copied 31
 times, and an increment took about 127 ms instead of 95 ms (89 instead of 88 ms at 8x4).
 Partitioning a contact by its slave points is not done.
+
+What balancing with the constraints bought on that model (250 increments, rabbit, the mean of two
+runs each, the time per increment after the first check):
+
+================================  ==========  ==========  ==========  ==========
+                                  8x4 base    8x4 now     32x1 base   32x1 now
+================================  ==========  ==========  ==========  ==========
+default tolerance                 87.8 ms     84.3 ms     91.8 ms     92.5 ms
+a repartition forced              88.8 ms     84.0 ms     93.6 ms     89.7 ms
+================================  ==========  ==========  ==========  ==========
+
+At 8x4 the contact's process computed 10--11 % of the element work instead of 12.6 %, and was no
+longer the busiest; at 32x1 the default tolerance found the processes balanced enough (the contact
+is a smaller part of a 32nd), and a forced repartition gave its process 2.6--4.4 % of the elements
+instead of 6 %.
 
 Adaptive refinement
 -------------------
@@ -607,22 +626,47 @@ Load balancing
 
 The first partition weighs an element by its number of degrees of freedom. A softening material
 costs more where it softens -- a return mapping needs more iterations -- so a partition balanced at
-the start drifts out of balance as damage localizes. Every element kernel is therefore timed, and on
-an output increment, as a step of the increment loop of its own right after the synchronization of
-the output, the model is repartitioned with the measured
-costs as weights whenever the slowest process has fallen more than ``load-balance-tolerance``
-(default 0.1) behind the mean -- and if that is worth it: the time it is expected to save until
-the next check (the imbalance beyond the tolerance, times the mean time of a process per increment,
-times ``output-frequency``) must exceed what the last repartition cost, measured from deciding it to
-the rebuilt equation system, in the slowest process. The first repartition is always made; a model
-that cannot be balanced better -- fewer elements than processes, say -- is therefore not
-repartitioned again and again. The journal says at level 2 why it did not repartition. The partition
-then depends on measured timings; the result does not, since it does not depend on the partition at
-all.
+the start drifts out of balance as damage localizes. Every element kernel is therefore timed, and
+every process measures how long per increment it is *busy* (:class:`~edelweissfe.domaindecomposition.subdomain.MeasuredLoad`):
+with its element loop, on all its threads, and with evaluating the constraints it evaluates -- wall
+times, as the time of an increment is. On an output increment, as a step of the increment loop of
+its own right after the synchronization of the output, the busy times of all processes are gathered
+to every process, so that every process takes the same decision
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`).
+
+A constraint is evaluated whole, by one process, and stays where it is. What a partition of the
+elements can attain is therefore that every process is as busy as the mean -- or, if the constraints
+of one process alone cost more, as busy as that process. The model is repartitioned whenever the
+busiest process has fallen more than ``load-balance-tolerance`` (default 0.1) behind that attainable
+time -- and if that is worth it: the time it is expected to save until the next check (what the
+busiest process takes beyond the attainable time times 1 + the tolerance, per increment, times
+``output-frequency``) must exceed what the last repartition cost, measured from deciding it to the
+rebuilt equation system, in the slowest process. The first repartition is always made; a model
+that cannot be balanced better -- fewer elements than processes, or one contact costing more than
+all elements of a process, say -- is therefore not repartitioned again and again. The journal says
+at level 2 why it did not repartition, and at level 1 what the constraints of each process cost when
+it does. The partition then depends on measured timings; the result does not, since it does not
+depend on the partition at all.
+
+The new partition weighs every element by its measured kernel time, and gives each process the share
+of them that makes it as busy as the others with its constraints
+(:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`, METIS' target
+part weights): the process evaluating a large contact computes correspondingly fewer elements. That
+helps only because the constraints are evaluated *with* the elements -- right after them, inside the
+same agreement on failures, before the forces are exchanged at the interface
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.assembleInternalForces`) --, while
+the other processes still compute the elements given to them in its place; the forces of the
+constraints are sent and added later, in model order, as before. Evaluated after the exchange, a
+synchronization point, every process would wait for the contact however few elements its process
+computed. A contact search is not counted: it runs between increments, at a synchronization point of
+its own, where no other process has elements to compute meanwhile. A repartition after a topology
+change (see `Adaptive refinement`_) uses the shares of the last measurement.
 
 The new parts are numbered so that as many elements as possible keep their process
 (:func:`~edelweissfe.domaindecomposition.partitioning.keepElementsWhereTheyWere`): METIS numbers
 parts arbitrarily, and a renumbered but otherwise similar partition would move almost every element.
+A part made for a share of its own -- for a process evaluating a costly constraint -- stays with its
+process.
 
 Where every process holds the whole model, a repartition changes nothing but which elements each
 process computes. A **distributed** model *migrates* the elements whose process changes
@@ -848,9 +892,10 @@ Limitations
   c1_150 model).
 * Before every topology check the whole solution, and the field outputs the markers read, are
   gathered to every process, since every process refines the whole mesh.
-* A constraint is evaluated whole, by one process, while the others wait; a single large contact
-  constraint is not split (see `Contact, ties and rigid bodies`_). The implicit-only constraint types
-  still hold the whole model on every process.
+* A constraint is evaluated whole, by one process; the load balancing gives that process fewer
+  elements, which helps only while the constraint costs less than a process' share of the whole
+  work. A single large contact constraint is not split (see `Contact, ties and rigid bodies`_). The
+  implicit-only constraint types still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
 * A failure in one process alone while the model is set up, before the first step -- reading the input,
   building the mesh, creating the elements -- is not agreed on: the process aborts all of them only

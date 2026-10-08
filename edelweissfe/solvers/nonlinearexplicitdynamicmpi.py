@@ -109,7 +109,7 @@ nothing but the table.
 
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and so is every
-constraint -- its evaluation and its contact search, by the process evaluating it. On an output
+constraint evaluation, by the process evaluating it (with its elements). On an output
 increment the model is repartitioned with the measured costs whenever the busiest process -- with its
 elements and its constraints -- falls more than ``load-balance-tolerance`` behind what a partition
 can attain; a process evaluating a costly contact is given correspondingly fewer elements. A
@@ -211,8 +211,9 @@ class NEDMPISchema(NEDSchema):
     loadBalanceTolerance: float | None = schemaField(
         description=(
             "How far the busiest process -- with its elements and the constraints it evaluates -- may fall "
-            "behind the mean, as a fraction, before the model is repartitioned with the measured element "
-            "and constraint costs. Checked on every output increment. The first partition can only "
+            "behind what a partition can attain (the mean, or the constraints of one process where they cost "
+            "more), as a fraction, before the model is repartitioned with the measured element and constraint "
+            "costs. Checked on every output increment. The first partition can only "
             "estimate an element's cost -- by its number of degrees of freedom -- and a softening material "
             "costs more where it softens, so a partition balanced at the start drifts out of balance as "
             "damage localizes. 0 disables it."
