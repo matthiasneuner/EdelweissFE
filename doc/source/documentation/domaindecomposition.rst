@@ -224,7 +224,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``assembleInternalForces``                  the interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
 ``assembleLoads``                           the loads of the own elements, completed at the interface
-``assembleConstraintForces``                evaluates the own constraints, shares all forces
+``assembleConstraintForces``                evaluates the own constraints, sends forces to neighbours
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the sums over the subdomains
 ``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned
@@ -250,9 +250,10 @@ which is the order a single process computing the whole model sums them in.
 
 Floating-point addition is not associative, so this order is what makes the result independent of
 the decomposition: the force at every degree of freedom is the same bits as without decomposition,
-and so is everything computed from it. The constraint forces, each computed by one process, are
-shared with all and added in model order. A run on any number of processes is bit-identical to
-``NED`` on the same input.
+and so is everything computed from it. The constraint forces, each computed by one process, are sent
+to the processes integrating their degrees of freedom and added there in model order (see `Contact,
+ties and rigid bodies`_). A run on any number of processes is bit-identical to ``NED`` on the same
+input.
 
 **What is bit-identical, exactly.** The solution, the velocity and the net nodal force at every
 degree of freedom; the state of every element and every constraint; the external work; and
@@ -290,7 +291,7 @@ not on elements, and is added by every process integrating them. A configuration
 a follower pressure on a finite-strain element, say -- therefore reads the current solution, not the
 one of the last synchronization, which a load evaluated on another process' element would.
 
-The volume exchanged per increment is that of the interface and the constraints. The lumped mass
+The volume exchanged per increment is that of the interface and of the constraint forces at it. The lumped mass
 and damping are assembled once per mesh by each process from its own elements, completed at the
 interface like the forces and then shared from the owners, so that every process holds them, the
 same bits as without decomposition, at every degree of freedom of the model. The critical time step
@@ -352,7 +353,7 @@ process can wait for one that already left (see Failures below).
 
 The contact search itself, at a contact update and at a topology check alike, runs on the process
 that evaluates the constraint only: nothing but that evaluation reads its outcome. The constraint
-forces are shared with the degrees of freedom of the owner's search. Whether a search changed a
+forces are sent with the degrees of freedom of the owner's search. Whether a search changed a
 footprint is decided by the owners and communicated to all processes.
 
 Restoring a constraint's state restores it completely -- a contact constraint adopts the owner's
@@ -405,11 +406,34 @@ new facets, made by every process and computed by the process of their host elem
 the constraint projects onto them afresh. A restart checkpoint carries the constraint states as
 before: they are synchronized from their owners before every output.
 
+**How the constraint forces travel.** The owner of a constraint integrates every degree of freedom
+it acts on, so another process integrating one of them shares it with the owner. The owner sends each
+such neighbour, point to point, the forces of its constraints at the degrees of freedom the two share,
+and nothing else; which entries go where, and their place in the order of addition -- the position of
+the constraint in the model and the index of the entry within it -- is exchanged once per rebuild of
+the equation system, an increment sends the forces alone. Every process then adds the forces it holds
+constraint by constraint, in model order, each as ``NED`` adds it
+(:func:`~edelweissfe.numerics.assembly.addNodalForces`): at a degree of freedom it integrates, those
+are the forces of every constraint acting there, added in the same order onto the same bits, so the
+sum is the same bits as serially
+(:class:`~edelweissfe.domaindecomposition.subdomaininterface.ConstraintForceExchange`).
+
+The net force vector of a process is therefore defined at the degrees of freedom it integrates only.
+Elsewhere it holds neither the element forces of the other subdomains nor the constraint forces, and
+nothing reads it there: the vectors are gathered from the owners before anything reads the whole
+model (`Where the whole model is read`_). ``tests/test_domaindecomposition.py`` asserts both -- the
+exchange writes nothing outside the subdomain, and a run with the net force set to NaN there gives the
+same bits.
+
 What it costs: the constraint owners evaluate their constraints while the others wait. On the c1_150
 edge-breakout model (five penalty contacts, five ties, 8 processes of 4 threads) the largest contact
 (the support under the slab, surface to rigid body) costs its process about 7 ms of a 90 ms increment,
-the others 0.5--1 ms, and sharing the constraint forces about 3 ms. Partitioning a contact by its
-slave points is not done.
+the others 0.5--1 ms. Exchanging and adding the constraint forces costs rank 0 about 1.2 ms at 8x4
+and 0.5 ms at 32 processes of one thread, and moves 2.5 MB (8x4) or 3.1 MB (32x1) per increment over
+all processes. The former exchange, which shared every constraint's forces with every process (an
+``Allgatherv``), moved 19.5 MB and 86.5 MB: at 32 processes one process' large contact was copied 31
+times, and an increment took about 127 ms instead of 95 ms (89 instead of 88 ms at 8x4).
+Partitioning a contact by its slave points is not done.
 
 Adaptive refinement
 -------------------
