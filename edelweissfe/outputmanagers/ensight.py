@@ -736,8 +736,10 @@ def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
     """The number, shape and visualization nodes of every element of a set.
 
     Taken from the element objects; where only part of the set was created in this process (a
-    domain-decomposed run), from the mesh instead, which describes the whole set -- the
-    visualization nodes of an element described in the mesh are its nodes.
+    domain-decomposed run), from the mesh instead, which describes the whole set -- its element
+    numbers, as the set reads them (:meth:`~edelweissfe.sets.elementset.ElementSet.elementNumbersOfWholeSet`:
+    a named set of the mesh, or a face of a surface listed by element numbers), and the nodes of each,
+    which are its visualization nodes.
 
     Parameters
     ----------
@@ -762,7 +764,7 @@ def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
             mesh.typeOf(mesh.elements[number]).ensightType,
             [nodes[label] for label in mesh.elements[number].nodeLabels],
         )
-        for number in mesh.elementSets[elementSet.name]
+        for number in elementSet.elementNumbersOfWholeSet()
     ]
 
 

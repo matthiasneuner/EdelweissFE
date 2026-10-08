@@ -46,6 +46,7 @@ from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.mesh import AUXILIARY, SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
+from edelweissfe.outputmanagers.ensight import visualizedElementsOf
 from edelweissfe.points.node import Node
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.inputfileparser import parseInputFile
@@ -425,3 +426,23 @@ def test_completeness_is_derived_from_the_mesh_and_repeated_making_changes_nothi
         part.createElementsOfMesh()
     assert {name: s._version for name, s in part.surfaces.items()} == versions
     assert {name: s._version for name, s in part.elementSets.items()} == setVersions
+
+
+def test_ensight_visualizes_a_surface_face_listed_by_numbers_of_a_partial_model(tmp_path):
+    """A face of a surface listed by element numbers (a refined surface) names no element set of the
+    mesh: where only part of it is local, Ensight takes the face's elements from the face itself, in
+    face order -- also those not local here -- with the nodes the mesh describes."""
+
+    model = _buildModel(tmp_path, lambda number: number != 3)
+    with model.topology.changes():
+        model.mesh.setSurfaceElements("byNumbers", {1: [5, 3, 1002]})
+        model.resolveSurfaceOfMesh("byNumbers")
+    face = model.surfaces["byNumbers"][1]
+    assert not face.isComplete
+
+    visualized = visualizedElementsOf(face, model)
+    assert [number for number, _, _ in visualized] == [5, 3, 1002]
+    assert [type_ for _, type_, _ in visualized] == ["quad4"] * 3
+    assert [[node.label for node in nodes] for _, _, nodes in visualized] == [
+        list(model.mesh.elements[number].nodeLabels) for number in (5, 3, 1002)
+    ]
