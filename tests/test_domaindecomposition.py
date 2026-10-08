@@ -521,6 +521,75 @@ def test_no_process_communicates_where_the_processes_agree_on_failures():
     assert communicator.allreduceSum([1.5]) == [1.5]
 
 
+#: Runs each deck in the directories given twice -- as it is, and with every entry of the net force
+#: vector at a degree of freedom not integrated in the process set to NaN after each assembly -- and
+#: prints, per process and deck, whether the final solution, net force and velocity are the same bits.
+_NET_FORCE_OUTSIDE_SUBDOMAIN_SCRIPT = """
+import contextlib, io, os, sys
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+assembleNetForce = NEDMPI.assembleNetForce
+
+
+def poisonedOutsideTheSubdomain(self, U, dU, P, stepActions, timeStep):
+    P, psi = assembleNetForce(self, U, dU, P, stepActions, timeStep)
+    outside = np.ones(P.shape[0], dtype=bool)
+    outside[self.partition.dofs] = False
+    P.asPlainArray()[outside] = np.nan
+    return P, psi
+
+
+def finalFields(directory):
+    os.chdir(directory)
+    with contextlib.redirect_stdout(io.StringIO()):
+        model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+    return np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+
+
+for directory in sys.argv[1:]:
+    plain = finalFields(directory)
+    NEDMPI.assembleNetForce = poisonedOutsideTheSubdomain
+    poisoned = finalFields(directory)
+    NEDMPI.assembleNetForce = assembleNetForce
+    same = np.array_equal(plain.view(np.int64), poisoned.view(np.int64))
+    print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", flush=True)
+"""
+
+
+def test_the_net_force_outside_the_subdomain_is_never_read(tmp_path):
+    # A process holds the net force -- elements, loads, constraint forces -- only at the degrees of
+    # freedom it integrates; elsewhere the vector holds whatever was left there until it is next
+    # gathered from the owners. Nothing may read it there: poisoned with NaN, the result is the same.
+    decks = ["NEDContact", "TieNED", "NEDSurfaceToDiscreteRigidBodyContact"]
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    for deck in decks:
+        shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), tmp_path / deck)
+    (tmp_path / "run.py").write_text(_NET_FORCE_OUTSIDE_SUBDOMAIN_SCRIPT)
+
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    output = subprocess.run(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"] + [str(tmp_path / deck) for deck in decks],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    ).stdout
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert reports == sorted("PROCESS {:} {:} SAME".format(rank, deck) for rank in range(3) for deck in decks), output
+
+
 _FAILING_LOAD_DECK = """
 *material, name=LinearElastic, id=linearelastic, provider=edelweiss
 30000.0, 0.15, 1.0
