@@ -157,7 +157,6 @@ with ``*solver, solver=NEDMPI, name=...`` in the deck. ``OMP_NUM_THREADS`` sets 
 process' element loop, as for ``NEDParallel``.
 """
 
-import math
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -180,6 +179,7 @@ from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.modelmodifiers.base.modelmodifierbase import fieldOutputsReadByAll
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofVector
+from edelweissfe.numerics.exactsum import ExactSum
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.modelpartition import ModelPartition
@@ -332,9 +332,9 @@ class NEDMPI(NEDParallel):
         #: :meth:`publishNodeFields`.
         self._integratedNodeFieldSlots: list[NodeFieldSlot] = []
         #: The work at the prescribed degrees of freedom owned here of every increment since the
-        #: external work was last read, in increment order: one array of products per increment,
-        #: added to the external work by :meth:`gatherExternalWork`.
-        self._pendingWorkAtPrescribedDofs: list[np.ndarray] = []
+        #: external work was last read, in increment order: per increment the exact sum of the
+        #: products, added to the external work by :meth:`gatherExternalWork`.
+        self._pendingWorkAtPrescribedDofs: list[ExactSum] = []
         #: Whether this process holds the whole solution -- ``U``, ``V`` and ``P`` at every degree of
         #: freedom, and published into the node fields -- as of the last accepted increment; else
         #: only at the degrees of freedom it integrates. See :meth:`requireWholeSolutionHere`.
@@ -756,8 +756,10 @@ class NEDMPI(NEDParallel):
     def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
         """Keep the work of this increment at the prescribed degrees of freedom owned here -- a degree
         of freedom shared by two subdomains is counted once, by its owner -- until the external work
-        is next read (:meth:`gatherExternalWork`), so that the products need not be gathered every
-        increment; see :meth:`NED.addExternalWork`.
+        is next read (:meth:`gatherExternalWork`), so that nothing is exchanged every increment; see
+        :meth:`NED.addExternalWork`. Kept as one number per increment: the exact sum of the products
+        (:class:`~edelweissfe.numerics.exactsum.ExactSum`), which the sums of the other processes
+        complete exactly.
 
         Parameters
         ----------
@@ -767,21 +769,22 @@ class NEDMPI(NEDParallel):
             Per degree of freedom, the net nodal force times the prescribed increment.
         """
 
-        self._pendingWorkAtPrescribedDofs.append(reactionTimesIncrement[self.subdomain.ownedDofMask[dofs]])
+        self._pendingWorkAtPrescribedDofs.append(ExactSum.of(reactionTimesIncrement[self.subdomain.ownedDofMask[dofs]]))
 
     def gatherExternalWork(self):
         """Add the work of every increment since the last call to the external work, increment by
-        increment, in increment order: the products at the degrees of freedom each process owns are
-        gathered to every process -- once for all those increments -- and each increment's are summed
-        exactly (:func:`math.fsum`), as :meth:`NED.addExternalWork` sums them in a serial run. So the
+        increment, in increment order: the exact sums of the products at the degrees of freedom each
+        process owns are gathered to every process -- once for all those increments, one integer per
+        increment and process --, added exactly, and rounded once: the bits of :func:`math.fsum` of all
+        the products of the increment, which :meth:`NED.addExternalWork` forms in a serial run. So the
         external work is the same, bit for bit, on any number of processes, and every process holds
         that of the whole model. Called where it is read: the energy balance, an output increment (and
         a checkpoint written with it), the end of a step. Collective.
         """
 
         gathered = self.communicator.allgather(self._pendingWorkAtPrescribedDofs)
-        for increment in range(len(self._pendingWorkAtPrescribedDofs)):
-            self._externalWork -= math.fsum(np.concatenate([ofProcess[increment] for ofProcess in gathered]).tolist())
+        for ofProcesses in zip(*gathered):
+            self._externalWork -= sum(ofProcesses, ExactSum()).rounded()
         self._pendingWorkAtPrescribedDofs = []
 
     def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
