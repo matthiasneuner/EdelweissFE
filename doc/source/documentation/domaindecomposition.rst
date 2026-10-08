@@ -820,6 +820,10 @@ that writes one compares everything a run carries on with -- for example
 Nothing printed means every dataset -- every element's state variables, every constraint's state,
 ``U``, ``V`` and ``P`` of every node field, and the solver's ``_externalWork`` -- is the same, byte
 for byte, signed zeros included.
+``testfiles/mpi/compare_checkpoints.py SERIAL DECOMPOSED`` does the same for every checkpoint below
+``SERIAL``. The MPI workflow of the repository runs exactly this: every deck of ``testfiles/mpi``
+turned serial by the ``sed`` line above, its references written by ``NED`` on the runner, and the
+decks over 2 and 3 processes compared with them at ``--tolerance 0``, checkpoints included.
 
 Limitations
 -----------

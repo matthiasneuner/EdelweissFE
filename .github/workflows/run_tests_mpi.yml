@@ -2,9 +2,13 @@
 #
 # Two checks per test case and process count:
 #   1. against the committed U.ref, with the test runner's usual tolerance, like the serial suites;
-#   2. bit-identity: the serial run on this runner writes fresh references (--create, in a copy), and the
-#      runs over several processes must reproduce them exactly (--tolerance 0). The committed U.ref files
-#      cannot serve here, since results differ between machines in the last bits.
+#   2. bit-identity with the serial solver: every test case is turned into a serial one (solver=NED, without the
+#      options only NEDMPI has -- the recipe of doc/source/documentation/domaindecomposition.rst), run on this
+#      runner to write fresh references (--create, in a copy), and the runs over several processes must
+#      reproduce them exactly (--tolerance 0); so must every dataset of every restart checkpoint the test cases
+#      write (testfiles/mpi/compare_checkpoints.py), which holds what U.ref does not: the element and
+#      constraint states, V, P and the external work. The committed U.ref files cannot serve here, since
+#      results differ between machines in the last bits.
 # 3. bit-identity again with debug-poison-stale-solution, which poisons what a process must not read.
 # And per process count, which way each test case held its model -- distributed, or the whole model in every
 # process -- since both give the same result (testfiles/mpi/check_element_distribution.py).
@@ -84,19 +88,31 @@ jobs:
           runTests="$(command -v run_tests_edelweissfe)"
           mpirun="mpirun --bind-to none --oversubscribe"
           committed="$RUNNER_TEMP/mpi-committed"
+          serial="$RUNNER_TEMP/mpi-serial"
           fresh="$RUNNER_TEMP/mpi-fresh"
-          rm -rf "$committed" "$fresh"
+          rm -rf "$committed" "$serial"
           cp -r testfiles/mpi "$committed"
-          cp -r testfiles/mpi "$fresh"
+          cp -r testfiles/mpi "$serial"
+          # The serial solver, NED, without the options only NEDMPI has (which NED would refuse).
+          sed -i -e 's/solver=NEDMPI/solver=NED/' -e '/^load-balance-/d' -e '/^debug-poison-stale-solution/d' \
+            "$serial"/*/*/test.inp
+          if grep -l "^\*solver,.*NEDMPI" "$serial"/*/*/test.inp; then exit 1; fi
           for suite in edelweiss-only marmot; do
             "$runTests" "$committed/$suite"
-            "$runTests" "$fresh/$suite" --create
-            for processes in 2 3; do
+            "$runTests" "$serial/$suite" --create
+          done
+          for processes in 2 3; do
+            # the test cases as committed, with the fresh serial references
+            rm -rf "$fresh"
+            cp -r testfiles/mpi "$fresh"
+            for reference in "$serial"/*/*/U.ref; do
+              cp "$reference" "$fresh/${reference#"$serial"/}"
+            done
+            for suite in edelweiss-only marmot; do
               $mpirun -n $processes "$runTests" "$committed/$suite"
               $mpirun -n $processes "$runTests" "$fresh/$suite" --tolerance 0
             done
-          done
-          for processes in 2 3; do
+            python testfiles/mpi/compare_checkpoints.py "$serial" "$fresh"
             $mpirun -n $processes python testfiles/mpi/check_element_distribution.py
           done
 
@@ -105,7 +121,8 @@ jobs:
         run: |
           # debug-poison-stale-solution sets the solution, velocity, net force and node fields to NaN outside
           # the degrees of freedom a process integrates, wherever it does not hold the whole solution: nothing
-          # may read them there, so every test case must still reproduce the fresh serial references exactly.
+          # may read them there, so every test case must still reproduce the fresh references of the serial NED
+          # exactly (mpi-fresh holds them).
           runTests="$(command -v run_tests_edelweissfe)"
           mpirun="mpirun --bind-to none --oversubscribe"
           poisoned="$RUNNER_TEMP/mpi-poisoned"
