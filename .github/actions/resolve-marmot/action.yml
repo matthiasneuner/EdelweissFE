@@ -1,7 +1,7 @@
 name: Resolve Marmot
 description: >
   Resolve the Marmot branch (and its current commit) to build EdelweissFE against: the branch under test, the PR's
-  base branch or next_v26.11, whichever exists first in the repository.
+  base branch or master, whichever exists first in the repository.
 
 inputs:
   repository:
@@ -29,19 +29,19 @@ runs:
       shell: bash -eo pipefail {0}
       run: |
         # Try, in order: the branch actually under test (github.head_ref, set for a pull_request
-        # event), the PR's base branch (github.base_ref), then next_v26.11, the shared
+        # event), the PR's base branch (github.base_ref), then master, the
         # development branch - NOT github.ref_name, since the EdelweissFE branch name essentially
         # never matches a Marmot branch name, and falling through to Marmot's default branch
         # ("master") silently builds against a stale, possibly API-incompatible Marmot revision.
         #
         # head_ref must be tried before base_ref: for a PR whose head branch itself has a
-        # same-named Marmot branch (e.g. a "next_v26.11 -> master" promotion PR), the code under
+        # same-named Marmot branch (e.g. a feature PR with a companion Marmot branch), the code under
         # test depends on that head branch's Marmot revision, not the base branch's -- using
         # base_ref there would silently build against the wrong (older/incompatible) Marmot.
         if [ -n "${{ inputs.ref }}" ]; then
           CANDIDATE_BRANCHES=("${{ inputs.ref }}")
         else
-          CANDIDATE_BRANCHES=("${{ github.head_ref }}" "${{ github.base_ref }}" "next_v26.11")
+          CANDIDATE_BRANCHES=("${{ github.head_ref }}" "${{ github.base_ref }}" "master")
         fi
         branch=""
         for candidate in "${CANDIDATE_BRANCHES[@]}"; do
