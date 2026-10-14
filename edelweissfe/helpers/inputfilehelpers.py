@@ -239,9 +239,10 @@ def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) 
     """Convenience helper function
     to fill an existing (possibly empty) FEModel using the input file and generators.
 
-    First the mesh generators and the ``*element``/``*elset``/``*surface`` keywords describe the
-    mesh (``model.mesh``); then the elements are made from it
-    (:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- those of them the model's
+    First the mesh generators and the ``*node``/``*nSet``/``*element``/``*elset``/``*surface`` keywords
+    describe the mesh (``model.mesh``); then the nodes and the elements are made from it
+    (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`,
+    :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- the elements those of them the model's
     :attr:`~edelweissfe.models.femodel.FEModel.elementDistribution` creates in this process: every
     element, unless a domain-decomposed run distributes them. Everything that refers to
     element objects (sections, element properties, contact facets, constraints, model modifiers)
@@ -349,8 +350,10 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
     model = abqModelConstructor.createGeometryFromInputFile(model, inputfile)
 
     # The mesh is described: decide which of its elements this process creates -- every one, unless
-    # a domain-decomposed run distributes them over its processes -- and make them.
+    # a domain-decomposed run distributes them over its processes -- and make them, and the nodes
+    # (every process holds every node, for now).
     model.elementDistribution.decideLocalElements(model.mesh, model.domainSize)
+    model.createNodesOfMesh()
     model.createElementsOfMesh()
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file
@@ -382,8 +385,9 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
         generatorClass = getGeneratorClass(generatorType)
         model = generatorClass.fromGeneratorDefinition(generatorDefinition["name"], model, journal, args, kwargs)
 
-    # A late generator may describe further elements (e.g. a boxgen with executeAfterManualGeneration):
-    # make them too, before anything refers to element objects again.
+    # A late generator may describe further nodes and elements (e.g. a boxgen with
+    # executeAfterManualGeneration): make them too, before anything refers to their objects again.
+    model.createNodesOfMesh()
     model.createElementsOfMesh()
 
     model = abqModelConstructor.createConstraintsFromInputFile(model, inputfile)

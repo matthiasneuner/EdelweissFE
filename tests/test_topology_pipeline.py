@@ -249,6 +249,7 @@ def test_parsed_element_set_keeps_its_declaration_order():
 
     model = AbqModelConstructor(Journal(verbose=False)).createGeometryFromInputFile(FEModel(2), inputFile)
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
 
     assert [el.elNumber for el in model.elementSets["declared"]] == list(range(1, nElements + 1))
@@ -722,21 +723,14 @@ def test_a_self_starting_modifier_is_refused_by_a_non_adapting_solver_and_named(
 # ---------------------------------------------------------------------------------------------
 
 
-class _StubNode:
-    """The registry only ever reads a node's label and coordinates."""
-
-    def __init__(self, label: int, coordinates):
-        self.label = label
-        self.coordinates = np.asarray(coordinates, dtype=float)
-
-
 def _modelWithSetupNodes(*labels: int) -> FEModel:
     """A model carrying nodes as the base mesh generators leave them, with the allocator raised
     above them exactly as the end of model setup does."""
 
     model = FEModel(3)
-    for label in labels:
-        model.nodes[label] = _StubNode(label, [float(label), 0.0, 0.0])
+    model.mesh.addNodes(labels, [[float(label), 0.0, 0.0] for label in labels])
+    with model.topology.changes():
+        model.createNodesOfMesh()
     model.topology.adoptSetupNodeNumbers()
     return model
 

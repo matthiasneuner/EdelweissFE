@@ -50,8 +50,6 @@ import numpy as np
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 identification = "microgen"
@@ -147,19 +145,16 @@ class Generator(GeneratorBase):
         lX = x_max - x_min
         lY = y_max - y_min
 
-        # create the nodes and describe the elements of the unit cell
-        _nodes = []
-        for label, node in zip(model.topology.reserveNodeNumbers(len(all_nodes)), all_nodes):
-            _node = Node(label, np.array(node))
-            _nodes.append(_node)
-            model.createNode(_node)
+        # describe the nodes and the elements of the unit cell
+        _nodes = list(model.topology.reserveNodeNumbers(len(all_nodes)))
+        model.mesh.addNodes(_nodes, all_nodes)
 
         idx = 0
         for block_id, el_ids in block_elements_assignments.items():
             elements_per_block = []
             for local_el_id in el_ids:
                 (elNumber,) = model.topology.reserveElementNumbers(1)
-                nodeLabels = [_nodes[nid].label for nid in all_elements[local_el_id]]
+                nodeLabels = [_nodes[nid] for nid in all_elements[local_el_id]]
                 model.mesh.addElement(elNumber, configuration.elType, configuration.elProvider, nodeLabels)
                 # add element to corresponding element set
                 elements_per_block.append(elNumber)
@@ -200,44 +195,44 @@ class Generator(GeneratorBase):
                 journal=journal,
             )
 
-        # create node sets for boundary conditions
-        nSet_left = set()
-        nSet_right = set()
-        nSet_bottom = set()
-        nSet_top = set()
+        # create node sets for boundary conditions, in mesh order
+        nSet_left = []
+        nSet_right = []
+        nSet_bottom = []
+        nSet_top = []
         # add sets for corners as well
-        nSet_top_left = set()
-        nSet_top_right = set()
-        nSet_bottom_left = set()
-        nSet_bottom_right = set()
+        nSet_top_left = []
+        nSet_top_right = []
+        nSet_bottom_left = []
+        nSet_bottom_right = []
 
         # create node sets for left and bottom boundaries
-        for nodeID, node in model.nodes.items():
-            if np.isclose(node.coordinates[1], y_min, atol=1e-8):
-                nSet_bottom.add(node)
-                if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                    nSet_bottom_left.add(node)
-                elif np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                    nSet_bottom_right.add(node)
-            if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                nSet_left.add(node)
-            if np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                nSet_right.add(node)
-            if np.isclose(node.coordinates[1], y_max + (nY - 1) * lY, atol=1e-8):
-                nSet_top.add(node)
-                if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                    nSet_top_left.add(node)
-                elif np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                    nSet_top_right.add(node)
+        for label, coordinates in zip(model.mesh.nodeLabels.tolist(), model.mesh.nodeCoordinates):
+            if np.isclose(coordinates[1], y_min, atol=1e-8):
+                nSet_bottom.append(label)
+                if np.isclose(coordinates[0], x_min, atol=1e-8):
+                    nSet_bottom_left.append(label)
+                elif np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                    nSet_bottom_right.append(label)
+            if np.isclose(coordinates[0], x_min, atol=1e-8):
+                nSet_left.append(label)
+            if np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                nSet_right.append(label)
+            if np.isclose(coordinates[1], y_max + (nY - 1) * lY, atol=1e-8):
+                nSet_top.append(label)
+                if np.isclose(coordinates[0], x_min, atol=1e-8):
+                    nSet_top_left.append(label)
+                elif np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                    nSet_top_right.append(label)
 
-        model.nodeSets[f"{name}_left"] = NodeSet(f"{name}_left", nSet_left)
-        model.nodeSets[f"{name}_right"] = NodeSet(f"{name}_right", nSet_right)
-        model.nodeSets[f"{name}_bottom"] = NodeSet(f"{name}_bottom", nSet_bottom)
-        model.nodeSets[f"{name}_top"] = NodeSet(f"{name}_top", nSet_top)
-        model.nodeSets[f"{name}_bottom_left"] = NodeSet(f"{name}_bottom_left", nSet_bottom_left)
-        model.nodeSets[f"{name}_bottom_right"] = NodeSet(f"{name}_bottom_right", nSet_bottom_right)
-        model.nodeSets[f"{name}_top_left"] = NodeSet(f"{name}_top_left", nSet_top_left)
-        model.nodeSets[f"{name}_top_right"] = NodeSet(f"{name}_top_right", nSet_top_right)
+        model.mesh.setNodeSet(f"{name}_left", nSet_left)
+        model.mesh.setNodeSet(f"{name}_right", nSet_right)
+        model.mesh.setNodeSet(f"{name}_bottom", nSet_bottom)
+        model.mesh.setNodeSet(f"{name}_top", nSet_top)
+        model.mesh.setNodeSet(f"{name}_bottom_left", nSet_bottom_left)
+        model.mesh.setNodeSet(f"{name}_bottom_right", nSet_bottom_right)
+        model.mesh.setNodeSet(f"{name}_top_left", nSet_top_left)
+        model.mesh.setNodeSet(f"{name}_top_right", nSet_top_right)
 
 
 def findInterfaceNodes(nodes, coordIndex, coordValue, idx_offset=0):
@@ -260,7 +255,7 @@ def replicateMesh(
 
     mesh = model.mesh
     all_elements_to_copy = [[label - 1 for label in record.nodeLabels] for record in mesh.elements.values()]
-    all_nodes_to_copy = [model.nodes[i + 1].coordinates for i in range(len(model.nodes))]
+    all_nodes_to_copy = list(mesh.nodeCoordinates[mesh.rowsOfNodes(range(1, mesh.nNodes + 1))])
 
     elements_in_block = {}
     # separate elements according to their blocks
@@ -295,8 +290,7 @@ def replicateMesh(
             # addresses nodes as `label - 1` into all_nodes, so keep the association in that form.
             (label,) = model.topology.reserveNodeNumbers(1)
             associated_nodes.append([k, label - 1])
-            _node = Node(label, np.array(new_nodes[-1]))
-            model.createNode(_node)
+            mesh.addNode(label, new_nodes[-1])
 
         new_nodes = np.array(new_nodes)
 
@@ -340,7 +334,7 @@ def replicateMesh(
 
         if journal:
             journal.message(f"Replication step {j}/{nReplications - 1} in direction {direction} done.", identification)
-            journal.message(f" Total nodes so far: {len(model.nodes)}", identification)
+            journal.message(f" Total nodes so far: {mesh.nNodes}", identification)
             journal.message(f" Total elements so far: {len(mesh.elements)}", identification)
             journal.message(
                 f" Total time for replication step: {round(toc_total - tic_total, 2)} seconds", identification

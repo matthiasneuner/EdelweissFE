@@ -39,7 +39,6 @@ import numpy as np
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.exceptions import WrongDomain
 from edelweissfe.utils.schema import schemaField
 
@@ -99,16 +98,12 @@ class Generator(GeneratorBase):
         if len(loc) != model.domainSize:
             raise WrongDomain("Spatial dimension of specified location does not match model dimension")
 
-        allNodes = np.asarray([n.coordinates for n in model.nodes.values()])
-
-        differenceNorm = np.linalg.norm(allNodes - loc, axis=1)
+        differenceNorm = np.linalg.norm(model.mesh.nodeCoordinates - loc, axis=1)
 
         indexClosest = differenceNorm.argmin()
 
-        closestNode = list(model.nodes.values())[indexClosest]
-
         storeIn = configuration.storeIn
-        if storeIn in model.nodeSets:
+        if storeIn in model.mesh.nodeSets or storeIn in model.nodeSets:
             raise Exception(f"Nodeset {storeIn} already exists")
 
-        model.nodeSets[storeIn] = NodeSet(storeIn, [closestNode])
+        model.mesh.setNodeSet(storeIn, [model.mesh.nodeLabels[indexClosest]])

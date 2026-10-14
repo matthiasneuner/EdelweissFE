@@ -58,7 +58,6 @@ from edelweissfe.modelmodifiers.base.modelmodifierbase import (
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange, coalesce
 from edelweissfe.models.modelchangeobserver import ModelChangeType
-from edelweissfe.points.node import Node
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.performancetiming import timeit
 from edelweissfe.utils.schema import (
@@ -765,7 +764,7 @@ class ModelModifier(ModelModifierBase):
         return oldValues
 
     def _createNewNodes(self, model: FEModel) -> dict:
-        """Create a model node for every octree node the model does not have yet.
+        """Describe in the mesh, and create, a model node for every octree node the mesh does not have yet.
 
         Returns
         -------
@@ -773,13 +772,32 @@ class ModelModifier(ModelModifierBase):
             The new nodes, by label.
         """
 
-        newNodes = {}
-        for label, coord in self._octree.registry.coordinates.items():
-            if label not in model.nodes:
-                node = Node(label, np.asarray(coord, dtype=float))
-                model.createNode(node)
-                newNodes[label] = node
-        return newNodes
+        labels = list(self._octree.registry.coordinates)
+        newLabels = [label for label, known in zip(labels, model.mesh.hasNodes(labels)) if not known]
+        model.mesh.addNodes(newLabels, [self._octree.registry.coordinates[label] for label in newLabels])
+        model.createNodesOfMesh()
+        return {label: model.nodes[label] for label in newLabels}
+
+    @staticmethod
+    def _redefineNodeSet(model: FEModel, setName: str, labels: list):
+        """Give a node set new members, in place: a node set of the mesh is redefined in the mesh and
+        resolved again; a set of node objects a model entity made (e.g. the slave nodes a tie tied) is
+        given the node objects.
+
+        Parameters
+        ----------
+        model
+            The model.
+        setName
+            The name of the node set.
+        labels
+            The labels of its new members, in order.
+        """
+
+        if setName in model.mesh.nodeSets:
+            model.defineNodeSetOfMesh(setName, labels)
+        else:
+            model.nodeSets[setName].replaceMembers([model.nodes[label] for label in labels])
 
     def _cellsToCreate(self, active: set) -> set:
         """Every octree cell that must become a model element but is not one yet.
@@ -979,16 +997,14 @@ class ModelModifier(ModelModifierBase):
         # hanging slave nodes, whose motion is set by the MPC).
         slaves = set(records.keys())
         for setName, labels in octree.nodeSets.items():
-            present = {n.label for n in model.nodeSets[setName].nodes}
+            present = set(model.nodeSets[setName].nodeLabelsOfWholeSet())
             if any(label not in present and label not in slaves for label in labels):
-                members = [model.nodes[label] for label in sorted(labels) if label not in slaves]
-                model.nodeSets[setName].replaceMembers(members)
+                self._redefineNodeSet(model, setName, [label for label in sorted(labels) if label not in slaves])
                 change.changedNodeSets.add(setName)
 
-        allNodes = list(model.nodes.values())
         if newNodes:
             for setName in self._allLikeSets | {"all"}:
-                model.nodeSets[setName].replaceMembers(allNodes)
+                self._redefineNodeSet(model, setName, model.mesh.nodeLabels.tolist())
                 change.changedNodeSets.add(setName)
         for setName, eids in octree.elementSets.items():
             if setName in model.elementSets:

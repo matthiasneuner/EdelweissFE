@@ -75,8 +75,6 @@ from edelweissfe.generators.base.generatorbase import (
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 
@@ -172,7 +170,9 @@ class Generator(GeneratorBase):
             if carriesElementNode(ix, iy, iz)
         )
 
+        # the grid of node labels; the nodes are described in the mesh
         nodes = []
+        coordinates = []
         currentNodeLabel = model.topology.reserveNodeNumbers(nElementNodes).start
         for ix in range(nNodesX):
             for iy in range(nNodesY):
@@ -181,9 +181,9 @@ class Generator(GeneratorBase):
                         nodes.append(GRID_POSITION_WITHOUT_NODE)
                         continue
                     label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
-                    node = Node(label, np.array([xLayers[ix], yLayers[iy], zLayers[iz]]))
-                    nodes.append(node)
-                    model.createNode(node)
+                    nodes.append(label)
+                    coordinates.append([xLayers[ix], yLayers[iy], zLayers[iz]])
+        model.mesh.addNodes([label for label in nodes if label is not GRID_POSITION_WITHOUT_NODE], coordinates)
 
         # # 3d plot of nodes; for debugging
         # def plotNodeList( nodeList ):
@@ -349,7 +349,7 @@ class Generator(GeneratorBase):
                     # plotNodeList( nodeList )
 
                     (currentElementLabel,) = model.topology.reserveElementNumbers(1)
-                    nodeLabels = [node.label for node in nodeList]
+                    nodeLabels = list(nodeList)
                     model.mesh.addElement(currentElementLabel, configuration.elType, configuration.elProvider, nodeLabels)
 
                     elements.append(currentElementLabel)
@@ -368,47 +368,47 @@ class Generator(GeneratorBase):
         def getFilteredNodes(s):
             return nG[s][filterGrid[s]]
 
-        nodeSets.append(NodeSet("{:}_top".format(name), getFilteredNodes(np.s_[:, -1, :])))
-        nodeSets.append(NodeSet("{:}_bottom".format(name), getFilteredNodes(np.s_[:, 0, :])))
-        nodeSets.append(NodeSet("{:}_right".format(name), getFilteredNodes(np.s_[-1, :, :])))
-        nodeSets.append(NodeSet("{:}_left".format(name), getFilteredNodes(np.s_[0, :, :])))
-        nodeSets.append(NodeSet("{:}_front".format(name), getFilteredNodes(np.s_[:, :, -1])))
-        nodeSets.append(NodeSet("{:}_back".format(name), getFilteredNodes(np.s_[:, :, 0])))
+        nodeSets.append(("{:}_top".format(name), getFilteredNodes(np.s_[:, -1, :])))
+        nodeSets.append(("{:}_bottom".format(name), getFilteredNodes(np.s_[:, 0, :])))
+        nodeSets.append(("{:}_right".format(name), getFilteredNodes(np.s_[-1, :, :])))
+        nodeSets.append(("{:}_left".format(name), getFilteredNodes(np.s_[0, :, :])))
+        nodeSets.append(("{:}_front".format(name), getFilteredNodes(np.s_[:, :, -1])))
+        nodeSets.append(("{:}_back".format(name), getFilteredNodes(np.s_[:, :, 0])))
 
         # 12 edges
-        nodeSets.append(NodeSet("{:}_bottomRight".format(name), getFilteredNodes(np.s_[-1, 0, :])))
-        nodeSets.append(NodeSet("{:}_bottomLeft".format(name), getFilteredNodes(np.s_[0, 0, :])))
-        nodeSets.append(NodeSet("{:}_bottomFront".format(name), getFilteredNodes(np.s_[:, 0, -1])))
-        nodeSets.append(NodeSet("{:}_bottomBack".format(name), getFilteredNodes(np.s_[:, 0, 0])))
+        nodeSets.append(("{:}_bottomRight".format(name), getFilteredNodes(np.s_[-1, 0, :])))
+        nodeSets.append(("{:}_bottomLeft".format(name), getFilteredNodes(np.s_[0, 0, :])))
+        nodeSets.append(("{:}_bottomFront".format(name), getFilteredNodes(np.s_[:, 0, -1])))
+        nodeSets.append(("{:}_bottomBack".format(name), getFilteredNodes(np.s_[:, 0, 0])))
 
-        nodeSets.append(NodeSet("{:}_topRight".format(name), getFilteredNodes(np.s_[-1, -1, :])))
-        nodeSets.append(NodeSet("{:}_topLeft".format(name), getFilteredNodes(np.s_[0, -1, :])))
-        nodeSets.append(NodeSet("{:}_topFront".format(name), getFilteredNodes(np.s_[:, -1, -1])))
-        nodeSets.append(NodeSet("{:}_topBack".format(name), getFilteredNodes(np.s_[:, -1, 0])))
+        nodeSets.append(("{:}_topRight".format(name), getFilteredNodes(np.s_[-1, -1, :])))
+        nodeSets.append(("{:}_topLeft".format(name), getFilteredNodes(np.s_[0, -1, :])))
+        nodeSets.append(("{:}_topFront".format(name), getFilteredNodes(np.s_[:, -1, -1])))
+        nodeSets.append(("{:}_topBack".format(name), getFilteredNodes(np.s_[:, -1, 0])))
 
-        nodeSets.append(NodeSet("{:}_rightBack".format(name), getFilteredNodes(np.s_[-1, :, 0])))
-        nodeSets.append(NodeSet("{:}_rightFront".format(name), getFilteredNodes(np.s_[-1, :, -1])))
+        nodeSets.append(("{:}_rightBack".format(name), getFilteredNodes(np.s_[-1, :, 0])))
+        nodeSets.append(("{:}_rightFront".format(name), getFilteredNodes(np.s_[-1, :, -1])))
 
-        nodeSets.append(NodeSet("{:}_leftBack".format(name), getFilteredNodes(np.s_[0, :, 0])))
-        nodeSets.append(NodeSet("{:}_leftFront".format(name), getFilteredNodes(np.s_[0, :, -1])))
+        nodeSets.append(("{:}_leftBack".format(name), getFilteredNodes(np.s_[0, :, 0])))
+        nodeSets.append(("{:}_leftFront".format(name), getFilteredNodes(np.s_[0, :, -1])))
 
-        nodeSets.append(NodeSet("{:}_centerX".format(name), getFilteredNodes(np.s_[int(nNodesX / 2), :, :])))
-        nodeSets.append(NodeSet("{:}_centerY".format(name), getFilteredNodes(np.s_[:, int(nNodesY / 2), :])))
-        nodeSets.append(NodeSet("{:}_centerZ".format(name), getFilteredNodes(np.s_[:, :, int(nNodesZ / 2)])))
+        nodeSets.append(("{:}_centerX".format(name), getFilteredNodes(np.s_[int(nNodesX / 2), :, :])))
+        nodeSets.append(("{:}_centerY".format(name), getFilteredNodes(np.s_[:, int(nNodesY / 2), :])))
+        nodeSets.append(("{:}_centerZ".format(name), getFilteredNodes(np.s_[:, :, int(nNodesZ / 2)])))
 
         # 8 vertices
-        nodeSets.append(NodeSet("{:}_bottomRightFront".format(name), nG[-1, 0, -1]))
-        nodeSets.append(NodeSet("{:}_bottomRightBack".format(name), nG[-1, 0, 0]))
-        nodeSets.append(NodeSet("{:}_bottomLeftFront".format(name), nG[0, 0, -1]))
-        nodeSets.append(NodeSet("{:}_bottomLeftBack".format(name), nG[0, 0, 0]))
+        nodeSets.append(("{:}_bottomRightFront".format(name), [nG[-1, 0, -1]]))
+        nodeSets.append(("{:}_bottomRightBack".format(name), [nG[-1, 0, 0]]))
+        nodeSets.append(("{:}_bottomLeftFront".format(name), [nG[0, 0, -1]]))
+        nodeSets.append(("{:}_bottomLeftBack".format(name), [nG[0, 0, 0]]))
 
-        nodeSets.append(NodeSet("{:}_topRightFront".format(name), nG[-1, -1, -1]))
-        nodeSets.append(NodeSet("{:}_topRightBack".format(name), nG[-1, -1, 0]))
-        nodeSets.append(NodeSet("{:}_topLeftFront".format(name), nG[0, -1, -1]))
-        nodeSets.append(NodeSet("{:}_topLeftBack".format(name), nG[0, -1, 0]))
+        nodeSets.append(("{:}_topRightFront".format(name), [nG[-1, -1, -1]]))
+        nodeSets.append(("{:}_topRightBack".format(name), [nG[-1, -1, 0]]))
+        nodeSets.append(("{:}_topLeftFront".format(name), [nG[0, -1, -1]]))
+        nodeSets.append(("{:}_topLeftBack".format(name), [nG[0, -1, 0]]))
 
-        for nodeSet in nodeSets:
-            model.nodeSets[nodeSet.name] = nodeSet
+        for setName, labels in nodeSets:
+            model.mesh.setNodeSet(setName, labels)
 
         # element sets
         elementSets = []

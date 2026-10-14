@@ -73,13 +73,14 @@ def _buildSingleElementModel():
     material = getMaterialClass("vonmises", "edelweiss")(np.array([E, nu, 10.0, 1.0, 5.0, 1.0]))
 
     model = FEModel(2)
-    for n in (n1, n2, n3, n4):
-        model.nodes[n.label] = n
+    model.mesh.addNodes([1, 2, 3, 4], [n.coordinates for n in (n1, n2, n3, n4)])
     # the element is described in the mesh, and created from there
     model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
     model.mesh.setElementSet("all", [1])
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
+    n1, n2, n3, n4 = model.nodes.values()
     element = model.elements[1]
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
     model.materials["vonmises"] = material

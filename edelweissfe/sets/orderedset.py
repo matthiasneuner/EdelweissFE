@@ -31,6 +31,8 @@ from collections import UserDict
 from collections.abc import Iterable
 from types import MappingProxyType
 
+from edelweissfe.utils.exceptions import TopologyError
+
 
 class OrderedSet(UserDict):
     """An ordered set.
@@ -195,3 +197,159 @@ class ImmutableOrderedSet(OrderedSet):
 
     def __ior__(self, other):
         raise TypeError(f"{type(self).__qualname__} items cannot be changed")
+
+
+class LocalOrderedSet(OrderedSet):
+    """An ordered set of entities of a model -- its elements or its nodes -- of which a process may
+    hold only part.
+
+    **Local and complete.** In a distributed (domain-decomposed) run each process holds only some
+    of the elements and nodes of the model -- its *local* ones, in the terms of deal.II and PETSc. A
+    set resolved from the mesh holds the local members of its set. The set is *complete* if every
+    member of the set is local here. A serial run is always complete, and so is a set of the objects
+    it was given, which holds exactly those.
+
+    Reading a set as a whole -- iterating it, indexing it, ``len()`` -- requires it to be complete,
+    and raises a :class:`~edelweissfe.utils.exceptions.TopologyError` otherwise: a result computed
+    from part of a set, silently, would be wrong. A reader that wants the local part asks for it
+    explicitly (:meth:`localMembers`); membership (``member in theSet``) is always allowed.
+
+    The element set and the node set word their errors themselves (:attr:`kindOfSet`,
+    :attr:`localMembersAre`, :attr:`localPartHas`).
+    """
+
+    #: The kind of set, for the error messages, e.g. ``element set``.
+    kindOfSet = "set"
+    #: How the local members of the set are described in an error message.
+    localMembersAre = "members are held here"
+    #: How the local part of the set is described in an error message.
+    localPartHas = "is held here"
+
+    @property
+    def isComplete(self) -> bool:
+        """Whether every member of the set is local to this process: always, for a set of the
+        objects it was given."""
+
+        return True
+
+    def localMembers(self):
+        """The members of the set local to this process, in set order, as a read-only view: every
+        member of the set if it is complete, e.g. in a serial run.
+
+        Returns
+        -------
+        KeysView
+            The local members.
+        """
+
+        return self.items
+
+    def __iter__(self):
+        """Iterate over the members of the set, in set order.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process; see :meth:`localMembers`.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("iterating")
+        return iter(self.data)
+
+    def __getitem__(self, index):
+        """The member at the given position (or slice) of the set.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process; see :meth:`localMembers`.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("indexing")
+        return list(self.items)[index]
+
+    def __len__(self) -> int:
+        """The number of members of the set.
+
+        Raises
+        ------
+        TopologyError
+            If the set is not complete in this process: the number of its local members and the
+            size of the set differ, and ``bool(theSet)`` ("is it empty?") would be ambiguous.
+        """
+
+        if not self.isComplete:
+            self._raiseNotComplete("taking len() of")
+        return len(self.data)
+
+    def sizeOfWholeSet(self) -> int:
+        """The number of members of the whole set, also of those not local here: here, of the
+        objects it holds.
+
+        Returns
+        -------
+        int
+            The size of the set.
+        """
+
+        return len(self.data)
+
+    def _raiseNotComplete(self, reading: str):
+        """Raise the error of a whole-set reading of a set that is not complete here.
+
+        Parameters
+        ----------
+        reading
+            How the set was read, for the error message.
+        """
+
+        raise TopologyError(
+            "{:} {:} was read as a whole ({:} it), but only {:} of its {:} {:}: {:}".format(
+                self.kindOfSet,
+                self.name,
+                reading,
+                len(self.data),
+                self.sizeOfWholeSet(),
+                self.localMembersAre,
+                self._whyIncomplete(),
+            )
+        )
+
+    def _whyIncomplete(self) -> str:
+        """Why members of the set are not local here, for the error of a set that is not complete:
+        never asked of a set of the objects it was given, which is complete.
+
+        Returns
+        -------
+        str
+            The explanation.
+        """
+
+        return "it holds only the {:}s it was given".format(self.kindOfSet.split()[0])
+
+    def requireComplete(self, reader: str):
+        """State that ``reader`` needs every member of this set, not only its local part.
+
+        Reading a set that is not complete as a whole raises anyway; a reader that keeps the set
+        for later states it up front with this, so that the error names the reader and arises
+        where the set is chosen.
+
+        Parameters
+        ----------
+        reader
+            Who reads the set, for the error message.
+
+        Raises
+        ------
+        TopologyError
+            If this process holds only some of the members of the set.
+        """
+
+        if not self.isComplete:
+            raise TopologyError(
+                "{:} needs the whole {:} {:}, but only part of it {:}: {:}".format(
+                    reader, self.kindOfSet, self.name, self.localPartHas, self._whyIncomplete()
+                )
+            )

@@ -71,14 +71,15 @@ def _buildTwoElementModel():
     material = getMaterialClass("linearelastic", "edelweiss")(np.array([1000.0, 0.3]))
 
     model = FEModel(2)
-    for node in n:
-        model.nodes[node.label] = node
+    model.mesh.addNodes([node.label for node in n], [node.coordinates for node in n])
     # the elements are described in the mesh, and created from there
     model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 5, 6])
     model.mesh.addElement(2, "CPE4", "edelweiss", [2, 3, 4, 5])
     model.mesh.setElementSet("all", [1, 2])
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
+    n = list(model.nodes.values())
     e1, e2 = model.elements[1], model.elements[2]
     model.nodeSets["all"] = NodeSet("all", n)
     model.materials["linearelastic"] = material

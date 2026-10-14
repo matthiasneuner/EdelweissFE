@@ -276,7 +276,8 @@ class TopologyPipeline:
         counterpart of :meth:`adoptSetupElementNumbers`, called alongside it.
         """
 
-        self._nextNodeNumber = max(self._nextNodeNumber, max(self._model.nodes.keys(), default=0) + 1)
+        labels = self._model.mesh.nodeLabels
+        self._nextNodeNumber = max(self._nextNodeNumber, int(labels.max(initial=0)) + 1)
 
     def ensureSurfaceFacetModifier(self, journal: Journal):
         """Create the implicit facet-regeneration modifier, if any facet recipe was declared.

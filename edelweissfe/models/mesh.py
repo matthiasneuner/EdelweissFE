@@ -27,22 +27,28 @@
 #  ---------------------------------------------------------------------
 """The mesh of a model, as data.
 
-``model.mesh`` holds the element connectivity, the element sets and the surfaces. The nodes are
-``model.nodes`` (they are not part of the mesh yet), and ``model.elements`` are the element objects
-created from the mesh -- never assigned directly.
+``model.mesh`` holds the nodes (labels and reference coordinates), the node sets, the element
+connectivity, the element sets and the surfaces. ``model.nodes`` are the node objects and
+``model.elements`` the element objects created from the mesh -- neither is assigned directly.
 
 A model is built in two stages:
 
-1. **Describe the mesh.** The ``*element``/``*elset``/``*surface`` keywords and the mesh generators
-   fill the :class:`Mesh` held by the model as ``model.mesh``: per element its number, type, provider
-   and node labels; element sets as ordered lists of element numbers; surfaces as element faces. No
-   element object exists yet.
-2. **Make the elements.** :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` creates an
-   element object for each element of the mesh, and resolves the element sets and surfaces to those
-   objects.
+1. **Describe the mesh.** The ``*node``/``*nSet``/``*element``/``*elset``/``*surface`` keywords and
+   the mesh generators fill the :class:`Mesh` held by the model as ``model.mesh``: per node its label
+   and reference coordinates; node sets as ordered lists of node labels; per element its number,
+   type, provider and node labels; element sets as ordered lists of element numbers; surfaces as
+   element faces. No node or element object exists yet.
+2. **Make the nodes and the elements.** :meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`
+   creates a :class:`~edelweissfe.points.node.Node` for each node of the mesh held in this process --
+   every node, in a serial run -- and resolves the node sets to those objects;
+   :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh` does the same for the elements,
+   the element sets and the surfaces.
 
-Nodes are not part of this description: they are created directly as :class:`~edelweissfe.points.node.Node`
-objects in ``model.nodes``, and node sets as :class:`~edelweissfe.sets.nodeset.NodeSet` objects, as before.
+The mesh holds the *reference* coordinates of the nodes. A model modifier that changes the
+reference geometry (a tie adjusting its slave nodes onto the master surface, a snap onto a
+cylinder) changes them in the mesh as well as at the node objects
+(:meth:`Mesh.moveNodes`); the current position of a node carried
+by a rigid body is not reference geometry, and is held by its node object only.
 
 Which fields an element has at which of its nodes depends on its type only. The mesh therefore
 answers that question per element without any element object of the model, by asking one prototype
@@ -51,6 +57,8 @@ nodes -- and so lay out its degrees of freedom -- from the mesh alone.
 """
 
 from dataclasses import dataclass
+
+import numpy as np
 
 from edelweissfe.utils.exceptions import TopologyError
 
@@ -172,15 +180,33 @@ class MeshElement:
 
 
 class Mesh:
-    """The mesh of a model: its element connectivity, element sets and surfaces, as data. The nodes
-    are held by the model (``model.nodes``), not here.
+    """The mesh of a model: its nodes, node sets, element connectivity, element sets and surfaces,
+    as data.
 
-    Element numbers are never chosen here: the input file gives them, or the model's number
-    allocator (:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`)
-    hands them out, so that the mesh, the contact facets and every model modifier share one counter.
+    The nodes are held as arrays, in the order they were described: their labels
+    (:attr:`nodeLabels`) and their reference coordinates (:attr:`nodeCoordinates`), one row per node.
+    A node is found by its label through a sorted index of the labels, built when first needed after
+    nodes were added (:meth:`rowsOfNodes`), which also refuses a label described twice.
+
+    Element numbers and node labels are never chosen here: the input file gives them, or the model's
+    number allocators (:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`,
+    :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers`) hand them out, so
+    that the mesh, the contact facets and every model modifier share one counter each.
     """
 
     def __init__(self):
+        #: The labels of the nodes, in the order they were described; the first :attr:`nNodes`
+        #: entries are used (the arrays grow by doubling).
+        self._nodeLabels = np.empty(0, dtype=np.int64)
+        #: The reference coordinates of the nodes, one row per node; its width is fixed by the first
+        #: node described.
+        self._nodeCoordinates = None
+        #: The number of nodes described.
+        self.nNodes = 0
+        #: The sorted labels and the row of each, built when first needed (:meth:`rowsOfNodes`).
+        self._sortedNodeLabels = None
+        #: The node sets, by name: ordered arrays of node labels without duplicates.
+        self.nodeSets = {}
         #: The elements, by number, in the order they were described.
         self.elements = {}
         #: The element sets, by name: ordered lists of element numbers without duplicates.
@@ -189,6 +215,234 @@ class Mesh:
         self.surfaces = {}
         #: Element class and type information per (type, provider), asked once per type.
         self._types = {}
+
+    @property
+    def nodeLabels(self) -> np.ndarray:
+        """The labels of the nodes, in the order they were described.
+
+        Returns
+        -------
+        np.ndarray
+            The labels, as a read-only view.
+        """
+
+        labels = self._nodeLabels[: self.nNodes]
+        labels.flags.writeable = False
+        return labels
+
+    @property
+    def nodeCoordinates(self) -> np.ndarray:
+        """The reference coordinates of the nodes, one row per node, in the order of
+        :attr:`nodeLabels`.
+
+        Returns
+        -------
+        np.ndarray
+            The coordinates, as a read-only view.
+        """
+
+        if self._nodeCoordinates is None:
+            return np.empty((0, 0))
+        coordinates = self._nodeCoordinates[: self.nNodes]
+        coordinates.flags.writeable = False
+        return coordinates
+
+    def addNode(self, label: int, coordinates) -> int:
+        """Describe a node; see :meth:`addNodes`.
+
+        Parameters
+        ----------
+        label
+            The node label, from the input file or the model's node number allocator.
+        coordinates
+            The reference coordinates of the node.
+
+        Returns
+        -------
+        int
+            The row of the node in :attr:`nodeLabels` and :attr:`nodeCoordinates`.
+        """
+
+        return self.addNodes((label,), (coordinates,))[0]
+
+    def addNodes(self, labels, coordinates) -> range:
+        """Describe nodes, after those described before.
+
+        Parameters
+        ----------
+        labels
+            The node labels, from the input file or the model's node number allocator; each is
+            described once (checked when the nodes are next looked up, :meth:`rowsOfNodes`).
+        coordinates
+            The reference coordinates of the nodes, one row (or one array) per node, all of the same
+            length as those of the nodes described before.
+
+        Returns
+        -------
+        range
+            The rows of the nodes in :attr:`nodeLabels` and :attr:`nodeCoordinates`.
+        """
+
+        labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+        nNew = labels.shape[0]
+        if nNew == 0:
+            return range(self.nNodes, self.nNodes)
+        coordinates = np.asarray(coordinates, dtype=float).reshape(nNew, -1)
+
+        if self._nodeCoordinates is None:
+            self._nodeCoordinates = np.empty((0, coordinates.shape[1]))
+        if coordinates.shape[1] != self._nodeCoordinates.shape[1]:
+            raise TopologyError(
+                "node(s) {:}: {:} coordinates per node, but the nodes of the mesh have {:}".format(
+                    labels[:5].tolist(), coordinates.shape[1], self._nodeCoordinates.shape[1]
+                )
+            )
+
+        first, end = self.nNodes, self.nNodes + nNew
+        if end > self._nodeLabels.shape[0]:
+            capacity = max(end, 2 * self._nodeLabels.shape[0])
+            self._nodeLabels = np.resize(self._nodeLabels, capacity)
+            grown = np.empty((capacity, self._nodeCoordinates.shape[1]))
+            grown[:first] = self._nodeCoordinates[:first]
+            self._nodeCoordinates = grown
+
+        self._nodeLabels[first:end] = labels
+        self._nodeCoordinates[first:end] = coordinates
+        self.nNodes = end
+        self._sortedNodeLabels = None
+        return range(first, end)
+
+    def rowsOfNodes(self, labels) -> np.ndarray:
+        """The rows of nodes in :attr:`nodeLabels` and :attr:`nodeCoordinates`.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+
+        Returns
+        -------
+        np.ndarray
+            The rows, in the order of ``labels``.
+
+        Raises
+        ------
+        KeyError
+            If a label is not described in the mesh.
+        TopologyError
+            If a label was described twice.
+        """
+
+        labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+        positions, found = self._positionsInIndex(labels)
+        if not found.all():
+            raise KeyError("node(s) {:} are not in the mesh".format(", ".join(map(str, labels[~found][:10]))))
+        return self._nodeIndex()[1][positions]
+
+    def hasNodes(self, labels) -> np.ndarray:
+        """Whether nodes of the given labels are described in the mesh.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+
+        Returns
+        -------
+        np.ndarray
+            Per label, True if it is.
+        """
+
+        return self._positionsInIndex(np.asarray(labels, dtype=np.int64).reshape(-1))[1]
+
+    def _positionsInIndex(self, labels: np.ndarray) -> tuple:
+        """The positions of labels in the sorted index of the labels (:meth:`_nodeIndex`), and
+        whether each is found there.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+
+        Returns
+        -------
+        tuple
+            The positions, and per label True if it is described in the mesh.
+        """
+
+        sortedLabels, _ = self._nodeIndex()
+        positions = np.searchsorted(sortedLabels, labels)
+        found = positions < sortedLabels.shape[0]
+        found[found] = sortedLabels[positions[found]] == labels[found]
+        return positions, found
+
+    def requireEachNodeDescribedOnce(self):
+        """Raise if a node label was described twice.
+
+        Raises
+        ------
+        TopologyError
+            If a label was described twice.
+        """
+
+        self._nodeIndex()
+
+    def _nodeIndex(self) -> tuple:
+        """The labels of the nodes, sorted, and the row of each; built once after nodes were added.
+
+        Raises
+        ------
+        TopologyError
+            If a label was described twice.
+        """
+
+        if self._sortedNodeLabels is None:
+            labels = self.nodeLabels
+            rowOfSorted = np.argsort(labels, kind="stable")
+            sortedLabels = labels[rowOfSorted]
+            twice = sortedLabels[1:][sortedLabels[1:] == sortedLabels[:-1]]
+            if twice.shape[0]:
+                raise TopologyError(
+                    "node label(s) {:} are described twice in the mesh -- every node label is described once, "
+                    "and labels from TopologyPipeline.reserveNodeNumbers() are never recycled".format(
+                        ", ".join(map(str, np.unique(twice)[:10]))
+                    )
+                )
+            self._sortedNodeLabels = (sortedLabels, rowOfSorted)
+        return self._sortedNodeLabels
+
+    def moveNodes(self, labels, coordinates):
+        """Change the reference coordinates of nodes, e.g. when a model modifier changes the
+        reference geometry (see the module documentation).
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+        coordinates
+            The new reference coordinates, one row per node.
+        """
+
+        rows = self.rowsOfNodes(labels)
+        self._nodeCoordinates[rows] = np.asarray(coordinates, dtype=float).reshape(rows.shape[0], -1)
+
+    def setNodeSet(self, name: str, labels):
+        """Define (or redefine) a node set.
+
+        Parameters
+        ----------
+        name
+            The name of the set.
+        labels
+            The node labels, in order; repeated labels are kept once, at their first position.
+        """
+
+        labels = np.fromiter(dict.fromkeys(int(label) for label in labels), dtype=np.int64)
+        try:
+            self.rowsOfNodes(labels)
+        except KeyError as missing:
+            raise KeyError("node set {:}: {:}".format(name, missing.args[0]))
+        self.nodeSets[name] = labels
 
     def addElement(self, number: int, elType: str, provider: str, nodeLabels) -> MeshElement:
         """Describe an element.

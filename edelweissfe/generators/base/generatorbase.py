@@ -35,8 +35,8 @@ from edelweissfe.models.elementdistribution import NOT_KNOWN_TO_ONLY_DESCRIBE_TH
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import OptionSchemaProvider, buildSchemaFromOptions
 
-#: The entry of a generator's node grid at a position that does not become a node of the model, e.g.
-#: the centre of a 20-node hexahedron: no :class:`~edelweissfe.points.node.Node` object, just this marker.
+#: The entry of a generator's grid of node labels at a position that does not become a node of the
+#: model, e.g. the centre of a 20-node hexahedron: no label, just this marker.
 GRID_POSITION_WITHOUT_NODE = None
 
 
@@ -51,8 +51,7 @@ def isNodeOfElements(nodeGrid: np.ndarray, elementNodeLabels) -> np.ndarray:
     Parameters
     ----------
     nodeGrid
-        The grid of :class:`~edelweissfe.points.node.Node` objects, and :data:`GRID_POSITION_WITHOUT_NODE`
-        where a position is not a node.
+        The grid of node labels, and :data:`GRID_POSITION_WITHOUT_NODE` where a position is not a node.
     elementNodeLabels
         The node labels of every element the generator described.
 
@@ -64,7 +63,7 @@ def isNodeOfElements(nodeGrid: np.ndarray, elementNodeLabels) -> np.ndarray:
 
     referenced = {label for labels in elementNodeLabels for label in labels}
     return np.array(
-        [node is not GRID_POSITION_WITHOUT_NODE and node.label in referenced for node in nodeGrid.flat], dtype=bool
+        [label is not GRID_POSITION_WITHOUT_NODE and label in referenced for label in nodeGrid.flat], dtype=bool
     ).reshape(nodeGrid.shape)
 
 

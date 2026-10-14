@@ -51,6 +51,7 @@ from edelweissfe.models.mesh import AUXILIARY, SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.outputmanagers.ensight import visualizedElementsOf
 from edelweissfe.points.node import Node
+from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.inputfileparser import parseInputFile
 
@@ -463,3 +464,105 @@ def test_the_mesh_data_lines_are_released_once_the_model_holds_the_mesh(tmp_path
     with pytest.raises(RuntimeError, match=r"the data lines of \*node were released"):
         fillFEModelFromInputFile(FEModel(2), inputFile, journal)
     assert 1001 in model.mesh.elements
+
+
+def test_mesh_describes_nodes_and_node_sets(tmp_path):
+    model = _buildModel(tmp_path)
+    mesh = model.mesh
+
+    # the generator's nodes first (labels from the allocator), then the *node block, in that order
+    assert mesh.nodeLabels.tolist() == list(range(1, 16)) + [101, 102, 103, 104, 105, 106]
+    assert mesh.nodeCoordinates[mesh.rowsOfNodes([105])].tolist() == [[7.0, 0.0]]
+    assert mesh.nodeSets["gen_leftBottom"].tolist() == [1]
+    assert mesh.nodeSets["all"].tolist() == mesh.nodeLabels.tolist()
+
+    # the node objects are made from the mesh, in mesh order, each with its own copy of the coordinates
+    assert list(model.nodes) == mesh.nodeLabels.tolist()
+    node = model.nodes[105]
+    assert node.coordinates.tolist() == [7.0, 0.0]
+    node.coordinates[0] = 8.0
+    assert mesh.nodeCoordinates[mesh.rowsOfNodes([105])].tolist() == [[7.0, 0.0]]
+
+    # every node set of the mesh resolves to the node objects, complete
+    for name, labels in mesh.nodeSets.items():
+        nodeSet = model.nodeSets[name]
+        assert [node.label for node in nodeSet] == labels.tolist()
+        assert nodeSet.isComplete and nodeSet.nodeLabelsOfWholeSet() == labels.tolist()
+
+
+def _modelOfFourNodes(isHeldHere=None) -> FEModel:
+    """A model whose mesh describes four nodes and two node sets, holding the nodes ``isHeldHere``
+    accepts."""
+
+    model = FEModel(2)
+    model.mesh.addNodes([1, 2, 3, 4], [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    model.mesh.setNodeSet("bottom", [2, 1, 2])
+    model.mesh.setNodeSet("top", [3, 4])
+    with model.topology.changes():
+        model.createNodesOfMesh(isHeldHere)
+    return model
+
+
+def test_a_node_set_holds_the_nodes_held_here_and_fails_safe():
+    model = _modelOfFourNodes(lambda label: label != 1)
+
+    assert list(model.nodes) == [2, 3, 4]
+    bottom, top = model.nodeSets["bottom"], model.nodeSets["top"]
+    assert model.mesh.nodeSets["bottom"].tolist() == [2, 1]
+    assert [node.label for node in bottom.localNodes()] == [2]
+    assert not bottom.isComplete and top.isComplete
+    assert bottom.nodeLabelsOfWholeSet() == [2, 1]
+
+    for readWhole in (list, len, bool, lambda s: s[0], lambda s: s.nodes):
+        with pytest.raises(TopologyError, match="node set bottom was read as a whole"):
+            readWhole(bottom)
+    assert model.nodes[2] in bottom
+    with pytest.raises(TopologyError, match="the test needs the whole node set bottom"):
+        bottom.requireComplete("the test")
+    top.requireComplete("the test")
+
+    # nodes made later (e.g. moved here) complete the set in place, in set order
+    with model.topology.changes():
+        model.createNodesOfMesh()
+    assert model.nodeSets["bottom"] is bottom and [node.label for node in bottom] == [2, 1]
+
+    # ... but they are not in mesh order, which the numbering of the degrees of freedom relies on
+    with pytest.raises(TopologyError, match="not in mesh order"):
+        model.checkNodesAgreeWithMesh()
+
+
+def test_a_node_is_described_once_and_created_only_from_the_mesh():
+    model = _modelOfFourNodes()
+    model.checkNodesAgreeWithMesh()
+
+    model.mesh.addNode(4, [2.0, 2.0])
+    with pytest.raises(TopologyError, match="described twice"):
+        with model.topology.changes():
+            model.createNodesOfMesh()
+
+    model = _modelOfFourNodes()
+    with pytest.raises(TopologyError, match="coordinates per node"):
+        model.mesh.addNode(5, [0.0, 0.0, 0.0])
+    with pytest.raises(KeyError, match="not in the mesh"):
+        model.mesh.setNodeSet("broken", [1, 7])
+    with pytest.raises(TopologyError, match="outside a topology change"):
+        model.mesh.addNode(6, [2.0, 2.0])
+        model.createNodesOfMesh()
+
+    model = _modelOfFourNodes()
+    model.nodes[9] = Node(9, np.zeros(2))
+    with pytest.raises(TopologyError, match="not described in the mesh"):
+        model.checkNodesAgreeWithMesh()
+
+    # a node set of node objects a model entity made cannot be redefined by the mesh
+    model = _modelOfFourNodes()
+    model.nodeSets["made"] = NodeSet("made", [model.nodes[1]])
+    model.mesh.setNodeSet("made", [1, 2])
+    with pytest.raises(TopologyError, match="a set of node objects"):
+        model.resolveNodeSetOfMesh("made")
+
+
+def test_moving_nodes_changes_the_reference_coordinates_in_the_mesh():
+    model = _modelOfFourNodes()
+    model.mesh.moveNodes([3, 1], [[1.5, 1.5], [-0.5, 0.0]])
+    assert model.mesh.nodeCoordinates.tolist() == [[-0.5, 0.0], [1.0, 0.0], [1.5, 1.5], [0.0, 1.0]]

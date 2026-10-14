@@ -30,7 +30,7 @@
 # @author: Matthias Neuner
 
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from operator import attrgetter
 
@@ -50,11 +50,13 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
+from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import (
     ElementSet,
     ElementSetOfMesh,
     ElementSetOfSurfaceFace,
 )
+from edelweissfe.sets.nodeset import NodeSetOfMesh
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -69,18 +71,19 @@ class FEModel:
 
     What the model holds:
 
-    * :attr:`mesh` (:class:`~edelweissfe.models.mesh.Mesh`) holds the element connectivity, the
-      element sets and the surfaces, as data: elements by number, type, provider and node labels.
-    * :attr:`nodes` holds the nodes, as objects; they are not (yet) part of the mesh.
-    * :attr:`elements` holds the element objects created from the mesh. It is never assigned
-      directly: :meth:`prepareYourself` refuses an element the mesh does not describe. (Auxiliary
-      elements -- contact facets, point masses -- are added by :meth:`createAuxiliaryElement`,
-      which describes them in the mesh as well.)
+    * :attr:`mesh` (:class:`~edelweissfe.models.mesh.Mesh`) holds the nodes (labels and reference
+      coordinates), the node sets, the element connectivity, the element sets and the surfaces, as
+      data.
+    * :attr:`nodes` holds the node objects created from the mesh (:meth:`createNodesOfMesh`),
+      :attr:`elements` the element objects. Neither is assigned directly: :meth:`prepareYourself` refuses a node or an element
+      the mesh does not describe. (Auxiliary elements -- contact facets, point masses -- are added
+      by :meth:`createAuxiliaryElement`, which describes them in the mesh as well.)
 
     The model is therefore built in two stages. First the mesh is described in :attr:`mesh`. Then
-    :meth:`createElementsOfMesh` creates the element objects from it and resolves the element sets
-    and surfaces to them. The fields at the nodes, and with them the
-    layout of the degrees of freedom, follow from the mesh alone (see :meth:`~edelweissfe.models.mesh.Mesh.typeOf`).
+    :meth:`createNodesOfMesh` and :meth:`createElementsOfMesh` create the node and element objects
+    from it and resolve the node sets, element sets and surfaces to them. The fields at the nodes,
+    and with them the layout of the degrees of freedom, follow from the mesh alone (see
+    :meth:`~edelweissfe.models.mesh.Mesh.typeOf`).
 
 
     Parameters
@@ -93,9 +96,11 @@ class FEModel:
 
     def __init__(self, dimension: int):
         self.time = 0.0  #: Current time of the model.
-        #: The nodes of the model, by label; not (yet) part of :attr:`mesh`.
+        #: The node objects created from :attr:`mesh`, by label, in mesh order. Never assigned directly:
+        #: describe a node in :attr:`mesh` and call :meth:`createNodesOfMesh`.
         self.nodes = {}
-        #: The mesh, as data: the element connectivity, the element sets and the surfaces.
+        #: The mesh, as data: the nodes, the node sets, the element connectivity, the element sets and
+        #: the surfaces.
         self.mesh = Mesh()
         #: The element objects created from :attr:`mesh`, by number, in mesh order. Never assigned
         #: directly: describe an element in :attr:`mesh` and call :meth:`createElementsOfMesh`.
@@ -105,7 +110,10 @@ class FEModel:
         #: element, here, unless a domain-decomposed run sets another (see
         #: :mod:`~edelweissfe.models.elementdistribution`).
         self.elementDistribution = ElementDistribution()
-        self.nodeSets = {}  #: NodeSets in the model.
+        #: The node sets of the model, by name: those of the mesh resolved to the nodes held here
+        #: (:class:`~edelweissfe.sets.nodeset.NodeSetOfMesh`), and sets of node objects a model entity
+        #: made itself (e.g. the slave nodes a tie tied).
+        self.nodeSets = {}
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
         self.sections = {}  #: Sections in the model.
@@ -144,27 +152,145 @@ class FEModel:
         clone.topology = self.topology.boundTo(clone)
         return clone
 
-    def createNode(self, node):
-        """Add a freshly created node to the model.
+    def createNodesOfMesh(self, isHeldHere: Callable[[int], bool] | None = None):
+        """Create the node objects of the mesh, and resolve its node sets to them.
+
+        Nodes are created in mesh order, after those created before, so :attr:`nodes` lists them in
+        the order they were described -- the order of the degrees of freedom of every field. Each
+        node's coordinates are a copy of its reference coordinates in the mesh.
+
+        Calling it again creates the nodes described since: a late generator, a model entity that needs
+        the objects of nodes it just described (a rigid body's surface nodes and reference point), a
+        refinement's new nodes. Node sets that already exist are updated in place (references held to
+        them stay valid).
 
         Parameters
         ----------
-        node
-            The node, already carrying a label obtained from :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers`.
+        isHeldHere
+            Whether the node of a label is held in this process; every node if None, as in a serial
+            run. A domain-decomposed run holds every node too (for now).
         """
 
-        if not self.topology.isOpen:
+        self.mesh.requireEachNodeDescribedOnce()
+        nodes = self.nodes
+        coordinates = self.mesh.nodeCoordinates
+        for row, label in enumerate(self.mesh.nodeLabels.tolist()):
+            if label not in nodes and (isHeldHere is None or isHeldHere(label)):
+                if not self.topology.isOpen:
+                    raise TopologyError(
+                        "node {:} was created outside a topology change: only model modifiers may create "
+                        "or delete nodes, inside TopologyPipeline.changes()".format(label)
+                    )
+                nodes[label] = Node(label, coordinates[row].copy())
+
+        self.resolveNodeSetsOfMesh()
+
+    def resolveNodeSetsOfMesh(self):
+        """Make every node set of the mesh hold the nodes held here; sets that already exist are
+        updated in place, so references held to them stay valid."""
+
+        for name in self.mesh.nodeSets:
+            self.resolveNodeSetOfMesh(name)
+
+    def resolveNodeSetOfMesh(self, name: str) -> NodeSetOfMesh:
+        """Make ``nodeSets[name]`` hold the nodes of the mesh's node set ``name`` held here.
+
+        Parameters
+        ----------
+        name
+            The name of the node set in :attr:`mesh`.
+
+        Returns
+        -------
+        NodeSetOfMesh
+            The nodes of the set held here, in set order; complete if that is all of them.
+        """
+
+        nodes = self.nodes
+        held = [nodes[label] for label in self.mesh.nodeSets[name].tolist() if label in nodes]
+
+        nodeSet = self.nodeSets.get(name)
+        if nodeSet is None:
+            nodeSet = self.nodeSets[name] = NodeSetOfMesh(name, held, self.mesh)
+        else:
+            nodeSet.requireDescribedBy(self.mesh)
+            if list(nodeSet.localNodes()) != held:
+                nodeSet.replaceMembers(held)
+        return nodeSet
+
+    def defineNodeSetOfMesh(self, name: str, labels) -> NodeSetOfMesh:
+        """Describe (or redefine) a node set in the mesh, and resolve it to the nodes held here: how a
+        model entity or a model modifier defines a node set of nodes of the mesh during a run.
+
+        Parameters
+        ----------
+        name
+            The name of the set.
+        labels
+            The node labels, in order.
+
+        Returns
+        -------
+        NodeSetOfMesh
+            The node set.
+        """
+
+        self.mesh.setNodeSet(name, labels)
+        return self.resolveNodeSetOfMesh(name)
+
+    def checkNodesAgreeWithMesh(self):
+        """Raise unless :attr:`nodes` holds nodes of the mesh, in mesh order, and every node of the
+        mesh (every process holds every node, for now).
+
+        The order matters: the nodes of every field, and so the degrees of freedom, are numbered in
+        the order of :attr:`nodes`.
+
+        Raises
+        ------
+        TopologyError
+            If a node of the model is not described in the mesh, a node of the mesh is not held here,
+            or the nodes are not in mesh order.
+        """
+
+        heldLabels = np.fromiter(self.nodes.keys(), dtype=np.int64, count=len(self.nodes))
+        meshLabels = self.mesh.nodeLabels
+        if not np.array_equal(heldLabels, meshLabels):
+            notDescribed = sorted(set(heldLabels.tolist()) - set(meshLabels.tolist()))
+            notHeld = sorted(set(meshLabels.tolist()) - set(heldLabels.tolist()))
             raise TopologyError(
-                "node {:} was created outside a topology change: only model modifiers may create "
-                "or delete nodes, inside TopologyPipeline.changes()".format(node.label)
-            )
-        if node.label in self.nodes:
-            raise TopologyError(
-                "node label {:} is already taken -- node labels are reserved via "
-                "TopologyPipeline.reserveNodeNumbers() and never recycled".format(node.label)
+                "the nodes of the model do not agree with the mesh: {:} node(s) (e.g. {:}) are not described in "
+                "the mesh, {:} node(s) of the mesh (e.g. {:}) have no node object{:} -- nodes are described in "
+                "model.mesh and created by FEModel.createNodesOfMesh, in mesh order".format(
+                    len(notDescribed),
+                    notDescribed[:5],
+                    len(notHeld),
+                    notHeld[:5],
+                    "" if notDescribed or notHeld else ", and they are not in mesh order",
+                )
             )
 
-        self.nodes[node.label] = node
+    def createAuxiliaryNodes(self, nodes: list):
+        """Add nodes a model entity (a discrete rigid body) makes itself, instead of the input
+        describing them in the mesh; they are described in the mesh as well, from these objects.
+
+        This is the special path, the counterpart of :meth:`createAuxiliaryElement` for nodes: a
+        discrete rigid body makes its surface nodes with the coordinates of its surface file, in that
+        file's precision, which the mesh (holding double precision) does not reproduce. Every other node
+        is described in :attr:`mesh` first and created from there, by :meth:`createNodesOfMesh` --
+        which is called first here, so that the nodes stay in mesh order.
+
+        Parameters
+        ----------
+        nodes
+            The nodes, already carrying labels obtained from
+            :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers`.
+        """
+
+        self.createNodesOfMesh()
+        self.mesh.addNodes([node.label for node in nodes], [node.coordinates for node in nodes])
+        self.mesh.requireEachNodeDescribedOnce()
+        for node in nodes:
+            self.nodes[node.label] = node
 
     def createAuxiliaryElement(self, element, hostElement: int | None = None):
         """Add an auxiliary element to the model: one a model entity (a contact surface, a rigid body)
@@ -828,6 +954,7 @@ class FEModel:
             The journal instance.
         """
 
+        self.checkNodesAgreeWithMesh()
         self.checkElementsAgreeWithMesh()
         self.topology.adoptSetupElementNumbers()
         self.topology.ensureSurfaceFacetModifier(journal)

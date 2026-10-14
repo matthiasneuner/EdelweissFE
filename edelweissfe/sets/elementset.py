@@ -49,21 +49,20 @@ else:
     MarmotMaterialWrappingElement = None
 
 from edelweissfe.sets.nodeset import NodeSet
-from edelweissfe.sets.orderedset import OrderedSet
-from edelweissfe.utils.exceptions import TopologyError
+from edelweissfe.sets.orderedset import LocalOrderedSet
 from edelweissfe.utils.meshtools import extractNodesFromElementSet
 
 
-class ElementSet(OrderedSet):
+class ElementSet(LocalOrderedSet):
     """A basic element set.
     It has a name, and a list containing unique elements.
 
-    **Local and complete.** In a distributed (domain-decomposed) run each process holds only some
-    of the elements of the model -- its *local* elements, in the terms of deal.II and PETSc. An
-    element set of a model resolved from its mesh is an :class:`ElementSetOfMesh`, which holds the
-    local elements of its set. The set is *complete* if every element of the set is local here. A
-    serial run is always complete, and so is a set of element objects like this one, which holds the
-    elements it was given.
+    **Local and complete** (see :class:`~edelweissfe.sets.orderedset.LocalOrderedSet`). In a
+    distributed (domain-decomposed) run each process holds only some of the elements of the model --
+    its *local* elements. An element set of a model resolved from its mesh is an
+    :class:`ElementSetOfMesh`, which holds the local elements of its set. The set is *complete* if
+    every element of the set is local here. A serial run is always complete, and so is a set of
+    element objects like this one, which holds the elements it was given.
 
     Reading a set as a whole -- iterating it, indexing it, ``len()``, :attr:`elements` -- requires it
     to be complete, and raises a :class:`~edelweissfe.utils.exceptions.TopologyError` otherwise:
@@ -80,6 +79,10 @@ class ElementSet(OrderedSet):
         A list of elements.
     """
 
+    kindOfSet = "element set"
+    localMembersAre = "elements have an element object here"
+    localPartHas = "has element objects here"
+
     def __init__(
         self,
         name: str,
@@ -95,13 +98,6 @@ class ElementSet(OrderedSet):
 
         super().__init__(name, elements)
         self._nodes = None
-
-    @property
-    def isComplete(self) -> bool:
-        """Whether every element of the set is local to this process: always, for a set of the
-        element objects it was given."""
-
-        return True
 
     @property
     def elements(self):
@@ -127,76 +123,18 @@ class ElementSet(OrderedSet):
             The local elements.
         """
 
-        return self.items
+        return self.localMembers()
 
-    def __iter__(self):
-        """Iterate over the elements of the set, in set order.
-
-        Raises
-        ------
-        TopologyError
-            If the set is not complete in this process; see :meth:`localElements`.
-        """
-
-        if not self.isComplete:
-            self._raiseNotComplete("iterating")
-        return iter(self.data)
-
-    def __getitem__(self, index):
-        """The element at the given position (or slice) of the set.
-
-        Raises
-        ------
-        TopologyError
-            If the set is not complete in this process; see :meth:`localElements`.
-        """
-
-        if not self.isComplete:
-            self._raiseNotComplete("indexing")
-        return list(self.items)[index]
-
-    def __len__(self) -> int:
-        """The number of elements of the set.
-
-        Raises
-        ------
-        TopologyError
-            If the set is not complete in this process: the number of its local elements and the
-            size of the set differ, and ``bool(elementSet)`` ("is it empty?") would be ambiguous.
-            Ask ``len(elementSet.localElements())`` or ``len(elementSet.elementNumbersOfWholeSet())``.
-        """
-
-        if not self.isComplete:
-            self._raiseNotComplete("taking len() of")
-        return len(self.data)
-
-    def _raiseNotComplete(self, reading: str):
-        """Raise the error of a whole-set reading of a set that is not complete here.
-
-        Parameters
-        ----------
-        reading
-            How the set was read, for the error message.
-        """
-
-        raise TopologyError(
-            "element set {:} was read as a whole ({:} it), but only {:} of its {:} elements have an element object "
-            "here: {:}".format(
-                self.name, reading, len(self.data), len(self.elementNumbersOfWholeSet()), self._whyIncomplete()
-            )
-        )
-
-    def _whyIncomplete(self) -> str:
-        """Why elements of the set have no element object here, for the error of a set that is not
-        complete: never asked of a set of the element objects it was given, which is complete.
+    def sizeOfWholeSet(self) -> int:
+        """The number of elements of the whole set (:meth:`elementNumbersOfWholeSet`).
 
         Returns
         -------
-        str
-            The explanation.
+        int
+            The size of the set.
         """
 
-        return "it holds only the elements it was given"
+        return len(self.elementNumbersOfWholeSet())
 
     def elementNumbersOfWholeSet(self) -> list:
         """The numbers of every element of the set, in set order: here, of its elements.
@@ -208,31 +146,6 @@ class ElementSet(OrderedSet):
         """
 
         return [element.elNumber for element in self]
-
-    def requireComplete(self, reader: str):
-        """State that ``reader`` needs every element of this set, not only its local part.
-
-        Reading a set that is not complete as a whole raises anyway; a reader that keeps the set
-        for later states it up front with this, so that the error names the reader and arises
-        where the set is chosen.
-
-        Parameters
-        ----------
-        reader
-            Who reads the set, for the error message.
-
-        Raises
-        ------
-        TopologyError
-            If this process created only some of the elements of the set.
-        """
-
-        if not self.isComplete:
-            raise TopologyError(
-                "{:} needs the whole element set {:}, but only part of it has element objects here: {:}".format(
-                    reader, self.name, self._whyIncomplete()
-                )
-            )
 
     def extractNodeSet(
         self,

@@ -90,13 +90,15 @@ def test_single_cpe4_patch_test_pure_python_no_parser():
     material = getMaterialClass("linearelastic", "edelweiss")(np.array([E, nu]))
 
     model = FEModel(2)
-    for n in (n1, n2, n3, n4):
-        model.nodes[n.label] = n
+    # the nodes and the element are described in the mesh, and created from there
+    model.mesh.addNodes([1, 2, 3, 4], [n.coordinates for n in (n1, n2, n3, n4)])
     # the element is described in the mesh, and created from there
     model.mesh.addElement(1, "CPE4", "edelweiss", [1, 2, 3, 4])
     model.mesh.setElementSet("all", [1])
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
+    n1, n2, n3, n4 = model.nodes.values()
     element = model.elements[1]
     model.nodeSets["all"] = NodeSet("all", [n1, n2, n3, n4])
     model.nodeSets["bottom"] = NodeSet("bottom", [n1, n2])
@@ -259,14 +261,16 @@ def _buildPatchModel(youngsModulus: float, poissonsRatio: float, thickness: floa
             label += 1
 
     model = FEModel(2)
-    model.nodes.update(nodes)
+    model.mesh.addNodes(list(nodes), [node.coordinates for node in nodes.values()])
     # the elements are described in the mesh, and created from there;
     # CCW node order per element, matching the Quad4 shape functions (see the first test)
     for elNumber, connectivity in enumerate([(1, 2, 5, 4), (2, 3, 6, 5), (4, 5, 8, 7), (5, 6, 9, 8)], start=1):
         model.mesh.addElement(elNumber, "CPE4", "edelweiss", connectivity)
     model.mesh.setElementSet("all", list(model.mesh.elements))
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
+    nodes = dict(model.nodes)
     elements = model.elements
     model.nodeSets["all"] = NodeSet("all", list(nodes.values()))
     model.nodeSets["bottom"] = NodeSet("bottom", [nodes[1], nodes[2], nodes[3]])

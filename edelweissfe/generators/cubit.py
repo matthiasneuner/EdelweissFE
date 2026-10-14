@@ -167,8 +167,9 @@ class Generator(GeneratorBase):
 
         abqModelConstructor = AbqModelConstructor(journal)
         model = abqModelConstructor.createGeometryFromInputFile(model, fileDict)
-        # the sections and constraints of the generated file refer to element objects: make the
-        # elements described so far -- all of them
+        # the sections and constraints of the generated file refer to node and element objects: make
+        # the nodes and elements described so far -- all of them
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
         model = abqModelConstructor.createSectionsFromInputFile(model, fileDict)
         model = abqModelConstructor.createConstraintsFromInputFile(model, fileDict)

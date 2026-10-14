@@ -46,7 +46,6 @@ from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
 from edelweissfe.rigidbodies.discreterigidbody import DiscreteRigidBody
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.exceptions import WrongDomain
 from edelweissfe.utils.polyhedronmassproperties import computePolyhedronMassProperties
 from edelweissfe.utils.schema import schemaField
@@ -284,40 +283,37 @@ def generateDiscreteRigidBodyFromMeshFile(
     # The surface nodes and the reference point below are labelled consecutively. Unless the
     # caller pins the first label explicitly, the labels come from the model's monotonic allocator
     # (TopologyPipeline.reserveNodeNumbers) rather than from max(model.nodes).
-    rigidNodes = []
-    nodeLabel = start_label if start_label is not None else model.topology.reserveNodeNumbers(len(points) + 1).start
-    for point in points:
-        node = Node(nodeLabel, point.copy())
-        model.createNode(node)
-        rigidNodes.append(node)
-        nodeLabel += 1
+    firstLabel = start_label if start_label is not None else model.topology.reserveNodeNumbers(len(points) + 1).start
+    surfaceLabels = list(range(firstLabel, firstLabel + len(points)))
+    rpLabel = firstLabel + len(points)
+
+    if rpCoordinate is None:
+        rpCoordinate = surf.center_of_mass()
+
+    # The body makes its surface nodes and reference point itself -- the surface nodes keep the
+    # precision of the surface file (single precision for an STL file) -- and they are described in
+    # the mesh from these objects.
+    rigidNodes = [Node(label, point.copy()) for label, point in zip(surfaceLabels, points)]
+    referencePoint = Node(rpLabel, np.asarray(rpCoordinate))
+    model.createAuxiliaryNodes(rigidNodes + [referencePoint])
+    if start_label is not None:
+        # Caller-pinned labels bypass the allocator, so lift it above them; otherwise a later
+        # allocation could hand out a label this body already occupies.
+        model.topology.adoptSetupNodeNumbers()
 
     surfaceNodeSetName = f"{name}_surface_nodes"
-    model.nodeSets[surfaceNodeSetName] = NodeSet(surfaceNodeSetName, rigidNodes)
+    model.defineNodeSetOfMesh(surfaceNodeSetName, surfaceLabels)
 
     facets = [
         {"type": elementType, "nodes": [rigidNodes[idx] for idx in face]}
         for face, elementType in zip(faces, elementTypes)
     ]
 
-    if rpCoordinate is None:
-        rpCoordinate = surf.center_of_mass()
-
-    referencePoint = Node(nodeLabel, np.asarray(rpCoordinate))
-    model.createNode(referencePoint)
-    if start_label is not None:
-        # Caller-pinned labels bypass the allocator, so lift it above them; otherwise a later
-        # allocation could hand out a label this body already occupies.
-        model.topology.adoptSetupNodeNumbers()
-
     rpNodeSetName = f"{name}_rp"
-    model.nodeSets[rpNodeSetName] = NodeSet(rpNodeSetName, [referencePoint])
+    model.defineNodeSetOfMesh(rpNodeSetName, [rpLabel])
 
-    if "all" in model.nodeSets:
-        allNodes = list(model.nodeSets["all"])
-        allNodes.extend(rigidNodes)
-        allNodes.append(referencePoint)
-        model.nodeSets["all"] = NodeSet("all", allNodes)
+    if "all" in model.mesh.nodeSets:
+        model.defineNodeSetOfMesh("all", model.mesh.nodeSets["all"].tolist() + surfaceLabels + [rpLabel])
 
     rigidBody = DiscreteRigidBody(
         name,

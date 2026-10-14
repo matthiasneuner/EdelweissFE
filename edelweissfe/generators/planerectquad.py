@@ -61,8 +61,6 @@ from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import GeneratorBase, isNodeOfElements
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 
@@ -151,14 +149,9 @@ class Generator(GeneratorBase):
         # Node labels come from the model's monotonic allocator (TopologyPipeline.reserveNodeNumbers), not
         # from max(model.nodes). Every grid position becomes a model node here, so the whole grid is
         # reserved as one batch.
-        nodes = []
-        reservedNodeLabels = iter(model.topology.reserveNodeNumbers(nNodesX * nNodesY))
-
-        for x in range(nNodesX):
-            for y in range(nNodesY):
-                node = Node(next(reservedNodeLabels), grid[:, x, y])
-                model.createNode(node)
-                nodes.append(node)
+        # the grid of node labels; the nodes are described in the mesh
+        nodes = list(model.topology.reserveNodeNumbers(nNodesX * nNodesY))
+        model.mesh.addNodes(nodes, [grid[:, x, y] for x in range(nNodesX) for y in range(nNodesY)])
 
         nG = np.asarray(nodes).reshape(nNodesX, nNodesY)
 
@@ -185,25 +178,24 @@ class Generator(GeneratorBase):
                         nG[2 * x + 1, 2 * y + 2],
                         nG[2 * x, 2 * y + 1],
                     ]
-                nodeLabels = [node.label for node in elNodes]
+                nodeLabels = [int(label) for label in elNodes]
                 model.mesh.addElement(currentElementLabel, elTypeName, elProvider, nodeLabels)
                 elements.append(currentElementLabel)
                 connectivity.append(nodeLabels)
 
         # nodesets:
-        model.nodeSets["{:}_all".format(name)] = NodeSet(
-            "{:}_all".format(name), np.ravel(nG)[np.ravel(isNodeOfElements(nG, connectivity))]
-        )
+        mesh = model.mesh
+        mesh.setNodeSet("{:}_all".format(name), np.ravel(nG)[np.ravel(isNodeOfElements(nG, connectivity))])
 
-        model.nodeSets["{:}_left".format(name)] = NodeSet("{:}_left".format(name), np.ravel(nG[0, :]))
-        model.nodeSets["{:}_right".format(name)] = NodeSet("{:}_right".format(name), np.ravel(nG[-1, :]))
-        model.nodeSets["{:}_top".format(name)] = NodeSet("{:}_top".format(name), np.ravel(nG[:, -1]))
-        model.nodeSets["{:}_bottom".format(name)] = NodeSet("{:}_bottom".format(name), np.ravel(nG[:, 0]))
+        mesh.setNodeSet("{:}_left".format(name), np.ravel(nG[0, :]))
+        mesh.setNodeSet("{:}_right".format(name), np.ravel(nG[-1, :]))
+        mesh.setNodeSet("{:}_top".format(name), np.ravel(nG[:, -1]))
+        mesh.setNodeSet("{:}_bottom".format(name), np.ravel(nG[:, 0]))
 
-        model.nodeSets["{:}_leftBottom".format(name)] = NodeSet("{:}_leftBottom".format(name), nG[0, 0])
-        model.nodeSets["{:}_leftTop".format(name)] = NodeSet("{:}_leftTop".format(name), nG[0, -1])
-        model.nodeSets["{:}_rightBottom".format(name)] = NodeSet("{:}_rightBottom".format(name), nG[-1, 0])
-        model.nodeSets["{:}_rightTop".format(name)] = NodeSet("{:}_rightTop".format(name), nG[-1, -1])
+        mesh.setNodeSet("{:}_leftBottom".format(name), [nG[0, 0]])
+        mesh.setNodeSet("{:}_leftTop".format(name), [nG[0, -1]])
+        mesh.setNodeSet("{:}_rightBottom".format(name), [nG[-1, 0]])
+        mesh.setNodeSet("{:}_rightTop".format(name), [nG[-1, -1]])
 
         # element sets
         elGrid = np.asarray(elements).reshape(nX, nY)

@@ -93,8 +93,6 @@ from edelweissfe.config.elementlibrary import createPrototypeElement
 from edelweissfe.generators.base.generatorbase import GeneratorBase
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 
@@ -513,9 +511,8 @@ class Generator(GeneratorBase):
             for iy in range(nNodesY):
                 layer = []
                 for U, V in nodes2D:
-                    node = Node(currentNodeLabel, makeCoordinates(U, V, yLayers[iy]))
-                    layer.append(node)
-                    model.createNode(node)
+                    model.mesh.addNode(currentNodeLabel, makeCoordinates(U, V, yLayers[iy]))
+                    layer.append(currentNodeLabel)
                     currentNodeLabel += 1
                 layerNodes.append(layer)
                 if iy == 0:
@@ -535,9 +532,7 @@ class Generator(GeneratorBase):
                     rc = windCorners(c0, c1, c2, c3)
                     nodeList = [layerNodes[iy][idx] for idx in rc] + [layerNodes[iy + 1][idx] for idx in rc]
 
-                    model.mesh.addElement(
-                        currentElementLabel, elTypeName, elProvider, [node.label for node in nodeList]
-                    )
+                    model.mesh.addElement(currentElementLabel, elTypeName, elProvider, nodeList)
 
                     elements.append(currentElementLabel)
                     if iy == 0:
@@ -560,9 +555,8 @@ class Generator(GeneratorBase):
                 isOuter = isOuter2D if fullLayer else isOuterCorner2D
                 layer = []
                 for U, V in coordsUV:
-                    node = Node(currentNodeLabel, makeCoordinates(U, V, yLayers[t]))
-                    layer.append(node)
-                    model.createNode(node)
+                    model.mesh.addNode(currentNodeLabel, makeCoordinates(U, V, yLayers[t]))
+                    layer.append(currentNodeLabel)
                     currentNodeLabel += 1
                 layerNodes.append(layer)
                 if fullLayer:
@@ -593,9 +587,7 @@ class Generator(GeneratorBase):
 
                     nodeList = bottomCorners + topCorners + bottomMids + topMids + verticalMids
 
-                    model.mesh.addElement(
-                        currentElementLabel, elTypeName, elProvider, [node.label for node in nodeList]
-                    )
+                    model.mesh.addElement(currentElementLabel, elTypeName, elProvider, nodeList)
 
                     elements.append(currentElementLabel)
                     if iy == 0:
@@ -608,11 +600,11 @@ class Generator(GeneratorBase):
                     currentElementLabel += 1
 
         # node sets
-        model.nodeSets["{:}_top".format(name)] = NodeSet("{:}_top".format(name), nodesTop)
-        model.nodeSets["{:}_bottom".format(name)] = NodeSet("{:}_bottom".format(name), nodesBottom)
-        model.nodeSets["{:}_outer".format(name)] = NodeSet("{:}_outer".format(name), nodesOuter)
-        model.nodeSets["{:}_centerTop".format(name)] = NodeSet("{:}_centerTop".format(name), nodesCenterTop)
-        model.nodeSets["{:}_centerBottom".format(name)] = NodeSet("{:}_centerBottom".format(name), nodesCenterBottom)
+        model.mesh.setNodeSet("{:}_top".format(name), nodesTop)
+        model.mesh.setNodeSet("{:}_bottom".format(name), nodesBottom)
+        model.mesh.setNodeSet("{:}_outer".format(name), nodesOuter)
+        model.mesh.setNodeSet("{:}_centerTop".format(name), nodesCenterTop)
+        model.mesh.setNodeSet("{:}_centerBottom".format(name), nodesCenterBottom)
         # the two diametral center lines are named after the global axis they are parallel to, so
         # the default axis='y' keeps yielding _centerLineX* and _centerLineZ*
         for axisIdx, nodesTopLine, nodesBottomLine in (
@@ -620,9 +612,9 @@ class Generator(GeneratorBase):
             (iV, nodesCenterLineVTop, nodesCenterLineVBottom),
         ):
             setName = "{:}_centerLine{:}Top".format(name, axisNames[axisIdx])
-            model.nodeSets[setName] = NodeSet(setName, nodesTopLine)
+            model.mesh.setNodeSet(setName, nodesTopLine)
             setName = "{:}_centerLine{:}Bottom".format(name, axisNames[axisIdx])
-            model.nodeSets[setName] = NodeSet(setName, nodesBottomLine)
+            model.mesh.setNodeSet(setName, nodesBottomLine)
 
         # element sets
         model.mesh.setElementSet("{:}_all".format(name), elements)

@@ -136,15 +136,22 @@ element's number, type, provider and node labels, the element sets as lists of e
 the surfaces by their element sets -- and the element objects are then *made* from it by
 :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`, for every element the model's
 :class:`~edelweissfe.models.elementdistribution.ElementDistribution` creates here (the model owns its
-distribution, ``model.elementDistribution``). Four properties
+distribution, ``model.elementDistribution``). Five properties
 make a distributed model possible:
 
 * **The layout of the degrees of freedom follows from the mesh.** Which fields an element has at
   which node depends on its type only, so the fields at the nodes are activated from the mesh, not
   from element objects (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). The global numbering of the
   degrees of freedom is therefore the same in every process *by construction*, whichever elements it
-  created. Vectors stay global-length: a process holds the solution at every node, and receives it
-  from the owners of the degrees of freedom whenever the whole model is read.
+  created. Vectors stay global-length: a process holds the solution at every node, and
+  receives it from the owners of the degrees of freedom whenever the whole model is read.
+* **The mesh owns the nodes.** The nodes are described in the mesh too -- labels and reference
+  coordinates, as arrays, and the node sets as lists of labels -- and the node objects are made from
+  it (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`), in mesh order, the order of the
+  degrees of freedom. A node set of the mesh, a :class:`~edelweissfe.sets.nodeset.NodeSetOfMesh`, holds
+  the nodes of its set held in this process and fails safe like an element set. For now every process
+  holds every node, so every node set is complete; a process holding only the nodes of its subdomain
+  will need no other change of the mesh.
 * **An element set holds its local elements, and fails safe.** Each element set of the model, an
   :class:`~edelweissfe.sets.elementset.ElementSetOfMesh`, holds the elements of its set in the mesh
   that are *local* to this process (created here), and is *complete* if that is all of them
@@ -476,8 +483,8 @@ contact facets of its surfaces          made by every process, from the surface 
                                         :meth:`~edelweissfe.models.femodel.FEModel.wholeElementSet`, which
                                         refuses a partial set; a facet's parent face (for the
                                         surface-to-surface quadrature) is stamped on the facet itself
-node sets                               every process holds every node set
-nodes, their coordinates and fields     every process holds every node; the positions of the nodes a
+node sets                               every process holds every node set (whole, for now)
+nodes, their coordinates and fields     every process holds every node (for now); the positions of the nodes a
                                         search reads are current on the constraint's process before the
                                         search (below)
 rigid bodies                            made by every process (``discreteRigidBodyGenerator``), with the

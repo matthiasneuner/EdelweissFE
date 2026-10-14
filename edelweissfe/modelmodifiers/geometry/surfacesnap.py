@@ -453,6 +453,9 @@ class ModelModifier(ModelModifierBase):
 
         for label, coord in zip(plan.labels, plan.coords):
             model.nodes[label].coordinates = np.array(coord, dtype=float)
+        if plan.labels:
+            # the snap changes the reference geometry, which the mesh describes
+            model.mesh.moveNodes(plan.labels, plan.coords)
 
         if plan.labels:
             # Every hAdaptivity instance keeps its own AdaptiveMesh mirror with node coordinates

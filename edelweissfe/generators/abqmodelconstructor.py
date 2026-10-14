@@ -51,8 +51,6 @@ from edelweissfe.constraints.base.multipointconstraintbase import (
     MultiPointConstraintBase,
 )
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.caseinsensitivedict import CaseInsensitiveDict
 from edelweissfe.utils.inputfileparser import (
     keywordIdentifier,
@@ -79,8 +77,9 @@ class AbqModelConstructor:
         """Collects nodes, elements, node sets and element sets from
         the input file.
 
-        Nodes and node sets are created directly. Elements, element sets and surfaces are described
-        in ``model.mesh``; the element objects are made from it by
+        Nodes, node sets, elements, element sets and surfaces are described in ``model.mesh``; the
+        node and element objects are made from it by
+        :meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh` and
         :meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`.
 
         Parameters
@@ -97,30 +96,30 @@ class AbqModelConstructor:
         """
 
         domainSize = model.domainSize
+        mesh = model.mesh
 
-        # returns an dict of {node label: node}
-        nodeDefinitions = model.nodes
+        # describe the nodes in the mesh; the node objects are created from it afterwards
+        # (FEModel.createNodesOfMesh)
         for nodeDefs in inputFile["node"]:
-            currNodeDefs = {}
+            labels = []
+            coordinatesOfNodes = []
             for line in nodeDefs["datalines"]:
                 defLine = splitLineAtCommas(line)
 
-                label = int(defLine[0])
+                labels.append(int(defLine[0]))
                 coordinates = np.zeros(domainSize)
                 coordinates[:] = defLine[1:]
-                currNodeDefs[label] = Node(
-                    label,
-                    coordinates,
-                )
-            nodeDefinitions.update(currNodeDefs)
+                coordinatesOfNodes.append(coordinates)
+            mesh.addNodes(labels, coordinatesOfNodes)
 
             if nodeDefs["nSet"] is not None:
-                setName = nodeDefs["nset"]
-                model.nodeSets[setName] = NodeSet(setName, [nodeDefinitions[x] for x in currNodeDefs.keys()])
+                mesh.setNodeSet(nodeDefs["nset"], labels)
 
         # describe the elements in the mesh; the element objects are created from it afterwards
         # (FEModel.createElementsOfMesh)
-        mesh = model.mesh
+
+        # the labels of the nodes themselves: one int object per node, shared by its elements
+        labelOfNode = {label: label for label in mesh.nodeLabels.tolist()}
 
         for elDefs in inputFile["element"]:
             elementType = elDefs["type"]
@@ -132,8 +131,7 @@ class AbqModelConstructor:
 
                 number = defLine[0]
                 try:
-                    # the labels of the nodes themselves: one int object per node, shared by its elements
-                    elNodeLabels = [nodeDefinitions[label].label for label in defLine[1:]]
+                    elNodeLabels = [labelOfNode[label] for label in defLine[1:]]
                 except KeyError as missing:
                     raise KeyError("element {:} refers to node {:}, which is not defined".format(number, missing))
                 mesh.addElement(number, elementType, elementProvider, elNodeLabels)
@@ -141,6 +139,8 @@ class AbqModelConstructor:
 
             if elDefs["elSet"] is not None:
                 mesh.setElementSet(elDefs["elset"], currElNumbers)
+
+        del labelOfNode
 
         # element sets, by element numbers (optionally generated, or combined by a boolean operation
         # with an existing set) or as the union of existing sets
@@ -186,35 +186,22 @@ class AbqModelConstructor:
                 numbers = [number for line in data for elSet in line for number in elementSets[elSet]]
             mesh.setElementSet(name, numbers)
 
-        # generate dictionary of nodeObjects belonging to a specified nodeset
-        # or generate nodeset by generate definition in inputfile
-        nodeSets = model.nodeSets
+        # node sets, by node labels (optionally generated) or as the union of existing sets
+        nodeSets = mesh.nodeSets
         for nSetDefinition in inputFile["nSet"]:
             name = nSetDefinition["nSet"]
 
             data = [splitLineAtCommas(line) for line in nSetDefinition["datalines"]]
             if isInteger(data[0][0]):
-                nodes = [int(n) for line in data for n in line]
+                labels = [int(n) for line in data for n in line]
                 if nSetDefinition.get("generate", False):
-                    generateDef = nodes  # nSetDefinition['data'][0][0:3]
-                    nodes = [
-                        nodeDefinitions[n]
-                        for n in np.arange(
-                            generateDef[0],
-                            generateDef[1] + 1,
-                            generateDef[2],
-                            dtype=int,
-                        )
-                    ]
-                else:
-                    nodes = [nodeDefinitions[n] for n in nodes]
-                nodeSets[name] = NodeSet(name, nodes)
+                    generateDef = labels
+                    labels = np.arange(generateDef[0], generateDef[1] + 1, generateDef[2], dtype=int)
             else:
-                nSetLabels = [nSetLabel for line in data for nSetLabel in line]
-                nodes = [n for nSetLabel in nSetLabels for n in nodeSets[nSetLabel].nodes]
-                nodeSets[name] = NodeSet(name, nodes)
+                labels = [label for line in data for nSetName in line for label in nodeSets[nSetName].tolist()]
+            mesh.setNodeSet(name, labels)
 
-        model.nodeSets["all"] = NodeSet("all", model.nodes.values())
+        mesh.setNodeSet("all", mesh.nodeLabels)
         mesh.setElementSet("all", mesh.elements.keys())
 
         # element-based surfaces: per face, the element set exposing it

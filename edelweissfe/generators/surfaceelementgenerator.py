@@ -588,6 +588,7 @@ def buildContactFacets(
                 seenNodes.add(node)
                 facetNodesInOrder.append(node)
 
+    # a set of the node objects of the facets, which the generator made (as the facets themselves)
     if nodesSetName in model.nodeSets:
         model.nodeSets[nodesSetName].replaceMembers(facetNodesInOrder)
     else:
@@ -687,6 +688,8 @@ class Generator(GeneratorBase):
             The options this generator accepts; ``surface``/``name`` are still required, see
             :class:`SurfaceElementGeneratorSchema`.
         """
+        # the facets are made of node objects: make those of the nodes described so far
+        model.createNodesOfMesh()
         buildContactFacets(
             model,
             configuration.surface,

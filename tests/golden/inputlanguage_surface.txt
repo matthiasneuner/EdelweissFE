@@ -440,8 +440,10 @@ character before the code is executed, so ``\t\t`` indents a line by two levels.
 
 Note that ``\t`` is replaced everywhere in the code, including inside string literals.
 
-The code may read any element of the model, so the elements of the mesh described so far are made
-(:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- all of them -- before it runs.
+The code may read any node or element of the model, so the nodes and elements of the mesh described so
+far are made (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`,
+:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- all of them -- before it runs. A node set
+it makes of node objects is a set of the objects it was given, which the mesh does not describe.
 [executePythoncode] Directly execute Python code to create the model tree.
   required datalines
     Python code to run

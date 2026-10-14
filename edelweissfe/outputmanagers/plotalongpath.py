@@ -155,7 +155,7 @@ class OutputManager(OutputManagerBase):
 
         theSet = entry["fieldOutput"].associatedSet
 
-        if type(theSet) is NodeSet:
+        if isinstance(theSet, NodeSet):
             # try:  # nSet?
             nodes = theSet
             # 1) distances between nodes:

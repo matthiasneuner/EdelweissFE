@@ -39,8 +39,6 @@ from edelweissfe.generators.base.generatorbase import (
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.points.node import Node
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 
@@ -188,7 +186,9 @@ class Generator(GeneratorBase):
             if carriesElementNode(it, iy, ic)
         )
 
+        # the grid of node labels; the nodes are described in the mesh
         nodes = []
+        coordinates = []
         currentNodeLabel = model.topology.reserveNodeNumbers(nElementNodes).start
         for iy in range(nNodesY):
             if useouter:
@@ -204,29 +204,23 @@ class Generator(GeneratorBase):
                     label, currentNodeLabel = currentNodeLabel, currentNodeLabel + 1
                     # use reduced radius to keep element planar if exG is True
                     if prototype.nNodes == 20 and (ic % 2 != 0):
-                        node = Node(
-                            label,
-                            np.array(
-                                [
-                                    x0 + tLayersRed[it] * np.sin(cLayers[ic]),
-                                    yLayers[iy],
-                                    z0 + tLayersRed[it] * np.cos(cLayers[ic]),
-                                ]
-                            ),
+                        coordinates.append(
+                            [
+                                x0 + tLayersRed[it] * np.sin(cLayers[ic]),
+                                yLayers[iy],
+                                z0 + tLayersRed[it] * np.cos(cLayers[ic]),
+                            ]
                         )
                     else:
-                        node = Node(
-                            label,
-                            np.array(
-                                [
-                                    x0 + tLayers[it] * np.sin(cLayers[ic]),
-                                    yLayers[iy],
-                                    z0 + tLayers[it] * np.cos(cLayers[ic]),
-                                ]
-                            ),
+                        coordinates.append(
+                            [
+                                x0 + tLayers[it] * np.sin(cLayers[ic]),
+                                yLayers[iy],
+                                z0 + tLayers[it] * np.cos(cLayers[ic]),
+                            ]
                         )
-                    nodes.append(node)
-                    model.createNode(node)
+                    nodes.append(label)
+        model.mesh.addNodes([label for label in nodes if label is not GRID_POSITION_WITHOUT_NODE], coordinates)
 
         # # 3d plot of nodes; for debugging
         # import os
@@ -308,7 +302,7 @@ class Generator(GeneratorBase):
                     # plotNodeList( nodeList )
 
                     (currentElementLabel,) = model.topology.reserveElementNumbers(1)
-                    nodeLabels = [node.label for node in nodeList]
+                    nodeLabels = list(nodeList)
                     model.mesh.addElement(currentElementLabel, elTypeName, elProvider, nodeLabels)
                     elements.append(currentElementLabel)
                     connectivity.append(nodeLabels)
@@ -326,46 +320,46 @@ class Generator(GeneratorBase):
         def getFilteredNodes(s):
             return nG[s][filterGrid[s]]
 
-        nodeSets.append(NodeSet("{:}_outer".format(name), getFilteredNodes(np.s_[:, -1, :])))
-        nodeSets.append(NodeSet("{:}_inner".format(name), getFilteredNodes(np.s_[:, 0, :])))
-        nodeSets.append(NodeSet("{:}_top".format(name), getFilteredNodes(np.s_[-1, :, :])))
-        nodeSets.append(NodeSet("{:}_bottom".format(name), getFilteredNodes(np.s_[0, :, :])))
-        nodeSets.append(NodeSet("{:}_end".format(name), getFilteredNodes(np.s_[:, :, -1])))
-        nodeSets.append(NodeSet("{:}_begin".format(name), getFilteredNodes(np.s_[:, :, 0])))
+        nodeSets.append(("{:}_outer".format(name), getFilteredNodes(np.s_[:, -1, :])))
+        nodeSets.append(("{:}_inner".format(name), getFilteredNodes(np.s_[:, 0, :])))
+        nodeSets.append(("{:}_top".format(name), getFilteredNodes(np.s_[-1, :, :])))
+        nodeSets.append(("{:}_bottom".format(name), getFilteredNodes(np.s_[0, :, :])))
+        nodeSets.append(("{:}_end".format(name), getFilteredNodes(np.s_[:, :, -1])))
+        nodeSets.append(("{:}_begin".format(name), getFilteredNodes(np.s_[:, :, 0])))
 
         # 12 edges
-        nodeSets.append(NodeSet("{:}_beginTop".format(name), getFilteredNodes(np.s_[-1, :, 0])))
-        nodeSets.append(NodeSet("{:}_endTop".format(name), getFilteredNodes(np.s_[-1, :, -1])))
-        nodeSets.append(NodeSet("{:}_beginBottom".format(name), getFilteredNodes(np.s_[0, :, 0])))
-        nodeSets.append(NodeSet("{:}_endBottom".format(name), getFilteredNodes(np.s_[0, :, -1])))
+        nodeSets.append(("{:}_beginTop".format(name), getFilteredNodes(np.s_[-1, :, 0])))
+        nodeSets.append(("{:}_endTop".format(name), getFilteredNodes(np.s_[-1, :, -1])))
+        nodeSets.append(("{:}_beginBottom".format(name), getFilteredNodes(np.s_[0, :, 0])))
+        nodeSets.append(("{:}_endBottom".format(name), getFilteredNodes(np.s_[0, :, -1])))
 
-        nodeSets.append(NodeSet("{:}_innerEnd".format(name), getFilteredNodes(np.s_[:, 0, -1])))
-        nodeSets.append(NodeSet("{:}_innerBegin".format(name), getFilteredNodes(np.s_[:, 0, 0])))
-        nodeSets.append(NodeSet("{:}_innerTop".format(name), getFilteredNodes(np.s_[-1, 0, :])))
-        nodeSets.append(NodeSet("{:}_innerBottom".format(name), getFilteredNodes(np.s_[0, 0, :])))
+        nodeSets.append(("{:}_innerEnd".format(name), getFilteredNodes(np.s_[:, 0, -1])))
+        nodeSets.append(("{:}_innerBegin".format(name), getFilteredNodes(np.s_[:, 0, 0])))
+        nodeSets.append(("{:}_innerTop".format(name), getFilteredNodes(np.s_[-1, 0, :])))
+        nodeSets.append(("{:}_innerBottom".format(name), getFilteredNodes(np.s_[0, 0, :])))
 
-        nodeSets.append(NodeSet("{:}_outerEnd".format(name), getFilteredNodes(np.s_[:, -1, -1])))
-        nodeSets.append(NodeSet("{:}_outerBegin".format(name), getFilteredNodes(np.s_[:, -1, 0])))
-        nodeSets.append(NodeSet("{:}_outerTop".format(name), getFilteredNodes(np.s_[-1, -1, :])))
-        nodeSets.append(NodeSet("{:}_outerBottom".format(name), getFilteredNodes(np.s_[0, -1, :])))
+        nodeSets.append(("{:}_outerEnd".format(name), getFilteredNodes(np.s_[:, -1, -1])))
+        nodeSets.append(("{:}_outerBegin".format(name), getFilteredNodes(np.s_[:, -1, 0])))
+        nodeSets.append(("{:}_outerTop".format(name), getFilteredNodes(np.s_[-1, -1, :])))
+        nodeSets.append(("{:}_outerBottom".format(name), getFilteredNodes(np.s_[0, -1, :])))
 
-        nodeSets.append(NodeSet("{:}_centerY".format(name), getFilteredNodes(np.s_[int(nNodesY / 2), :, :])))
-        nodeSets.append(NodeSet("{:}_centerT".format(name), getFilteredNodes(np.s_[:, int(nNodesT / 2), :])))
-        nodeSets.append(NodeSet("{:}_centerC".format(name), getFilteredNodes(np.s_[:, :, int(nNodesC / 2)])))
+        nodeSets.append(("{:}_centerY".format(name), getFilteredNodes(np.s_[int(nNodesY / 2), :, :])))
+        nodeSets.append(("{:}_centerT".format(name), getFilteredNodes(np.s_[:, int(nNodesT / 2), :])))
+        nodeSets.append(("{:}_centerC".format(name), getFilteredNodes(np.s_[:, :, int(nNodesC / 2)])))
 
         # 8 vertices
-        nodeSets.append(NodeSet("{:}_topEndInner".format(name), nG[-1, 0, -1]))
-        nodeSets.append(NodeSet("{:}_topBeginInner".format(name), nG[-1, 0, 0]))
-        nodeSets.append(NodeSet("{:}_bottomEndInner".format(name), nG[0, 0, -1]))
-        nodeSets.append(NodeSet("{:}_bottomBeginInner".format(name), nG[0, 0, 0]))
+        nodeSets.append(("{:}_topEndInner".format(name), [nG[-1, 0, -1]]))
+        nodeSets.append(("{:}_topBeginInner".format(name), [nG[-1, 0, 0]]))
+        nodeSets.append(("{:}_bottomEndInner".format(name), [nG[0, 0, -1]]))
+        nodeSets.append(("{:}_bottomBeginInner".format(name), [nG[0, 0, 0]]))
 
-        nodeSets.append(NodeSet("{:}_topEndOuter".format(name), nG[-1, -1, -1]))
-        nodeSets.append(NodeSet("{:}_topBeginOuter".format(name), nG[-1, -1, 0]))
-        nodeSets.append(NodeSet("{:}_bottomEndOuter".format(name), nG[0, -1, -1]))
-        nodeSets.append(NodeSet("{:}_bottomBeginOuter".format(name), nG[0, -1, 0]))
+        nodeSets.append(("{:}_topEndOuter".format(name), [nG[-1, -1, -1]]))
+        nodeSets.append(("{:}_topBeginOuter".format(name), [nG[-1, -1, 0]]))
+        nodeSets.append(("{:}_bottomEndOuter".format(name), [nG[0, -1, -1]]))
+        nodeSets.append(("{:}_bottomBeginOuter".format(name), [nG[0, -1, 0]]))
 
-        for nodeSet in nodeSets:
-            model.nodeSets[nodeSet.name] = nodeSet
+        for setName, labels in nodeSets:
+            model.mesh.setNodeSet(setName, labels)
 
         # element sets
         elementSets = []

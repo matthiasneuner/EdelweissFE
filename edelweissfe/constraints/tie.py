@@ -397,6 +397,11 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         if not self._snappedNodes:
             return
 
+        # Snapping changes the reference geometry, which the mesh describes.
+        model.mesh.moveNodes(
+            [node.label for node in self._snappedNodes], [node.coordinates for node in self._snappedNodes]
+        )
+
         snapped = set(self._snappedNodes)
         # The local elements suffice: setNodes refreshes an element's cached coordinates, and
         # an element not local here has no cache to refresh -- it is made from the moved nodes.

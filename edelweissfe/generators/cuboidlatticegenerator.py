@@ -86,7 +86,6 @@ from edelweissfe.generators.microstructuregenerator import replicateMesh
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.mesh import Mesh
-from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.utils.schema import schemaField
 
 
@@ -189,10 +188,11 @@ class Generator(GeneratorBase):
         yToDelete = (lStrutY, lY - lStrutY)
         zToDelete = (lStrutZ, lZ - lStrutZ)
 
+        boxMesh = boxmodel.mesh
         keptElementNodes = []
-        for record in boxmodel.mesh.elements.values():
-            elNodes = [boxmodel.nodes[label] for label in record.nodeLabels]
-            nodeCoords = np.array([node.coordinates for node in elNodes])
+        for record in boxMesh.elements.values():
+            elNodes = list(record.nodeLabels)
+            nodeCoords = boxMesh.nodeCoordinates[boxMesh.rowsOfNodes(elNodes)]
             xCoords = nodeCoords[:, 0]
             yCoords = nodeCoords[:, 1]
             zCoords = nodeCoords[:, 2]
@@ -212,33 +212,25 @@ class Generator(GeneratorBase):
             if not deleteElement:
                 keptElementNodes.append(elNodes)
 
-        # keep the nodes used by any remaining element, in node order
-        usedNodes = {id(node) for elNodes in keptElementNodes for node in elNodes}
-        nodes = {}
-        idx = 1
-        for node in boxmodel.nodes.values():
-            if id(node) in usedNodes:
-                nodes[idx] = node
-                idx += 1
-
-        model.nodes = nodes
-
-        nodel_label_to_index = {node.label: idx for idx, node in enumerate(model.nodes.values())}
-        for node in model.nodes.values():
-            node.label = nodel_label_to_index[node.label] + 1  # re-label nodes to have continuous numbering
-        # The node dict is replaced wholesale: the replications below mint their labels from the
-        # allocator, which must lie above these.
-        model.topology.adoptSetupNodeNumbers()
+        # keep the nodes used by any remaining element, in node order, re-labelled 1..N to have
+        # continuous numbering
+        usedNodes = {label for elNodes in keptElementNodes for label in elNodes}
+        keptRows = [row for row, label in enumerate(boxMesh.nodeLabels.tolist()) if label in usedNodes]
+        newLabelOf = {int(boxMesh.nodeLabels[row]): newLabel for newLabel, row in enumerate(keptRows, start=1)}
 
         # This generator REPLACES the mesh wholesale, with its own 1..N numbering, rather than adding
-        # to it. Tell the allocator about those numbers, so that everything minted afterwards
-        # (contact facets, rigid-body point masses, model modifiers) cannot collide with them. See
-        # TopologyPipeline.adoptSetupElementNumbers.
+        # to it. Tell the allocators about those numbers, so that everything minted afterwards (the
+        # replications below, contact facets, rigid-body point masses, model modifiers) cannot collide
+        # with them. See TopologyPipeline.adoptSetupElementNumbers.
         model.mesh = Mesh()
+        model.nodes = {}
+        model.nodeSets = {}
         model.elements = {}
+        model.mesh.addNodes(list(newLabelOf.values()), boxMesh.nodeCoordinates[keptRows])
+        model.topology.adoptSetupNodeNumbers()
         for number, elNodes in enumerate(keptElementNodes, start=1):
             model.mesh.addElement(
-                number, configuration.elType, configuration.elProvider, [node.label for node in elNodes]
+                number, configuration.elType, configuration.elProvider, [newLabelOf[label] for label in elNodes]
             )
         model.topology.adoptSetupElementNumbers()
 
@@ -279,49 +271,49 @@ class Generator(GeneratorBase):
             journal=journal,
         )
 
-        # create node sets for boundary conditions
-        nSet_left = set()
-        nSet_right = set()
-        nSet_bottom = set()
-        nSet_top = set()
-        nSet_front = set()
-        nSet_back = set()
+        # create node sets for boundary conditions, in mesh order
+        nSet_left = []
+        nSet_right = []
+        nSet_bottom = []
+        nSet_top = []
+        nSet_front = []
+        nSet_back = []
         # add sets for edges as well
-        nSet_top_left = set()
-        nSet_top_right = set()
-        nSet_bottom_left = set()
-        nSet_bottom_right = set()
+        nSet_top_left = []
+        nSet_top_right = []
+        nSet_bottom_left = []
+        nSet_bottom_right = []
 
         # create node sets for boundaries
-        for nodeID, node in model.nodes.items():
-            if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                nSet_left.add(node)
-            elif np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                nSet_right.add(node)
-            if np.isclose(node.coordinates[1], y_min, atol=1e-8):
-                nSet_bottom.add(node)
-                if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                    nSet_bottom_left.add(node)
-                elif np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                    nSet_bottom_right.add(node)
-            elif np.isclose(node.coordinates[1], y_max + (nY - 1) * lY, atol=1e-8):
-                nSet_top.add(node)
-                if np.isclose(node.coordinates[0], x_min, atol=1e-8):
-                    nSet_top_left.add(node)
-                elif np.isclose(node.coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
-                    nSet_top_right.add(node)
-            if np.isclose(node.coordinates[2], z_min, atol=1e-8):
-                nSet_front.add(node)
-            elif np.isclose(node.coordinates[2], z_max + (nZ - 1) * lZ, atol=1e-8):
-                nSet_back.add(node)
+        for label, coordinates in zip(model.mesh.nodeLabels.tolist(), model.mesh.nodeCoordinates):
+            if np.isclose(coordinates[0], x_min, atol=1e-8):
+                nSet_left.append(label)
+            elif np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                nSet_right.append(label)
+            if np.isclose(coordinates[1], y_min, atol=1e-8):
+                nSet_bottom.append(label)
+                if np.isclose(coordinates[0], x_min, atol=1e-8):
+                    nSet_bottom_left.append(label)
+                elif np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                    nSet_bottom_right.append(label)
+            elif np.isclose(coordinates[1], y_max + (nY - 1) * lY, atol=1e-8):
+                nSet_top.append(label)
+                if np.isclose(coordinates[0], x_min, atol=1e-8):
+                    nSet_top_left.append(label)
+                elif np.isclose(coordinates[0], x_max + (nX - 1) * lX, atol=1e-8):
+                    nSet_top_right.append(label)
+            if np.isclose(coordinates[2], z_min, atol=1e-8):
+                nSet_front.append(label)
+            elif np.isclose(coordinates[2], z_max + (nZ - 1) * lZ, atol=1e-8):
+                nSet_back.append(label)
 
-        model.nodeSets[f"{name}_left"] = NodeSet(f"{name}_left", nSet_left)
-        model.nodeSets[f"{name}_right"] = NodeSet(f"{name}_right", nSet_right)
-        model.nodeSets[f"{name}_bottom"] = NodeSet(f"{name}_bottom", nSet_bottom)
-        model.nodeSets[f"{name}_top"] = NodeSet(f"{name}_top", nSet_top)
-        model.nodeSets[f"{name}_front"] = NodeSet(f"{name}_front", nSet_front)
-        model.nodeSets[f"{name}_back"] = NodeSet(f"{name}_back", nSet_back)
-        model.nodeSets[f"{name}_bottom_left"] = NodeSet(f"{name}_bottom_left", nSet_bottom_left)
-        model.nodeSets[f"{name}_bottom_right"] = NodeSet(f"{name}_bottom_right", nSet_bottom_right)
-        model.nodeSets[f"{name}_top_left"] = NodeSet(f"{name}_top_left", nSet_top_left)
-        model.nodeSets[f"{name}_top_right"] = NodeSet(f"{name}_top_right", nSet_top_right)
+        model.mesh.setNodeSet(f"{name}_left", nSet_left)
+        model.mesh.setNodeSet(f"{name}_right", nSet_right)
+        model.mesh.setNodeSet(f"{name}_bottom", nSet_bottom)
+        model.mesh.setNodeSet(f"{name}_top", nSet_top)
+        model.mesh.setNodeSet(f"{name}_front", nSet_front)
+        model.mesh.setNodeSet(f"{name}_back", nSet_back)
+        model.mesh.setNodeSet(f"{name}_bottom_left", nSet_bottom_left)
+        model.mesh.setNodeSet(f"{name}_bottom_right", nSet_bottom_right)
+        model.mesh.setNodeSet(f"{name}_top_left", nSet_top_left)
+        model.mesh.setNodeSet(f"{name}_top_right", nSet_top_right)

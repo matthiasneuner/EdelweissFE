@@ -53,8 +53,10 @@ character before the code is executed, so ``\\t\\t`` indents a line by two level
 
 Note that ``\\t`` is replaced everywhere in the code, including inside string literals.
 
-The code may read any element of the model, so the elements of the mesh described so far are made
-(:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- all of them -- before it runs.
+The code may read any node or element of the model, so the nodes and elements of the mesh described so
+far are made (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`,
+:meth:`~edelweissfe.models.femodel.FEModel.createElementsOfMesh`) -- all of them -- before it runs. A node set
+it makes of node objects is a set of the objects it was given, which the mesh does not describe.
 """
 
 from edelweissfe.generators.base.generatorbase import GeneratorBase
@@ -91,7 +93,8 @@ class Generator(GeneratorBase):
         """
         cleanCodeLines = codeLines.replace(r"\t", "\t")  # literal \t sequences become tabs, used for indentation
 
-        # arbitrary code may read any element: make every element described so far
+        # arbitrary code may read any node or element: make every node and element described so far
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
         exec(cleanCodeLines, {"model": model})
 
