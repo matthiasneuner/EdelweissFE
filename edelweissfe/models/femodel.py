@@ -114,6 +114,12 @@ class FEModel:
         #: (:class:`~edelweissfe.sets.nodeset.NodeSetOfMesh`), and sets of node objects a model entity
         #: made itself (e.g. the slave nodes a tie tied).
         self.nodeSets = {}
+        #: The mesh, and how many of its leading rows all have node objects here
+        #: (:meth:`createNodesOfMesh`).
+        self._rowsWithNodeObjects = (None, 0)
+        #: The mesh, its node sets' version and the number of nodes when the node sets were last
+        #: resolved (:meth:`createNodesOfMesh`).
+        self._nodeSetsResolvedFor = None
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
         self.sections = {}  #: Sections in the model.
@@ -171,19 +177,34 @@ class FEModel:
             run. A domain-decomposed run holds every node too (for now).
         """
 
-        self.mesh.requireEachNodeDescribedOnce()
+        mesh = self.mesh
+        mesh.requireEachNodeDescribedOnce()
         nodes = self.nodes
-        coordinates = self.mesh.nodeCoordinates
-        for row, label in enumerate(self.mesh.nodeLabels.tolist()):
-            if label not in nodes and (isHeldHere is None or isHeldHere(label)):
+        # The leading rows of the mesh whose nodes all have objects here need no second look: a model
+        # describing its mesh in many steps calls this after each of them.
+        firstRow = self._rowsWithNodeObjects[1] if self._rowsWithNodeObjects[0] is mesh else 0
+        labels = mesh.nodeLabels[firstRow:].tolist()
+        coordinates = mesh.nodeCoordinates[firstRow:]
+        firstNotHeld = len(labels)
+        for offset, label in enumerate(labels):
+            if label in nodes:
+                continue
+            if isHeldHere is None or isHeldHere(label):
                 if not self.topology.isOpen:
                     raise TopologyError(
                         "node {:} was created outside a topology change: only model modifiers may create "
                         "or delete nodes, inside TopologyPipeline.changes()".format(label)
                     )
-                nodes[label] = Node(label, coordinates[row].copy())
+                nodes[label] = Node(label, coordinates[offset].copy())
+            else:
+                firstNotHeld = min(firstNotHeld, offset)
+        self._rowsWithNodeObjects = (mesh, firstRow + firstNotHeld)
 
-        self.resolveNodeSetsOfMesh()
+        # resolved again only if the nodes or the node sets of the mesh changed since
+        resolvedFor = (mesh, mesh.nodeSetsVersion, len(nodes))
+        if resolvedFor != self._nodeSetsResolvedFor:
+            self.resolveNodeSetsOfMesh()
+            self._nodeSetsResolvedFor = resolvedFor
 
     def resolveNodeSetsOfMesh(self):
         """Make every node set of the mesh hold the nodes held here; sets that already exist are

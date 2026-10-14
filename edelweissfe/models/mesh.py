@@ -207,6 +207,9 @@ class Mesh:
         self._sortedNodeLabels = None
         #: The node sets, by name: ordered arrays of node labels without duplicates.
         self.nodeSets = {}
+        #: Counts the definitions of node sets (:meth:`setNodeSet`), so that a model can tell whether
+        #: its node sets need resolving again.
+        self.nodeSetsVersion = 0
         #: The elements, by number, in the order they were described.
         self.elements = {}
         #: The element sets, by name: ordered lists of element numbers without duplicates.
@@ -443,6 +446,7 @@ class Mesh:
         except KeyError as missing:
             raise KeyError("node set {:}: {:}".format(name, missing.args[0]))
         self.nodeSets[name] = labels
+        self.nodeSetsVersion += 1
 
     def addElement(self, number: int, elType: str, provider: str, nodeLabels) -> MeshElement:
         """Describe an element.
