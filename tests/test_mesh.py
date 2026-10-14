@@ -49,6 +49,7 @@ from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.mesh import AUXILIARY, SurfaceFace
 from edelweissfe.numerics.dofmanager import DofManager
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.outputmanagers.ensight import visualizedElementsOf
 from edelweissfe.points.node import Node
 from edelweissfe.sets.nodeset import NodeSet
@@ -566,3 +567,22 @@ def test_moving_nodes_changes_the_reference_coordinates_in_the_mesh():
     model = _modelOfFourNodes()
     model.mesh.moveNodes([3, 1], [[1.5, 1.5], [-0.5, 0.0]])
     assert model.mesh.nodeCoordinates.tolist() == [[-0.5, 0.0], [1.0, 0.0], [1.5, 1.5], [0.0, 1.0]]
+
+
+@pytest.mark.parametrize("isLocal", [lambda number: True, lambda number: number in {2, 4, 6, 8, 1001}])
+def test_the_global_numbering_of_the_mesh_is_the_dof_managers(tmp_path, isLocal):
+    model = _buildModel(tmp_path, isLocal)
+    dofManager = DofManager(list(model.nodeFields.values()), list(model.scalarVariables.values()))
+
+    numbering = GlobalDofNumbering.ofModel(model)
+    numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
+    assert numbering.nDof == dofManager.nDof
+    assert numbering.fields == ["displacement"]
+    # the inner node of the CPE8 (its repeated corners) and every element node carry displacement
+    assert numbering.nodesCarryingField["displacement"].all()
+
+    # a different order of the nodes of a field is a different numbering, and is refused
+    field = model.nodeFields["displacement"]
+    field.nodes[0], field.nodes[1] = field.nodes[1], field.nodes[0]
+    with pytest.raises(RuntimeError, match="are not the nodes of the mesh carrying it"):
+        numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)

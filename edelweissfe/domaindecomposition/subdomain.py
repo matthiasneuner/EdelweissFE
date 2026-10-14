@@ -79,6 +79,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
 )
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
@@ -450,13 +451,16 @@ class Subdomain:
         return np.concatenate([touched, np.flatnonzero(linked & np.isin(group, groupsTouched))])
 
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
-        """Refuse to continue unless every process built the same mesh and degree-of-freedom layout
-        (:func:`layoutFingerprint`). Collective.
+        """Refuse to continue unless the DofManager numbers the degrees of freedom as the global
+        numbering of the mesh does (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`),
+        and every process built the same mesh and degree-of-freedom layout (:func:`layoutFingerprint`).
+        Collective.
 
         The interface exchange addresses degrees of freedom by index, and the load assembly tags a
         load contribution by its place in the element sets and surfaces of the mesh; both are only
         meaningful if every process numbered and ordered them identically, which after a refinement
-        rests on every process having refined identically.
+        rests on every process having refined identically. The global numbering of the mesh is what a
+        process holding only some of the nodes will number its degrees of freedom by.
 
         Parameters
         ----------
@@ -471,7 +475,9 @@ class Subdomain:
             On every process, if any two fingerprints differ.
         """
 
-        fingerprints = self.communicator.allgather(layoutFingerprint(model, dofManager, self._mpcTransformation))
+        numbering = GlobalDofNumbering.ofModel(model)
+        numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
+        fingerprints = self.communicator.allgather(layoutFingerprint(model, numbering, self._mpcTransformation))
         if len(set(fingerprints)) > 1:
             raise RuntimeError(
                 "The processes hold different models: their layout fingerprints are {:}. Every process "
@@ -1212,22 +1218,22 @@ class Subdomain:
 
 
 def layoutFingerprint(
-    model: FEModel, dofManager: DofManager, mpcTransformation: MultiPointConstraintTransformation | None
+    model: FEModel, numbering: GlobalDofNumbering, mpcTransformation: MultiPointConstraintTransformation | None
 ) -> str:
     """A fingerprint of everything the processes of a domain-decomposed run must hold identically: the
     mesh -- the element numbers and the node labels of every element --, the element sets and the
-    surfaces of the mesh, each with its elements in order and all of them in order, the degree of
-    freedom of every node of every field, the node coordinates, the size of the system, and the
-    multi-point constraints -- every slave, master and weight. It is made from the mesh, the nodes and
-    the equation system, which every process holds whole, and not from the element objects, of which
-    a process may hold only its own.
+    surfaces of the mesh, each with its elements in order and all of them in order, the global
+    numbering of the degrees of freedom (its digest, :meth:`GlobalDofNumbering.digest`), the node
+    coordinates, and the multi-point constraints -- every slave, master and weight. It is made from
+    the mesh, the nodes and the equation system, which every process holds whole, and not from the
+    element objects, of which a process may hold only its own.
 
     Parameters
     ----------
     model
         The model tree.
-    dofManager
-        The degree-of-freedom layout.
+    numbering
+        The global numbering of the degrees of freedom, which the DofManager was checked to agree with.
     mpcTransformation
         The multi-point-constraint transformation of the equation system, or None.
 
@@ -1263,21 +1269,12 @@ def layoutFingerprint(
         for face, numbers in mesh.elementNumbersOfSurface(name).items():
             add("surface {:} face {:}".format(name, face), np.asarray(numbers, dtype=np.int64))
 
-    dofsOfFieldVariables = dofManager.idcsOfFieldVariablesInDofVector
-    for name, field in model.nodeFields.items():
-        add("nodes of field " + name, np.asarray([node.label for node in field.nodes], dtype=np.int64))
-        add(
-            "degrees of freedom of field " + name,
-            np.concatenate(
-                [np.atleast_1d(dofsOfFieldVariables[node.fields[name]]) for node in field.nodes]
-                or [np.empty(0, dtype=np.int64)]
-            ).astype(np.int64),
-        )
+    add("numbering of the degrees of freedom", np.frombuffer(numbering.digest().encode(), dtype=np.uint8))
     add(
         "coordinates",
         np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()] or [np.empty(0)]),
     )
-    add("size", np.int64(dofManager.nDof))
+    add("size", np.int64(numbering.nDof))
 
     if mpcTransformation is not None:
         slaves, masters, weights = mpcTransformation.slaveMasterDofWeights()

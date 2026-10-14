@@ -55,7 +55,9 @@ rigid body is not reference geometry: it is held by the node object only.
 
 The fields at the nodes -- and with them the layout of the degrees of freedom -- follow from the mesh
 alone: which fields an element has at which node depends on its type, which the mesh asks one
-prototype element per type for (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). Element numbers and node
+prototype element per type for (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). The numbering of the
+degrees of freedom can therefore be written down from the mesh, without node objects
+(:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`). Element numbers and node
 labels are those of the input file, or are drawn from the model's number allocators
 (:meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveElementNumbers`,
 :meth:`~edelweissfe.models.topologypipeline.TopologyPipeline.reserveNodeNumbers`) by generators,
@@ -82,6 +84,9 @@ domain-decomposed run distributes the elements over its processes; see
 :ref:`domaindecomposition_mesh_to_elements`.
 
 .. automodule:: edelweissfe.models.elementdistribution
+   :members:
+
+.. automodule:: edelweissfe.numerics.globaldofnumbering
    :members:
 
 The Abaqus-like keywords

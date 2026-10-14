@@ -143,7 +143,11 @@ make a distributed model possible:
   which node depends on its type only, so the fields at the nodes are activated from the mesh, not
   from element objects (:meth:`~edelweissfe.models.mesh.Mesh.typeOf`). The global numbering of the
   degrees of freedom is therefore the same in every process *by construction*, whichever elements it
-  created. Vectors stay global-length: a process holds the solution at every node, and
+  created -- and it can be written down from the mesh alone, as a few arrays per field
+  (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`): per field, which nodes of the
+  mesh carry it, in mesh order, and where its range starts; the scalar variables last. Whenever the
+  equation system is built, every process checks its DofManager against it, degree of freedom by
+  degree of freedom. Vectors stay global-length: a process holds the solution at every node, and
   receives it from the owners of the degrees of freedom whenever the whole model is read.
 * **The mesh owns the nodes.** The nodes are described in the mesh too -- labels and reference
   coordinates, as arrays, and the node sets as lists of labels -- and the node objects are made from
@@ -595,9 +599,11 @@ Every process therefore refines the same mesh, and numbers it the same way. That
 assumed: after every build of the equation system, a fingerprint
 (:func:`~edelweissfe.domaindecomposition.subdomain.layoutFingerprint`) of the mesh (element numbers and
 connectivity), its element sets and surfaces with their elements, all in order -- the order the loads
-are added in follows from them --, the degree of freedom of every node of every field, the node
-coordinates, the size of the system and every slave, master and weight of the multi-point constraints
-is compared across all processes, and the run stops if any two differ.
+are added in follows from them --, the global numbering of the degrees of freedom of the mesh
+(:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`, which every process first checks
+its DofManager against, degree of freedom by degree of freedom), the node coordinates, the size of the
+system and every slave, master and weight of the multi-point constraints is compared across all
+processes, and the run stops if any two differ.
 
 Every process must therefore build its model in the same order. Python orders a ``dict`` by insertion,
 the same in every process, but a ``set`` of strings by their hashes, which differ between processes

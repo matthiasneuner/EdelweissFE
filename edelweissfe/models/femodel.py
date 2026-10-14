@@ -243,7 +243,8 @@ class FEModel:
         mesh (every process holds every node, for now).
 
         The order matters: the nodes of every field, and so the degrees of freedom, are numbered in
-        the order of :attr:`nodes`.
+        the order of :attr:`nodes`, and the numbering of the mesh
+        (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) in mesh order.
 
         Raises
         ------
