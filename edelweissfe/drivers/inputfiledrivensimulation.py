@@ -56,6 +56,7 @@ from edelweissfe.helpers.inputfilehelpers import (
     createSolversFromInputFile,
     createStepManagerFromInputFile,
     fillFEModelFromInputFile,
+    releaseMeshDataLines,
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel, printPrettyModelSummary
@@ -135,6 +136,8 @@ def finiteElementSimulation(
     # several MPI processes, which then each create only their own part (see domaindecomposition.distributedelements).
     model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
     model = fillFEModelFromInputFile(model, inputfile, journal)
+    # The model holds the mesh now; its data lines, the bulk of the parsed input, are not needed again.
+    releaseMeshDataLines(inputfile)
     model.prepareYourself(journal)
     # Every process contributes the material properties of its own elements; one writes the files.
     for section, rowsOfSets in model.materialPropertiesToExport():

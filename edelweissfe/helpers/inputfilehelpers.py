@@ -270,6 +270,59 @@ def fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) 
         return _fillFEModelFromInputFile(model, inputfile, journal)
 
 
+#: The keywords whose data lines describe the mesh: read once, into the model, by
+#: :func:`fillFEModelFromInputFile`, and released afterwards by :func:`releaseMeshDataLines`.
+MESH_KEYWORDS = ("node", "element", "nSet", "elSet")
+
+
+class ReleasedDataLines:
+    """The data lines of a mesh keyword after :func:`releaseMeshDataLines`: reading them raises, so
+    that a parsed input file used twice fails loudly instead of building a model without a mesh.
+
+    Parameters
+    ----------
+    keyword
+        The keyword whose data lines were released.
+    """
+
+    def __init__(self, keyword: str):
+        self.keyword = keyword
+
+    def __iter__(self):
+        """Raise: the data lines are gone.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+
+        raise RuntimeError(
+            "the data lines of *{:} were released after the model was built from them (releaseMeshDataLines); "
+            "parse the input file again to build another model".format(self.keyword)
+        )
+
+
+def releaseMeshDataLines(inputfile: dict):
+    """Release the data lines describing the mesh (``*node``, ``*element``, ``*nSet``, ``*elSet``),
+    once the model holds the mesh they describe.
+
+    They are the bulk of a parsed input file -- about 50 MB for a mesh of 280,000 nodes -- and every
+    process of a domain-decomposed run parsed the whole file. Nothing reads them after
+    :func:`fillFEModelFromInputFile`: a resumed run rebuilds its model from the file again. Reading
+    them afterwards raises (:class:`ReleasedDataLines`).
+
+    Parameters
+    ----------
+    inputfile
+        The processed input file in dictionary form; its mesh keywords are changed in place.
+    """
+
+    for keyword in MESH_KEYWORDS:
+        for definition in inputfile[keyword]:
+            definition["datalines"] = ReleasedDataLines(keyword)
+
+
 def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal) -> FEModel:
     """The body of :func:`fillFEModelFromInputFile`, run inside an open topology window."""
 

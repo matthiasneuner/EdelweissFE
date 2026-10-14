@@ -40,7 +40,10 @@ import numpy as np
 import pytest
 
 from edelweissfe.config.phenomena import domainMapping
-from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+from edelweissfe.helpers.inputfilehelpers import (
+    fillFEModelFromInputFile,
+    releaseMeshDataLines,
+)
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.femodel import FEModel
@@ -446,3 +449,17 @@ def test_ensight_visualizes_a_surface_face_listed_by_numbers_of_a_partial_model(
     assert [[node.label for node in nodes] for _, _, nodes in visualized] == [
         list(model.mesh.elements[number].nodeLabels) for number in (5, 3, 1002)
     ]
+
+
+def test_the_mesh_data_lines_are_released_once_the_model_holds_the_mesh(tmp_path):
+    deck = tmp_path / "test.inp"
+    deck.write_text(DECK)
+    inputFile = parseInputFile(str(deck))
+    journal = Journal(verbose=False)
+    model = fillFEModelFromInputFile(FEModel(2), inputFile, journal)
+    releaseMeshDataLines(inputFile)
+
+    # a parsed input file built into a second model fails loudly, not with an empty mesh
+    with pytest.raises(RuntimeError, match=r"the data lines of \*node were released"):
+        fillFEModelFromInputFile(FEModel(2), inputFile, journal)
+    assert 1001 in model.mesh.elements
