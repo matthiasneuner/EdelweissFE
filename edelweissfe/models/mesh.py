@@ -129,6 +129,45 @@ class SurfaceFace:
         return list(self.elementNumbers)
 
 
+@dataclass(frozen=True)
+class ElementGroup:
+    """The elements of the mesh of one type information -- the same fields at each of their nodes, the
+    same shape, size and kernels --, as arrays.
+
+    Parameters
+    ----------
+    typeInfo
+        The type information of every element of the group.
+    positions
+        The position of each element of the group in mesh order (:attr:`MeshConnectivity.numbers`),
+        ascending.
+    nodeRows
+        The rows of the nodes of each element (:meth:`Mesh.rowsOfNodes`), one row per element, in the
+        element's node order.
+    """
+
+    typeInfo: ElementTypeInfo
+    positions: np.ndarray
+    nodeRows: np.ndarray
+
+
+@dataclass(frozen=True)
+class MeshConnectivity:
+    """The element connectivity of the mesh as arrays (:meth:`Mesh.connectivity`).
+
+    Parameters
+    ----------
+    numbers
+        The element numbers, in mesh order.
+    groups
+        The elements grouped by their type information, in the order of the first element of each
+        group in the mesh.
+    """
+
+    numbers: np.ndarray
+    groups: list
+
+
 class MeshElement:
     """One element of the mesh, as data.
 
@@ -218,6 +257,9 @@ class Mesh:
         self.surfaces = {}
         #: Element class and type information per (type, provider), asked once per type.
         self._types = {}
+        #: The connectivity as arrays (:meth:`connectivity`), made when first asked for after the
+        #: elements changed; None before.
+        self._connectivity = None
 
     @property
     def nodeLabels(self) -> np.ndarray:
@@ -498,6 +540,7 @@ class Mesh:
                 "and numbers from TopologyPipeline.reserveElementNumbers() are never recycled".format(record.number)
             )
         self.elements[record.number] = record
+        self._connectivity = None
         return record
 
     def addAuxiliaryElement(self, element, hostElement: int | None = None) -> MeshElement:
@@ -563,6 +606,7 @@ class Mesh:
         removed = set(numbers)
         for number in removed:
             del self.elements[number]
+        self._connectivity = None
 
         for members in self.elementSets.values():
             if not removed.isdisjoint(members):
@@ -686,6 +730,54 @@ class Mesh:
             return record.ownTypeInfo
         return self._typeEntry(record.elType, record.provider)[1]
 
+    def connectivity(self) -> MeshConnectivity:
+        """The element connectivity as arrays: the element numbers in mesh order, and the elements
+        grouped by their type information, each group with the rows of the nodes of its elements. What
+        reads the whole mesh at once -- the global numbering of the degrees of freedom, the processes
+        integrating each degree of freedom, a fingerprint of the mesh -- reads it from here, without a
+        pass over the element records each.
+
+        Made in one pass over the element records when first asked for after an element was described
+        or removed, then held.
+
+        Returns
+        -------
+        MeshConnectivity
+            The connectivity.
+        """
+
+        if self._connectivity is None:
+            groupOfTypeInfo = {}
+            groups = {}
+            typeOf = self.typeOf
+            for position, record in enumerate(self.elements.values()):
+                typeInfo = typeOf(record)
+                key = groupOfTypeInfo.get(id(typeInfo))
+                if key is None:
+                    # Auxiliary elements carry a type information object each: grouped by content.
+                    key = (tuple(tuple(fields) for fields in typeInfo.fields),) + (
+                        typeInfo.ensightType,
+                        typeInfo.nDof,
+                        typeInfo.hasKernels,
+                    )
+                    groupOfTypeInfo[id(typeInfo)] = key
+                    groups.setdefault(key, (typeInfo, [], []))
+                group = groups[key]
+                group[1].append(position)
+                group[2].append(record.nodeLabels)
+            self._connectivity = MeshConnectivity(
+                np.fromiter(self.elements.keys(), dtype=np.int64, count=len(self.elements)),
+                [
+                    ElementGroup(
+                        typeInfo,
+                        np.asarray(positions, dtype=np.int64),
+                        self.rowsOfNodes(np.asarray(labels, dtype=np.int64)).reshape(len(labels), -1),
+                    )
+                    for typeInfo, positions, labels in groups.values()
+                ],
+            )
+        return self._connectivity
+
     def _typeEntry(self, elType: str, provider: str) -> tuple:
         """The element class and the type information of an element type, from one prototype
         element (:func:`~edelweissfe.config.elementlibrary.createPrototypeElement`) created once per
@@ -709,4 +801,12 @@ class Mesh:
 
         state = self.__dict__.copy()
         state["_types"] = {}
+        state["_connectivity"] = None
         return state
+
+    def __setstate__(self, state: dict):
+        """Restore the data; the connectivity arrays are made again when first asked for (a mesh
+        pickled before they existed has none)."""
+
+        self.__dict__.update(state)
+        self._connectivity = None

@@ -130,17 +130,11 @@ class GlobalDofNumbering:
                 carrying[field] = np.zeros(mesh.nNodes, dtype=bool)
             return carrying[field]
 
-        # the elements, grouped by the fields at their nodes, so that each group is one array operation
-        connectivitiesOfFields = {}
-        typeOf = mesh.typeOf
-        for record in mesh.elements.values():
-            fieldsAtNodes = tuple(tuple(fields) for fields in typeOf(record).fields)
-            connectivitiesOfFields.setdefault(fieldsAtNodes, []).append(record.nodeLabels)
-        for fieldsAtNodes, connectivities in connectivitiesOfFields.items():
-            rows = mesh.rowsOfNodes(np.asarray(connectivities, dtype=np.int64)).reshape(len(connectivities), -1)
-            for i, fields in enumerate(fieldsAtNodes):
+        # the elements, a group of the same type at a time, each one array operation per node and field
+        for group in mesh.connectivity().groups:
+            for i, fields in enumerate(group.typeInfo.fields):
                 for field in fields:
-                    carryingOf(field)[rows[:, i]] = True
+                    carryingOf(field)[group.nodeRows[:, i]] = True
 
         for constraint in model.constraints.values():
             rows = mesh.rowsOfNodes([node.label for node in constraint.nodes])
@@ -210,11 +204,15 @@ class GlobalDofNumbering:
                 differ("the nodes of field {:} are not the nodes of the mesh carrying it, in mesh order".format(field))
 
             first, dimension = self.firstDofOfField[field], self.dimensionOfField[field]
-            dofs = np.concatenate(
-                [np.atleast_1d(dofsOfFieldVariables[node.fields[field]]) for node in nodes]
-                or [np.empty(0, dtype=np.int64)]
+            # The DofManager gives the components of a node consecutive degrees of freedom, a row of its
+            # field's range (DofManager._reserveSpaceForNodeFields): the first of each node and the
+            # range of the field below determine them all.
+            firstOfNodes = np.fromiter(
+                (dofsOfFieldVariables[node.fields[field]][0] for node in nodes),
+                dtype=np.int64,
+                count=len(nodes),
             )
-            if not np.array_equal(dofs, np.arange(first, first + labels.shape[0] * dimension)):
+            if not np.array_equal(firstOfNodes, first + dimension * np.arange(labels.shape[0], dtype=np.int64)):
                 differ("the degrees of freedom of field {:}".format(field))
             if dofManager.idcsOfFieldsInDofVector[field] != slice(first, first + labels.shape[0] * dimension):
                 differ("the range of field {:}".format(field))

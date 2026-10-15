@@ -1226,12 +1226,17 @@ def layoutFingerprint(
     model: FEModel, numbering: GlobalDofNumbering, mpcTransformation: MultiPointConstraintTransformation | None
 ) -> str:
     """A fingerprint of everything the processes of a domain-decomposed run must hold identically: the
-    mesh -- the element numbers and the node labels of every element --, the element sets and the
-    surfaces of the mesh, each with its elements in order and all of them in order, the global
-    numbering of the degrees of freedom (its digest, :meth:`GlobalDofNumbering.digest`), the node
-    coordinates, and the multi-point constraints -- every slave, master and weight. It is made from
-    the mesh, the nodes and the equation system, which every process holds whole, and not from the
-    element objects, of which a process may hold only its own.
+    mesh -- the element numbers in mesh order, and per type of element the positions of its elements and
+    the nodes of each --, the element sets and the surfaces of the mesh, each with its elements in order
+    and all of them in order, the global numbering of the degrees of freedom (its digest,
+    :meth:`GlobalDofNumbering.digest`, which covers the node labels in mesh order), the reference
+    coordinates of the nodes and the current ones of the nodes a rigid body moves, and the multi-point
+    constraints -- every slave, master and weight.
+
+    It is made from arrays every process holds whole -- the connectivity of the mesh
+    (:meth:`~edelweissfe.models.mesh.Mesh.connectivity`), its node coordinates, the numbering, the
+    multi-point constraints --, not from the element or node objects, of which a process may hold only
+    its own.
 
     Parameters
     ----------
@@ -1260,14 +1265,17 @@ def layoutFingerprint(
         digest.update(np.int64(array.nbytes).tobytes() + array.tobytes())
 
     mesh = model.mesh
-    add("elements", np.asarray(list(mesh.elements.keys()), dtype=np.int64))
-    add(
-        "connectivity",
-        np.concatenate(
-            [np.asarray(record.nodeLabels, dtype=np.int64) for record in mesh.elements.values()]
-            or [np.empty(0, dtype=np.int64)]
-        ),
-    )
+    connectivity = mesh.connectivity()
+    add("elements", connectivity.numbers)
+    for group in connectivity.groups:
+        typeInfo = group.typeInfo
+        add(
+            "element type {:} {:} {:} {:}".format(
+                typeInfo.fields, typeInfo.ensightType, typeInfo.nDof, typeInfo.hasKernels
+            ),
+            group.positions,
+        )
+        add("connectivity", group.nodeRows.astype(np.int64))
     for name, numbers in mesh.elementSets.items():
         add("element set " + name, np.asarray(numbers, dtype=np.int64))
     for name in mesh.surfaces:
@@ -1275,10 +1283,16 @@ def layoutFingerprint(
             add("surface {:} face {:}".format(name, face), np.asarray(numbers, dtype=np.int64))
 
     add("numbering of the degrees of freedom", np.frombuffer(numbering.digest().encode(), dtype=np.uint8))
-    add(
-        "coordinates",
-        np.concatenate([np.asarray(node.coordinates, dtype=float) for node in model.nodes.values()] or [np.empty(0)]),
-    )
+    add("reference coordinates", np.asarray(mesh.nodeCoordinates, dtype=float))
+    # A rigid body moves its surface nodes along with it: their current coordinates, which every process
+    # computes from the reference node as it holds it.
+    for name, rigidBody in model.rigidBodies.items():
+        moved = list(rigidBody.referenceCoordinatesOfMovedNodes())
+        add("rigid body " + name, np.asarray(moved, dtype=np.int64))
+        add(
+            "current coordinates",
+            np.asarray([model.nodes[label].coordinates for label in moved], dtype=float).reshape(-1),
+        )
     add("size", np.int64(numbering.nDof))
 
     if mpcTransformation is not None:
