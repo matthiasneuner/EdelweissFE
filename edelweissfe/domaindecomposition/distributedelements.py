@@ -277,8 +277,10 @@ class DistributedElements(ElementDistribution):
         self.reasonsForWholeModel = list(reasonsForWholeModel)
         self.holdsNodesOfSubdomainOnly = not self.reasonsForWholeModel
         #: Where this process holds the nodes of its subdomain only: the labels of the nodes of the elements
-        #: it creates (:meth:`decideLocalElements`); None where it holds every node.
-        self._nodesOfLocalElements = None
+        #: it creates (:meth:`decideLocalElements`) -- none before the mesh is partitioned, so that a
+        #: generator making node objects before (the contact facets) makes only those it holds for itself
+        #: (:meth:`holdNodes`) --; None where it holds every node.
+        self._nodesOfLocalElements = set() if self.holdsNodesOfSubdomainOnly else None
         #: The labels of the nodes held here whatever the elements, because a model entity reads them
         #: whole (:meth:`holdNodes`).
         self._nodesHeldForReaders = set()

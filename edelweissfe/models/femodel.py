@@ -306,7 +306,8 @@ class FEModel:
             self._nodeSetsResolvedFor = None
             self.resolveNodeSetsOfMesh()
         if self.nodeFields and (dropped or len(self.nodes) != len(nodesBefore)):
-            self._resizeNodeFieldsForNodes(Journal(verbose=False))
+            newNodes = [node for label, node in self.nodes.items() if label not in nodesBefore]
+            self._resizeNodeFieldsForNodes(Journal(verbose=False), newNodes)
             # every node: the resize made new arrays, of which the field variables are views
             self._linkFieldVariableObjects(list(self.nodes.values()))
 
@@ -872,6 +873,26 @@ class FEModel:
                     if field not in nodeFields:
                         nodeFields[field] = FieldVariable(node, field)
 
+    def _activateNodeFieldsOfNodes(self, nodes: list):
+        """Create the FieldVariables of the given nodes, for the fields the elements of the mesh have at
+        them (:meth:`_activateNodeFieldsFromMesh`), from the global numbering of the mesh -- arrays, so that
+        the cost of a few new nodes (elements moving here) is not a walk over the whole mesh.
+
+        Parameters
+        ----------
+        nodes
+            The nodes.
+        """
+
+        if not nodes:
+            return
+        carrying = GlobalDofNumbering.ofModel(self).nodesCarryingField
+        rows = self.mesh.rowsOfNodes([node.label for node in nodes])
+        for field, carriedAt in carrying.items():
+            for node in (node for node, carries in zip(nodes, carriedAt[rows].tolist()) if carries):
+                if field not in node.fields:
+                    node.fields[field] = FieldVariable(node, field)
+
     def _populateNodeFieldVariablesFromConstraints(
         self,
     ):
@@ -1005,7 +1026,7 @@ class FEModel:
         self.scalarVariables = dict()
         self._createAndAssignScalarVariableForConstraints(journal)
 
-    def _resizeNodeFieldsForNodes(self, journal: Journal):
+    def _resizeNodeFieldsForNodes(self, journal: Journal, newNodes: list | None = None):
         """Resize the existing NodeFields in place for the current ``self.nodeSets["all"]``,
         instead of rebuilding :attr:`nodeFields` from scratch as :meth:`_prepareVariablesAndFields`
         does. Used by mesh mutators (e.g. AMR's ``hadaptivity._materialize``) so that NodeField
@@ -1024,6 +1045,10 @@ class FEModel:
         ----------
         journal
             The journal instance.
+        newNodes
+            The nodes created since the node fields were last sized, if only these need their fields
+            activated (elements moved here: see :meth:`holdNodesOfDistribution`); None to activate the fields
+            of every node from the mesh.
         """
         if self.topology.isDeferringFieldBookkeeping:
             self.topology.deferNodeFieldResize(journal)
@@ -1033,7 +1058,10 @@ class FEModel:
             "Activating fields on nodes from the mesh and the constraints",
             self.identification,
         )
-        self._activateNodeFieldsFromMesh()
+        if newNodes is None:
+            self._activateNodeFieldsFromMesh()
+        else:
+            self._activateNodeFieldsOfNodes(newNodes)
         self._populateNodeFieldVariablesFromConstraints()
 
         journal.message("Resizing NodeFields", self.identification)
