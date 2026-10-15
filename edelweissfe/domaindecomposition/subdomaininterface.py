@@ -213,8 +213,10 @@ class ElementProcessesAtDofs:
             The degrees of freedom, sorted.
         """
 
-        return np.union1d(
-            np.flatnonzero(self.lowestProcess == process), self.sharedDofs[self.sharedProcesses == process]
+        return _sortedUnique(
+            np.concatenate(
+                [np.flatnonzero(self.lowestProcess == process), self.sharedDofs[self.sharedProcesses == process]]
+            )
         )
 
     def processesAt(self, dofs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -276,10 +278,31 @@ def _processesAtPlaces(places: np.ndarray, processes: np.ndarray, nPlaces: int, 
     return lowest, sharedPlaces, sharedProcesses
 
 
+def _sortedUnique(values: np.ndarray) -> np.ndarray:
+    """The distinct values, sorted: :func:`numpy.unique` by a sort, many times faster for the large
+    integer arrays of a rebuild than the hash table :func:`numpy.unique` uses (numpy 2.5).
+
+    Parameters
+    ----------
+    values
+        A one-dimensional array.
+
+    Returns
+    -------
+    np.ndarray
+        The distinct values, ascending.
+    """
+
+    values = np.sort(values)
+    if values.shape[0] < 2:
+        return values
+    return values[np.concatenate(([True], values[1:] != values[:-1]))]
+
+
 def _uniquePairs(places: np.ndarray, processes: np.ndarray, nProcesses: int) -> tuple[np.ndarray, np.ndarray]:
     """Pairs of a place and a process without repetitions, sorted by place and then by process."""
 
-    keys = np.unique(np.asarray(places, dtype=np.int64) * nProcesses + np.asarray(processes, dtype=np.int64))
+    keys = _sortedUnique(np.asarray(places, dtype=np.int64) * nProcesses + np.asarray(processes, dtype=np.int64))
     return keys // nProcesses, keys % nProcesses
 
 
@@ -323,20 +346,20 @@ class SubdomainInterface:
         nDof = elementProcesses.nDof
         self.nDof = nDof
 
-        touched = np.unique(np.asarray(touchedDofs, dtype=np.int64))
+        touched = _sortedUnique(np.asarray(touchedDofs, dtype=np.int64))
 
         # Which processes' elements touch a degree of freedom, every process derives itself. What it
         # cannot derive are the degrees of freedom a process touches beyond its elements' -- those of
         # its constraints --: each process sends those, and they are gathered to every process.
         byOwnElements = elementProcesses.dofsOfProcess(rank)
-        derivedWrongly = np.setdiff1d(byOwnElements, touched, assume_unique=True).shape[0] > 0
+        derivedWrongly = not np.isin(byOwnElements, touched, kind="table").all()
         if communicator.allreduce(int(derivedWrongly), op=MPI.MAX):
             raise RuntimeError(
                 "The degrees of freedom the elements of a process touch, as derived from the element partition "
                 "and the mesh, include some its elements do not touch: the processes would disagree on which "
                 "process integrates which degree of freedom."
             )
-        claimed = np.setdiff1d(touched, byOwnElements, assume_unique=True)
+        claimed = touched[~np.isin(touched, byOwnElements, kind="table")]
         counts = np.array(communicator.allgather(claimed.shape[0]), dtype=np.int64)
         claimedDofs = np.empty(counts.sum(), dtype=np.int64)
         communicator.Allgatherv(claimed, [claimedDofs, counts, _displacements(counts), MPI.INT64_T])
@@ -350,7 +373,7 @@ class SubdomainInterface:
             constraints, as pairs of a degree of freedom and a process."""
 
             elementDofs, elementRanks = elementProcesses.processesAt(dofs)
-            atDofs = np.isin(claimedDofs, dofs)
+            atDofs = np.isin(claimedDofs, dofs, kind="table")
             return _uniquePairs(
                 np.concatenate([elementDofs, claimedDofs[atDofs]]),
                 np.concatenate([elementRanks, claimedProcesses[atDofs]]),
@@ -362,7 +385,7 @@ class SubdomainInterface:
         # theirs): every degree of freedom of a group, with every process touching the group.
         linkedDofs, groupOfLinked = multiPointConstraintGroups(multiPointConstraintLinks)
         pairDofs, pairRanks = touchingProcessesAt(linkedDofs)
-        groupKeys = np.unique(groupOfLinked[np.searchsorted(linkedDofs, pairDofs)] * size + pairRanks)
+        groupKeys = _sortedUnique(groupOfLinked[np.searchsorted(linkedDofs, pairDofs)] * size + pairRanks)
         closureDofs, closureRanks = _membersWithProcesses(
             linkedDofs, groupOfLinked, groupKeys // size, groupKeys % size
         )
@@ -375,9 +398,10 @@ class SubdomainInterface:
         untouched = owner == size
         owner[untouched] = 0
 
-        subdomainDofs = np.union1d(touched, closureDofs[closureRanks == rank])
+        subdomainDofs = [touched, closureDofs[closureRanks == rank]]
         if rank == 0:
-            subdomainDofs = np.union1d(subdomainDofs, np.flatnonzero(untouched))
+            subdomainDofs.append(np.flatnonzero(untouched))
+        subdomainDofs = _sortedUnique(np.concatenate(subdomainDofs))
         #: The sorted degrees of freedom this process integrates.
         self.subdomainDofs = subdomainDofs
 
@@ -394,7 +418,7 @@ class SubdomainInterface:
 
         # The interface: every (degree of freedom, other process) pair among this process' own.
         pairDofs, pairRanks = touchingProcessesAt(subdomainDofs)
-        atSubdomain = np.isin(closureDofs, subdomainDofs)
+        atSubdomain = np.isin(closureDofs, subdomainDofs, kind="table")
         sharedDofs, sharedRanks = _uniquePairs(
             np.concatenate([pairDofs, closureDofs[atSubdomain]]),
             np.concatenate([pairRanks, closureRanks[atSubdomain]]),
@@ -404,7 +428,7 @@ class SubdomainInterface:
         sharedDofs, sharedRanks = sharedDofs[other], sharedRanks[other]
 
         #: The degrees of freedom this process shares with at least one other, sorted.
-        self.interfaceDofs = np.unique(sharedDofs)
+        self.interfaceDofs = _sortedUnique(sharedDofs)
         #: The neighbouring processes, ascending.
         self.neighbours = np.unique(sharedRanks).tolist()
 
@@ -926,7 +950,7 @@ class ValuesFromOwners:
         rank = communicator.Get_rank()
         size = communicator.Get_size()
 
-        neededDofs = np.unique(np.asarray(neededDofs, dtype=np.int64))
+        neededDofs = _sortedUnique(np.asarray(neededDofs, dtype=np.int64))
         owners = dofOwners[neededDofs]
         asks = [neededDofs[owners == other] if other != rank else np.empty(0, dtype=np.int64) for other in range(size)]
         askedOfThisProcess = communicator.alltoall(asks)
