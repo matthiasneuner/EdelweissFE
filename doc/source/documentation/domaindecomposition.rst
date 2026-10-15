@@ -664,7 +664,15 @@ at level 2 why it did not repartition, and at level 1 what the constraints of ea
 it does. The partition then depends on measured timings; the result does not, since it does not
 depend on the partition at all.
 
-The new partition weighs every element by its measured kernel time, and gives each process the share
+The new partition weighs every element by its kernel time -- the least measured in any increment
+since the last check. A time measured is a wall time: it can only grow by what else happened
+meanwhile, never shrink below what the element costs, and a process descheduled while one element is
+timed -- on a loaded machine -- charges the whole stall to that element, thousands of times its cost
+in that increment. Summed over the increments, such an element weighed 40 to 100 000 times its peers,
+and METIS gave its process a part of hardly more than that element; the least time is what the
+element costs, the same on a loaded machine as on an idle one, while an element that has grown
+costlier -- a material softening -- is measured costlier in every increment. The new partition gives
+each process the share
 of them that makes it as busy as the others with its constraints
 (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`, METIS' target
 part weights): the process evaluating a large contact computes correspondingly fewer elements --
@@ -672,9 +680,8 @@ but never less than half an equal share, since METIS leaves a part of a much sma
 reporting success; a mesh of fewer than 8 elements per process keeps equal shares
 (:data:`~edelweissfe.domaindecomposition.partitioning.MINIMUM_SHARE_OF_AN_EQUAL_SHARE`,
 :data:`~edelweissfe.domaindecomposition.partitioning.ELEMENTS_PER_PROCESS_FOR_SHARES`). METIS also
-empties parts when a single element weighs about as much as a part should -- and a measured kernel
-time is a wall time: on a loaded machine, an element whose process was descheduled while it was
-timed measures thousands of times its cost. A part METIS leaves empty is therefore given the lightest
+empties parts when a single element weighs about as much as a part should, as a stall summed into
+its time made it do. A part METIS leaves empty is therefore given the lightest
 element of the part with the most elements
 (:func:`~edelweissfe.domaindecomposition.partitioning.giveEveryPartAnElement`), so that every
 process has elements by construction wherever there are as many elements as processes; a partition

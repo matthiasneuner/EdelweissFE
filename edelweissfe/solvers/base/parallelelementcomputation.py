@@ -327,8 +327,8 @@ def _evaluateExplicitKernels(
     psi
         The internal energy to add the chunk's elements' to.
     costs
-        If given, the wall-clock time of each element's kernels is added to its entry -- one entry
-        per element of the chunk, in order.
+        If given, each element's entry -- one per element of the chunk, in order -- is lowered to the
+        wall-clock time of its kernels in this call, if that is less (:func:`computeElementsForExplicit`).
 
     Returns
     -------
@@ -346,7 +346,7 @@ def _evaluateExplicitKernels(
         element.computeKernelsExplicit(Pe[begin:end], gatheredU[begin:end], gatheredDU[begin:end], time, dT)
         psi += element.computeInternalEnergy()
         if costs is not None:
-            costs[position] += perf_counter() - tic
+            costs[position] = min(costs[position], perf_counter() - tic)
 
     return psi
 
@@ -381,8 +381,12 @@ def computeElementsForExplicit(
     timeStep
         The time step.
     elementCosts
-        If given, the wall-clock time of each element's kernels is added to its entry, one per
-        element of the plan in order; what a load balancer weighs the elements by.
+        If given, the least wall-clock time of each element's kernels over the calls so far, one
+        entry per element of the plan in order (infinite before the first): what a load balancer
+        weighs the elements by. The least, since a time measured is a wall time, which can only
+        grow by what else happened meanwhile -- a process descheduled while one element is timed
+        charges the whole stall to that element, thousands of times its cost on a loaded machine --,
+        never shrink below what the element costs.
 
     Returns
     -------

@@ -38,6 +38,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from time import sleep
 
 import numpy as np
 import pytest
@@ -450,6 +451,52 @@ def _springModel(nElements: int = 2000, nDof: int = 3001):
     U = DofVector(nDof, indices)
     U[:] = rng.standard_normal(nDof)
     return elements, indices, U
+
+
+class _DescheduledOnceElement(_SpringElement):
+    """A spring element whose process is descheduled once while its kernel is timed: its wall time
+    in that increment is a stall, not its cost."""
+
+    stalls = 1
+
+    def computeKernelsExplicit(self, Pe, Ue, dUe, time, dT):
+        super().computeKernelsExplicit(Pe, Ue, dUe, time, dT)
+        if self.stalls:
+            self.stalls -= 1
+            sleep(0.02)
+
+
+def test_a_descheduled_process_does_not_make_an_element_weigh_more_than_its_peers():
+    # The load balancer weighs every element by its measured kernel time, a wall time: an element
+    # whose process is descheduled while it is timed measures the whole stall -- thousands of times
+    # its cost on a loaded machine --, and METIS then gives its process a part of one element. The
+    # least time over the increments is what the element costs; a stall cannot inflate it.
+    from edelweissfe.solvers.base.parallelelementcomputation import (
+        computeElementsForExplicit,
+        planElements,
+    )
+    from edelweissfe.timesteppers.timestep import TimeStep
+
+    elements, indices, U = _springModel(nElements=200, nDof=301)
+    stalled = next(iter(elements))
+    replaced = elements[stalled]
+    elements[stalled] = _DescheduledOnceElement(replaced.stiffness, replaced.nDof)
+    indices[elements[stalled]] = indices.pop(replaced)
+    timeStep = TimeStep(1, 0.1, 0.1, 1e-3, 0.1, 0.1)
+
+    for nThreads in (1, 4):
+        elements[stalled].stalls = 1
+        plan = planElements(elements, indices, slice(None), U.shape[0], nThreads)
+        costs = np.full(len(elements), np.inf)
+        for _ in range(5):
+            P = U.copy()
+            computeElementsForExplicit(plan, U, U, P, timeStep, costs)
+
+        assert np.all(np.isfinite(costs)) and np.all(costs > 0.0)
+        position = list(plan.elements).index(stalled)
+        # Its peers cost microseconds; the stall was 20 ms.
+        assert costs[position] < 1e-3, costs[position]
+        assert costs[position] < 20.0 * np.median(costs), (costs[position], np.median(costs))
 
 
 def test_element_loop_sums_in_element_order_on_any_number_of_threads():

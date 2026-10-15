@@ -324,9 +324,9 @@ class NEDMPI(NEDParallel):
         )
         #: How the element forces of the current increment plan are completed at the interface.
         self._interfaceAssembly: InterfaceForceAssembly | None = None
-        #: The kernel time of every element of the current increment plan, in plan order, summed
-        #: over :attr:`_nMeasuredIncrements` increments, if the subdomain balances load by measured
-        #: costs; else None.
+        #: The kernel time of every element of the current increment plan, in plan order, the least
+        #: over :attr:`_nMeasuredIncrements` increments (:func:`computeElementsForExplicit`), if the
+        #: subdomain balances load by measured costs; else None.
         self._elementCosts: np.ndarray | None = None
         #: The increments computed with the current increment plan.
         self._nMeasuredIncrements = 0
@@ -546,7 +546,7 @@ class NEDMPI(NEDParallel):
         self._forgetReceivePlans()
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementLoop)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
-        self._elementCosts = np.zeros(len(plan.elementLoop.elements)) if timesKernels else None
+        self._elementCosts = np.full(len(plan.elementLoop.elements), np.inf) if timesKernels else None
         self._nMeasuredIncrements = 0
         self._elementLoopTime = self._constraintEvaluationTime = 0.0
         return plan
@@ -572,8 +572,8 @@ class NEDMPI(NEDParallel):
 
     def _measuredLoad(self) -> MeasuredLoad:
         """What :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance` weighs: the cost
-        of every element of the increment plan, in plan order -- the measured kernel times, or the
-        element numbers (``load-balance-costs``) -- the number of increments it was summed over, the
+        of every element of the increment plan per increment, in plan order -- the least kernel time
+        measured, or the element number (``load-balance-costs``) -- the number of increments measured, the
         increments until the next check, to weigh a repartition's gain against its cost (None for
         element numbers, which are no times), and the time per increment this process was busy with
         its elements and its constraints.
@@ -592,7 +592,7 @@ class NEDMPI(NEDParallel):
         nIncrements = self._nMeasuredIncrements
         if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
             numbers = np.array(list(self._incrementPlan.elementLoop.elements.keys()), dtype=float)
-            return MeasuredLoad(numbers * nIncrements, nIncrements, None, float(numbers.sum()), 0.0)
+            return MeasuredLoad(numbers, nIncrements, None, float(numbers.sum()), 0.0)
         return MeasuredLoad(
             self._elementCosts,
             nIncrements,
