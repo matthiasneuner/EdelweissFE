@@ -158,6 +158,28 @@ class FEModel:
         clone.topology = self.topology.boundTo(clone)
         return clone
 
+    def moveNodes(self, labels, coordinates):
+        """Change the reference coordinates of nodes: in the mesh and, in place, at the node objects
+        held here -- what a model entity or modifier changing the reference geometry calls (a tie
+        adjusting its slave nodes onto the master surface, a snap onto a cylinder).
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+        coordinates
+            The new reference coordinates, one row per node.
+        """
+
+        mesh = self.mesh
+        mesh.moveNodes(labels, coordinates)
+        rows = mesh.rowsOfNodes(labels)
+        moved = mesh.nodeCoordinates
+        nodes = self.nodes
+        for label, row in zip(np.asarray(labels).tolist(), rows.tolist()):
+            if label in nodes:
+                nodes[label].coordinates[:] = moved[row]
+
     def createNodesOfMesh(self, isHeldHere: Callable[[int], bool] | None = None):
         """Create the node objects of the mesh, and resolve its node sets to them.
 

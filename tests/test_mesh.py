@@ -563,10 +563,13 @@ def test_a_node_is_described_once_and_created_only_from_the_mesh():
         model.resolveNodeSetOfMesh("made")
 
 
-def test_moving_nodes_changes_the_reference_coordinates_in_the_mesh():
-    model = _modelOfFourNodes()
-    model.mesh.moveNodes([3, 1], [[1.5, 1.5], [-0.5, 0.0]])
+def test_moving_nodes_changes_the_reference_coordinates_in_the_mesh_and_at_the_nodes():
+    model = _modelOfFourNodes(lambda label: label != 1)
+    coordinatesOfNode3 = model.nodes[3].coordinates
+    model.moveNodes([3, 1], [[1.5, 1.5], [-0.5, 0.0]])
     assert model.mesh.nodeCoordinates.tolist() == [[-0.5, 0.0], [1.0, 0.0], [1.5, 1.5], [0.0, 1.0]]
+    # in place, at the nodes held here
+    assert model.nodes[3].coordinates is coordinatesOfNode3 and coordinatesOfNode3.tolist() == [1.5, 1.5]
 
 
 @pytest.mark.parametrize("isLocal", [lambda number: True, lambda number: number in {2, 4, 6, 8, 1001}])

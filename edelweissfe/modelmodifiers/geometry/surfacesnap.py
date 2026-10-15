@@ -451,11 +451,9 @@ class ModelModifier(ModelModifierBase):
         :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.apply`.
         """
 
-        for label, coord in zip(plan.labels, plan.coords):
-            model.nodes[label].coordinates = np.array(coord, dtype=float)
         if plan.labels:
-            # the snap changes the reference geometry, which the mesh describes
-            model.mesh.moveNodes(plan.labels, plan.coords)
+            # the snap changes the reference geometry: in the mesh and at the node objects
+            model.moveNodes(plan.labels, plan.coords)
 
         if plan.labels:
             # Every hAdaptivity instance keeps its own AdaptiveMesh mirror with node coordinates

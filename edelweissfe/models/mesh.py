@@ -47,7 +47,7 @@ A model is built in two stages:
 The mesh holds the *reference* coordinates of the nodes. A model modifier that changes the
 reference geometry (a tie adjusting its slave nodes onto the master surface, a snap onto a
 cylinder) changes them in the mesh as well as at the node objects
-(:meth:`Mesh.moveNodes`); the current position of a node carried
+(:meth:`~edelweissfe.models.femodel.FEModel.moveNodes`); the current position of a node carried
 by a rigid body is not reference geometry, and is held by its node object only.
 
 Which fields an element has at which of its nodes depends on its type only. The mesh therefore

@@ -49,8 +49,8 @@ A generator that needs node objects while the mesh is still being described (``e
 ``surfaceElementGenerator``, ``discreteRigidBodyGenerator``) makes the nodes described so far itself.
 A model modifier that adds nodes (a refinement) describes them in the mesh and calls
 :meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh` again; one that changes the reference
-geometry (a tie adjusting its slave nodes, a snap onto a surface) changes the coordinates in the mesh
-too (:meth:`~edelweissfe.models.mesh.Mesh.moveNodes`). The current position of a node carried by a
+geometry (a tie adjusting its slave nodes, a snap onto a surface) moves the nodes in the mesh and at
+the node objects in one call (:meth:`~edelweissfe.models.femodel.FEModel.moveNodes`). The current position of a node carried by a
 rigid body is not reference geometry: it is held by the node object only.
 
 The fields at the nodes -- and with them the layout of the degrees of freedom -- follow from the mesh

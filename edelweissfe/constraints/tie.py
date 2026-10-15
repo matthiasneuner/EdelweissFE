@@ -353,6 +353,9 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
         tiedRecords = []
         untiedSlaveNodes = []
         self._snappedNodes = []
+        #: The positions on the master surface the snapped nodes are moved to, by
+        #: :meth:`_reassignNodesOfElementsWithSnappedNodes`.
+        self._snappedCoordinates = []
 
         for s, slaveNode in enumerate(slaveNodes):
             bestFacetIdx, bestWeights, bestDistance = int(closestFacet[s]), closestWeights[s], closestDistance[s]
@@ -366,15 +369,17 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
             # beyond adjustTolerance stays tied, just not snapped, preserving its gap exactly.
             withinAdjustTolerance = self._adjustTolerance is None or bestDistance <= self._adjustTolerance
             if adjust and withinAdjustTolerance and bestDistance > 0.0:
-                slaveNode.coordinates[:] = bestWeights @ masterFacetCoords[bestFacetIdx]
                 self._snappedNodes.append(slaveNode)
+                self._snappedCoordinates.append(bestWeights @ masterFacetCoords[bestFacetIdx])
 
             tiedRecords.append((slaveNode, masterFacetElements[bestFacetIdx].nodes, bestWeights))
 
         return tiedRecords, untiedSlaveNodes
 
     def _reassignNodesOfElementsWithSnappedNodes(self, model: FEModel):
-        """Let every element with a snapped node take up the node's new position.
+        """Move the snapped nodes onto the master surface -- in the mesh and at the node objects
+        (:meth:`~edelweissfe.models.femodel.FEModel.moveNodes`) -- and let every element with a
+        snapped node take up the node's new position.
 
         An element copies the coordinates of its nodes when they are assigned -- a Marmot element
         into the buffer its C++ element reads, a displacement element into its coordinate matrix --
@@ -398,9 +403,7 @@ class Constraint(MultiPointConstraintBase, MeshDependent):
             return
 
         # Snapping changes the reference geometry, which the mesh describes.
-        model.mesh.moveNodes(
-            [node.label for node in self._snappedNodes], [node.coordinates for node in self._snappedNodes]
-        )
+        model.moveNodes([node.label for node in self._snappedNodes], self._snappedCoordinates)
 
         snapped = set(self._snappedNodes)
         # The local elements suffice: setNodes refreshes an element's cached coordinates, and
