@@ -85,6 +85,7 @@ from edelweissfe.numerics.mpctransformation import (
     MultiPointConstraintTransformation,
     dependenciesOfRecords,
 )
+from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
 from edelweissfe.solvers.base.subdomain import Subdomain
 from edelweissfe.utils.exceptions import TopologyError
@@ -452,7 +453,9 @@ class DomainDecomposition:
                     )
                 )
             rows = np.flatnonzero(numbering.nodesCarryingField[field])[ranks[::dimension]]
-            nodeFields[field] = NodeField(field, dimension, [nodes[label] for label in labels[rows].tolist()])
+            nodeFields[field] = NodeField(
+                field, dimension, NodeSet(field, [nodes[label] for label in labels[rows].tolist()])
+            )
             rowsOfFields[field] = rows
         #: The nodes of each node field of the subdomain, by their row in the mesh.
         self._rowsOfSubdomainNodeFields = rowsOfFields

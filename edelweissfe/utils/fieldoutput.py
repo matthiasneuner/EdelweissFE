@@ -44,9 +44,11 @@ from typing import Callable, Union
 
 import numpy as np
 
+from edelweissfe.config.phenomena import getFieldSize
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.orderedset import OrderedSet
 from edelweissfe.utils.elementresultcollector import ElementResultCollector
@@ -654,6 +656,127 @@ class NodeFieldOutput(_FieldOutputBase):
         return super()._applyResultsPipleline(result)
 
 
+class GatheredNodeFieldOutput(_FieldOutputBase):
+    """A per-node field output of a model whose processes hold the nodes of their subdomains only
+    (:attr:`~edelweissfe.models.elementdistribution.ElementDistribution.holdsEveryNodeHere`): its result
+    -- an entry of a node field at the nodes of a set carrying the field, in set order, as a
+    :class:`NodeFieldOutput` reads it where every node is held -- is gathered from the processes
+    computing those nodes
+    (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeValuesOfWholeSet`), to rank
+    0, which writes the output, or to every process, as an :class:`ElementFieldOutput` gathers the
+    results of elements.
+
+    Parameters
+    ----------
+    name
+        The name of this FieldOutput.
+    fieldName
+        The name of the field.
+    associatedSet
+        The node set or element set whose nodes it reads.
+    result
+        The name of the result entry in the NodeField.
+    model
+        The model tree instance.
+    journal
+        The journal object for logging.
+    saveHistory
+        Save the complete history or only the last result.
+    f_x
+        Apply a math function on the results.
+    export
+        Export the results to a file.
+    fExport_x
+        Apply a math function on the results before exporting.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        fieldName: str,
+        associatedSet,
+        result: str,
+        model: FEModel,
+        journal: Journal,
+        saveHistory: bool = False,
+        f_x: Callable = None,
+        export: str = None,
+        fExport_x: Callable = None,
+    ):
+        self.entry = result
+        self.fieldName = fieldName
+        self.associatedSet = associatedSet
+        self._dimension = getFieldSize(fieldName, model.domainSize)
+        # the nodes of the whole set carrying the field, in set order, from the mesh
+        carrying = GlobalDofNumbering.ofModel(model).nodesCarryingField.get(fieldName)
+        if carrying is None:
+            raise KeyError("no node of the model carries field {:}".format(fieldName))
+        labels = np.asarray(associatedSet.nodeLabelsOfWholeSet(), dtype=np.int64)
+        #: The labels of the nodes of the result, in its order.
+        self._labels = labels[carrying[model.mesh.rowsOfNodes(labels)]] if labels.shape[0] else labels
+        #: The values read here (:meth:`readResultsHere`) and not yet gathered, and the result of the
+        #: whole set gathered and not yet stored; None if there are none.
+        self._valuesHere = None
+        self._resultOfWholeSet = None
+        super().__init__(name, model, journal, saveHistory, f_x, export, fExport_x)
+
+    def readResultsHere(self):
+        """Read the values of the nodes of the result whose values this process contributes
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodesProvidingValuesHere`);
+        see :meth:`_FieldOutputBase.readResultsHere`."""
+
+        model = self.model
+        provided = model.elementDistribution.nodesProvidingValuesHere(model)
+        nodeField = model.nodeFields.get(self.fieldName)
+        labelsHere = [label for label in self._labels.tolist() if label in provided] if nodeField else []
+        nodes = model.nodes
+        rows = [nodeField.indexOfNode(nodes[label]) for label in labelsHere]
+        valuesHere = nodeField[self.entry][rows] if labelsHere else np.empty((0, self._dimension))
+        self._valuesHere = (np.asarray(labelsHere, dtype=np.int64), valuesHere)
+
+    def gatherResultsOfWholeSet(self, toEveryProcess: bool = True, storedHere: bool = True):
+        """Collective. Gather the result of the whole set from the values read here and elsewhere; see
+        :meth:`_FieldOutputBase.gatherResultsOfWholeSet`.
+
+        Parameters
+        ----------
+        toEveryProcess
+            Whether every process receives the result, or rank 0 only.
+        storedHere
+            Whether the next :meth:`finalizeIncrement` stores the result here.
+        """
+
+        super().gatherResultsOfWholeSet(toEveryProcess, storedHere)
+        if self._valuesHere is None:
+            raise RuntimeError(
+                "field output {:}: the result of the whole set is gathered from the values read here, which were "
+                "not read (readResultsHere)".format(self.name)
+            )
+        (labelsHere, valuesHere), self._valuesHere = self._valuesHere, None
+        whole = self.model.elementDistribution.nodeValuesOfWholeSet(
+            self._labels, labelsHere, valuesHere, toEveryProcess
+        )
+        self._resultOfWholeSet = whole.reshape(-1, self._dimension) if storedHere and whole is not None else None
+
+    def updateResults(self, model: FEModel):
+        """Update the field output: read the values here, gather the result of the whole set, and store
+        it -- or store the result gathered already, if a domain-decomposed solver gathered it apart
+        (:meth:`gatherResultsOfWholeSet`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        if self._resultOfWholeSet is None:
+            self.readResultsHere()
+            self.gatherResultsOfWholeSet()
+        result, self._resultOfWholeSet = self._resultOfWholeSet, None
+
+        super()._applyResultsPipleline(result)
+
+
 class RigidBodyFieldOutput(_FieldOutputBase):
     """
     This is a FieldOutput operating directly on a RigidBody.
@@ -1050,6 +1173,41 @@ class FieldOutputController:
         self.fieldOutputs[name] = NodeFieldOutput(
             name,
             nodeField,
+            result,
+            self.model,
+            self.journal,
+            saveHistory,
+            f_x,
+            export,
+            fExport_x,
+        )
+
+    def addGatheredPerNodeFieldOutput(
+        self,
+        name: str,
+        fieldName: str,
+        associatedSet,
+        result: str = None,
+        saveHistory=False,
+        f_x: Callable = None,
+        export: str = None,
+        fExport_x: Callable = None,
+    ):
+        """Add a per-node field output gathered from the processes holding the nodes of their subdomains
+        only (see :class:`GatheredNodeFieldOutput`); parameters as for :meth:`addPerNodeFieldOutput`, the
+        field given by its name and the nodes by the set whose nodes it reads.
+        """
+
+        if not result:
+            result = name
+
+        if name in self.fieldOutputs:
+            raise Exception("FieldOutput {:} already exists!".format(name))
+
+        self.fieldOutputs[name] = GatheredNodeFieldOutput(
+            name,
+            fieldName,
+            associatedSet,
             result,
             self.model,
             self.journal,

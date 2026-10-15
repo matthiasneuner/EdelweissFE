@@ -79,6 +79,11 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
     #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
     replicatedElementsReason: str | None = NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS
 
+    #: Whether it searches its connectivity during a run, as a contact constraint does
+    #: (:attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.searchesConnectivity`): never --
+    #: its records are fixed between topology changes.
+    searchesConnectivity: bool = False
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None

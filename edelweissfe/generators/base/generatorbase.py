@@ -97,6 +97,11 @@ class GeneratorBase(OptionSchemaProvider, ABC):
     #: mass of a rigid body (see :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`), or none.
     describesElementsOfMesh: bool = True
 
+    #: Whether this generator makes rigid bodies, whose surfaces every process of a domain-decomposed
+    #: run moves from the reference node -- a reason to hold every node in every process
+    #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`).
+    makesRigidBodies: bool = False
+
     @classmethod
     def fromGeneratorDefinition(cls, name: str, model: FEModel, journal: Journal, args: list, kwargs: dict) -> FEModel:
         """Create this generator from a parsed ``*modelGenerator`` definition.

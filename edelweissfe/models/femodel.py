@@ -44,6 +44,7 @@ from edelweissfe.models.elementdistribution import ElementDistribution
 from edelweissfe.models.mesh import Mesh
 from edelweissfe.models.modelchange import TopologyRecord
 from edelweissfe.models.topologypipeline import TopologyPipeline
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.numerics.parallelizationutilities import (
     chunked_iterable,
     getNumberOfThreads,
@@ -56,7 +57,7 @@ from edelweissfe.sets.elementset import (
     ElementSetOfMesh,
     ElementSetOfSurfaceFace,
 )
-from edelweissfe.sets.nodeset import NodeSetOfMesh
+from edelweissfe.sets.nodeset import NodeSet, NodeSetOfMesh
 from edelweissfe.surfaces.entitybasedsurface import EntityBasedSurface
 from edelweissfe.utils.checkpoint import readRestartDataInto, writeRestartDataOf
 from edelweissfe.utils.exceptions import RestartError, TopologyError
@@ -143,6 +144,10 @@ class FEModel:
         #: where it does not come from the local element objects; see
         #: :meth:`elementStatesFromElsewhere`. None otherwise.
         self._elementStatesFromElsewhere = None
+        #: The node fields of the whole model, per field and entry, for the restart checkpoint being
+        #: written, where the node fields here hold only some of the nodes; see
+        #: :meth:`nodeFieldsFromElsewhere`. None otherwise.
+        self._nodeFieldsFromElsewhere = None
 
     def __copy__(self):
         """A shallow copy of the model, with a topology pipeline that acts on the copy.
@@ -194,17 +199,23 @@ class FEModel:
         refinement's new nodes. Node sets that already exist are updated in place (references held to
         them stay valid).
 
+        Which nodes are held here, the model's :attr:`elementDistribution` decides
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`): every node in a
+        serial run; in a process of a domain-decomposed run holding the nodes of its subdomain only, those
+        of its elements and those a model entity reads whole (:meth:`holdNodes`).
+
         Parameters
         ----------
         isHeldHere
-            Which nodes of the mesh get an object; None for all of them, as in every run today. The
-            hook a process of a domain-decomposed run holding only the nodes of its subdomain will
-            use.
+            Which nodes of the mesh get an object; None for those the element distribution holds here.
         """
 
+        if isHeldHere is None:
+            isHeldHere = self.elementDistribution.isNodeHeldHere
         mesh = self.mesh
         mesh.requireEachNodeDescribedOnce()
         nodes = self.nodes
+        nodesBefore = len(nodes)
         # The leading rows of the mesh whose nodes all have objects here need no second look: a model
         # describing its mesh in many steps calls this after each of them.
         firstRow = self._rowsWithNodeObjects[1] if self._rowsWithNodeObjects[0] is mesh else 0
@@ -214,7 +225,7 @@ class FEModel:
         for offset, label in enumerate(labels):
             if label in nodes:
                 continue
-            if isHeldHere is None or isHeldHere(label):
+            if isHeldHere(label):
                 if not self.topology.isOpen:
                     raise TopologyError(
                         "node {:} was created outside a topology change: only model modifiers may create "
@@ -224,12 +235,108 @@ class FEModel:
             else:
                 firstNotHeld = min(firstNotHeld, offset)
         self._rowsWithNodeObjects = (mesh, firstRow + firstNotHeld)
+        if self.elementDistribution.holdsNodesOfSubdomainOnly and 0 < nodesBefore < len(nodes):
+            # a node skipped before may be held now, behind nodes of later rows (where every node is held,
+            # nodes are created in mesh order)
+            self.putNodesInMeshOrder()
 
         # resolved again only if the nodes or the node sets of the mesh changed since
         resolvedFor = (mesh, mesh.nodeSetsVersion, len(nodes))
         if resolvedFor != self._nodeSetsResolvedFor:
             self.resolveNodeSetsOfMesh()
             self._nodeSetsResolvedFor = resolvedFor
+
+    def putNodesInMeshOrder(self):
+        """Order :attr:`nodes` as the mesh lists them, in place, after nodes were created later than
+        nodes of later rows of the mesh (a node held here from then on: a reader holding it, an element
+        moving here). The order of :attr:`nodes` is the order of the degrees of freedom of every field."""
+
+        rows = self.mesh.rowsOfNodes(list(self.nodes))
+        if np.all(rows[1:] > rows[:-1]):
+            return
+        ordered = [list(self.nodes.items())[i] for i in np.argsort(rows, kind="stable")]
+        self.nodes.clear()
+        self.nodes.update(ordered)
+
+    def holdNodes(self, labels):
+        """Hold nodes of the mesh in this process from now on, whichever elements it holds, and make their
+        node objects: how a model entity that reads nodes whole in every process -- a constraint's node set,
+        the nodes of contact facets -- gets them where the process holds the nodes of its subdomain only
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`). In a serial run,
+        and wherever every node is held, it changes nothing.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+        """
+
+        labels = [int(label) for label in labels]
+        self.elementDistribution.holdNodes(labels)
+        nodes = self.nodes
+        if any(label not in nodes for label in labels):
+            # making node objects is a change of the topology, also where a reader holds nodes later
+            # (a step action at the start of its step)
+            with self.topology.changes():
+                self.holdNodesOfDistribution()
+
+    def holdNodesOfDistribution(self):
+        """Make the node objects of the nodes the element distribution holds here, and drop the others
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`), keeping
+        :attr:`nodes` in mesh order; after the nodes held here changed -- elements moved between the
+        processes, or a reader holds nodes --, inside a topology change. Once the node fields exist, they
+        are resized for the nodes now held (their values kept where a node stays), and the field variables
+        of the new nodes linked.
+        """
+
+        isHeldHere = self.elementDistribution.isNodeHeldHere
+        dropped = [label for label in self.nodes if not isHeldHere(label)]
+        if dropped and not self.topology.isOpen:
+            raise TopologyError(
+                "nodes were dropped outside a topology change: node objects are created and dropped only inside "
+                "TopologyPipeline.changes()"
+            )
+        for label in dropped:
+            del self.nodes[label]
+        nodesBefore = set(self.nodes)
+        # created afresh from the first row: a node skipped before may be held now
+        self._rowsWithNodeObjects = (None, 0)
+        self.createNodesOfMesh()
+        if dropped:
+            self._nodeSetsResolvedFor = None
+            self.resolveNodeSetsOfMesh()
+        if self.nodeFields and (dropped or len(self.nodes) != len(nodesBefore)):
+            self._resizeNodeFieldsForNodes(Journal(verbose=False))
+            # every node: the resize made new arrays, of which the field variables are views
+            self._linkFieldVariableObjects(list(self.nodes.values()))
+
+    def wholeNodeSet(self, name: str, reader: str) -> NodeSet:
+        """A node set of the mesh, held whole in this process: how a model entity reading every node of a
+        set in every process -- a constraint whose copy every process holds -- reads it. Where the process
+        holds the nodes of its subdomain only, the nodes of the set are held here from now on
+        (:meth:`holdNodes`).
+
+        Parameters
+        ----------
+        name
+            The name of the node set in the mesh.
+        reader
+            What reads it, for the message of a set that is still not complete.
+
+        Returns
+        -------
+        NodeSet
+            The node set, complete.
+        """
+
+        if name not in self.mesh.nodeSets:
+            # a set of node objects a model entity made (e.g. the slave nodes a tie tied): held whole
+            nodeSet = self.nodeSets[name]
+        else:
+            self.holdNodes(self.mesh.nodeSets[name].tolist())
+            nodeSet = self.resolveNodeSetOfMesh(name)
+        nodeSet.requireComplete(reader)
+        return nodeSet
 
     def resolveNodeSetsOfMesh(self):
         """Make every node set of the mesh hold the local nodes; sets that already exist are
@@ -304,7 +411,9 @@ class FEModel:
 
     def checkNodesAgreeWithMesh(self):
         """Raise unless :attr:`nodes` holds nodes of the mesh, in mesh order, and every node of the
-        mesh (in a domain-decomposed run, too: every process holds every node, for now).
+        mesh the element distribution holds here -- every node, unless a process of a domain-decomposed run
+        holds the nodes of its subdomain only
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`).
 
         The order matters: the nodes of every field, and so the degrees of freedom, are numbered in
         the order of :attr:`nodes`, and the numbering of the mesh
@@ -318,7 +427,10 @@ class FEModel:
         """
 
         heldLabels = np.fromiter(self.nodes.keys(), dtype=np.int64, count=len(self.nodes))
+        isHeldHere = self.elementDistribution.isNodeHeldHere
         meshLabels = self.mesh.nodeLabels
+        if self.elementDistribution.holdsNodesOfSubdomainOnly:
+            meshLabels = meshLabels[np.fromiter((isHeldHere(label) for label in meshLabels.tolist()), dtype=bool)]
         if not np.array_equal(heldLabels, meshLabels):
             notDescribed = sorted(set(heldLabels.tolist()) - set(meshLabels.tolist()))
             notHeld = sorted(set(meshLabels.tolist()) - set(heldLabels.tolist()))
@@ -727,7 +839,10 @@ class FEModel:
         typeOf = self.mesh.typeOf
         for record in self.mesh.elements.values():
             for label, elementNodeFields in zip(record.nodeLabels, typeOf(record).fields):
-                node = nodes[label]
+                node = nodes.get(label)
+                if node is None:
+                    # held by another process only (see createNodesOfMesh)
+                    continue
                 nodeFields = node.fields
                 for field in elementNodeFields:
                     if field not in nodeFields:
@@ -859,6 +974,7 @@ class FEModel:
         self._populateNodeFieldVariablesFromConstraints()
 
         journal.message("Bundling fields on nodes to NodeFields", self.identification)
+        # of the nodes held here (NodeField reads the local part of a node set)
         self.nodeFields = self._createNodeFieldsFromNodes(self.nodeSets["all"], self.nodeFields.values())
 
         journal.message("Assembling ScalarVariables", self.identification)
@@ -1163,6 +1279,56 @@ class FEModel:
         finally:
             self._elementStatesFromElsewhere = None
 
+    @contextmanager
+    def nodeFieldsFromElsewhere(self, nodeFields: dict | None):
+        """A context in which a restart checkpoint reads the node fields from ``nodeFields`` instead of
+        :attr:`nodeFields`: a process that holds only some of the nodes -- in a domain-decomposed run --
+        writes a checkpoint of the whole model from the node fields gathered from the processes computing
+        the others
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldsOfWholeModel`).
+
+        Parameters
+        ----------
+        nodeFields
+            Per field, every entry at every node of the mesh carrying the field, in mesh order; None to
+            read them from :attr:`nodeFields`, as without the context.
+
+        Yields
+        ------
+        None
+        """
+
+        self._nodeFieldsFromElsewhere = nodeFields
+        try:
+            yield
+        finally:
+            self._nodeFieldsFromElsewhere = None
+
+    def nodeFieldsForCheckpoint(self) -> dict:
+        """Every entry of every node field at every node of the mesh carrying it, per field and entry, for
+        a restart checkpoint: :attr:`nodeFields` -- or the node fields given for this checkpoint
+        (:meth:`nodeFieldsFromElsewhere`).
+
+        Returns
+        -------
+        dict
+            Per field, a dict of the entries' values.
+
+        Raises
+        ------
+        TopologyError
+            If this process holds only some of the nodes, and no node fields were given.
+        """
+
+        if self._nodeFieldsFromElsewhere is not None:
+            return self._nodeFieldsFromElsewhere
+        if not self.elementDistribution.holdsEveryNodeHere:
+            raise TopologyError(
+                "A restart checkpoint reads the node fields of the whole model, but this process holds only some "
+                "of the nodes: the node fields must be gathered for it (FEModel.nodeFieldsFromElsewhere)"
+            )
+        return {nf.name: nf._values for nf in self.nodeFields.values()}
+
     def writeRestart(self, restartFile: h5py.File):
         """Write the current (converged) state of the model to a restart checkpoint.
 
@@ -1182,9 +1348,11 @@ class FEModel:
         f.attrs["time"] = self.time
 
         nodeFieldsGroup = f.create_group("nodeFields")
-        for nf in self.nodeFields.values():
-            nodeFieldGroup = nodeFieldsGroup.create_group(nf.name)
-            for entryName, entryValues in nf._values.items():
+        # In a domain-decomposed run, also the nodes held in other processes only (see
+        # nodeFieldsForCheckpoint).
+        for name, entries in self.nodeFieldsForCheckpoint().items():
+            nodeFieldGroup = nodeFieldsGroup.create_group(name)
+            for entryName, entryValues in entries.items():
                 nodeFieldGroup.create_dataset(entryName, data=entryValues)
 
         scalarVariablesGroup = f.create_group("scalarVariables")
@@ -1216,6 +1384,25 @@ class FEModel:
             recordGroup.attrs["fingerprint"] = record.fingerprint
             for entryName, entryValues in record.plan.items():
                 recordGroup.create_dataset(entryName, data=entryValues)
+
+    def _rowsOfNodeFieldsInWholeFields(self) -> dict[str, np.ndarray]:
+        """Per node field, the row of each of its nodes in the node field of the whole model -- among the
+        nodes of the mesh carrying the field, in mesh order (the numbering of
+        :class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) --: where a process holding
+        only some of the nodes finds them in a checkpoint.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            The rows, by field.
+        """
+
+        numbering = GlobalDofNumbering.ofModel(self)
+        rows = {}
+        for name, nodeField in self.nodeFields.items():
+            meshRows = self.mesh.rowsOfNodes([node.label for node in nodeField.nodes])
+            rows[name] = numbering.rankInField[name][meshRows].astype(np.int64)
+        return rows
 
     def readRestart(self, restartFile: h5py.File, journal: Journal = None):
         """Read the state of the model from a restart checkpoint written by :meth:`writeRestart`.
@@ -1264,6 +1451,11 @@ class FEModel:
         # with every change before the checkpoint was written, so a resumed run must start the same.
         self.topology.refreshMeshDependents()
 
+        # A checkpoint holds every node carrying a field, in mesh order; a process holding only some of
+        # the nodes reads their rows.
+        rowsInFields = (
+            self._rowsOfNodeFieldsInWholeFields() if self.elementDistribution.holdsNodesOfSubdomainOnly else {}
+        )
         for nf in self.nodeFields.values():
             storedField = f["nodeFields"].get(nf.name)
             if storedField is None:
@@ -1271,10 +1463,14 @@ class FEModel:
 
             # Iterate the checkpoint's entries, not the model's -- entries created only later by a
             # solver (e.g. the explicit solver's 'V') would otherwise never be restored.
+            rows = rowsInFields.get(nf.name)
             for entryName, storedValues in storedField.items():
                 if entryName not in nf:
                     nf.createFieldValueEntry(entryName)
-                storedValues.read_direct(nf[entryName])
+                if rows is None or rows.shape[0] == storedValues.shape[0]:
+                    storedValues.read_direct(nf[entryName])
+                else:
+                    nf[entryName][:] = storedValues[()][rows]
 
         for name, scalarVariable in self.scalarVariables.items():
             scalarVariable.value = f["scalarVariables"].attrs[name]

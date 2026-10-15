@@ -246,7 +246,8 @@ class StepAction(NodalLoadBase):
 
         return cls(
             name,
-            model.nodeSets[nSetName],
+            # read whole -- its prescribed values in every process (a solver acts on the part it holds)
+            model.wholeNodeSet(nSetName, name),
             configuration.field,
             cls._nodeForcesFromDefinition(configuration, getFieldSize(configuration.field, model.domainSize)),
             model,

@@ -76,14 +76,16 @@ class NodeField:
         The name of the field.
     dimension
         The dimension of the field.
-    nodes
-        The associated nodes. Only nodes with active fields are considered.
+    nodeSet
+        The associated nodes. Only nodes with active fields are considered, and of a node set only those
+        held in this process (:meth:`~edelweissfe.sets.nodeset.NodeSet.localNodes`): every node of it in a
+        serial run.
     """
 
     def __init__(self, fieldName: str, dimension: int, nodeSet: NodeSet):
         self.name = fieldName
         self.associatedSet = nodeSet
-        self.nodes = [n for n in nodeSet if fieldName in n.fields]
+        self.nodes = [n for n in nodeSet.localNodes() if fieldName in n.fields]
         self.dimension = dimension
         self._indicesOfNodesInArray = {n: i for i, n in enumerate(self.nodes)}
         self._subsetCache = dict()
@@ -103,13 +105,14 @@ class NodeField:
         Parameters
         ----------
         nodes
-            The new (possibly larger or smaller) list of nodes this NodeField is associated with.
-            Only nodes with this field active are retained, exactly as at construction.
+            The new (possibly larger or smaller) node set this NodeField is associated with.
+            Only nodes with this field active are retained, of those held in this process, exactly as
+            at construction.
         """
         oldIndicesOfNodesInArray = self._indicesOfNodesInArray
         oldValues = self._values
 
-        self.nodes = [n for n in nodes if self.name in n.fields]
+        self.nodes = [n for n in nodes.localNodes() if self.name in n.fields]
         self._indicesOfNodesInArray = {n: i for i, n in enumerate(self.nodes)}
 
         # nodes retained across the resize (e.g. AMR-untouched nodes); computed once and reused for
@@ -140,6 +143,17 @@ class NodeField:
 
     def __contains__(self, key):
         return key in self._values
+
+    def entries(self) -> list[str]:
+        """The names of the entries of the field, e.g. 'U' and 'P', in the order they were created.
+
+        Returns
+        -------
+        list[str]
+            The entry names.
+        """
+
+        return list(self._values)
 
     def indexOfNode(self, node) -> int:
         """

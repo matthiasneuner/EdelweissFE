@@ -270,8 +270,9 @@ class GlobalDofNumbering:
         return GlobalDofsOfFieldVariables(self, mesh)
 
     def nodesOfFieldsAgreeWith(self, nodeFields: dict) -> bool:
-        """Whether the node fields of a model hold, per field, the nodes of the mesh carrying it, in mesh
-        order -- the order of this numbering.
+        """Whether the node fields of a model hold, per field, nodes of the mesh carrying it, in mesh
+        order -- the order of this numbering --: every one of them, or, in a process holding only some of
+        the nodes, those it holds (a field none of them carries has no node field there).
 
         Parameters
         ----------
@@ -284,20 +285,28 @@ class GlobalDofNumbering:
             Whether they agree.
         """
 
-        if list(nodeFields) != self.fields:
+        if [field for field in self.fields if field in nodeFields] != list(nodeFields):
             return False
-        for field in self.fields:
-            nodes = nodeFields[field].nodes
+        for field, nodeField in nodeFields.items():
+            nodes = nodeField.nodes
             labels = np.fromiter((node.label for node in nodes), dtype=np.int64, count=len(nodes))
-            if not np.array_equal(labels, self.nodeLabels[self.nodesCarryingField[field]]):
+            carrying = self.nodeLabels[self.nodesCarryingField[field]]
+            if labels.shape[0] == carrying.shape[0]:
+                if not np.array_equal(labels, carrying):
+                    return False
+                continue
+            order = np.argsort(carrying, kind="stable")
+            found = np.minimum(np.searchsorted(carrying, labels, sorter=order), max(carrying.shape[0] - 1, 0))
+            places = order[found] if carrying.shape[0] else found
+            if not (carrying[places] == labels).all() or not (places[1:] > places[:-1]).all():
                 return False
         return True
 
     def requireAgreementOfSubdomain(self, dofManager, rowsOfFields: dict, nodeFields: dict, subdomainDofs: np.ndarray):
         """Raise unless a DofManager of the node fields of a subdomain numbers its degrees of freedom as
         the order-preserving compression of this numbering -- its degree of freedom ``i`` is the global
-        ``subdomainDofs[i]`` --, and unless the node fields of the model, which hold every node, are
-        ordered as this numbering.
+        ``subdomainDofs[i]`` --, and unless the node fields of the model, of the nodes held here, are
+        ordered as this numbering (:meth:`nodesOfFieldsAgreeWith`).
 
         Parameters
         ----------

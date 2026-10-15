@@ -418,10 +418,18 @@ def buildContactFacets(
         raise ValueError(f"surfaceElementGenerator: surface '{surfaceName}' is not defined.")
 
     # The source faces are read from the mesh, not from the element objects: the facets are made in
-    # every process, from the whole surface, whichever solid elements the process created.
+    # every process, from the whole surface, whichever solid elements the process created -- and so of
+    # the nodes of the elements they are cut from, which every process holds (FEModel.holdNodes).
+    numbersOfFace = model.mesh.elementNumbersOfSurface(surfaceName)
+    records = model.mesh.elements
+    model.holdNodes(
+        dict.fromkeys(
+            label for numbers in numbersOfFace.values() for number in numbers for label in records[number].nodeLabels
+        )
+    )
     sourceElementsOfFace = {
         faceNumber: [_SourceElement.ofMeshElement(model, number) for number in numbers]
-        for faceNumber, numbers in model.mesh.elementNumbersOfSurface(surfaceName).items()
+        for faceNumber, numbers in numbersOfFace.items()
     }
 
     if nodalWeights == "serendipityOptimal" and triangulation != "midside":

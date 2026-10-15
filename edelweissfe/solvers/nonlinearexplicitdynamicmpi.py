@@ -48,8 +48,11 @@ decomposition; the critical time step is the minimum over the subdomains.
 **Vectors of the subdomain.** Each process numbers and holds the vectors -- the carried vectors, the
 lumped operators -- at the degrees of freedom of its subdomain only, by a DofManager of the node
 fields of its subdomain whose numbering is the global one compressed
-(:meth:`NEDMPI.createDofManager`); the node fields keep every node and are filled from the owners
-where the whole model is read. A model with a reason against it
+(:meth:`NEDMPI.createDofManager`); its node fields are those of the nodes it holds -- in a
+distributed model those of its subdomain and those its model entities read whole
+(:mod:`~edelweissfe.domaindecomposition.distributedelements`) -- and are filled from the owners
+where the whole model is read; a per-node field output and a checkpoint gather the node fields of
+the whole model from the processes computing them. A model with a reason against it
 (:meth:`NEDMPI.reasonsForVectorsOfWholeModel`: every element on every process, adaptive refinement,
 contact, rigid bodies, scalar variables) holds vectors of the whole model
 instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
@@ -157,9 +160,8 @@ at the end of the documentation of :mod:`~edelweissfe.solvers.nonlinearexplicitd
   contact search, a topology update, writing the output -- fails on all ranks together
   (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
-**Limits of this prototype.** Every process holds the whole mesh, every node with its node fields,
-and every contact facet. A model with a reason against vectors of the subdomain holds vectors of the
-whole model in every process; a model under the whole-model rule
+**Limits of this prototype.** Every process holds the whole mesh and every contact facet. A model with a reason against vectors of the subdomain holds vectors
+of the whole model, and every node, in every process; a model under the whole-model rule
 (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements`) holds every
 element in every process, so that its memory per process does not shrink with the number of
 processes. The topology of a refinement costs every process what it costs a serial run. Constraints
@@ -198,6 +200,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
 )
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.modelmodifiers.base.modelmodifierbase import fieldOutputsReadByAll
+from edelweissfe.models.elementdistribution import nodeFieldValuesHere
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.exactsum import ExactSum
@@ -470,6 +473,11 @@ class NEDMPI(NEDParallel):
         """
 
         reasons = self.reasonsForVectorsOfWholeModel(model)
+        if reasons and model.elementDistribution.holdsNodesOfSubdomainOnly:
+            raise RuntimeError(
+                "Each process holds the nodes of its subdomain only (reasonsToHoldEveryNode found no reason in the "
+                "input), but the model needs vectors of the whole model because: {:}".format("; ".join(reasons))
+            )
         self._vectorsOfSubdomain = not reasons
         self.domainDecomposition.vectorsOfSubdomain = self._vectorsOfSubdomain
         self.journal.message(
@@ -1265,7 +1273,7 @@ class NEDMPI(NEDParallel):
         """
 
         if self.vectorsOfSubdomain:
-            # the vectors hold nothing else; the node fields hold every node
+            # the vectors hold nothing else; the node fields hold more nodes than the subdomain's
             for slot in self._integratedNodeFieldSlots:
                 for entry in self._system.carried:
                     values = slot.nodeField[entry].reshape(-1)
@@ -1512,9 +1520,13 @@ class NEDMPI(NEDParallel):
                 any(manager.writesCheckpointAtNextIncrement() for manager in outputManagers), root=0
             )
 
+            # A process holding the nodes of its subdomain only holds only some rows of the node fields.
+            gathersNodeFields = gathersStates and model.elementDistribution.holdsNodesOfSubdomainOnly
+
             with self.communicator.allRanksFailTogether("Reading the output"):
                 fieldOutputController.readResultsHere()
                 statesHere = self.domainDecomposition.elementStatesOwnedHere(model) if gathersStates else None
+                nodeFieldsHere = nodeFieldValuesHere(model) if gathersNodeFields else None
 
             fieldOutputController.gatherResultsOfWholeSet(
                 readOnEveryProcess=self.fieldOutputsGatheredToEveryProcess(),
@@ -1522,8 +1534,17 @@ class NEDMPI(NEDParallel):
             )
             with performancetiming.timeit("gather states"):
                 states = self.domainDecomposition.gatherElementStatesToRoot(statesHere) if gathersStates else None
+                nodeFields = (
+                    model.elementDistribution.nodeFieldsOfWholeModel(model, nodeFieldsHere)
+                    if gathersNodeFields
+                    else None
+                )
 
-            with model.elementStatesFromElsewhere(states), self.communicator.allRanksFailTogether("Writing the output"):
+            with (
+                model.elementStatesFromElsewhere(states),
+                model.nodeFieldsFromElsewhere(nodeFields),
+                self.communicator.allRanksFailTogether("Writing the output"),
+            ):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
@@ -1610,8 +1631,10 @@ class NEDMPI(NEDParallel):
     def _publishWholeVector(self, model: FEModel, entry: str, whole: np.ndarray):
         """Publish a vector of the whole model, in global order
         (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.wholeVector`), into
-        an entry of every node field: each field holds the range of its degrees of freedom in the global
-        numbering, its nodes in its order.
+        an entry of every node field: a field holding every node carrying it holds the range of its degrees
+        of freedom in the global numbering, its nodes in its order; a field of the nodes held here
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`) their degrees
+        of freedom.
 
         Parameters
         ----------
@@ -1629,7 +1652,11 @@ class NEDMPI(NEDParallel):
                 nodeField.createFieldValueEntry(entry)
             values = nodeField[entry]
             first = numbering.firstDofOfField[field]
-            values[:] = whole[first : first + values.size].reshape(values.shape)
+            if values.size == np.count_nonzero(numbering.nodesCarryingField[field]) * numbering.dimensionOfField[field]:
+                values[:] = whole[first : first + values.size].reshape(values.shape)
+            else:
+                # the nodes of the field held here
+                values[:] = whole[numbering.dofsAtNodes(field, self._meshRowsOfNodeField(model, nodeField))]
 
     def _subdomainNodeFieldSlots(self, model: FEModel) -> list[NodeFieldSlot]:
         """Where the degrees of freedom of vectors of the subdomain are published in the node fields of the
@@ -1646,18 +1673,38 @@ class NEDMPI(NEDParallel):
             One slot per node field.
         """
 
-        numbering = self.domainDecomposition.numbering
         rowsOfFields = self.domainDecomposition.rowsOfSubdomainNodeFields
         slots = []
         for field, nodeField in model.nodeFields.items():
             dofs = self.theDofManager.idcsOfFieldsInDofVector[field]
-            ranks = numbering.rankInField[field][rowsOfFields[field]].astype(np.int64)
-            if ranks.shape[0] == len(nodeField.nodes):
+            subdomainRows = rowsOfFields[field]
+            if subdomainRows.shape[0] == len(nodeField.nodes):
                 positions = slice(None)
             else:
-                positions = (ranks[:, None] * nodeField.dimension + np.arange(nodeField.dimension)).ravel()
+                # the places of the subdomain's nodes among the nodes of the node field, both in mesh order
+                placed = np.searchsorted(self._meshRowsOfNodeField(model, nodeField), subdomainRows)
+                positions = (placed[:, None] * nodeField.dimension + np.arange(nodeField.dimension)).ravel()
             slots.append(NodeFieldSlot(nodeField, positions, dofs))
         return slots
+
+    @staticmethod
+    def _meshRowsOfNodeField(model: FEModel, nodeField: NodeField) -> np.ndarray:
+        """The rows in the mesh of the nodes of a node field of the model, in its order -- mesh order.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        nodeField
+            The node field.
+
+        Returns
+        -------
+        np.ndarray
+            The rows.
+        """
+
+        return model.mesh.rowsOfNodes([node.label for node in nodeField.nodes])
 
     def _partOfNodeSetHere(self, nodeSet, field: str) -> tuple[np.ndarray, np.ndarray]:
         """The part of a node set whose degrees of freedom of a field the vectors of the subdomain hold: its
@@ -2075,7 +2122,7 @@ class NEDMPI(NEDParallel):
         with performancetiming.timeit("gather solution"):
             for entry, vector in carried.items():
                 if self.vectorsOfSubdomain:
-                    # gathered for this synchronization only, into the node fields, which hold every node
+                    # gathered for this synchronization only, into the node fields, at the nodes held here
                     whole = self.domainDecomposition.wholeVector(vector, toEveryProcess)
                     if whole is not None:
                         self._publishWholeVector(model, entry, whole)

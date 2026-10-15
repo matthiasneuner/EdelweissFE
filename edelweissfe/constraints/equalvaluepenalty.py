@@ -128,7 +128,8 @@ class Constraint(ConstraintBase, MeshDependent):
         :class:`~edelweissfe.constraints.base.constraintbase.ConstraintBase` for why this is
         separate from ``__init__``."""
         configuration = buildSchemaFromOptions(cls.schema, definition)
-        return cls(name, model, model.nodeSets[configuration.nSet], configuration=configuration)
+        # its copy is held by every process, which therefore holds the nodes of the set
+        return cls(name, model, model.wholeNodeSet(configuration.nSet, name), configuration=configuration)
 
     def _rebuildDerivedState(self):
         """(Re)derive every quantity sized to the constrained node set -- the node count, ``nDof``,

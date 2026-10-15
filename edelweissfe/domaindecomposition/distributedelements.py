@@ -59,7 +59,11 @@ from edelweissfe.domaindecomposition.partitioning import (
     processOfAuxiliaryElement,
 )
 from edelweissfe.journal.journal import Journal
-from edelweissfe.models.elementdistribution import ElementDistribution
+from edelweissfe.models.elementdistribution import (
+    ElementDistribution,
+    assembleNodeFields,
+    assembleNodeValues,
+)
 from edelweissfe.models.mesh import Mesh, MeshElement
 from edelweissfe.utils.exceptions import TopologyError
 
@@ -142,6 +146,49 @@ def reasonsToReplicateElements(inputfile: dict) -> list[str]:
     return reasons
 
 
+def reasonsToHoldEveryNode(inputfile: dict) -> list[str]:
+    """Why every process of a distributed job must hold every node -- a node object, with its fields,
+    for every node of the mesh -- instead of the nodes of its subdomain: what reads, or changes, nodes
+    outside a subdomain during a run, read from the input before any node exists. These are the reasons
+    for vectors of the whole model
+    (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.reasonsForVectorsOfWholeModel`,
+    which checks that the two agree), as far as the input names them:
+
+    * **a model modifier changing the mesh** (``initiatesTopologyChanges``, e.g. ``hAdaptivity``): its
+      refinement reads the node fields of the whole model;
+    * **a constraint searching its connectivity** (contact,
+      :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.searchesConnectivity`): a search
+      may couple nodes of another subdomain;
+    * **a generator making rigid bodies**
+      (:attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.makesRigidBodies`): every process
+      moves the surface of a rigid body from its reference node.
+
+    Parameters
+    ----------
+    inputfile
+        The parsed input file.
+
+    Returns
+    -------
+    list[str]
+        The reasons; empty if each process may hold the nodes of its subdomain only.
+    """
+
+    reasons = []
+    for definition in inputfile["modelModifier"]:
+        if getModelModifierClass(definition["type"]).initiatesTopologyChanges:
+            reasons.append("model modifier {:} ({:}) changes the mesh".format(definition["name"], definition["type"]))
+    for definition in inputfile["constraint"]:
+        if getConstraintClass(definition["type"]).searchesConnectivity:
+            reasons.append(
+                "constraint {:} ({:}) searches its connectivity".format(definition["name"], definition["type"])
+            )
+    for definition in inputfile["modelGenerator"]:
+        if getGeneratorClass(definition["generator"]).makesRigidBodies:
+            reasons.append("generator {:} ({:}) makes rigid bodies".format(definition["name"], definition["generator"]))
+    return reasons
+
+
 def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDistribution:
     """How the processes of this job hold the model; decided once per job, and reported once.
 
@@ -180,7 +227,18 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
         "DomainDecomposition",
         0,
     )
-    return DistributedElements(worldCommunicator())
+    nodeReasons = reasonsToHoldEveryNode(inputfile)
+    journal.message(
+        (
+            "Nodes of the subdomain: each process holds the nodes of its elements and those its model entities "
+            "read whole"
+            if not nodeReasons
+            else "Every node on every process because: " + "; ".join(nodeReasons)
+        ),
+        "DomainDecomposition",
+        0,
+    )
+    return DistributedElements(worldCommunicator(), holdsNodesOfSubdomainOnly=not nodeReasons)
 
 
 class DistributedElements(ElementDistribution):
@@ -190,13 +248,25 @@ class DistributedElements(ElementDistribution):
     ----------
     communicator
         The communicator of the processes sharing the model.
+    holdsNodesOfSubdomainOnly
+        Whether each process holds only the nodes of its subdomain; see :func:`reasonsToHoldEveryNode`.
     """
 
     replicatesElements = False
 
-    def __init__(self, communicator):
+    def __init__(self, communicator, holdsNodesOfSubdomainOnly: bool = False):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
+        self.holdsNodesOfSubdomainOnly = holdsNodesOfSubdomainOnly
+        #: Where this process holds the nodes of its subdomain only: the labels of the nodes of the elements
+        #: it creates (:meth:`decideLocalElements`); None where it holds every node.
+        self._nodesOfLocalElements = None
+        #: The labels of the nodes held here whatever the elements, because a model entity reads them
+        #: whole (:meth:`holdNodes`).
+        self._nodesHeldForReaders = set()
+        #: The nodes this process contributes the values of (:meth:`nodesProvidingValuesHere`), with the
+        #: mesh and ownership they were derived for; None before.
+        self._nodesProvidingValues = None
 
         #: The rank of every element of the mesh, by number: the process computing it.
         self.owners = None
@@ -228,6 +298,66 @@ class DistributedElements(ElementDistribution):
         self.owners = partitionElementsOfMesh(mesh, self.communicator.Get_size(), domainSize, self.communicator)
 
         self._localElements = self._localElementsFor(mesh, self.owners)
+        self._holdNodesOfLocalElements(mesh)
+
+    def _holdNodesOfLocalElements(self, mesh: Mesh):
+        """Where this process holds the nodes of its subdomain only: hold the nodes of the elements it
+        creates (:attr:`_localElements`).
+
+        Parameters
+        ----------
+        mesh
+            The mesh.
+        """
+
+        if not self.holdsNodesOfSubdomainOnly:
+            return
+        records = mesh.elements
+        self._nodesOfLocalElements = {label for number in self._localElements for label in records[number].nodeLabels}
+
+    @property
+    def holdsEveryNodeHere(self) -> bool:
+        """Whether this process holds every node of the mesh; see
+        :attr:`~edelweissfe.models.elementdistribution.ElementDistribution.holdsEveryNodeHere`.
+
+        Returns
+        -------
+        bool
+            Whether every node is held here.
+        """
+
+        return self._nodesOfLocalElements is None
+
+    def isNodeHeldHere(self, label: int) -> bool:
+        """Whether this process holds the node with the given label: every node, unless it holds the nodes
+        of its subdomain only -- those of its elements and those held for a reader (:meth:`holdNodes`).
+        See :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`.
+
+        Parameters
+        ----------
+        label
+            The node label.
+
+        Returns
+        -------
+        bool
+            Whether it is held here.
+        """
+
+        nodesOfElements = self._nodesOfLocalElements
+        return nodesOfElements is None or label in nodesOfElements or label in self._nodesHeldForReaders
+
+    def holdNodes(self, labels):
+        """Hold the given nodes here from now on, whichever elements this process creates; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+        """
+
+        self._nodesHeldForReaders.update(int(label) for label in labels)
 
     def _localElementsFor(self, mesh: Mesh, owners: dict) -> set:
         """The numbers of the elements this process creates under a partition: its own, and every
@@ -340,6 +470,10 @@ class DistributedElements(ElementDistribution):
             for number in toDrop:
                 model.dropElementOfMesh(number)
             model.resolveSetsAndSurfacesOfMesh()
+            # the nodes follow the elements: those of the new elements are made, those of none dropped
+            self._localElements = createdHere
+            self._holdNodesOfLocalElements(mesh)
+            model.holdNodesOfDistribution()
             created = {number: model.createElementOfMesh(number) for number in toCreate}
         model.putElementsInMeshOrder()
         model.resolveSetsAndSurfacesOfMesh()
@@ -365,6 +499,11 @@ class DistributedElements(ElementDistribution):
         self.owners[childNumber] = owner
         if owner == self.rank:
             self._localElements.add(childNumber)
+            if self._nodesOfLocalElements is not None:
+                raise TopologyError(
+                    "a process holding the nodes of its subdomain only cannot refine: a model modifier changing "
+                    "the mesh requires every node on every process (reasonsToHoldEveryNode)"
+                )
 
     def placeAuxiliaryElement(self, record: MeshElement):
         """An auxiliary element -- a contact facet, the point mass of a rigid body -- is
@@ -381,6 +520,8 @@ class DistributedElements(ElementDistribution):
         """
 
         self._localElements.add(record.number)
+        if self._nodesOfLocalElements is not None:
+            self._nodesOfLocalElements.update(record.nodeLabels)
         if self.owners is not None:
             self.owners[record.number] = processOfAuxiliaryElement(record, self.owners)
 
@@ -474,6 +615,89 @@ class DistributedElements(ElementDistribution):
         """
 
         return [element for element in elements if self.owners[element.elNumber] == self.rank]
+
+    def nodesProvidingValuesHere(self, model) -> set:
+        """The labels of the nodes of the elements this process computes -- whose degrees of freedom it
+        integrates, so that its node fields hold them current --: the nodes whose values it contributes
+        when the values of nodes are gathered; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodesProvidingValuesHere`. A
+        node of the mesh carrying a field is a node of an element computed by some process.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        set
+            The node labels.
+        """
+
+        key = (model.mesh, model.mesh.elementsVersion, self.ownershipVersion)
+        if self._nodesProvidingValues is None or self._nodesProvidingValues[0] != key:
+            records = model.mesh.elements
+            labels = {
+                label
+                for number, owner in self.owners.items()
+                if owner == self.rank
+                for label in records[number].nodeLabels
+            }
+            self._nodesProvidingValues = (key, labels)
+        return self._nodesProvidingValues[1]
+
+    def nodeValuesOfWholeSet(
+        self, labels: np.ndarray, labelsHere: np.ndarray, valuesHere: np.ndarray, toEveryProcess: bool = True
+    ) -> np.ndarray | None:
+        """Collective. The values of nodes, in the order given, gathered from the rows each process
+        contributes, to every process or to rank 0 only; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeValuesOfWholeSet`.
+
+        Parameters
+        ----------
+        labels
+            The labels of the nodes whose values are gathered, in the order of the result.
+        labelsHere
+            The labels of the nodes whose values this process contributes.
+        valuesHere
+            Their values, one row per node.
+        toEveryProcess
+            Whether every process receives the values, or rank 0 only.
+
+        Returns
+        -------
+        np.ndarray | None
+            The values, one row per node of ``labels``; None on a process other than rank 0, if
+            gathered to rank 0 only.
+        """
+
+        piece = (np.asarray(labelsHere, dtype=np.int64), valuesHere)
+        pieces = self.communicator.allgather(piece) if toEveryProcess else self.communicator.gather(piece, root=0)
+        if pieces is None:
+            return None
+        return assembleNodeValues(labels, pieces)
+
+    def nodeFieldsOfWholeModel(self, model, piece: dict, toEveryProcess: bool = False) -> dict | None:
+        """Collective. The node fields of the whole model, gathered to rank 0 or to every process; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldsOfWholeModel`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        piece
+            The piece of this process (:func:`~edelweissfe.models.elementdistribution.nodeFieldValuesHere`).
+        toEveryProcess
+            Whether every process receives them, or rank 0 only.
+
+        Returns
+        -------
+        dict | None
+            Per field, a dict of the entries' values; None in a process not receiving them.
+        """
+
+        pieces = self.communicator.allgather(piece) if toEveryProcess else self.communicator.gather(piece, root=0)
+        return None if pieces is None else assembleNodeFields(model, pieces)
 
     def resultsOfWholeSet(
         self, elementSet, numbersOwnedHere: list, results: np.ndarray | None, toEveryProcess: bool = True

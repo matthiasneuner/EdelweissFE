@@ -45,6 +45,7 @@ from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
 )
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.models.elementdistribution import nodeFieldValuesHere
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 matplotlib.use("Agg")
@@ -151,7 +152,15 @@ def main():
             model, fieldOutputController = finiteElementSimulation(inputFile, verbose=False, suppressPlots=True)
             toc = timer()
 
-            u = [f["U"].flatten() for f in model.nodeFields.values()]
+            if model.elementDistribution.holdsNodesOfSubdomainOnly:
+                # each process holds the nodes of its subdomain only: the solution of the whole model,
+                # gathered to every process, which all reach the verdict
+                fields = model.elementDistribution.nodeFieldsOfWholeModel(
+                    model, nodeFieldValuesHere(model), toEveryProcess=True
+                )
+                u = [entries["U"].flatten() for entries in fields.values()]
+            else:
+                u = [f["U"].flatten() for f in model.nodeFields.values()]
             sv = [v.value for v in model.scalarVariables.values()]
 
             U = np.hstack(u + sv).flatten()

@@ -145,6 +145,18 @@ class ElementSet(LocalOrderedSet):
 
         return [element.elNumber for element in self]
 
+    def nodeLabelsOfWholeSet(self) -> list:
+        """The labels of the nodes of every element of the set, without duplicates, in the order the
+        elements list them (:meth:`extractNodeSet`): here, of its nodes.
+
+        Returns
+        -------
+        list
+            The node labels.
+        """
+
+        return [node.label for node in self.extractNodeSet()]
+
     def extractNodeSet(
         self,
     ):
@@ -288,9 +300,21 @@ class ElementSetOfMesh(ElementSet):
         NodeSet
             The nodes, named like the set.
         """
+        return NodeSet(self.name, [self.nodesOfModel[label] for label in self.nodeLabelsOfWholeSet()])
+
+    def nodeLabelsOfWholeSet(self) -> list:
+        """The labels of the nodes of every element of the set, without duplicates, in the order the
+        elements list them -- also of the elements not local here, and of nodes not held here --,
+        read from the mesh.
+
+        Returns
+        -------
+        list
+            The node labels.
+        """
+
         records = self.mesh.elements
-        labels = dict.fromkeys(label for number in self._numbersInMesh() for label in records[number].nodeLabels)
-        return NodeSet(self.name, [self.nodesOfModel[label] for label in labels])
+        return list(dict.fromkeys(label for number in self._numbersInMesh() for label in records[number].nodeLabels))
 
 
 class ElementSetOfSurfaceFace(ElementSetOfMesh):

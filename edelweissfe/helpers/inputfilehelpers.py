@@ -149,6 +149,27 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
                 )
                 continue
 
+            if not model.elementDistribution.holdsEveryNodeHere:
+                # A process holding the nodes of its subdomain only gathers the result from the processes
+                # computing the nodes of the set (the whole field: the node set of every node).
+                if definition["nSet"]:
+                    associatedSet = model.nodeSets[definition["nSet"]]
+                elif definition["elSet"]:
+                    associatedSet = model.elementSets[definition["elSet"]]
+                else:
+                    associatedSet = model.nodeSets["all"]
+                fieldOutputController.addGatheredPerNodeFieldOutput(
+                    name=definition["name"],
+                    fieldName=field,
+                    associatedSet=associatedSet,
+                    result=definition["result"],
+                    saveHistory=definition["saveHistory"],
+                    f_x=f_of_x,
+                    export=definition["export"],
+                    fExport_x=f_export_of_x,
+                )
+                continue
+
             nodeField = model.nodeFields[field]
 
             subset = None
@@ -376,10 +397,11 @@ def _fillFEModelFromInputFile(model: FEModel, inputfile: dict, journal: Journal)
     model = abqModelConstructor.createGeometryFromInputFile(model, inputfile)
 
     # The mesh is described: decide which of its elements this process creates -- every one, unless
-    # a domain-decomposed run distributes them over its processes -- and make them, and the nodes
-    # (every process holds every node, for now).
+    # a domain-decomposed run distributes them over its processes -- and make them, and the nodes it
+    # holds: every node, unless a process holds the nodes of its subdomain only (a generator that made
+    # node objects before -- the contact facets -- keeps those it holds; the others are dropped).
     model.elementDistribution.decideLocalElements(model.mesh, model.domainSize)
-    model.createNodesOfMesh()
+    model.holdNodesOfDistribution()
     model.createElementsOfMesh()
 
     # The base mesh is complete here, and it numbers its nodes and elements from the input file

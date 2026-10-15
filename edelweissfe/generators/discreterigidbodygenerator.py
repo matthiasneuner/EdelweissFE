@@ -120,6 +120,9 @@ class Generator(GeneratorBase):
     #: The point mass is an element of its own; see GeneratorBase.describesElementsOfMesh.
     describesElementsOfMesh = False
 
+    #: See GeneratorBase.makesRigidBodies.
+    makesRigidBodies = True
+
     #: Option schema for this generator, per OptionSchemaProvider.
     schema = DiscreteRigidBodyGeneratorSchema
 

@@ -251,7 +251,8 @@ class StepAction(DirichletBase):
 
         return cls(
             name,
-            model.nodeSets[nSetName],
+            # read whole -- its prescribed values in every process (a solver acts on the part it holds)
+            model.wholeNodeSet(nSetName, name),
             configuration.field,
             cls._prescribedComponentsFromDefinition(configuration, getFieldSize(configuration.field, model.domainSize)),
             model,

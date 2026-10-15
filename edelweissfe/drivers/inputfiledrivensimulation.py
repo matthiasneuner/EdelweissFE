@@ -196,7 +196,7 @@ def finiteElementSimulation(
                 nodeField.createFieldValueEntry("V")
                 nodeField.createFieldValueEntry("A")
 
-        model._linkFieldVariableObjects(model.nodeSets["all"])
+        model._linkFieldVariableObjects(model.nodeSets["all"].localNodes())
 
         # *restart, readFrom=...: resume from a checkpoint. Reconstruct-then-overwrite, not full
         # serialization -- the model above was already rebuilt from this same .inp file, and

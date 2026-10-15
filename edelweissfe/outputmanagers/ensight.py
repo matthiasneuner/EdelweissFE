@@ -732,6 +732,70 @@ class EnsightChunkWiseCase:
                     )
 
 
+@dataclass(frozen=True, eq=False)
+class NodeOfMesh:
+    """A node as the mesh describes it -- its label and reference coordinates --, drawn where this
+    process holds no node object of it: a process of a domain-decomposed run holding the nodes of its
+    subdomain only draws the whole model from the mesh (in such a model nothing moves a node away from
+    its reference coordinates, which a rigid body would). Compared by identity, as a node object is.
+
+    Parameters
+    ----------
+    label
+        The node label.
+    coordinates
+        The reference coordinates.
+    """
+
+    label: int
+    coordinates: np.ndarray
+
+
+def nodesOfMeshByLabel(labels, model: FEModel) -> dict:
+    """The nodes of the given labels as the mesh describes them (:class:`NodeOfMesh`), one per label.
+
+    Parameters
+    ----------
+    labels
+        The node labels.
+    model
+        The model tree.
+
+    Returns
+    -------
+    dict
+        The nodes, by label.
+    """
+
+    labels = list(dict.fromkeys(int(label) for label in labels))
+    coordinates = model.mesh.nodeCoordinates[model.mesh.rowsOfNodes(labels)] if labels else []
+    return {label: NodeOfMesh(label, coordinates[i]) for i, label in enumerate(labels)}
+
+
+def visualizedNodesOf(nodeSet: NodeSet, model: FEModel) -> list:
+    """The nodes of a node set: the node objects; where only part of the set is held in this process,
+    the nodes of the whole set as the mesh describes them (:class:`NodeOfMesh`).
+
+    Parameters
+    ----------
+    nodeSet
+        The node set.
+    model
+        The model tree.
+
+    Returns
+    -------
+    list
+        The nodes, in set order.
+    """
+
+    if nodeSet.isComplete:
+        return list(nodeSet)
+    labels = nodeSet.nodeLabelsOfWholeSet()
+    nodes = nodesOfMeshByLabel(labels, model)
+    return [nodes[label] for label in labels]
+
+
 def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
     """The number, shape and visualization nodes of every element of a set.
 
@@ -739,7 +803,7 @@ def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
     domain-decomposed run), from the mesh instead, which describes the whole set -- its element
     numbers, as the set reads them (:meth:`~edelweissfe.sets.elementset.ElementSet.elementNumbersOfWholeSet`:
     a named set of the mesh, or a face of a surface listed by element numbers), and the nodes of each,
-    which are its visualization nodes.
+    which are its visualization nodes, as the mesh describes them (:class:`NodeOfMesh`).
 
     Parameters
     ----------
@@ -757,7 +821,8 @@ def visualizedElementsOf(elementSet: ElementSet, model: FEModel) -> list[tuple]:
     if elementSet.isComplete:
         return [(element.elNumber, element.ensightType, element.visualizationNodes) for element in elementSet]
 
-    mesh, nodes = model.mesh, model.nodes
+    mesh = model.mesh
+    nodes = nodesOfMeshByLabel(elementSet.nodeLabelsOfWholeSet(), model)
     return [
         (
             number,
@@ -959,7 +1024,7 @@ class OutputManager(OutputManagerBase):
         self._transientCfg = transient
         # The geometry and the results cover the whole model: the geometry from the mesh where a
         # process created only part of it, the results from the field outputs, which gather theirs.
-        self._initialMeshSignature = (len(self.model.mesh.elements), len(self.model.nodes))
+        self._initialMeshSignature = (len(self.model.mesh.elements), self.model.mesh.nNodes)
         self._meshSignature = None
         self._buildVariableJobs()
 
@@ -1179,7 +1244,7 @@ class OutputManager(OutputManagerBase):
         self.timeAtLastOutput = model.time
 
         # rebuild parts + variable jobs if the mesh changed (AMR), so geometry and variables match
-        signature = (len(model.mesh.elements), len(model.nodes))
+        signature = (len(model.mesh.elements), model.mesh.nNodes)
         mesh_changed = False
 
         if self._meshSignature is None:
@@ -1346,7 +1411,7 @@ class OutputManager(OutputManagerBase):
 
         nodeSetParts = []
         for setName, nodeSet in nodeSets.items():
-            nodeSetPart = createUnstructuredPartFromNodeSet(setName, nodeSet, partCounter)
+            nodeSetPart = createUnstructuredPartFromNodeSet(setName, visualizedNodesOf(nodeSet, model), partCounter)
             self.nSetToEnsightPartMappings[setName] = nodeSetPart
             nodeSetParts.append(nodeSetPart)
             partCounter += 1

@@ -820,6 +820,7 @@ def test_the_net_force_outside_the_subdomain_is_never_read(tmp_path):
 _VECTORS_OF_SUBDOMAIN_SCRIPT = """
 import contextlib, io, os, sys
 import numpy as np
+import edelweissfe.domaindecomposition.distributedelements as distributedelements
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
@@ -827,7 +828,9 @@ from edelweissfe.utils.inputfileparser import parseInputFile
 
 rank = worldCommunicator().Get_rank()
 reasons = NEDMPI.__dict__["reasonsForVectorsOfWholeModel"]
+nodeReasons = distributedelements.reasonsToHoldEveryNode
 sizes = []
+nodesHeld = []
 createDofManager = NEDMPI.createDofManager
 
 
@@ -840,29 +843,45 @@ def recordingSize(self, model):
 NEDMPI.createDofManager = recordingSize
 
 
-def finalFields(directory):
+def finalFields(directory, labels=None):
     os.chdir(directory)
     with contextlib.redirect_stdout(io.StringIO()):
         model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
-    return np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+    nodesHeld.append(len(model.nodes))
+    held = set(model.nodes) if labels is None else labels
+    # the node fields at the nodes held with vectors of the subdomain, which hold those of its subdomain only
+    return held, np.hstack(
+        [
+            f[e][[i for i, node in enumerate(f.nodes) if node.label in held]].flatten()
+            for e in ("U", "P", "V")
+            for f in model.nodeFields.values()
+            if e in f
+        ]
+    )
 
 
 for directory in sys.argv[1:]:
     sizes.clear()
-    ofSubdomain = finalFields(directory)
+    nodesHeld.clear()
+    held, ofSubdomain = finalFields(directory)
     sizeOfSubdomain = sizes[0]
     NEDMPI.reasonsForVectorsOfWholeModel = staticmethod(lambda model: ["a test"])
+    distributedelements.reasonsToHoldEveryNode = lambda inputfile: ["a test"]
     sizes.clear()
-    ofWholeModel = finalFields(directory)
+    _, ofWholeModel = finalFields(directory, held)
     NEDMPI.reasonsForVectorsOfWholeModel = reasons
+    distributedelements.reasonsToHoldEveryNode = nodeReasons
     same = np.array_equal(ofSubdomain.view(np.int64), ofWholeModel.view(np.int64))
-    print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", sizeOfSubdomain < sizes[0], flush=True)
+    # never more nodes than with every node held
+    fewerNodes = nodesHeld[0] <= nodesHeld[1]
+    print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", sizeOfSubdomain < sizes[0], fewerNodes, flush=True)
 """
 
 
 def test_vectors_of_the_subdomain_give_the_bits_of_vectors_of_the_whole_model(tmp_path):
     # A process numbering only the degrees of freedom of its subdomain -- the global numbering,
-    # compressed -- computes the same bits as one holding vectors of the whole model: the elements,
+    # compressed -- and holding only the nodes of its subdomain computes the same
+    # bits as one holding vectors of the whole model and every node: the elements,
     # a constraint force, Dirichlet conditions on node sets split between the processes, the output, a
     # tie (the multi-point-constraint transformation of the subdomain).
     decks = ["NED", "NEDEqualValuePenalty", "NEDNodeForcesSplit", "TieNED"]
@@ -888,7 +907,7 @@ def test_vectors_of_the_subdomain_give_the_bits_of_vectors_of_the_whole_model(tm
     ).stdout
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
     assert reports == sorted(
-        "PROCESS {:} {:} SAME True".format(rank, deck) for rank in range(3) for deck in decks
+        "PROCESS {:} {:} SAME True True".format(rank, deck) for rank in range(3) for deck in decks
     ), output
 
 
@@ -2457,8 +2476,13 @@ with contextlib.redirect_stdout(journal):
     model, fieldOutputs = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
 failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.getvalue().splitlines() if "failed" in line]
 print("PROCESS", processRank(), failures, flush=True)
+nodeFields = {name: field for name, field in model.nodeFields.items()}
+if model.elementDistribution.holdsNodesOfSubdomainOnly:
+    # each process holds the nodes of its subdomain only: the node fields of the whole model, gathered
+    from edelweissfe.models.elementdistribution import nodeFieldValuesHere
+    nodeFields = model.elementDistribution.nodeFieldsOfWholeModel(model, nodeFieldValuesHere(model))
 if processRank() == 0:
-    final = {name + " " + entry: field[entry] for name, field in model.nodeFields.items() for entry in ("U", "V", "P")}
+    final = {name + " " + entry: field[entry] for name, field in nodeFields.items() for entry in ("U", "V", "P")}
     final |= {name: np.asarray(output.getLastResult()) for name, output in fieldOutputs.fieldOutputs.items()}
     np.savez("final.npz", **final)
 """
@@ -2842,3 +2866,57 @@ def test_a_constraint_is_evaluated_by_the_process_holding_most_of_its_nodes():
     nodeRows = {"most on 1": [1, 2, 3], "a tie of 1 and 2": [0, 2], "on no element": [5], "majority 0": [3, 4, 5]}
     owners = assignConstraintsByMajority(nodeRows, lowest, 3)
     assert owners == {"most on 1": 1, "a tie of 1 and 2": 2, "on no element": 2, "majority 0": 0}
+
+
+#: Runs the deck in this directory to its end, quietly.
+_RUN_QUIETLY_SCRIPT = """
+import contextlib, io
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+with contextlib.redirect_stdout(io.StringIO()):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+"""
+
+
+def test_processes_holding_the_nodes_of_their_subdomains_write_the_output_of_a_serial_run(tmp_path):
+    # Each process holds the nodes of its subdomain only, rank 0 too: the per-node field outputs gather
+    # their results by node, Ensight draws the nodes rank 0 holds no object of from the mesh. The Ensight
+    # files -- geometry, per-node and per-element variables -- and the exports are those of a serial run,
+    # byte for byte.
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    deck = open(os.path.join(testfiles, "edelweiss-only", "NEDNodeForcesSplit", "test.inp")).read()
+    deck = deck.replace(
+        "*output, type=monitor, name=monitor",
+        ">>perNode, name=displacement, elSet=all, field=displacement, result=U, export=displacement\n"
+        ">>perNode, name=force, nSet=gen_right, field=displacement, result=P\n"
+        ">>perElement, name=stress, elSet=all, result=stress, quadraturePoint=0\n\n"
+        "*output, type=ensight, name=esExport\n"
+        ">>perNode, fieldOutput=displacement\n"
+        ">>perNode, fieldOutput=force\n"
+        ">>perElement, fieldOutput=stress\n"
+        ">>configuration, overwrite=yes\n\n"
+        "*output, type=monitor, name=monitor",
+    )
+    serial, decomposed = tmp_path / "serial", tmp_path / "decomposed"
+    for directory, solver in ((serial, "NED"), (decomposed, "NEDMPI")):
+        directory.mkdir()
+        (directory / "test.inp").write_text(deck.replace("solver=NEDMPI", "solver=" + solver))
+        (directory / "run.py").write_text(_RUN_QUIETLY_SCRIPT)
+
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    subprocess.run([sys.executable, "run.py"], cwd=serial, env=environment, check=True, timeout=180)
+    output, exitCode = _runUnderMPI(decomposed, 3)
+    if output is None:
+        pytest.fail("the job on 3 processes did not end")
+    assert exitCode == 0, output
+
+    written = sorted(
+        str(path.relative_to(serial))
+        for path in serial.rglob("*")
+        if path.is_file() and path.name not in ("test.inp", "run.py")
+    )
+    assert any(name.startswith("esExport/geometry") for name in written) and "displacement.csv" in written
+    assert [name for name in written if (serial / name).read_bytes() != (decomposed / name).read_bytes()] == []
