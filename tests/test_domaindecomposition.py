@@ -2741,3 +2741,29 @@ def test_the_kinetic_energy_and_the_momentum_are_the_same_bits_on_any_number_of_
     assert "kineticEnergy" in kinds and (deck.endswith("AMR") <= ("momentum" in kinds)), serial
     for nProcesses in (2, 3):
         assert records[nProcesses] == [serial] * nProcesses, nProcesses
+
+
+def test_a_constraint_is_evaluated_by_the_process_holding_most_of_its_nodes():
+    from edelweissfe.domaindecomposition.partitioning import (
+        assignConstraints,
+        assignConstraintsByMajority,
+        lowestProcessAtNodes,
+    )
+    from edelweissfe.models.mesh import ElementGroup, ElementTypeInfo, MeshConnectivity
+
+    # Four two-node elements in a row, on processes 2, 1, 1, 0; node 5 belongs to no element.
+    typeInfo = ElementTypeInfo([["displacement"], ["displacement"]], "bar2", 2, True)
+    connectivity = MeshConnectivity(
+        np.arange(4), [ElementGroup(typeInfo, np.arange(4), np.array([[0, 1], [1, 2], [2, 3], [3, 4]]))]
+    )
+    lowest = lowestProcessAtNodes(connectivity, np.array([2, 1, 1, 0]), 6, 3)
+    assert lowest.tolist() == [2, 1, 1, 0, 0, 3]
+
+    nodeRows = {"most on 1": [1, 2, 3], "tie of 1 and 2": [0, 2], "on no element": [5], "majority 0": [3, 4, 5]}
+    owners = assignConstraintsByMajority(nodeRows, lowest, 3)
+    assert owners == {
+        "most on 1": 1,
+        "tie of 1 and 2": 1,
+        "on no element": assignConstraints(nodeRows, 3)["on no element"],
+        "majority 0": 0,
+    }

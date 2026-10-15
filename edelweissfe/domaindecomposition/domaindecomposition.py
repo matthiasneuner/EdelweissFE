@@ -59,9 +59,10 @@ from edelweissfe.domaindecomposition.loadsonsubdomain import (
     LoadsOnSubdomain,
 )
 from edelweissfe.domaindecomposition.partitioning import (
-    assignConstraints,
+    assignConstraintsByMajority,
     elementSharesBesideConstraints,
     keepElementsWhereTheyWere,
+    lowestProcessAtNodes,
     partitionElementsOfMesh,
 )
 from edelweissfe.domaindecomposition.statesynchronization import (
@@ -307,13 +308,27 @@ class DomainDecomposition:
             # DistributedElements.placeChildElement), and this partition must not change with it.
             self._elementOwners = dict(distribution.owners)
         self._partitionedElementKeys = set(model.mesh.elements.keys())
+        if not byMeasuredCosts:
+            # a changed mesh: the constraints are assigned afresh (_constraintOwnersOf)
+            self._constraintOwners = None
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:
         """The rank of every constraint of the model: the current assignment while the model has the
-        constraints it was made for, otherwise the assignment the next definition adopts.
+        mesh and the constraints it was made for, otherwise the assignment the next definition adopts,
+        made now.
 
-        The second case is what lets a connectivity update right after a topology change, before the
-        subdomain is defined afresh, search on the process that is going to evaluate a constraint.
+        A constraint is evaluated by the process holding most of its nodes under the partition of the
+        mesh (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the
+        nodes its search may couple, or, for a constraint without a search, those it couples. The
+        assignment is made from what every process holds alike -- the mesh, the partition, the nodes
+        of the copies of the constraints -- where the mesh changed, and only there: before the first
+        definition, and after a topology change, where every copy of every constraint is current
+        (:meth:`requireConstraintCopiesCurrent`). A repartition of the same mesh keeps it, since a
+        copy elsewhere is current only after a synchronization to every process. A mesh not yet
+        partitioned is partitioned first -- the partition the next definition adopts.
+
+        That a connectivity update right after a topology change, before the subdomain is defined
+        afresh, already searches on the process that is going to evaluate a constraint rests on this.
 
         Parameters
         ----------
@@ -326,9 +341,41 @@ class DomainDecomposition:
             The rank of every constraint, by name.
         """
 
-        if self._constraintOwners is None or model.constraints.keys() != self._constraintOwners.keys():
-            return assignConstraints(model.constraints, self.nProcesses)
+        if self._elementOwners is None or model.mesh.elements.keys() != self._partitionedElementKeys:
+            self._partition(model, measuredCosts=None, byMeasuredCosts=False)
+        if self._constraintOwners is not None and model.constraints.keys() == self._constraintOwners.keys():
+            return self._constraintOwners
+
+        mesh = model.mesh
+        nodeRows = {}
+        for name, constraint in model.constraints.items():
+            # the nodes a search may couple; those coupled now for a constraint without a search
+            nodes = constraint.nodesReadByConnectivityUpdate() or constraint.nodes
+            nodeRows[name] = mesh.rowsOfNodes([node.label for node in nodes])
+        lowestProcess = lowestProcessAtNodes(
+            mesh.connectivity(), self._processOfElementsInMeshOrder(model), mesh.nNodes, self.nProcesses
+        )
+        self._constraintOwners = assignConstraintsByMajority(nodeRows, lowestProcess, self.nProcesses)
         return self._constraintOwners
+
+    def _processOfElementsInMeshOrder(self, model: FEModel) -> np.ndarray:
+        """The process of every element of the mesh under the current partition, in mesh order.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        np.ndarray
+            The ranks.
+        """
+
+        numbers = model.mesh.connectivity().numbers
+        return np.fromiter(
+            (self._elementOwners[number] for number in numbers.tolist()), dtype=np.int64, count=numbers.shape[0]
+        )
 
     def _adoptOwnership(self, model: FEModel):
         """Collect the elements and constraints this process owns under the current partition.
@@ -352,14 +399,8 @@ class DomainDecomposition:
             if self._constraintOwners[name] == self.rank
         }
 
-        connectivity = model.mesh.connectivity()
-        processOfElements = np.fromiter(
-            (self._elementOwners[number] for number in connectivity.numbers.tolist()),
-            dtype=np.int64,
-            count=connectivity.numbers.shape[0],
-        )
         self._elementProcesses = ElementProcessesAtDofs.ofMesh(
-            connectivity, self._numbering, processOfElements, self.nProcesses
+            model.mesh.connectivity(), self._numbering, self._processOfElementsInMeshOrder(model), self.nProcesses
         )
 
     def _defineInterface(self, model: FEModel, ownershipChanged: bool):
