@@ -162,10 +162,13 @@ class MeshConnectivity:
     groups
         The elements grouped by their type information, in the order of the first element of each
         group in the mesh.
+    nAuxiliary
+        The number of auxiliary elements (:attr:`MeshElement.isAuxiliary`).
     """
 
     numbers: np.ndarray
     groups: list
+    nAuxiliary: int
 
 
 class MeshElement:
@@ -260,6 +263,9 @@ class Mesh:
         #: The connectivity as arrays (:meth:`connectivity`), made when first asked for after the
         #: elements changed; None before.
         self._connectivity = None
+        #: Counts the changes of the elements -- every element described or removed --, so that what is
+        #: derived from them can tell in constant time whether it is current.
+        self.elementsVersion = 0
 
     @property
     def nodeLabels(self) -> np.ndarray:
@@ -541,6 +547,7 @@ class Mesh:
             )
         self.elements[record.number] = record
         self._connectivity = None
+        self.elementsVersion += 1
         return record
 
     def addAuxiliaryElement(self, element, hostElement: int | None = None) -> MeshElement:
@@ -607,6 +614,7 @@ class Mesh:
         for number in removed:
             del self.elements[number]
         self._connectivity = None
+        self.elementsVersion += 1
 
         for members in self.elementSets.values():
             if not removed.isdisjoint(members):
@@ -750,7 +758,9 @@ class Mesh:
             groupOfTypeInfo = {}
             groups = {}
             typeOf = self.typeOf
+            nAuxiliary = 0
             for position, record in enumerate(self.elements.values()):
+                nAuxiliary += record.isAuxiliary
                 typeInfo = typeOf(record)
                 key = groupOfTypeInfo.get(id(typeInfo))
                 if key is None:
@@ -775,6 +785,7 @@ class Mesh:
                     )
                     for typeInfo, positions, labels in groups.values()
                 ],
+                nAuxiliary,
             )
         return self._connectivity
 
@@ -810,3 +821,4 @@ class Mesh:
 
         self.__dict__.update(state)
         self._connectivity = None
+        self.elementsVersion = state.get("elementsVersion", 0)
