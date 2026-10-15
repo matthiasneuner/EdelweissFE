@@ -32,6 +32,7 @@ processes can test -- the interface exchange and the independence of the result 
 decomposition -- is covered by the decks in ``testfiles/mpi``, run under ``mpirun``; a failure in one
 process, which must not leave the others waiting, by a test starting ``mpirun`` itself."""
 
+import json
 import os
 import re
 import shutil
@@ -2637,3 +2638,71 @@ def test_an_output_reads_the_contact_results_of_the_process_evaluating_the_conta
         serial, decomposed = histories["NED"][name], histories["NEDMPI"][name]
         assert np.any(serial), "{:}: the serial run reports no contact".format(name)
         assert serial.shape == decomposed.shape and serial.tobytes() == decomposed.tobytes(), name
+
+
+#: Runs a deck, recording every kinetic energy and momentum the solver forms -- the numbers of the energy
+#: table and of the topology-change report -- as exact hexadecimal strings, one file per process.
+_RECORDING_KINETIC_ENERGY_SCRIPT = """
+import contextlib, io, json
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+communicator = worldCommunicator()
+rank = 0 if communicator is None else communicator.Get_rank()
+recorded = []
+kineticEnergy, momentum = NED.kineticEnergy, NED.momentum
+
+
+def recordedKineticEnergy(self, V, dofs=None):
+    value = kineticEnergy(self, V, dofs)
+    recorded.append(["kineticEnergy", float(value).hex()])
+    return value
+
+
+def recordedMomentum(self, V, model):
+    value = momentum(self, V, model)
+    recorded.append(["momentum", [float(component).hex() for component in value]])
+    return value
+
+
+NED.kineticEnergy, NED.momentum = recordedKineticEnergy, recordedMomentum
+with contextlib.redirect_stdout(io.StringIO()):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+with open("recorded_{:}.json".format(rank), "w") as file:
+    json.dump(recorded, file)
+"""
+
+
+@pytest.mark.parametrize("deck", ["edelweiss-only/NED", "marmot/NEDLiveAMR"])
+def test_the_kinetic_energy_and_the_momentum_are_the_same_bits_on_any_number_of_processes(tmp_path, deck):
+    # The energy table every output increment, and -- in the refined deck -- the topology-change report
+    # before and after the refinement: exact sums, so the same bits serially and over 2 and 3 processes.
+    if deck.startswith("marmot"):
+        from edelweissfe.utils.misc import checkSuccessfulExtension
+
+        if not checkSuccessfulExtension("edelweissfe.elements.marmotelement.element"):
+            pytest.skip("the deck needs Marmot elements")
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    records = {}
+    for nProcesses in (1, 2, 3):
+        directory = tmp_path / str(nProcesses)
+        shutil.copytree(os.path.join(testfiles, deck), directory)
+        if nProcesses == 1:
+            deckText = (directory / "test.inp").read_text().replace("solver=NEDMPI", "solver=NED")
+            (directory / "test.inp").write_text(
+                "\n".join(line for line in deckText.splitlines() if not line.startswith("load-balance-"))
+            )
+        (directory / "run.py").write_text(_RECORDING_KINETIC_ENERGY_SCRIPT)
+        output, exitCode = _runUnderMPI(directory, nProcesses)
+        assert output is not None and exitCode == 0, output
+        records[nProcesses] = [
+            json.loads((directory / "recorded_{:}.json".format(rank)).read_text()) for rank in range(nProcesses)
+        ]
+
+    serial = records[1][0]
+    kinds = {kind for kind, _ in serial}
+    assert "kineticEnergy" in kinds and (deck.endswith("AMR") <= ("momentum" in kinds)), serial
+    for nProcesses in (2, 3):
+        assert records[nProcesses] == [serial] * nProcesses, nProcesses

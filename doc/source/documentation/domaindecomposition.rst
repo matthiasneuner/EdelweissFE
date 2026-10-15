@@ -313,8 +313,8 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``addConstraintForces``                     sends the own constraints' forces to neighbours, adds them
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the internal energy summed over the subdomains
-``kineticEnergy``, ``momentum``             count a degree of freedom where it is owned, then sum
-                                            over the subdomains
+``sumsOverModel``                           the exact sums of the kinetic energy and the momentum:
+                                            owned terms, partial sums added exactly
 ``addExternalWork``                         keeps the owned work until it is read (below)
 ``publishNodeFields``                       publishes the subdomain degrees of freedom
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
@@ -356,11 +356,12 @@ input.
 
 **What is bit-identical, exactly.** The solution, the velocity and the net nodal force at every
 degree of freedom; the state of every element and every constraint; the external work; and
-therefore every dataset of a restart checkpoint and every field output computed from them. Not
-bit-identical: the kinetic and the internal energy printed in the energy table, and the kinetic
-energy and momentum reported across a topology change, which each process sums over its own
-subdomain (the degrees of freedom it owns) and the processes then add in rank order; they enter
-nothing but the journal. Timings, and the load balancing that depends on them, change the speed of a run, never its
+therefore every dataset of a restart checkpoint and every field output computed from them; and the
+kinetic energy and momentum the journal reports -- in the energy table and across a topology
+change --, which each process sums exactly over the degrees of freedom it owns, the processes then
+adding the exact partial sums before the one rounding (``sumsOverModel``). Not bit-identical: the
+internal energy of the energy table, the sum of what the elements report, which each process sums
+over its own elements and the processes then add in rank order; it enters nothing but the table. Timings, and the load balancing that depends on them, change the speed of a run, never its
 result.
 
 **What the order rests on.** Within one process the contributions at each degree of freedom are

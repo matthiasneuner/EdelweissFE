@@ -118,6 +118,12 @@ field only where that field carries a non-mechanical inertia. Such a field's own
 ``0.5 m_k rate^2`` is reported on a separate line and kept out of the balance: with a coefficient in
 seconds squared it has the units of a volume, not of an energy.
 
+The external work, the kinetic energy and -- across a topology change -- the momentum are exact
+sums, rounded once (:meth:`NED.sumsOverModel`): their digits do not depend on the order of the
+terms, so a domain-decomposed run reports the same bits on any number of processes. The internal
+energy is the exception: it is the plain sum of what the elements report, and a domain-decomposed
+run adds the sums of its subdomains, so its last digits may differ from a serial run's.
+
 Two honest limits, both of which the solver states in the log rather than leaving to be
 discovered. The external work accumulates only at *prescribed* degrees of freedom, so a model
 driven by body forces, node forces, a distributed load or an initial velocity has none, and the
@@ -160,8 +166,8 @@ a subdomain -- on the shared functions of the element loop and the assembly, whe
   *(replaces)*;
 * the lumped operators and the stable time increment: :meth:`NED.assembleLumpedDiagonal`
   *(replaces)*, :meth:`NED.getCriticalTimeStepForExplicitDynamics`;
-* the sums over the whole model: :meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
-  :meth:`NED.energyBalanceTerms`;
+* the sums over the whole model: :meth:`NED.sumsOverModel` *(replaces)*, the one reduction of
+  :meth:`NED.kineticEnergy` and :meth:`NED.momentum`, and :meth:`NED.energyBalanceTerms`;
 * accepting an increment, and the output: :meth:`NED.acceptIncrement`, :meth:`NED.advanceModelToTime`
   *(replaces)*, :meth:`NED.publishNodeFields` *(replaces)*, ``writeIncrementOutput``,
   ``applyStepActionsAtStepEnd``;
@@ -172,8 +178,8 @@ a subdomain -- on the shared functions of the element loop and the assembly, whe
 
 The one rule this places on the code of this module: **a sum over the carried vectors -- the
 solution, its increment, the velocity, the net force (``U``, ``dU``, ``V``, ``P``) -- belongs in
-one of the methods ``NEDMPI`` overrides** (:meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
-:meth:`NED.energyBalanceTerms`). In ``NEDMPI`` those vectors are current only at the subdomain
+one of the methods that sum over the model** (:meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
+through :meth:`NED.sumsOverModel`, which ``NEDMPI`` overrides, or :meth:`NED.energyBalanceTerms`). In ``NEDMPI`` those vectors are current only at the subdomain
 degrees of freedom, so a sum over them written inline is a sum over the subdomain of one process: a
 plausible number, and a wrong one. A sum over the lumped operators -- the inertia, the damping --
 may be written inline: they are complete in every process.
@@ -194,13 +200,14 @@ from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.assembly import addNodalForces, hasRepeatedDofs
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
+from edelweissfe.numerics.exactsum import ExactSum
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.conservationchecks import (
     CONSERVATION_TOLERANCE,
     ConservationCheck,
     formatMomentumAndKineticEnergy,
-    linearMomentum,
+    momentumComponentDofs,
 )
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
@@ -1505,7 +1512,8 @@ class NED(NonlinearSolverBase):
         One of the two sums over every degree of freedom of the model in this solver, with
         :meth:`momentum`; every diagnostic that needs one calls these. Given other degrees of freedom
         -- those of a second-order field whose inertia is not a mass --, the same sum, which is then
-        not an energy.
+        not an energy. The sum is exact, rounded once (:meth:`sumsOverModel`): the same bits in whatever
+        order the terms are added, and however the model is split over processes.
 
         Parameters
         ----------
@@ -1522,7 +1530,31 @@ class NED(NonlinearSolverBase):
 
         if dofs is None:
             dofs = self.ids_mechanicalEnergy
-        return 0.5 * float(np.sum(self._rawLumpedMass[dofs] * V[dofs] ** 2))
+        dofs = np.arange(self.theDofManager.nDof)[dofs]
+        (sumOfMassTimesSquaredRate,) = self.sumsOverModel(
+            [(dofs, np.asarray(self._rawLumpedMass)[dofs] * np.asarray(V)[dofs] ** 2)]
+        )
+        return 0.5 * sumOfMassTimesSquaredRate
+
+    def sumsOverModel(self, termsAtDofs: list[tuple[np.ndarray, np.ndarray]]) -> list[float]:
+        """Sums over the degrees of freedom of the model, each exact and rounded once
+        (:class:`~edelweissfe.numerics.exactsum.ExactSum`, the bits of :func:`math.fsum`): the one
+        reduction :meth:`kineticEnergy` and :meth:`momentum` form, and the one step a domain-decomposed
+        solver overrides -- each process counts the terms at the degrees of freedom it owns, and the
+        exact partial sums of all processes are added before the one rounding.
+
+        Parameters
+        ----------
+        termsAtDofs
+            Per sum, the degrees of freedom and the term at each of them.
+
+        Returns
+        -------
+        list[float]
+            The correctly rounded sum of the terms of each.
+        """
+
+        return [ExactSum.of(terms).rounded() for _, terms in termsAtDofs]
 
     @performancetiming.timeit("elements")
     def assembleInternalForces(
@@ -2377,18 +2409,19 @@ class NED(NonlinearSolverBase):
 
         return constraintForce
 
-    def momentum(self, V: DofVector | np.ndarray, model: FEModel) -> np.ndarray:
+    def momentum(self, V: DofVector, model: FEModel) -> np.ndarray:
         """The linear momentum of the model -- of the fields whose inertia is a mass --, per spatial
-        component; see :func:`~edelweissfe.solvers.base.conservationchecks.linearMomentum`.
+        component (:func:`~edelweissfe.solvers.base.conservationchecks.momentumComponentDofs`).
 
         Weighted with the *unfolded* lumped mass: a multi-point-constraint slave carries real velocity,
         and folding its mass onto its masters would drop its momentum. One of the two sums over every
-        degree of freedom of the model in this solver, with :meth:`kineticEnergy`.
+        degree of freedom of the model in this solver, with :meth:`kineticEnergy`; each component is
+        exact, rounded once (:meth:`sumsOverModel`).
 
         Parameters
         ----------
         V
-            The velocity vector, or its values as a plain array.
+            The velocity vector.
         model
             The model tree, for the fields' spatial dimension.
 
@@ -2398,9 +2431,9 @@ class NED(NonlinearSolverBase):
             The momentum, one entry per spatial component.
         """
 
-        return linearMomentum(
-            np.asarray(self._rawLumpedMass) * np.asarray(V), self.theDofManager, self.linearMomentumFields, model
-        )
+        massTimesVelocity = np.asarray(self._rawLumpedMass) * np.asarray(V)
+        components = momentumComponentDofs(self.theDofManager, self.linearMomentumFields, model)
+        return np.array(self.sumsOverModel([(dofs, massTimesVelocity[dofs]) for dofs in components]))
 
     def _perFieldLumpedTotals(self) -> dict[str, float]:
         """The assembled lumped total of every first- and second-order field, each on its own.

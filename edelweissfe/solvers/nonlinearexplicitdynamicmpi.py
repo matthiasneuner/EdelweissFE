@@ -103,10 +103,11 @@ therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same i
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
 depends on measured timings, changes the speed of a run and never its result. The external work is
 summed exactly (:meth:`gatherExternalWork`), so it, too, and the checkpoints recording it,
-are bit-identical. Only the kinetic and internal energy of the energy table, and the kinetic
-energy and momentum reported across a topology change, are formed per subdomain and then added
-(:meth:`kineticEnergy`, :meth:`momentum`), and may differ from a serial run's in their last digits;
-they enter nothing but the journal.
+are bit-identical; so are the kinetic energy and the momentum of the journal, exact sums of the
+terms each process owns, added exactly (:meth:`sumsOverModel`). Only the internal energy of the
+energy table is formed per subdomain and then added in rank order, and may differ from a serial
+run's in its last digits: it is the sum the elements report, one number per element, and enters
+nothing but the table.
 
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and so is every
@@ -136,8 +137,8 @@ at the end of the documentation of :mod:`~edelweissfe.solvers.nonlinearexplicitd
 * :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements of the subdomain, and completes
   them at the interface like the forces;
 * :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` forms the minimum over all processes, and
-  :meth:`NEDMPI.kineticEnergy`, :meth:`NEDMPI.momentum` and :meth:`NEDMPI.energyBalanceTerms` the
-  sums;
+  :meth:`NEDMPI.sumsOverModel` (the kinetic energy and the momentum) and
+  :meth:`NEDMPI.energyBalanceTerms` (the internal energy) the sums;
 * :meth:`NEDMPI.acceptIncrement` synchronizes the model on output increments and rebalances it,
   rebuilding the equation system if elements moved,
   :meth:`NEDMPI.updateConstraintConnectivity` synchronizes it before a contact search,
@@ -891,55 +892,35 @@ class NEDMPI(NEDParallel):
             self._externalWork -= sum(ofProcesses, ExactSum()).rounded()
         self._pendingWorkAtPrescribedDofs = []
 
-    def kineticEnergy(self, V: DofVector, dofs: slice | np.ndarray | None = None) -> float:
-        """Collective. The kinetic energy of the whole model (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.kineticEnergy`): each process
-        sums over the degrees of freedom it owns, and the sums are added in rank order -- so it may
-        differ from a serial run's in its last digits; it enters nothing but the journal.
+    def sumsOverModel(self, termsAtDofs: list[tuple[np.ndarray, np.ndarray]]) -> list[float]:
+        """Collective. The sums of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.sumsOverModel`
+        over the whole model: each process forms the exact sum of the terms at the degrees of freedom it
+        owns, the exact partial sums of all processes are gathered and added, and the total is rounded
+        once -- the same bits as a serial run's, in every process, however the model is split.
 
         Parameters
         ----------
-        V
-            The velocity vector; current at the subdomain degrees of freedom.
-        dofs
-            As for :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.kineticEnergy`.
+        termsAtDofs
+            Per sum, the degrees of freedom and the term at each of them; current at least where this
+            process owns them.
 
         Returns
         -------
-        float
-            The sum over the whole model, the same in every process.
+        list[float]
+            The correctly rounded sum of the terms of each, over the whole model.
         """
 
-        dofs = np.arange(V.shape[0])[self.ids_mechanicalEnergy if dofs is None else dofs]
-        ownedHere = super().kineticEnergy(V, dofs[self.domainDecomposition.ownedDofMask[dofs]])
-        return self.communicator.allreduceSum([ownedHere])[0]
-
-    def momentum(self, V: DofVector, model: FEModel) -> np.ndarray:
-        """Collective. The linear momentum of the whole model (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.momentum`): each process sums
-        over the degrees of freedom it owns, and the sums are added in rank order -- so it may differ
-        from a serial run's in its last digits; it enters nothing but the journal.
-
-        Parameters
-        ----------
-        V
-            The velocity vector; current at the subdomain degrees of freedom.
-        model
-            The model tree.
-
-        Returns
-        -------
-        np.ndarray
-            The momentum, one entry per spatial component, the same in every process.
-        """
-
-        ownedVelocity = np.where(self.domainDecomposition.ownedDofMask, np.asarray(V), 0.0)
-        return np.array(self.communicator.allreduceSum(super().momentum(ownedVelocity, model).tolist()))
+        owned = self.domainDecomposition.ownedDofMask
+        ownedHere = [ExactSum.of(terms[owned[dofs]]) for dofs, terms in termsAtDofs]
+        return [sum(ofProcesses, ExactSum()).rounded() for ofProcesses in zip(*self.communicator.allgather(ownedHere))]
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """Collective. The terms of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.energyBalanceTerms` of the whole model.
 
-        The internal energy is formed per subdomain and then added in rank order, as the kinetic
-        energies are (:meth:`kineticEnergy`), so they may differ from a serial run's in their last
-        digits; they enter nothing but the energy table. The external work is that of the whole model
+        The internal energy is formed per subdomain and then added in rank order, so it may differ from
+        a serial run's in its last digits -- the one term of the table that does; it enters nothing but
+        the table. The kinetic energies are exact sums over the whole model already
+        (:meth:`sumsOverModel`), and the external work is that of the whole model
         (:meth:`gatherExternalWork`).
 
         Parameters

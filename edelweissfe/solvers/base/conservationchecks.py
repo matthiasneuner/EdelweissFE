@@ -54,6 +54,7 @@ import numpy as np
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager
+from edelweissfe.numerics.exactsum import ExactSum
 
 #: Default tolerance on the relative change, across one topology change, of a field's total
 #: coefficient. Conservation is a geometric identity, but the assembly is Gauss quadrature, exact
@@ -68,17 +69,61 @@ CONSERVATION_TOLERANCE = 1e-6
 CUMULATIVE_DRIFT_TOLERANCE = 1e-4
 
 
-def linearMomentum(
-    massTimesVelocity: np.ndarray, dofManager: DofManager, fieldNames: list[str], model: FEModel
-) -> np.ndarray:
-    """The linear momentum of the given fields, per spatial component.
+def momentumComponentDofs(dofManager: DofManager, fieldNames: list[str], model: FEModel) -> list[np.ndarray]:
+    """The degrees of freedom of each spatial component of the linear momentum of the given fields.
 
     Per component, not summed over them: adding a momentum's x, y and z contributions produces a
     number with no physical meaning and would hide a component-wise error behind a cancellation.
     Across fields the sum is legitimate -- a system's momentum is the sum of its parts'. A field
-    occupies a contiguous slice of the dof vector, node-major with the component innermost (what
-    ``writeNodeFieldToDofVector``'s flatten establishes), so reshaping the slice recovers the
-    per-node vectors.
+    occupies a contiguous range of the dof vector, node-major with the component innermost (what
+    ``writeNodeFieldToDofVector``'s flatten establishes), so reshaping it recovers the per-node
+    vectors.
+
+    Parameters
+    ----------
+    dofManager
+        The manager of the degrees of freedom.
+    fieldNames
+        The fields whose inertia is a mass; any other has no linear momentum.
+    model
+        The model tree, for the fields' spatial dimension.
+
+    Returns
+    -------
+    list[np.ndarray]
+        Per spatial component, its degrees of freedom in every field, field after field; empty when
+        no field is given.
+
+    Raises
+    ------
+    ValueError
+        If two fields differ in spatial dimension, so that their momenta have no common components.
+    """
+
+    components = None
+    for fieldName in fieldNames:
+        indices = dofManager.idcsOfFieldsInDofVector[fieldName]
+        if isinstance(indices, slice):
+            indices = np.arange(indices.start, indices.stop)
+        perNode = np.asarray(indices).reshape((-1, model.nodeFields[fieldName].dimension))
+        if components is not None and perNode.shape[1] != len(components):
+            raise ValueError(
+                "Field {:} has dimension {:} against {:} for the fields before it, so their momenta "
+                "have no common components to add.".format(fieldName, perNode.shape[1], len(components))
+            )
+        if components is None:
+            components = [[] for _ in range(perNode.shape[1])]
+        for component, dofs in zip(components, perNode.T):
+            component.append(dofs)
+    return [np.concatenate(component) for component in components] if components is not None else []
+
+
+def linearMomentum(
+    massTimesVelocity: np.ndarray, dofManager: DofManager, fieldNames: list[str], model: FEModel
+) -> np.ndarray:
+    """The linear momentum of the given fields, per spatial component (:func:`momentumComponentDofs`),
+    each the correctly rounded sum of its terms (:class:`~edelweissfe.numerics.exactsum.ExactSum`), so
+    that it does not depend on the order of the terms.
 
     Parameters
     ----------
@@ -103,21 +148,13 @@ def linearMomentum(
         If two fields differ in spatial dimension, so that their momenta have no common components.
     """
 
-    total = None
-    for fieldName in fieldNames:
-        indices = dofManager.idcsOfFieldsInDofVector[fieldName]
-        dimension = model.nodeFields[fieldName].dimension
-        contribution = np.asarray(massTimesVelocity[indices]).reshape((-1, dimension)).sum(axis=0)
-        # numpy would broadcast a shape (1,) contribution onto every component of a shape (3,)
-        # total instead of refusing to add them
-        if total is not None and contribution.shape != total.shape:
-            raise ValueError(
-                "Field {:} has dimension {:} against {:} for the fields before it, so their momenta "
-                "have no common components to add.".format(fieldName, contribution.shape[0], total.shape[0])
-            )
-        total = contribution if total is None else total + contribution
-
-    return total if total is not None else np.zeros(0)
+    massTimesVelocity = np.asarray(massTimesVelocity)
+    return np.array(
+        [
+            ExactSum.of(massTimesVelocity[dofs]).rounded()
+            for dofs in momentumComponentDofs(dofManager, fieldNames, model)
+        ]
+    )
 
 
 def formatMomentumAndKineticEnergy(
