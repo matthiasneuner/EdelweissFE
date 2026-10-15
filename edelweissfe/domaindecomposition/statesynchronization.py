@@ -122,7 +122,7 @@ class ModelStateSynchronization:
         size = communicator.Get_size()
         self._rank = rank
 
-        # An element exposing no state (see elementsWithoutState) is not synchronized; the subdomain
+        # An element exposing no state (see elementsWithoutState) is not synchronized; the decomposition
         # refuses a model with such elements.
         withoutState = set(elementsWithoutState(elements))
 

@@ -1323,8 +1323,8 @@ class NED(NonlinearSolverBase):
 
         # Fold the forces acting on slave DOFs onto their masters (action-reaction through the rigid
         # interpolation link); done here so the Dirichlet handling at the start of the next increment
-        # operates on the already-folded vector. A slave and its masters are always integrated in the
-        # same part of the model, so the fold is restricted to its DOFs.
+        # operates on the already-folded vector. A slave and its masters are always in the same
+        # subdomain, so the fold is restricted to the subdomain degrees of freedom.
         mpcForceFold = self._incrementPlan.mpcForceFold
         if mpcForceFold is not None:
             with performancetiming.timeit("mpc force fold"):

@@ -1190,7 +1190,7 @@ class DomainDecomposition:
         partition (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
         and report the migration.
 
-        The subdomain forgets the elements it computed first, so that a process holds no reference
+        The decomposition forgets the elements it computed first, so that a process holds no reference
         to an element it drops; the solver must have released its own (its degree-of-freedom indices
         and plans) or build them afresh right afterwards, and define the subdomain afresh
         (:meth:`define`), for the elements it now holds. What the moving alone costs -- without

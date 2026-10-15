@@ -333,7 +333,7 @@ class NEDMPI(NEDParallel):
         self._interfaceAssembly: InterfaceForceAssembly | None = None
         #: The kernel time of every element of the current increment plan, in plan order, the least
         #: over the :attr:`_nMeasuredIncrements` increments since the last check of the balance
-        #: (:func:`computeElementsForExplicit`), if the subdomain balances load by measured costs; else
+        #: (:func:`computeElementsForExplicit`), if the decomposition balances load by measured costs; else
         #: None. See :meth:`_startMeasuring`.
         self._elementCosts: np.ndarray | None = None
         #: The increments computed since the last check of the balance, or since the increment plan

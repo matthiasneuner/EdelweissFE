@@ -176,7 +176,7 @@ What a distributed process creates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements` partitions the mesh
-with the same function and the same weights the subdomain uses
+with the same function and the same weights the domain decomposition of the solver uses
 (:func:`~edelweissfe.domaindecomposition.partitioning.partitionElementsOfMesh`), right after the
 mesh is described and before the elements are made
 (:func:`~edelweissfe.helpers.inputfilehelpers.fillFEModelFromInputFile`). A process then creates
@@ -190,7 +190,7 @@ process computing the element and exchanged like its forces (see `An increment`_
 needs another one's element for it. An element described after the partition, which no process
 would compute, is refused.
 
-The subdomain of the solver adopts this partition instead of computing its own.
+The domain decomposition of the solver adopts this partition instead of computing its own.
 
 .. _domaindecomposition_mesh_to_elements:
 
