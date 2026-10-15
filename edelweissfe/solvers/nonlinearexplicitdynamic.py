@@ -1287,6 +1287,7 @@ class NED(NonlinearSolverBase):
         """
 
         P, psi = self.assembleInternalForces(U, dU, P, timeStep)
+        constraintForces = self.evaluateConstraintForces(self.subdomain.constraints, U, dU, P, timeStep)
         P[:] = -P[:]
         # The load assembly is shared with the implicit solvers, which also assemble the load
         # stiffness into a tangent K; an explicit increment has no tangent, hence K=None.
@@ -1299,7 +1300,7 @@ class NED(NonlinearSolverBase):
             K=None,
             timeStep=timeStep,
         )
-        P = self.assembleConstraintForces(self.subdomain.constraints, U, dU, P, timeStep)
+        P = self.addConstraintForces(constraintForces, P)
 
         # Fold the forces acting on slave DOFs onto their masters (action-reaction through the rigid
         # interpolation link); done here so the Dirichlet handling at the start of the next increment
@@ -1554,7 +1555,7 @@ class NED(NonlinearSolverBase):
         indirect-control unknown). Those DOFs carry no inertia, so their inverse lumped mass is zero
         and the explicit update leaves them untouched forever -- the constraint would appear active
         and enforce nothing. Penalty-type constraints, which act through nodal forces alone, are
-        supported: see :meth:`assembleConstraintForces`.
+        supported: see :meth:`evaluateConstraintForces`.
 
         Parameters
         ----------
@@ -2222,22 +2223,20 @@ class NED(NonlinearSolverBase):
             criticalTimeStep=criticalTimeStep,
         )
 
-    @performancetiming.timeit("assemble constraints")
-    def assembleConstraintForces(
+    @performancetiming.timeit("evaluate constraints")
+    def evaluateConstraintForces(
         self,
         constraints: dict,
         U_np: DofVector,
         dU: DofVector,
         P: DofVector,
         timeStep: TimeStep,
-    ) -> DofVector:
-        """Evaluate every constraint and add its nodal forces to the net force vector.
+    ) -> dict[str, ConstraintForce]:
+        """Evaluate the nodal forces of every constraint, each into a buffer of its own; added to the
+        net force by :meth:`addConstraintForces`.
 
-        The explicit counterpart of
-        :meth:`~edelweissfe.solvers.nonlinearimplicitstatic.NIST.assembleConstraints`, and it shares
-        that method's sign convention: a constraint writes what the implicit solver calls ``PExt``,
-        which is why this is called after :meth:`assembleLoads`, on a ``P`` that already holds
-        ``-P_internal``.
+        Evaluated right after the elements, and added after the loads: a constraint reads the solution
+        and its increment only, which do not change in between.
 
         No tangent is requested. An explicit increment solves no linear system, so a constraint's
         stiffness enters nothing, and
@@ -2255,9 +2254,38 @@ class NED(NonlinearSolverBase):
         dU
             The current solution increment.
         P
-            The net force vector to be augmented.
+            The net force vector, for its entity mapping.
         timeStep
             The current time step.
+
+        Returns
+        -------
+        dict[str, ConstraintForce]
+            The forces of every constraint, by name, in model order.
+        """
+
+        return {
+            name: self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
+            for name, constraint in constraints.items()
+        }
+
+    @performancetiming.timeit("assemble constraints")
+    def addConstraintForces(self, forces: dict[str, ConstraintForce], P: DofVector) -> DofVector:
+        """Add the nodal forces of every constraint to the net force vector, constraint by constraint, in
+        model order.
+
+        The explicit counterpart of
+        :meth:`~edelweissfe.solvers.nonlinearimplicitstatic.NIST.assembleConstraints`, and it shares
+        that method's sign convention: a constraint writes what the implicit solver calls ``PExt``,
+        which is why this is called after :meth:`assembleLoads`, on a ``P`` that already holds
+        ``-P_internal``.
+
+        Parameters
+        ----------
+        forces
+            The forces of the constraints, by name, in model order (:meth:`evaluateConstraintForces`).
+        P
+            The net force vector to be augmented.
 
         Returns
         -------
@@ -2266,8 +2294,8 @@ class NED(NonlinearSolverBase):
         """
 
         PPlain = P.asPlainArray()
-        for name, constraint in constraints.items():
-            self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep).addInto(PPlain)
+        for constraintForce in forces.values():
+            constraintForce.addInto(PPlain)
 
         return P
 

@@ -305,7 +305,8 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
                                             interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh
 ``assembleLoads``                           the loads of the own elements, completed at the interface
-``assembleConstraintForces``                sends the own constraints' forces to neighbours, adds them
+``evaluateConstraintForces``                returns the forces evaluated with the elements (above)
+``addConstraintForces``                     sends the own constraints' forces to neighbours, adds them
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
 ``energyBalanceTerms``                      the sums over the subdomains
 ``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned

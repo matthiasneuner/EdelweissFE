@@ -129,7 +129,7 @@ communication, each in an override of a method of ``NED``:
 * :meth:`NEDMPI.assembleInternalForces` completes the element forces at the interface;
 * :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
   shares them from the owners;
-* :meth:`NEDMPI.assembleConstraintForces` sends the constraint forces to the processes integrating
+* :meth:`NEDMPI.addConstraintForces` sends the constraint forces to the processes integrating
   their degrees of freedom;
 * :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements of the subdomain, and completes
   them at the interface like the forces;
@@ -342,7 +342,8 @@ class NEDMPI(NEDParallel):
         self._elementLoopTime = 0.0
         self._constraintEvaluationTime = 0.0
         #: The forces of the constraints of the subdomain, evaluated with the elements of the current
-        #: increment and not yet assembled, by name; None otherwise. See :meth:`assembleInternalForces`.
+        #: increment in :meth:`assembleInternalForces` and not yet returned by
+        #: :meth:`evaluateConstraintForces`, by name; None otherwise.
         self._constraintForcesOfIncrement: dict | None = None
         #: The increments of the step done at the last topology change (or 0, at the start of the
         #: step), for the horizon a migration after a topology change is weighed over.
@@ -662,14 +663,14 @@ class NEDMPI(NEDParallel):
         on all ranks together if it fails on one, and complete the internal force at the interface; see
         :meth:`NED.assembleInternalForces`.
 
-        The constraints are evaluated in this method, right after the elements, and their forces sent and added
-        later, in :meth:`assembleConstraintForces`, where ``NED`` evaluates them: a constraint reads
-        the solution and its increment only, which do not change in between, and its forces are added
-        in the same order onto the same bits, so the result is the same. A process evaluating a
+        The constraints are evaluated in this method (:meth:`NED.evaluateConstraintForces`), right
+        after the elements and inside the same agreement, and kept for the next step of
+        :meth:`NED.assembleNetForce`, :meth:`evaluateConstraintForces`, to return: ``NED`` evaluates
+        them right after the elements as well, so the result is the same. A process evaluating a
         costly constraint -- a large contact -- does so before the exchange at the interface, while
         the others are still computing the elements the load balancing gave them in its place
-        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance`), instead of every
-        process waiting for it after the exchange.
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance`),
+        instead of every process waiting for it after the exchange.
 
         Parameters
         ----------
@@ -696,11 +697,9 @@ class NEDMPI(NEDParallel):
                 self._incrementPlan.elementLoop, U_np, dU, P, timeStep, self._elementCosts
             )
             startOfConstraints = perf_counter()
-            with performancetiming.timeit("evaluate constraints"):
-                self._constraintForcesOfIncrement = {
-                    name: self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
-                    for name, constraint in self.subdomain.constraints.items()
-                }
+            self._constraintForcesOfIncrement = super().evaluateConstraintForces(
+                self.subdomain.constraints, U_np, dU, P, timeStep
+            )
             self._elementLoopTime += startOfConstraints - startOfElements
             self._constraintEvaluationTime += perf_counter() - startOfConstraints
         self._nMeasuredIncrements += 1
@@ -773,15 +772,11 @@ class NEDMPI(NEDParallel):
             )
         return PExt, K
 
-    @performancetiming.timeit("assemble constraints")
-    def assembleConstraintForces(
+    def evaluateConstraintForces(
         self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
-    ) -> DofVector:
-        """Collective. Send the forces of the constraints of the subdomain -- with the elements, in
-        :meth:`assembleInternalForces` -- to the processes integrating their degrees of freedom, and add
-        those of every constraint at the subdomain degrees of freedom, in model order; see
-        :meth:`NED.assembleConstraintForces` and
-        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.addConstraintForces`.
+    ) -> dict:
+        """The forces of the constraints of the subdomain, evaluated with the elements of this increment
+        in :meth:`assembleInternalForces`; see :meth:`NED.evaluateConstraintForces`.
 
         Parameters
         ----------
@@ -792,14 +787,14 @@ class NEDMPI(NEDParallel):
         dU
             The current solution increment.
         P
-            The net force vector to be augmented.
+            The net force vector.
         timeStep
             The current time step.
 
         Returns
         -------
-        DofVector
-            The augmented net force vector.
+        dict[str, ConstraintForce]
+            The forces of every constraint of the subdomain, by name, in model order.
 
         Raises
         ------
@@ -811,8 +806,30 @@ class NEDMPI(NEDParallel):
         if forces is None or forces.keys() != constraints.keys():
             raise RuntimeError(
                 "the constraints of the subdomain must be evaluated with the elements of the increment "
-                "(NEDMPI.assembleInternalForces) before their forces are assembled"
+                "(NEDMPI.assembleInternalForces) before their forces are added"
             )
+        return forces
+
+    @performancetiming.timeit("assemble constraints")
+    def addConstraintForces(self, forces: dict, P: DofVector) -> DofVector:
+        """Collective. Send the forces of the constraints of the subdomain to the processes integrating
+        their degrees of freedom, and add those of every constraint at the subdomain degrees of freedom,
+        in model order; see :meth:`NED.addConstraintForces` and
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.addConstraintForces`.
+
+        Parameters
+        ----------
+        forces
+            The forces of the constraints of the subdomain, by name, in model order.
+        P
+            The net force vector to be augmented.
+
+        Returns
+        -------
+        DofVector
+            The augmented net force vector.
+        """
+
         self.domainDecomposition.addConstraintForces(forces, P)
         return P
 
