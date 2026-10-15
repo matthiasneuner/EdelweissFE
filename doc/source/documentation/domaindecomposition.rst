@@ -817,8 +817,8 @@ failed step only if every process raised the failure together
 agreement, and the step failures of an increment, which are decided from values every process holds
 alike -- a refused cutback, a diverged energy balance
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Such a step -- and a
-step ending with an error raised on all ranks together -- ends as a serial one does, with the model of the last accepted increment in every process -- the failed increment
-changed the vectors of each process at the degrees of freedom it integrates, which are taken back
+step ending with an error raised on all ranks together -- ends as a serial one does, with the model of
+the last accepted increment in every process -- the failed increment changed the vectors of each process at the degrees of freedom it integrates, which are taken back
 from the node fields published when that increment was accepted, and the model is synchronized from
 them before the field outputs and the output managers read it a last time
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.endStep`). Any other failure
@@ -827,9 +827,24 @@ at the start or the end of a step, outside any increment; that process stops all
 the exception leaves the step
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.stepFailed`), before the end of the
 step would gather results with processes that never arrive, and before a caller catching the exception
--- the test runner, which goes on to the next test case -- could leave them waiting.
+-- the test runner, which goes on to the next test case -- could leave them waiting. So does an
+exception leaving the job outside a step without the agreement of the other processes.
 
-Nothing inside such an agreement may communicate: a process that failed before a collective operation
+Setting up the model -- reading the input, describing and partitioning the mesh, creating the
+elements, restoring a checkpoint, setting up the field outputs, the output managers and the solvers
+-- may fail in one process alone as well: a file only one process can read, say. It runs in one
+agreement of its own
+(:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogetherWhileCommunicating`),
+so that a failure in any process is raised in every process, as an error
+(:class:`~edelweissfe.domaindecomposition.mpienvironment.ErrorOnAllRanks`), as in a serial run --
+and a caller catching it catches it in every process. Setup communicates in its middle -- the
+partition is broadcast before the elements are made, the field outputs gather the element results
+of their sets --, so this agreement lets the processes communicate: before every collective
+operation inside it, they first agree that no process has failed so far. A process that failed is not
+at that operation but at the end of the setup, where it agrees on its failure; the others learn of it
+there instead of waiting for it in the operation.
+
+Nothing inside an agreement of a step may communicate: a process that failed before a collective operation
 would skip it, and leave the others waiting in it. That is enforced: the communicator
 (:class:`~edelweissfe.domaindecomposition.communicator.Communicator`) raises at any communication
 inside the agreement, which then fails on all ranks like any other failure. What reads more than one
@@ -932,11 +947,6 @@ Limitations
   work. A single large contact constraint is not split (see `Contact, ties and rigid bodies`_). The
   implicit-only constraint types still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
-* A failure in one process alone while the model is set up, before the first step -- reading the input,
-  building the mesh, creating the elements -- is not agreed on: the process aborts all of them only
-  when its exception goes uncaught. A caller catching it -- the test runner, which goes on to the next
-  test case -- leaves the others waiting. (A failure in a step aborts all processes before anything
-  else, see `Failures`_.)
 
 Package reference
 -----------------

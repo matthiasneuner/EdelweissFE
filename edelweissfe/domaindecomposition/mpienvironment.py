@@ -42,6 +42,7 @@ driver therefore installs :func:`abortAllProcessesOnUncaughtException` for a run
 
 import os
 import sys
+from contextlib import nullcontext
 from functools import cache
 
 from edelweissfe.utils.exceptions import StepFailed
@@ -116,6 +117,29 @@ def worldCommunicator():
         return None
 
     return Communicator(MPI.COMM_WORLD)
+
+
+def allRanksFailTogetherWhileCommunicating(operation: str):
+    """A context in which an exception raised in one process is raised in every process together,
+    while the processes may communicate
+    (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogetherWhileCommunicating`);
+    nothing in a serial run.
+
+    Parameters
+    ----------
+    operation
+        What is done in the context, for the message.
+
+    Returns
+    -------
+    contextlib.AbstractContextManager
+        The context.
+    """
+
+    communicator = worldCommunicator()
+    if communicator is None:
+        return nullcontext()
+    return communicator.allRanksFailTogetherWhileCommunicating(operation)
 
 
 def abortAllProcesses(reason: str):

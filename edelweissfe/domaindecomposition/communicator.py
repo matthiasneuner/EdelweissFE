@@ -41,6 +41,13 @@ This class makes that rule a mechanism instead of a convention: it forwards the 
 raises while a context without communication is open (:meth:`Communicator.withoutCommunication`).
 Since every process raises at the same operation -- or the process that alone tried to communicate
 raises there --, the agreement that closes the context reports it as a failure on all ranks.
+
+Setting up the model cannot be split so: the processes communicate in the middle of it -- the
+partition of the mesh is broadcast before the elements are made. Its agreement
+(:meth:`Communicator.allRanksFailTogetherWhileCommunicating`) lets the processes communicate, and
+every process first agrees, at each collective operation, that no process has failed so far: a
+process that failed meets the others there with its failure, at the agreement that closes its
+context, instead of leaving them waiting.
 """
 
 from contextlib import contextmanager
@@ -83,6 +90,9 @@ class Communicator:
         self.mpiCommunicator = mpiCommunicator
         #: What is done in the open context without communication, or None if there is none.
         self._operationWithoutCommunication = None
+        #: What is done in the open agreement in which the processes communicate, or None if there is
+        #: none; see :meth:`allRanksFailTogetherWhileCommunicating`.
+        self._agreementWhileCommunicating = None
 
     @contextmanager
     def withoutCommunication(self, operation: str):
@@ -105,18 +115,25 @@ class Communicator:
         finally:
             self._operationWithoutCommunication = enclosing
 
-    def _requireCommunicationAllowed(self, communication: str):
-        """Raise if a context without communication is open.
+    def _requireCommunicationAllowed(self, communication: str, collective: bool = True):
+        """Raise if a context without communication is open; inside an agreement in which the
+        processes communicate (:meth:`allRanksFailTogetherWhileCommunicating`), first agree that no
+        process has failed so far, and raise if one has.
 
         Parameters
         ----------
         communication
             The operation asked for, for the message.
+        collective
+            Whether every process of the communicator takes part in the operation.
 
         Raises
         ------
         RuntimeError
-            Inside :meth:`withoutCommunication`.
+            Inside :meth:`withoutCommunication`; and for an operation not every process takes part in,
+            inside :meth:`allRanksFailTogetherWhileCommunicating`.
+        _FailedInAnotherProcess
+            Inside :meth:`allRanksFailTogetherWhileCommunicating`, if a process has failed.
         """
 
         if self._operationWithoutCommunication is not None:
@@ -127,6 +144,18 @@ class Communicator:
                     communication, self._operationWithoutCommunication.lower()
                 )
             )
+        if self._agreementWhileCommunicating is None:
+            return
+        if not collective:
+            raise RuntimeError(
+                "{:} was called while {:} -- a step in which the processes agree on failures before every "
+                "collective operation, which a point-to-point operation is not.".format(
+                    communication, self._agreementWhileCommunicating.lower()
+                )
+            )
+        outcome = self._agreedOutcome(_NO_FAILURE)
+        if outcome != _NO_FAILURE:
+            raise _FailedInAnotherProcess(outcome)
 
     # --- Who --------------------------------------------------------------------------------------
 
@@ -344,7 +373,7 @@ class Communicator:
             The request.
         """
 
-        self._requireCommunicationAllowed("Isend")
+        self._requireCommunicationAllowed("Isend", collective=False)
         return self.mpiCommunicator.Isend(buffer, dest=dest, tag=tag)
 
     def Irecv(self, buffer, source: int, tag: int):
@@ -365,7 +394,7 @@ class Communicator:
             The request.
         """
 
-        self._requireCommunicationAllowed("Irecv")
+        self._requireCommunicationAllowed("Irecv", collective=False)
         return self.mpiCommunicator.Irecv(buffer, source=source, tag=tag)
 
     # --- Agreeing among the processes ---------------------------------------------------------------
@@ -486,25 +515,94 @@ class Communicator:
         except Exception as exception:
             failure = exception
 
-        if failure is None:
-            outcome = _NO_FAILURE
-        elif isinstance(failure, CutbackRequest):
-            outcome = _CUTBACK
-        elif isinstance(failure, ConditionalStop):
-            outcome = _CONDITIONAL_STOP
-        elif isinstance(failure, StepFailed):
-            outcome = _STEP_FAILURE
-        else:
-            outcome = _ERROR
-
-        status = np.array([outcome], dtype=np.int32)
+        outcome = _outcomeOf(failure)
         # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
         with performancetiming.timeit("waiting for all ranks"):
-            self.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
+            self._requireCommunicationAllowed("Allreduce")
+            agreed = self._agreedOutcome(outcome)
+        self._raiseAgreedOutcome(operation, agreed, outcome, failure)
 
-        if status[0] == _NO_FAILURE:
+    @contextmanager
+    def allRanksFailTogetherWhileCommunicating(self, operation: str):
+        """A context in which an exception raised in one process is raised in every process, as in
+        :meth:`allRanksFailTogether`, but in which the processes may communicate -- through operations
+        every process takes part in. Collective.
+
+        Before every such operation inside the context, the processes agree that none of them has
+        failed so far: a process that failed is not at that operation but at the end of its context,
+        where it agrees on its failure -- the same agreement. The others learn of the failure there,
+        and leave the context without the operation, so that no process waits for another. An
+        operation not every process takes part in (``Isend``, ``Irecv``) raises inside it. The
+        agreement before each operation costs a reduction of one integer: meant for setting up the
+        model, which communicates a few times, not for an increment.
+
+        Parameters
+        ----------
+        operation
+            What is done in the context, for the message.
+
+        Yields
+        ------
+        None
+        """
+
+        if self._agreementWhileCommunicating is not None or self._operationWithoutCommunication is not None:
+            raise RuntimeError("{:} cannot agree on failures inside another agreement.".format(operation))
+
+        failure = None
+        self._agreementWhileCommunicating = operation
+        try:
+            yield
+        except Exception as exception:
+            failure = exception
+        finally:
+            self._agreementWhileCommunicating = None
+
+        if isinstance(failure, _FailedInAnotherProcess):
+            # the agreement was reached before an operation, where this process learned of the failure
+            agreed, outcome, failure = failure.agreedOutcome, _NO_FAILURE, None
+        else:
+            outcome = _outcomeOf(failure)
+            agreed = self._agreedOutcome(outcome)
+        self._raiseAgreedOutcome(operation, agreed, outcome, failure)
+
+    def _agreedOutcome(self, outcome: int) -> int:
+        """The most severe outcome of any process. Collective.
+
+        Parameters
+        ----------
+        outcome
+            This process' outcome.
+
+        Returns
+        -------
+        int
+            The most severe outcome.
+        """
+
+        status = np.array([outcome], dtype=np.int32)
+        self.mpiCommunicator.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
+        return int(status[0])
+
+    def _raiseAgreedOutcome(self, operation: str, agreed: int, outcome: int, failure: Exception | None):
+        """Raise the outcome the processes agreed on, in every process alike, with what went wrong in
+        each of them. Collective if a process failed.
+
+        Parameters
+        ----------
+        operation
+            What was done, for the message.
+        agreed
+            The most severe outcome of any process.
+        outcome
+            This process' outcome.
+        failure
+            The exception this process raised, or None.
+        """
+
+        if agreed == _NO_FAILURE:
             return
-        if status[0] == _CONDITIONAL_STOP:
+        if agreed == _CONDITIONAL_STOP:
             raise ConditionalStop() from failure
 
         reports = self.allgather(
@@ -518,9 +616,49 @@ class Communicator:
         message = "; ".join(
             "process {:}: {:}".format(rank, report[0]) for rank, report in enumerate(reports) if report is not None
         )
-        if status[0] == _CUTBACK:
+        if agreed == _CUTBACK:
             cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
             raise CutbackRequest(message, cutbackSize) from failure
-        if status[0] == _ERROR:
+        if agreed == _ERROR:
             raise ErrorOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
         raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
+
+
+def _outcomeOf(failure: Exception | None) -> int:
+    """What a process' exception means for the agreement on it.
+
+    Parameters
+    ----------
+    failure
+        The exception, or None.
+
+    Returns
+    -------
+    int
+        The outcome: no failure, a cutback, a conditional stop, a step failure, or an error.
+    """
+
+    if failure is None:
+        return _NO_FAILURE
+    if isinstance(failure, CutbackRequest):
+        return _CUTBACK
+    if isinstance(failure, ConditionalStop):
+        return _CONDITIONAL_STOP
+    if isinstance(failure, StepFailed):
+        return _STEP_FAILURE
+    return _ERROR
+
+
+class _FailedInAnotherProcess(Exception):
+    """Another process failed inside :meth:`Communicator.allRanksFailTogetherWhileCommunicating`: this
+    process learned of it in the agreement before an operation, and leaves the context.
+
+    Parameters
+    ----------
+    agreedOutcome
+        The most severe outcome of any process, agreed on.
+    """
+
+    def __init__(self, agreedOutcome: int):
+        super().__init__("another process failed")
+        self.agreedOutcome = agreedOutcome

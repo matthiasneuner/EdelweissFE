@@ -43,9 +43,11 @@ from edelweissfe.domaindecomposition.distributedelements import (
     elementDistributionOfThisJob,
 )
 from edelweissfe.domaindecomposition.mpienvironment import (
+    RaisedOnAllRanks,
     StepFailedOnAllRanks,
     abortAllProcesses,
     abortAllProcessesOnUncaughtException,
+    allRanksFailTogetherWhileCommunicating,
     isRootProcess,
     numberOfProcesses,
 )
@@ -113,7 +115,7 @@ def finiteElementSimulation(
     writesOutput = isRootProcess()
     abortAllProcessesOnUncaughtException()
     interrupted = False
-    # A step failure the processes did not agree on may have happened in this process alone.
+    # A failure the processes did not agree on may have happened in this process alone.
     failedAlone = False
 
     journal = Journal(verbose=verbose and writesOutput)
@@ -125,130 +127,137 @@ def finiteElementSimulation(
 
     journal.printSeperationLine()
 
-    journal.message(
-        "Setting up finite element model",
-        identification,
-        0,
-    )
-
-    jobInfo = dict()
-
-    tic = getCurrentTime()
-    model = FEModel(domainSize)
-    # Which elements of the mesh this process creates: every one, unless the job is distributed over
-    # several MPI processes, which then each create only their own part (see domaindecomposition.distributedelements).
-    model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
-    model = fillFEModelFromInputFile(model, inputfile, journal)
-    # The model holds the mesh now; its data lines, the bulk of the parsed input, are not needed again.
-    releaseMeshDataLines(inputfile)
-    model.prepareYourself(journal)
-    # Every process contributes the material properties of its own elements; one writes the files.
-    for section, rowsOfSets in model.materialPropertiesToExport():
-        if writesOutput:
-            section.writeMaterialPropertiesFile(rowsOfSets)
-    model.advanceToTime(job.get("startTime", 0.0))
-    toc = getCurrentTime()
-    jobInfo["model setup time"] = toc - tic
-
-    journal.printTable(
-        [
-            ("Model setup time ", "{:10.4f}s".format(jobInfo["model setup time"])),
-        ],
-        identification,
-        level=0,
-    )
-
-    printPrettyModelSummary(model, journal)
-    journal.printSeperationLine()
-
-    jobInfo["computationTime"] = 0.0
-
-    jobInfo.update(job)
-    jobInfo = loadConfiguration(jobInfo)
-    for updateConfig in inputfile["updateConfiguration"]:
-        updateConfiguration(updateConfig, jobInfo, journal)
-
-    # Create the default entries 'U' (flux) and 'P' (effort) on every node field, and the kinematic
-    # entries 'V' (velocity) and 'A' (acceleration) on the ones a dynamic solver integrates in time
-    # -- those whose inertia is a mass. They stay zero until such a solver publishes into them.
-    #
-    # Created here, before the field outputs take their sample at job initialisation, so that a
-    # ``result=V``/``result=A`` output is valid from the start (a per-node field output reads
-    # ``nodeField[result]`` directly and would otherwise raise) rather than only from the first
-    # increment a dynamic solver has finished. Restricted to the mass-carrying fields because a
-    # velocity of a non-local damage or a temperature field is not a kinematic quantity any solver
-    # here publishes. On those fields they are created for every run, a quasi-static one included,
-    # where they stay zero -- and, like every other entry, travel into its restart checkpoints and
-    # through a refinement's warm start.
-    for nodeField in model.nodeFields.values():
-        nodeField.createFieldValueEntry("U")
-        nodeField.createFieldValueEntry("P")
-        if carriesLinearMomentum(nodeField.name):
-            nodeField.createFieldValueEntry("V")
-            nodeField.createFieldValueEntry("A")
-
-    model._linkFieldVariableObjects(model.nodeSets["all"])
-
-    # *restart, readFrom=...: resume from a checkpoint. Reconstruct-then-overwrite, not full
-    # serialization -- the model above was already rebuilt from this same .inp file, and
-    # readRestart only overwrites its converged state (node fields, element history, scalar
-    # variables, stateful constraints' history) plus model.time, so it must run after node fields
-    # exist (createFieldValueEntry above) and after advanceToTime's cold-start bookkeeping, which
-    # would otherwise clobber model.time back to job['startTime'].
-    #
-    # Resuming skips every step before the checkpoint's step. Topology changes made by model
-    # modifiers (e.g. AMR) are replayed from the checkpoint's topology history. A `modelupdate`
-    # executes an arbitrary expression, whose effect no checkpoint records -- so a resume past one,
-    # in a skipped step or at the start of the resumed step, is refused.
-    restartDefinitions = inputfile["restart"]
-    resumeCheckpoint = None
-    resumeStepNumber = None
-    if restartDefinitions and restartDefinitions[0].get("readFrom"):
-        resumeCheckpoint = ResumeCheckpoint(restartDefinitions[0]["readFrom"])
-        resumeStepNumber = resumeCheckpoint.stepNumber
-        resumeCheckpoint.restoreModel(model, journal)
+    # Setting up the model -- reading the input, describing and partitioning the mesh, creating the
+    # elements, restoring a checkpoint, the field outputs, the output managers and the solvers -- may
+    # fail in one process alone (a file path only one process can read, say). The processes agree on
+    # such a failure, so that every one raises it rather than leaving the others waiting in their next
+    # collective operation -- a caller catching it, the test runner, would otherwise go on to another
+    # job. Nothing in a serial run.
+    with allRanksFailTogetherWhileCommunicating("Setting up the model"):
         journal.message(
-            "Resuming from restart checkpoint {:} (step {:}, time {:})".format(
-                resumeCheckpoint.fileName, resumeStepNumber, model.time
-            ),
+            "Setting up finite element model",
             identification,
             0,
         )
 
-    plotter = createPlotterFromInputFile(inputfile, journal)
-    stepManager = createStepManagerFromInputFile(inputfile)
-    fieldOutputController = createFieldOutputFromInputFile(inputfile, model, journal)
-    model.fieldOutputController = fieldOutputController
-    if not writesOutput:
-        fieldOutputController.disableFileExport()
-    fieldOutputController.initializeJob()
+        jobInfo = dict()
 
-    outputManagers = (
-        createOutputManagersFromInputFile(inputfile, jobName, model, fieldOutputController, journal, plotter)
-        if writesOutput
-        else []
-    )
-    for outputManager in outputManagers:
-        outputManager.initializeJob()
+        tic = getCurrentTime()
+        model = FEModel(domainSize)
+        # Which elements of the mesh this process creates: every one, unless the job is distributed over
+        # several MPI processes, which then each create only their own part (see domaindecomposition.distributedelements).
+        model.elementDistribution = elementDistributionOfThisJob(inputfile, journal)
+        model = fillFEModelFromInputFile(model, inputfile, journal)
+        # The model holds the mesh now; its data lines, the bulk of the parsed input, are not needed again.
+        releaseMeshDataLines(inputfile)
+        model.prepareYourself(journal)
+        # Every process contributes the material properties of its own elements; one writes the files.
+        for section, rowsOfSets in model.materialPropertiesToExport():
+            if writesOutput:
+                section.writeMaterialPropertiesFile(rowsOfSets)
+        model.advanceToTime(job.get("startTime", 0.0))
+        toc = getCurrentTime()
+        jobInfo["model setup time"] = toc - tic
 
-    solvers = createSolversFromInputFile(inputfile, jobInfo, journal)
-
-    if not solvers:
-        from warnings import warn
-
-        warn(
-            "Warning, not defining a Solver is deprecated; Define solver using *solver keyword",
-            DeprecationWarning,
-            stacklevel=2,
+        journal.printTable(
+            [
+                ("Model setup time ", "{:10.4f}s".format(jobInfo["model setup time"])),
+            ],
+            identification,
+            level=0,
         )
 
-    defaultSolver = getSolverByName(job["solver"])
-    solvers["default"] = defaultSolver(jobInfo, journal)
+        printPrettyModelSummary(model, journal)
+        journal.printSeperationLine()
 
-    # Looked up by name from a >>options block (edelweissfe.stepactions.options), which resolves
-    # directly against these two rather than scanning step actions for a category tag.
-    model.solvers = solvers
-    model.outputManagers = {outputManager.name: outputManager for outputManager in outputManagers}
+        jobInfo["computationTime"] = 0.0
+
+        jobInfo.update(job)
+        jobInfo = loadConfiguration(jobInfo)
+        for updateConfig in inputfile["updateConfiguration"]:
+            updateConfiguration(updateConfig, jobInfo, journal)
+
+        # Create the default entries 'U' (flux) and 'P' (effort) on every node field, and the kinematic
+        # entries 'V' (velocity) and 'A' (acceleration) on the ones a dynamic solver integrates in time
+        # -- those whose inertia is a mass. They stay zero until such a solver publishes into them.
+        #
+        # Created here, before the field outputs take their sample at job initialisation, so that a
+        # ``result=V``/``result=A`` output is valid from the start (a per-node field output reads
+        # ``nodeField[result]`` directly and would otherwise raise) rather than only from the first
+        # increment a dynamic solver has finished. Restricted to the mass-carrying fields because a
+        # velocity of a non-local damage or a temperature field is not a kinematic quantity any solver
+        # here publishes. On those fields they are created for every run, a quasi-static one included,
+        # where they stay zero -- and, like every other entry, travel into its restart checkpoints and
+        # through a refinement's warm start.
+        for nodeField in model.nodeFields.values():
+            nodeField.createFieldValueEntry("U")
+            nodeField.createFieldValueEntry("P")
+            if carriesLinearMomentum(nodeField.name):
+                nodeField.createFieldValueEntry("V")
+                nodeField.createFieldValueEntry("A")
+
+        model._linkFieldVariableObjects(model.nodeSets["all"])
+
+        # *restart, readFrom=...: resume from a checkpoint. Reconstruct-then-overwrite, not full
+        # serialization -- the model above was already rebuilt from this same .inp file, and
+        # readRestart only overwrites its converged state (node fields, element history, scalar
+        # variables, stateful constraints' history) plus model.time, so it must run after node fields
+        # exist (createFieldValueEntry above) and after advanceToTime's cold-start bookkeeping, which
+        # would otherwise clobber model.time back to job['startTime'].
+        #
+        # Resuming skips every step before the checkpoint's step. Topology changes made by model
+        # modifiers (e.g. AMR) are replayed from the checkpoint's topology history. A `modelupdate`
+        # executes an arbitrary expression, whose effect no checkpoint records -- so a resume past one,
+        # in a skipped step or at the start of the resumed step, is refused.
+        restartDefinitions = inputfile["restart"]
+        resumeCheckpoint = None
+        resumeStepNumber = None
+        if restartDefinitions and restartDefinitions[0].get("readFrom"):
+            resumeCheckpoint = ResumeCheckpoint(restartDefinitions[0]["readFrom"])
+            resumeStepNumber = resumeCheckpoint.stepNumber
+            resumeCheckpoint.restoreModel(model, journal)
+            journal.message(
+                "Resuming from restart checkpoint {:} (step {:}, time {:})".format(
+                    resumeCheckpoint.fileName, resumeStepNumber, model.time
+                ),
+                identification,
+                0,
+            )
+
+        plotter = createPlotterFromInputFile(inputfile, journal)
+        stepManager = createStepManagerFromInputFile(inputfile)
+        fieldOutputController = createFieldOutputFromInputFile(inputfile, model, journal)
+        model.fieldOutputController = fieldOutputController
+        if not writesOutput:
+            fieldOutputController.disableFileExport()
+        fieldOutputController.initializeJob()
+
+        outputManagers = (
+            createOutputManagersFromInputFile(inputfile, jobName, model, fieldOutputController, journal, plotter)
+            if writesOutput
+            else []
+        )
+        for outputManager in outputManagers:
+            outputManager.initializeJob()
+
+        solvers = createSolversFromInputFile(inputfile, jobInfo, journal)
+
+        if not solvers:
+            from warnings import warn
+
+            warn(
+                "Warning, not defining a Solver is deprecated; Define solver using *solver keyword",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        defaultSolver = getSolverByName(job["solver"])
+        solvers["default"] = defaultSolver(jobInfo, journal)
+
+        # Looked up by name from a >>options block (edelweissfe.stepactions.options), which resolves
+        # directly against these two rather than scanning step actions for a category tag.
+        model.solvers = solvers
+        model.outputManagers = {outputManager.name: outputManager for outputManager in outputManagers}
 
     # The output managers exist only now, well after the model was restored above.
     try:
@@ -318,11 +327,14 @@ def finiteElementSimulation(
         failedAlone = True
 
     except Exception as e:
-        # An error, not a failed step -- raised by every process together (ErrorOnAllRanks), or by this
-        # one alone -- leaves the job as in a serial run: uncaught, it aborts every process with a
-        # non-zero exit status (abortAllProcessesOnUncaughtException).
+        # An error, not a failed step, leaves the job as in a serial run: uncaught, it aborts every
+        # process with a non-zero exit status (abortAllProcessesOnUncaughtException). Raised by every
+        # process together (ErrorOnAllRanks), a caller may catch it in every process; raised here
+        # alone -- outside the steps, which stop every process themselves (stepFailed) --, it stops
+        # the others too, before a caller catching it could leave them waiting.
         print("")
         journal.errorMessage("Simulation failed due to unhandled exception", identification)
+        failedAlone = not isinstance(e, RaisedOnAllRanks)
         raise e
 
     finally:
@@ -353,7 +365,7 @@ def finiteElementSimulation(
         if interrupted:
             abortAllProcesses("interrupted")
         if failedAlone:
-            abortAllProcesses("a step failed without the agreement of the other processes")
+            abortAllProcesses("the job failed without the agreement of the other processes")
 
     return model, fieldOutputController
 

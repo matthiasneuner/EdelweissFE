@@ -799,6 +799,58 @@ def test_a_field_output_failing_in_one_process_before_the_gather_fails_in_every_
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
 
 
+#: Setting up the model fails in one process: on rank 0 while it partitions the mesh, before the
+#: partition is broadcast; on rank 1 after that, before the element results are gathered for the field
+#: output at the start of the job.
+_SETUP_FAILING_PATCHES = {
+    0: """
+from edelweissfe.domaindecomposition import partitioning
+
+
+def failingInProcessZero(*args, **kwargs):
+    raise RuntimeError("partitioning failed in process 0")
+
+
+partitioning.partitionMeshDual = failingInProcessZero
+""",
+    1: """
+from edelweissfe.models.femodel import FEModel
+
+prepareYourself = FEModel.prepareYourself
+
+
+def failingInProcessOne(self, journal):
+    if rank == 1:
+        raise RuntimeError("preparing the model failed in process 1")
+    return prepareYourself(self, journal)
+
+
+FEModel.prepareYourself = failingInProcessOne
+""",
+}
+
+
+@pytest.mark.parametrize("failingRank", [0, 1])
+def test_setting_up_the_model_failing_in_one_process_fails_in_every_process(tmp_path, failingRank):
+    # Not agreed on, the failing process -- caught, as the test runner catches it -- would end its
+    # job, while the others wait for it in the broadcast of the partition, or in the gather of the
+    # element results, forever (the timeout).
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK)
+    (tmp_path / "run.py").write_text(
+        _CATCHING_IN_EVERY_PROCESS_SCRIPT.replace("PATCH", _SETUP_FAILING_PATCHES[failingRank])
+    )
+    output, _ = _runUnderMPI(tmp_path, timeout=60)
+    if output is None:
+        pytest.fail("setting up the model failing in one process left the others waiting")
+
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    failure = "partitioning failed in process 0" if failingRank == 0 else "preparing the model failed in process 1"
+    expected = "ErrorOnAllRanks: Setting up the model failed in process {:}: RuntimeError: {:}".format(
+        failingRank, failure
+    )
+    assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
+
+
 #: A step failing in process 1 alone, outside any step the processes agree on: on increment 3, which
 #: writes no output, so that the others go on into the next increment's exchange -- and the failing
 #: process unwinds through the end of the step, whose field outputs gather element results.
