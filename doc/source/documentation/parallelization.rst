@@ -9,7 +9,7 @@ However, it is RECOMMENDED to enforce a fixed number of threads by running
 
 .. code-block:: console
 
-    OMP_NUM_THREADS=XX python edelweiss.py INPUT.inp
+    PYTHON_GIL=0 OMP_NUM_THREADS=XX edelweissfe INPUT.inp
 
 This ensures that the same number of threads ``XX`` is employed both in EdelweissFE as well as in the underlying Intel MKL (e.g., if the PARDISO linear solver is used).
 
@@ -42,7 +42,7 @@ those variables for the run:
 .. code-block:: console
 
     unset OMP_PROC_BIND OMP_PLACES
-    OMP_NUM_THREADS=XX python edelweiss.py INPUT.inp
+    PYTHON_GIL=0 OMP_NUM_THREADS=XX edelweissfe INPUT.inp
 
 Thread-local buffers in the element loop
 ----------------------------------------

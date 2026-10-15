@@ -134,12 +134,12 @@ The subdomain an increment runs over
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The increment of ``NED`` runs over the elements, constraints and degrees of freedom of one small
-object, the solver's :class:`~edelweissfe.solvers.base.subdomain.Subdomain`: the elements
-computed here, the constraints evaluated here, and the degrees of freedom integrated here. ``NED``
-and ``NEDParallel`` compute the whole model, whose degrees of freedom
-are ``slice(None)``; ``NEDMPI`` computes the subdomain a
-:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines in each process, and adds the
-exchange between the processes in overrides of its own (:doc:`domaindecomposition`).
+object, the solver's :class:`~edelweissfe.solvers.base.subdomain.Subdomain`: the elements of the
+subdomain, its constraints, and the subdomain degrees of freedom. ``NED`` and ``NEDParallel`` compute
+the whole model, whose degrees of freedom are ``slice(None)``; ``NEDMPI`` computes the subdomain a
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines in each
+process, and adds the exchange between the processes in overrides of its own
+(:doc:`domaindecomposition`).
 
 .. automodule:: edelweissfe.solvers.base.subdomain
    :members:

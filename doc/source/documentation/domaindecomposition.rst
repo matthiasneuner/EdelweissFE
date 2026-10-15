@@ -7,6 +7,73 @@ computing one *subdomain* of it. It is the explicit solver of
 results -- distributed over processes, which may sit on several nodes of a cluster, instead of over
 the threads of one process.
 
+Throughout this page and the code, *partition* means one thing only: the division of the elements
+of the mesh into parts by METIS, one part per process; a *repartition* makes it again. What a
+process computes is its *subdomain*.
+
+Vocabulary
+----------
+
+The standard terms of domain decomposition (deal.II, PETSc), as this code uses them. A serial run
+is the special case of one process: its subdomain is the whole model, every degree of freedom is
+owned, every element and node is local, and every set is complete.
+
+subdomain
+    The part of the model one process computes: its elements, the constraints it evaluates, and
+    the degrees of freedom those touch (:class:`~edelweissfe.solvers.base.subdomain.Subdomain`). A
+    serial solver's subdomain is the whole model. (Unrelated to the *subdomains* of libMesh or
+    MOOSE, which name groups of elements, e.g. by material.)
+domain decomposition
+    The division of the model into one subdomain per process, and every exchange between the
+    processes that division needs
+    (:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition`).
+subdomain degrees of freedom
+    The degrees of freedom the elements and constraints of a subdomain touch -- those its process
+    *integrates*. deal.II calls them *locally relevant*: owned and ghost.
+interface degree of freedom
+    A subdomain degree of freedom of more than one process; a *ghost* in every one but its owner.
+owned degree of freedom
+    Each degree of freedom is owned by exactly one process, the lowest-ranked one integrating it
+    (one no element or constraint touches is integrated and owned by rank 0). The owner counts what must be counted once -- a
+    kinetic energy, the external work -- and its value is the one every gather takes.
+local element, local node
+    One that has an object in this process. A **distributed** model creates only the elements of a
+    process' subdomain there (and the surface-sized auxiliary elements everywhere); under the
+    fallback rule every element is local in every process.
+complete set
+    A set all of whose members are local; reading a set that is not complete as a whole raises.
+replicated
+    Held identically in every process: the mesh, the nodes, the sets, the contact facets, the rigid
+    bodies, the degree-of-freedom numbering, and the copies of the constraints.
+collective
+    A method every process must call, in the same order, since it communicates; its docstring
+    starts with the word *Collective*. "Collective among neighbours": every process sharing an
+    interface with this one.
+synchronization
+    Making vectors and states current from their owners -- a ghost update, or a gather of the whole
+    model to rank 0 or to every process.
+agreement
+    A context in which a failure in any one process is raised in every process
+    (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`); no
+    process may communicate inside it.
+
+Invariants
+----------
+
+1. **Bit-identity.** Every sum that decides the solution is a left fold in model order, and the
+   external work is an exact sum: a run on any number of processes equals ``NED``'s run, bit for bit
+   (`An increment`_, `Verifying bit-identity yourself`_).
+2. **One owner per degree of freedom,** and the owner's value is authoritative in every gather
+   (:class:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface`).
+3. **The same model everywhere.** Every process builds, refines and numbers the model identically;
+   checked by a fingerprint of the layout after every build.
+4. **Read only what you received.** Between synchronizations a process reads vectors at its
+   subdomain degrees of freedom only; the readers of the whole model are listed under `Where the
+   whole model is read`_ and refuse to read otherwise. A sum over all degrees of freedom belongs in a
+   method ``NEDMPI`` overrides; written inline in ``NED``, it is a sum over one process.
+5. **No communication inside an agreement,** enforced by the
+   :class:`~edelweissfe.domaindecomposition.communicator.Communicator`.
+
 Running a job
 -------------
 
@@ -217,15 +284,15 @@ a group therefore integrates all of them.
 An increment
 ------------
 
-An increment is the central-difference increment of ``NED``, unchanged. ``NED`` runs it over the
-elements, constraints and degrees of freedom of its
-:class:`~edelweissfe.solvers.base.subdomain.Subdomain` -- three members: the elements
-computed here, the constraints evaluated here, and the degrees of freedom integrated here. For
-``NED`` that is the whole model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]``
-is the whole vector; for ``NEDMPI`` it is the subdomain of the process, as a
-:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines it, and the degrees of freedom
-are a sorted index array. Which of them a process owns -- counts once for the model, e.g. in the
-external work -- is the subdomain's (``DomainDecomposition.ownedDofMask``).
+An increment is the central-difference increment of ``NED``, unchanged. ``NED`` runs it over its
+:class:`~edelweissfe.solvers.base.subdomain.Subdomain` -- three members: the elements of the
+subdomain, its constraints, and the subdomain degrees of freedom. For ``NED`` that is the whole
+model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]`` is the whole vector; for
+``NEDMPI`` it is the subdomain of the process, as its
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines it, and the
+degrees of freedom are a sorted index array. Which of them a process owns -- counts once for the
+model, e.g. in the external work -- is the decomposition's business
+(``DomainDecomposition.ownedDofMask``), not the subdomain's.
 
 Everything a process must exchange with the others, ``NEDMPI`` adds in overrides of a few methods of
 ``NED``, each calling the ``NED`` method or the shared function it extends:
@@ -243,7 +310,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``energyBalanceTerms``                      the sums over the subdomains
 ``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned
 ``addExternalWork``                         keeps the owned work until it is read (below)
-``publishNodeFields``                       publishes the degrees of freedom integrated here
+``publishNodeFields``                       publishes the subdomain degrees of freedom
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
 ``advanceModelToTime``                      accepts the states of the own elements and constraints only
 ``updateConstraintConnectivity``            the positions a contact search reads, from their owners
@@ -406,21 +473,7 @@ the verification harness run ``testfiles/mpi`` with it.
 ``tests/test_domaindecomposition.py`` checks with it that a poisoned run gives the same bits, and
 that the poison would notice: without the positions received for the contact search, it does not.
 
-What it saves, on the c1_150 edge-breakout model (about 1 million degrees of freedom; output and a
-contact search every 50 increments, a topology check every 250; summed over all processes):
-
-==============================  ========================  ========================
-                                8 processes x 4 threads   32 processes x 1 thread
-==============================  ========================  ========================
-output increment, before        313 MB, 0.30 s            1386 MB, 0.50 s
-output increment, now           39 MB, 0.20 s             43 MB, 0.22 s
-contact search, before          191 MB, 0.26 s            847 MB, 0.32 s
-contact search, now             0.13 MB, 0.18 s           0.18 MB, 0.17 s
-==============================  ========================  ========================
-
-An output increment a topology check follows costs what it did. What is left of a contact search
-is the search itself; an increment without output or search, and the peak memory of a process, are
-unchanged.
+What this saves on a large model is measured under `Performance notes`_.
 
 What happens to the element states depends on how the model is held.
 
@@ -561,31 +614,14 @@ model (`Where the whole model is read`_). ``tests/test_domaindecomposition.py`` 
 exchange writes nothing outside the subdomain, and a run with the net force set to NaN there gives the
 same bits.
 
-What it costs: on the c1_150 edge-breakout model (five penalty contacts, five ties, 8 processes of 4
-threads) the largest contact (the support under the slab, surface to rigid body) costs its process
-about 7--9 ms of a 85--90 ms increment, the others 0.5--1 ms. Evaluated after the exchange of the
-element forces, every other process waited for it; the load balancing now gives its process fewer
-elements and it is evaluated with them (see `Load balancing`_). Exchanging and adding the constraint forces costs rank 0 about 1.2 ms at 8x4
-and 0.5 ms at 32 processes of one thread, and moves 2.5 MB (8x4) or 3.1 MB (32x1) per increment over
-all processes. The former exchange, which shared every constraint's forces with every process (an
-``Allgatherv``), moved 19.5 MB and 86.5 MB: at 32 processes one process' large contact was copied 31
-times, and an increment took about 127 ms instead of 95 ms (89 instead of 88 ms at 8x4).
-Partitioning a contact by its slave points is not done.
+A large contact may cost its process far more than the others' constraints cost theirs. Evaluated
+after the exchange of the element forces, it would keep every other process waiting; so it is
+evaluated with the elements, before the exchange, and the load balancing gives its process
+correspondingly fewer elements (see `Load balancing`_). Partitioning a contact by its slave points
+is not done.
 
-What balancing with the constraints bought on that model (250 increments, rabbit, the mean of two
-runs each, the time per increment after the first check):
-
-================================  ==========  ==========  ==========  ==========
-                                  8x4 base    8x4 now     32x1 base   32x1 now
-================================  ==========  ==========  ==========  ==========
-default tolerance                 87.8 ms     84.3 ms     91.8 ms     92.5 ms
-a repartition forced              88.8 ms     84.0 ms     93.6 ms     89.7 ms
-================================  ==========  ==========  ==========  ==========
-
-At 8x4 the contact's process computed 10--11 % of the element work instead of 12.6 %, and was no
-longer the busiest; at 32x1 the default tolerance found the processes balanced enough (the contact
-is a smaller part of a 32nd), and a forced repartition gave its process 2.6--4.4 % of the elements
-instead of 6 %.
+What the constraint exchange costs, and what balancing with the constraints buys, is measured under
+`Performance notes`_.
 
 Adaptive refinement
 -------------------
@@ -754,16 +790,13 @@ Everything indexed by the elements a process holds is then built again, as after
 topology: the solver rebuilds the equation system for the elements now held, carrying the solution,
 the velocity and the force over -- each process completes them at the degrees of freedom it
 integrates from now on, from their previous owners --, and with it the degree-of-freedom indices of the elements, the subdomain and its
-interface, the loads of the elements computed here, the lumped inertia and damping (assembled from the
-elements now computed here, completed at the interface in model order, so the same bits as before)
+interface, the loads of the elements of the subdomain, the lumped inertia and damping (assembled from the
+elements now in the subdomain, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
 element results again for the elements now owned here. All of these are released *before* the
 elements move -- the solver keeps only plain copies of the three vectors it carries over, the field
 outputs keep element numbers, not elements -- so that a dropped element is freed before the new ones
-are created, and a migration does not raise the memory of a process beyond what its elements need:
-on a 192 000-element GC3D8 block at 8 processes, two migrations raised the peak resident memory per
-process by 80--150 MB (the transient of the exchange and the rebuild), and the memory at the end of
-the run equals that of a run that never migrated. A
+are created, and a migration does not raise the memory of a process beyond what its elements need: (see `Performance notes`_). A
 migrated element is bit for bit the element its previous
 process held -- exactly as a resumed restart's element is -- and every sum is still formed in model
 order, so a run that migrates elements is bit-identical to a serial run too. The equation system is
@@ -772,12 +805,6 @@ serial run keeps them between rebuilds of its equation system: the two agree bec
 not depend on its state -- checked at every migration, bit for bit, not assumed; an element violating
 it stops the run with a message. The journal reports every migration (``Element migration: ...
 element(s) changed process``).
-
-What balancing buys is the waiting it removes, and no more. On that block the costliest process was
-only 3--5 % above the mean; a light process (rank 0) waited about 9 % of each increment for it, and
-after the migrations a quarter of that, computing more elements in the time it had waited before. The
-time per increment, set by the costliest process, could therefore not improve noticeably, and did
-not. Balancing pays where damage localizes and the imbalance grows large.
 
 The timed costs make a partition, and so a migration, depend on the machine and its load.
 ``load-balance-costs=elementNumber`` weighs every element by its number instead: a deterministic,
@@ -806,9 +833,7 @@ only where the external work is read -- the energy balance, an output increment,
 model, as a serial run does, without an exchange every increment
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.gatherExternalWork`). What is kept
 and gathered is one integer per increment and process, however many degrees of freedom are
-prescribed: on a 40 000-element block with 40 000 prescribed degrees of freedom and an output every
-1000 increments, keeping and gathering the products cost each of 4 processes 2.3 s over 2000
-increments, the exact sums 0.5 s. It is an
+prescribed. It is an
 ordinary checkpoint of the whole model, so a run can be resumed by
 ``NEDMPI`` on any number of processes, or by ``NED``. The topology check due after that increment
 runs at the start of the next one, after the checkpoint, so a resumed run performs it exactly as the
@@ -989,6 +1014,68 @@ Limitations
   work. A single large contact constraint is not split (see `Contact, ties and rigid bodies`_). The
   implicit-only constraint types still hold the whole model on every process.
 * Only the explicit dynamic solver is decomposed.
+
+Performance notes
+-----------------
+
+Measurements behind the sections above, on rabbit (64 cores). They describe the cost of the
+mechanisms at the time they were made, not what a run guarantees.
+
+**Gathering only what is read** (`Where the whole model is read`_). On the c1_150 edge-breakout
+model (about 1 million degrees of freedom; output and a contact search every 50 increments, a
+topology check every 250; summed over all processes), before and after the readers received only
+what they read:
+
+==============================  ========================  ========================
+                                8 processes x 4 threads   32 processes x 1 thread
+==============================  ========================  ========================
+output increment, before        313 MB, 0.30 s            1386 MB, 0.50 s
+output increment, now           39 MB, 0.20 s             43 MB, 0.22 s
+contact search, before          191 MB, 0.26 s            847 MB, 0.32 s
+contact search, now             0.13 MB, 0.18 s           0.18 MB, 0.17 s
+==============================  ========================  ========================
+
+An output increment a topology check follows costs what it did. What is left of a contact search
+is the search itself; an increment without output or search, and the peak memory of a process, are
+unchanged.
+
+**The constraint forces** (`Contact, ties and rigid bodies`_). On c1_150 (five penalty contacts,
+five ties, 8 processes of 4 threads) the largest contact (the support under the slab, surface to
+rigid body) costs its process about 7--9 ms of a 85--90 ms increment, the others 0.5--1 ms.
+Exchanging and adding the constraint forces costs rank 0 about 1.2 ms at 8x4 and 0.5 ms at 32
+processes of one thread, and moves 2.5 MB (8x4) or 3.1 MB (32x1) per increment over all processes.
+The former exchange, which shared every constraint's forces with every process (an
+``Allgatherv``), moved 19.5 MB and 86.5 MB: at 32 processes one process' large contact was copied 31
+times, and an increment took about 127 ms instead of 95 ms (89 instead of 88 ms at 8x4).
+
+What balancing with the constraints bought on c1_150 (250 increments, rabbit, the mean of two
+runs each, the time per increment after the first check):
+
+================================  ==========  ==========  ==========  ==========
+                                  8x4 base    8x4 now     32x1 base   32x1 now
+================================  ==========  ==========  ==========  ==========
+default tolerance                 87.8 ms     84.3 ms     91.8 ms     92.5 ms
+a repartition forced              88.8 ms     84.0 ms     93.6 ms     89.7 ms
+================================  ==========  ==========  ==========  ==========
+
+At 8x4 the contact's process computed 10--11 % of the element work instead of 12.6 %, and was no
+longer the busiest; at 32x1 the default tolerance found the processes balanced enough (the contact
+is a smaller part of a 32nd), and a forced repartition gave its process 2.6--4.4 % of the elements
+instead of 6 %.
+
+**Migration** (`Load balancing`_). On a 192 000-element GC3D8 block at 8 processes, two migrations
+raised the peak resident memory per process by 80--150 MB (the transient of the exchange and the
+rebuild), and the memory at the end of the run equals that of a run that never migrated.
+
+What balancing buys is the waiting it removes, and no more. On that block the costliest process was
+only 3--5 % above the mean; a light process (rank 0) waited about 9 % of each increment for it, and
+after the migrations a quarter of that, computing more elements in the time it had waited before. The
+time per increment, set by the costliest process, could therefore not improve noticeably, and did
+not. Balancing pays where damage localizes and the imbalance grows large.
+
+**The external work** (`Output and restart`_). On a 40 000-element block with 40 000 prescribed
+degrees of freedom and an output every 1000 increments, keeping and gathering the products cost each
+of 4 processes 2.3 s over 2000 increments, the exact sums 0.5 s.
 
 Package reference
 -----------------
