@@ -644,6 +644,12 @@ class _TaggedContributions:
         if np.any((sortedDofs[1:] == sortedDofs[:-1]) & (sortedOrder[1:] == sortedOrder[:-1])):
             raise RuntimeError("A nodal contribution at the subdomain interface was received twice.")
 
+    @property
+    def nEntriesSent(self) -> int:
+        """The number of entries this process sends to its neighbours per exchange."""
+
+        return sum(entries.shape[0] for entries in self._sendEntries.values())
+
     @staticmethod
     def entriesAtInterface(interface: SubdomainInterface, entryDofs: np.ndarray) -> np.ndarray:
         """The entries of a contribution buffer at a degree of freedom another process integrates too.
@@ -895,6 +901,12 @@ class ConstraintForceExchange:
             if entries.shape[0]:
                 dofs = self._contributions.tagDofs[entries]
                 self._additions.append((entries, dofs, np.unique(dofs).shape[0] != dofs.shape[0]))
+
+    @property
+    def nEntriesSent(self) -> int:
+        """The number of constraint force entries this process sends to its neighbours per increment."""
+
+        return self._contributions.nEntriesSent
 
     def addAllConstraintForces(self, ownedForces: dict, vector: np.ndarray):
         """Collective among neighbours. Send this process' constraint forces to the neighbours integrating

@@ -490,6 +490,8 @@ class DomainDecomposition:
                 self._interface.nInterfaceDofs,
                 len(self._interface.neighbours),
                 len(self._model.elements),
+                len(self._ownedConstraints),
+                self._constraintForceExchange.nEntriesSent,
             ),
             root=0,
         )
@@ -500,7 +502,8 @@ class DomainDecomposition:
         imbalance = elementCounts.max() / max(elementCounts.mean(), 1e-300)
         self.journal.message(
             "Subdomains: {:} element(s) per process (max/mean {:.3f}); subdomain DOFs {:}; interface DOFs {:}; "
-            "neighbours {:}; elements created {:} of {:}".format(
+            "neighbours {:}; elements created {:} of {:}; constraints evaluated {:}, their force entries sent per "
+            "increment {:}; degrees of freedom of constraints beyond the elements', gathered to every process: {:}".format(
                 "/".join(str(count) for count in elementCounts),
                 imbalance,
                 "/".join(str(entry[1]) for entry in statistics),
@@ -508,6 +511,9 @@ class DomainDecomposition:
                 "/".join(str(entry[3]) for entry in statistics),
                 "/".join(str(entry[4]) for entry in statistics),
                 len(self._model.mesh.elements),
+                "/".join(str(entry[5]) for entry in statistics),
+                "/".join(str(entry[6]) for entry in statistics),
+                self._interface.nClaimedDofs,
             ),
             self.identification,
             0 if topologyChanged else 2,
