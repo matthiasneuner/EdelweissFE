@@ -204,15 +204,10 @@ class GlobalDofNumbering:
                 differ("the nodes of field {:} are not the nodes of the mesh carrying it, in mesh order".format(field))
 
             first, dimension = self.firstDofOfField[field], self.dimensionOfField[field]
-            # The DofManager gives the components of a node consecutive degrees of freedom, a row of its
-            # field's range (DofManager._reserveSpaceForNodeFields): the first of each node and the
-            # range of the field below determine them all.
-            firstOfNodes = np.fromiter(
-                (dofsOfFieldVariables[node.fields[field]][0] for node in nodes),
-                dtype=np.int64,
-                count=len(nodes),
+            dofs = np.concatenate(
+                [dofsOfFieldVariables[node.fields[field]] for node in nodes] or [np.empty(0, dtype=np.int64)]
             )
-            if not np.array_equal(firstOfNodes, first + dimension * np.arange(labels.shape[0], dtype=np.int64)):
+            if not np.array_equal(dofs, np.arange(first, first + labels.shape[0] * dimension)):
                 differ("the degrees of freedom of field {:}".format(field))
             if dofManager.idcsOfFieldsInDofVector[field] != slice(first, first + labels.shape[0] * dimension):
                 differ("the range of field {:}".format(field))
