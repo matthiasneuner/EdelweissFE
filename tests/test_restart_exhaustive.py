@@ -654,7 +654,7 @@ def _reader(checkpoint: Path) -> str:
 #: Attributes that legitimately differ between a resumed and an uninterrupted run: wall-clock time,
 #: and change counters that only invalidate caches -- how far they count depends on how many
 #: separate mutations a replay bundles into one, not on the state they guard.
-_NOT_STATE = {"_stepWallClockTic", "_version", "_seenParentVersion"}
+_NOT_STATE = {"_stepWallClockTic", "_version", "_seenParentVersion", "_nodesFoundFor"}
 
 
 def _plainValue(value, directory: str, depth: int = 0):
