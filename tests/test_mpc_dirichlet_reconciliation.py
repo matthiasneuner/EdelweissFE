@@ -33,6 +33,9 @@ class _DummySolver(NonlinearSolverBase):
 
 
 class _DummyDirichlet:
+    #: every row of the set holds constrained degrees of freedom (see DirichletBase.constrainedRows)
+    constrainedRows = slice(None)
+
     def __init__(self, name, dof_indices, delta_values, active=True):
         self.name = name
         self.active = active

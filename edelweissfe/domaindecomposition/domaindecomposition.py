@@ -81,7 +81,10 @@ from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
-from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
+from edelweissfe.numerics.mpctransformation import (
+    MultiPointConstraintTransformation,
+    dependenciesOfRecords,
+)
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
 from edelweissfe.solvers.base.subdomain import Subdomain
 from edelweissfe.utils.exceptions import TopologyError
@@ -191,6 +194,9 @@ class DomainDecomposition:
 
         #: The global numbering of the degrees of freedom the layout was last checked against.
         self._numbering = None
+        #: Where the vectors are of the subdomain: the records of the multi-point constraints by global
+        #: degree of freedom, of the whole model, as of the last :meth:`defineSubdomainDofs`.
+        self._multiPointConstraintRecords = []
         #: The nodes of each node field of the subdomain, by their row in the mesh (:meth:`subdomainNodeFields`).
         self._rowsOfSubdomainNodeFields = None
         #: Whether the vectors of this process hold the subdomain degrees of freedom only, numbered by a
@@ -284,16 +290,11 @@ class DomainDecomposition:
 
         self._reportSubdomains(topologyChanged)
 
-    def defineSubdomainDofs(self, model: FEModel) -> np.ndarray:
-        """Collective. Where the vectors are of the subdomain (:attr:`vectorsOfSubdomain`): check that every
-        process holds the same model, take the partition of the current mesh -- adopting the distribution's
-        if the mesh was not partitioned yet; a repartition is decided by :meth:`rebalance` beforehand --,
-        assign the constraints afresh where the mesh or the elements changed (:meth:`_constraintOwnersOf`),
-        and determine this process' subdomain degrees of freedom and interface -- before any DofManager
-        exists, from what every process holds:
-        the partition, the mesh and its global numbering of the degrees of freedom, and the nodes of the
-        constraints this process evaluates. The DofManager of the subdomain is then made for exactly these
-        (:meth:`subdomainNodeFields`), and :meth:`define` completes the definition.
+    def numberDegreesOfFreedom(self, model: FEModel) -> GlobalDofNumbering:
+        """Where the vectors are of the subdomain: the global numbering of the degrees of freedom of the
+        model (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`), made afresh from
+        the mesh -- what :meth:`defineSubdomainDofs` and the records of the multi-point constraints by
+        global degree of freedom read.
 
         Parameters
         ----------
@@ -302,14 +303,46 @@ class DomainDecomposition:
 
         Returns
         -------
+        GlobalDofNumbering
+            The numbering.
+        """
+
+        self._numbering = GlobalDofNumbering.ofModel(model)
+        return self._numbering
+
+    def defineSubdomainDofs(self, model: FEModel, multiPointConstraintRecords: list) -> np.ndarray:
+        """Collective. Where the vectors are of the subdomain (:attr:`vectorsOfSubdomain`): check that every
+        process holds the same model, take the partition of the current mesh -- adopting the distribution's
+        if the mesh was not partitioned yet; a repartition is decided by :meth:`rebalance` beforehand --,
+        assign the constraints afresh where the mesh or the elements changed (:meth:`_constraintOwnersOf`),
+        and determine this process' subdomain degrees of freedom and interface -- before any DofManager
+        exists, from what every process holds:
+        the partition, the mesh and its global numbering of the degrees of freedom
+        (:meth:`numberDegreesOfFreedom`, made first), the nodes of the constraints this process evaluates,
+        and the multi-point constraints, whose groups a process integrates whole. The DofManager of the
+        subdomain is then made for exactly these (:meth:`subdomainNodeFields`), the multi-point-constraint
+        transformation on them (:meth:`multiPointConstraintRecordsOfSubdomain`), and :meth:`define`
+        completes the definition.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        multiPointConstraintRecords
+            The records of every multi-point constraint of the model by global degree of freedom, the same
+            in every process (``(slaveDof, [(masterDof, coefficient), ...])``); empty if there are none.
+
+        Returns
+        -------
         np.ndarray
             The subdomain degrees of freedom, global, sorted.
         """
 
         self._model = model
+        self._multiPointConstraintRecords = multiPointConstraintRecords
+        dependencies = dependenciesOfRecords(multiPointConstraintRecords) if multiPointConstraintRecords else None
         with performancetiming.timeit("subdomain definition"):
-            self._numbering = GlobalDofNumbering.ofModel(model)
-            self._requireSameLayout(model)
+            self._requireSameLayout(model, dependencies)
             self._constraintOwnersOf(model)
             self._adoptOwnership(model)
 
@@ -324,9 +357,53 @@ class DomainDecomposition:
                     for field in fields
                 ]
             self._interface = SubdomainInterface(
-                self.communicator, elementProcesses, np.concatenate(touched), None, vectorsOfSubdomain=True
+                self.communicator,
+                elementProcesses,
+                np.concatenate(touched),
+                None if dependencies is None else dependencies[:2],
+                vectorsOfSubdomain=True,
             )
         return self._interface.subdomainDofs
+
+    def multiPointConstraintRecordsOfSubdomain(self) -> list:
+        """The records of the multi-point constraints whose slave this process integrates, by the
+        positions of their degrees of freedom in the vectors of the subdomain, in the order of the records
+        of the whole model (:meth:`defineSubdomainDofs`): what the transformation of a process whose
+        vectors are of the subdomain is assembled from. A process integrating a slave integrates its
+        masters too (the closure of :class:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface`),
+        and its numbering is the global one compressed in order, so that the transformation is the
+        rows and columns of the subdomain of the transformation of the whole model.
+
+        Returns
+        -------
+        list
+            The records, ``(slavePosition, [(masterPosition, coefficient), ...])``.
+
+        Raises
+        ------
+        RuntimeError
+            If a master of a slave of the subdomain is not a subdomain degree of freedom.
+        """
+
+        records = self._multiPointConstraintRecords
+        if not records:
+            return []
+        interface = self._interface
+        subdomainDofs = interface.subdomainDofs
+        slaves = np.array([slave for slave, _ in records], dtype=np.int64)
+        position = np.minimum(np.searchsorted(subdomainDofs, slaves), max(subdomainDofs.shape[0] - 1, 0))
+        integrated = np.flatnonzero(subdomainDofs[position] == slaves) if subdomainDofs.shape[0] else []
+        held = [records[i] for i in integrated]
+        positions = interface.positionsOf(
+            np.array(
+                [dof for slave, masters in held for dof in [slave, *(master for master, _ in masters)]], dtype=np.int64
+            )
+        ).tolist()
+        local, at = [], 0
+        for _, masters in held:
+            local.append((positions[at], [(positions[at + 1 + i], weight) for i, (_, weight) in enumerate(masters)]))
+            at += 1 + len(masters)
+        return local
 
     def subdomainNodeFields(self, model: FEModel) -> dict:
         """The node fields of the subdomain: per field of the model, the nodes at which this process
@@ -409,7 +486,7 @@ class DomainDecomposition:
                 "the DofManager of the subdomain does not locate every element and constraint of the subdomain"
             )
 
-    def _requireSameLayout(self, model: FEModel):
+    def _requireSameLayout(self, model: FEModel, multiPointConstraintDependencies: tuple | None):
         """Collective. Refuse to continue unless every process built the same mesh and degree-of-freedom
         layout (:func:`layoutFingerprint`).
 
@@ -417,6 +494,9 @@ class DomainDecomposition:
         ----------
         model
             The model tree.
+        multiPointConstraintDependencies
+            Every slave, master and weight of the multi-point constraints, by global degree of freedom
+            (:func:`~edelweissfe.numerics.mpctransformation.dependenciesOfRecords`), or None.
 
         Raises
         ------
@@ -424,7 +504,9 @@ class DomainDecomposition:
             On every process, if any two fingerprints differ.
         """
 
-        fingerprints = self.communicator.allgather(layoutFingerprint(model, self._numbering, self._mpcTransformation))
+        fingerprints = self.communicator.allgather(
+            layoutFingerprint(model, self._numbering, multiPointConstraintDependencies)
+        )
         if len(set(fingerprints)) > 1:
             raise RuntimeError(
                 "The processes hold different models: their layout fingerprints are {:}. Every process "
@@ -915,7 +997,8 @@ class DomainDecomposition:
         numbering = GlobalDofNumbering.ofModel(model)
         numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
         self._numbering = numbering
-        self._requireSameLayout(model)
+        transformation = self._mpcTransformation
+        self._requireSameLayout(model, None if transformation is None else transformation.slaveMasterDofWeights())
 
     def _reportSubdomains(self, topologyChanged: bool):
         """Collective. Report the size of every subdomain and of its interface, and the constraints each
@@ -1790,7 +1873,7 @@ def _sameShares(shares: np.ndarray | None, others: np.ndarray | None) -> bool:
 
 
 def layoutFingerprint(
-    model: FEModel, numbering: GlobalDofNumbering, mpcTransformation: MultiPointConstraintTransformation | None
+    model: FEModel, numbering: GlobalDofNumbering, multiPointConstraintDependencies: tuple | None
 ) -> str:
     """A fingerprint of everything the processes of a domain-decomposed run must hold identically: the
     mesh -- the element numbers in mesh order, and per type of element the positions of its elements and
@@ -1811,8 +1894,9 @@ def layoutFingerprint(
         The model tree.
     numbering
         The global numbering of the degrees of freedom, which the DofManager was checked to agree with.
-    mpcTransformation
-        The multi-point-constraint transformation of the equation system, or None.
+    multiPointConstraintDependencies
+        Every slave, master and weight of the multi-point constraints, by global degree of freedom
+        (:func:`~edelweissfe.numerics.mpctransformation.dependenciesOfRecords`), or None.
 
     Returns
     -------
@@ -1862,8 +1946,8 @@ def layoutFingerprint(
         )
     add("size", np.int64(numbering.nDof))
 
-    if mpcTransformation is not None:
-        slaves, masters, weights = mpcTransformation.slaveMasterDofWeights()
+    if multiPointConstraintDependencies is not None:
+        slaves, masters, weights = multiPointConstraintDependencies
         add("multi-point constraint slaves", slaves.astype(np.int64))
         add("multi-point constraint masters", masters.astype(np.int64))
         add("multi-point constraint weights", np.asarray(weights, dtype=float))

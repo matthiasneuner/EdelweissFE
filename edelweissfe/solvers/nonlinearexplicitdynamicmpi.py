@@ -51,7 +51,7 @@ fields of its subdomain whose numbering is the global one compressed
 (:meth:`NEDMPI.createDofManager`); the node fields keep every node and are filled from the owners
 where the whole model is read. A model with a reason against it
 (:meth:`NEDMPI.reasonsForVectorsOfWholeModel`: every element on every process, adaptive refinement,
-contact, rigid bodies, multi-point constraints, scalar variables) holds vectors of the whole model
+contact, rigid bodies, scalar variables) holds vectors of the whole model
 instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
 owners at every degree of freedom -- which is what lets a contact search move a constraint onto
 nodes another process integrated until then.
@@ -493,8 +493,9 @@ class NEDMPI(NEDParallel):
         synchronize); a model modifier changing the mesh, whose refinement interpolates the node fields
         of the whole model; a constraint searching its connectivity (contact), which may couple degrees
         of freedom of another subdomain at its next search; a rigid body, whose reference node every
-        process reads; a multi-point constraint, whose closure the DofManager of a subdomain does not
-        yet number; and scalar variables.
+        process reads; and scalar variables. (A multi-point constraint is not among them: its groups
+        are integrated whole, and its transformation is that of the subdomain, see
+        :meth:`multiPointConstraintRecords`.)
 
         Parameters
         ----------
@@ -518,8 +519,6 @@ class NEDMPI(NEDParallel):
             reasons.append("constraint(s) {:} search their connectivity (contact)".format(", ".join(searched)))
         if model.rigidBodies:
             reasons.append("rigid bodies {:}".format(", ".join(model.rigidBodies)))
-        if model.multiPointConstraints:
-            reasons.append("multi-point constraint(s) {:}".format(", ".join(model.multiPointConstraints)))
         if model.scalarVariables:
             reasons.append("scalar variables")
         return reasons
@@ -657,7 +656,10 @@ class NEDMPI(NEDParallel):
 
         self._partsOfNodeSetsHere = {}
         decomposition = self.domainDecomposition
-        decomposition.defineSubdomainDofs(model)
+        numbering = decomposition.numberDegreesOfFreedom(model)
+        decomposition.defineSubdomainDofs(
+            model, self._collectMultiPointConstraintRecords(model, numbering.dofsOfFieldVariables(model.mesh))
+        )
         return self.explicitDofManager(
             decomposition.subdomainNodeFields(model).values(),
             [],
@@ -665,6 +667,29 @@ class NEDMPI(NEDParallel):
             decomposition.ownedConstraints.values(),
             [],
         )
+
+    def multiPointConstraintRecords(self, model: FEModel) -> list:
+        """The records of the multi-point constraints of the equation system; see
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.multiPointConstraintRecords`.
+        Where the vectors are of the subdomain, those whose slave this process integrates, by the positions
+        in its vectors
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.multiPointConstraintRecordsOfSubdomain`),
+        so that the transformation is the subdomain's part of the transformation of the whole model.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        list
+            The records.
+        """
+
+        if not self.vectorsOfSubdomain:
+            return super().multiPointConstraintRecords(model)
+        return self.domainDecomposition.multiPointConstraintRecordsOfSubdomain()
 
     def readCarriedFromNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
         """Fill the carried vectors of a new equation system from the node fields; see
@@ -1676,25 +1701,29 @@ class NEDMPI(NEDParallel):
             self._partsOfNodeSetsHere[key] = (np.flatnonzero(held), positions[held])
         return self._partsOfNodeSetsHere[key]
 
-    def locateConstrainedDofs(self, dirichlets: list):
-        """Determine which degrees of freedom each Dirichlet condition constrains; see
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.locateConstrainedDofs`.
+    def _constrainedDofsOf(self, dirichlet: StepActionBase) -> np.ndarray:
+        """The degrees of freedom a Dirichlet condition constrains, in the vectors of this process; see
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase._constrainedDofsOf`.
         Vectors of the subdomain hold the part of a node set whose degrees of freedom this process
-        integrates (:meth:`_partOfNodeSetHere`), and the condition is imposed on that part
-        (:attr:`~edelweissfe.stepactions.base.dirichletbase.DirichletBase.constrainedRows`).
+        integrates (:meth:`_partOfNodeSetHere`): the condition is imposed on that part, whose rows it
+        states (:attr:`~edelweissfe.stepactions.base.dirichletbase.DirichletBase.constrainedRows`).
 
         Parameters
         ----------
-        dirichlets
-            The Dirichlet conditions of the step.
+        dirichlet
+            The Dirichlet condition.
+
+        Returns
+        -------
+        np.ndarray
+            The positions of its constrained degrees of freedom, node-major.
         """
 
         if not self.vectorsOfSubdomain:
-            return super().locateConstrainedDofs(dirichlets)
-        for dirichlet in dirichlets:
-            rows, positions = self._partOfNodeSetHere(dirichlet.nSet, dirichlet.field)
-            dirichlet.constrainedRows = rows
-            dirichlet.constrainedDofIndices = positions[:, dirichlet.components].ravel()
+            return super()._constrainedDofsOf(dirichlet)
+        rows, positions = self._partOfNodeSetHere(dirichlet.nSet, dirichlet.field)
+        dirichlet.constrainedRows = rows
+        return positions[:, dirichlet.components].ravel()
 
     def computeNodeForces(self, nodeForces: list[StepActionBase], PExt: DofVector, timeStep: TimeStep) -> DofVector:
         """Add the concentrated loads; see

@@ -128,6 +128,36 @@ def _flattenChainedRecords(
     return [(slaveDof, list(resolve(slaveDof, frozenset()).items())) for slaveDof in recordOf]
 
 
+def dependenciesOfRecords(
+    records: list[tuple[int, list[tuple[int, float]]]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Every dependency of a set of multi-point-constraint records: a slave DOF, one of its masters,
+    and the weight of that master in the slave's motion, ordered by slave, then by master -- after
+    chained records are flattened (:func:`_flattenChainedRecords`), so that a master is always an
+    independent DOF.
+
+    The order does not depend on the order of the records, so that two processes holding the same
+    constraints describe them identically.
+
+    Parameters
+    ----------
+    records
+        The records, one per slave DOF: ``(slaveDof, [(masterDof, coefficient), ...])``.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The slave DOF, the master DOF and the weight of each dependency, of equal length.
+    """
+
+    flattened = _flattenChainedRecords(records)
+    slaves = np.array([slave for slave, masters in flattened for _ in masters], dtype=np.int64)
+    masters = np.array([master for _, masters in flattened for master, _ in masters], dtype=np.int64)
+    weights = np.array([weight for _, masters in flattened for _, weight in masters], dtype=float)
+    order = np.lexsort((masters, slaves))
+    return slaves[order], masters[order], weights[order]
+
+
 class MultiPointConstraintTransformation:
     """The assembled master-slave condensation operator for all linear multi-point constraints of
     an equation system.
@@ -224,6 +254,9 @@ class MultiPointConstraintTransformation:
         cVals = np.concatenate([np.ones(len(self.slaveDofIndices)), -np.array(wVals)])
         self._C = csr_matrix((cVals, (cRows, cCols)), shape=(nDof, nDof))
 
+        #: Every dependency, ordered by slave and master (:meth:`slaveMasterDofWeights`).
+        self._dependencies = dependenciesOfRecords(records)
+
         self._useAmgclSpgemm = useAmgclSpgemm
         # Lazily populated by _transformSystemMatrixAmgcl on first use: self._T is fixed for the
         # lifetime of this object (assigned once above, never reassigned), so both the
@@ -244,11 +277,11 @@ class MultiPointConstraintTransformation:
         Returns
         -------
         tuple[np.ndarray, np.ndarray, np.ndarray]
-            The slave DOF, the master DOF and the weight of each dependency, of equal length.
+            The slave DOF, the master DOF and the weight of each dependency, of equal length
+            (:func:`dependenciesOfRecords`).
         """
 
-        W = self._W.sorted_indices().tocoo()
-        return self.slaveDofIndices[W.row], W.col.astype(int), W.data
+        return self._dependencies
 
     def slaveMasterDofPairs(self) -> tuple[np.ndarray, np.ndarray]:
         """Every dependency of the condensation, as pairs of a slave DOF and one of its masters

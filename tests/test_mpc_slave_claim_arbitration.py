@@ -59,7 +59,7 @@ class _ArbiterHost:
     def collect(self, model):
         # Resolved at call time so this module still imports against a tree without the arbiter,
         # letting the tie test below fail on its own terms rather than at collection.
-        return NonlinearSolverBase._collectMultiPointConstraintRecords(self, model)
+        return NonlinearSolverBase._collectMultiPointConstraintRecords(self, model, self.theDofManager)
 
 
 def _model(*namedConstraints):

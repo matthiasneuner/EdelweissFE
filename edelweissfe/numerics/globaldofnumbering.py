@@ -250,6 +250,25 @@ class GlobalDofNumbering:
         dimension = self.dimensionOfField[field]
         return self.firstDofOfField[field] + ranks[:, None] * dimension + np.arange(dimension, dtype=np.int64)
 
+    def dofsOfFieldVariables(self, mesh) -> "GlobalDofsOfFieldVariables":
+        """The global degrees of freedom of the field variables of nodes of the mesh: what a model entity
+        reads from a DofManager (``idcsOfFieldVariablesInDofVector``), answered from this numbering
+        instead -- e.g. for the records of the multi-point constraints by global degree of freedom, in a
+        process whose DofManager numbers only its subdomain.
+
+        Parameters
+        ----------
+        mesh
+            The mesh this numbering was made from.
+
+        Returns
+        -------
+        GlobalDofsOfFieldVariables
+            The lookup.
+        """
+
+        return GlobalDofsOfFieldVariables(self, mesh)
+
     def nodesOfFieldsAgreeWith(self, nodeFields: dict) -> bool:
         """Whether the node fields of a model hold, per field, the nodes of the mesh carrying it, in mesh
         order -- the order of this numbering.
@@ -318,3 +337,73 @@ class GlobalDofNumbering:
             globalDofs.append(dofs)
         if dofManager.nDof != first or not np.array_equal(np.concatenate(globalDofs), subdomainDofs):
             differ("its degrees of freedom are not the subdomain degrees of freedom, in global order")
+
+
+class GlobalDofsOfFieldVariables:
+    """The global degrees of freedom of field variables, by field variable, read from a
+    :class:`GlobalDofNumbering`; see :meth:`GlobalDofNumbering.dofsOfFieldVariables`.
+
+    It answers what a model entity asks a :class:`~edelweissfe.numerics.dofmanager.DofManager` for the
+    degrees of freedom of a field variable -- through the same attribute,
+    :attr:`idcsOfFieldVariablesInDofVector` --, so that the entity can be asked for its degrees of
+    freedom in the global numbering wherever no DofManager numbers the whole model.
+
+    Parameters
+    ----------
+    numbering
+        The numbering.
+    mesh
+        The mesh it was made from.
+    """
+
+    def __init__(self, numbering: GlobalDofNumbering, mesh):
+        self._numbering = numbering
+        self._mesh = mesh
+
+    @property
+    def idcsOfFieldVariablesInDofVector(self) -> "GlobalDofsOfFieldVariables":
+        """The lookup itself, under the name of the DofManager's mapping."""
+
+        return self
+
+    def __contains__(self, fieldVariable) -> bool:
+        """Whether the node of a field variable carries its field in the numbering.
+
+        Parameters
+        ----------
+        fieldVariable
+            The field variable.
+
+        Returns
+        -------
+        bool
+            Whether it has degrees of freedom.
+        """
+
+        field = fieldVariable.field
+        if field not in self._numbering.rankInField or not self._mesh.hasNodes([fieldVariable.node.label])[0]:
+            return False
+        row = self._mesh.rowsOfNodes([fieldVariable.node.label])[0]
+        return bool(self._numbering.rankInField[field][row] >= 0)
+
+    def __getitem__(self, fieldVariable) -> np.ndarray:
+        """The global degrees of freedom of a field variable, one per component.
+
+        Parameters
+        ----------
+        fieldVariable
+            The field variable.
+
+        Returns
+        -------
+        np.ndarray
+            The degrees of freedom.
+
+        Raises
+        ------
+        KeyError
+            If its node does not carry its field.
+        """
+
+        rows = self._mesh.rowsOfNodes([fieldVariable.node.label])
+        return self._numbering.dofsAtNodes(fieldVariable.field, rows)[0]

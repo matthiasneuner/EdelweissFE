@@ -1116,7 +1116,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
                 f"Multi-point constraints (e.g. surface ties) are not supported by the {self.identification} solver."
             )
 
-        records = self._collectMultiPointConstraintRecords(model)
+        records = self.multiPointConstraintRecords(model)
 
         if stepActions is not None:
             records = self._reconcileMPCDirichletConflicts(records, stepActions)
@@ -1153,7 +1153,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
             # but not the cached prescribed values, until the BC is asked to catch up
             dirichlet.reconcileIfSetChanged()
             indices = np.asarray(self._constrainedDofsOf(dirichlet)).flatten()
-            values = np.asarray(dirichlet.delta).flatten()
+            values = np.asarray(dirichlet.delta)[dirichlet.constrainedRows].flatten()
             if indices.shape != values.shape:
                 raise ValueError(
                     "Dirichlet '{:}': {:} constrained DOF(s) but {:} prescribed value(s) -- the DOF "
@@ -1165,7 +1165,26 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
                 prescribed[int(index)] = float(value)
         return prescribed
 
-    def _collectMultiPointConstraintRecords(self, model: FEModel) -> list:
+    def multiPointConstraintRecords(self, model: FEModel) -> list:
+        """The records of the multi-point constraints of the equation system, by its degrees of freedom
+        (:meth:`_collectMultiPointConstraintRecords` with the DofManager); what
+        :meth:`buildMPCTransformation` assembles. A domain-decomposed solver whose DofManager numbers
+        only its subdomain overrides it.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        list
+            The records, ``(slaveDof, [(masterDof, coefficient), ...])``.
+        """
+
+        return self._collectMultiPointConstraintRecords(model, self.theDofManager)
+
+    def _collectMultiPointConstraintRecords(self, model: FEModel, dofLayout) -> list:
         """Collect every multi-point constraint's records, keeping one claim per slave DOF.
 
         A DOF may be condensed out only once, so when several constraints ask for the same one, the
@@ -1180,6 +1199,20 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         parents, which are themselves tie slaves. ``hAdaptivity`` registers its hanging-node
         constraint at the FRONT of ``model.multiPointConstraints`` for exactly this reason, and
         ``tests/test_mpc_slave_claim_arbitration.py`` pins it.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        dofLayout
+            What numbers the degrees of freedom the records refer to: the DofManager, or the global
+            numbering of a domain-decomposed run
+            (:meth:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering.dofsOfFieldVariables`).
+
+        Returns
+        -------
+        list
+            The records, ``(slaveDof, [(masterDof, coefficient), ...])``, in model order.
         """
 
         records = []
@@ -1187,7 +1220,7 @@ class NonlinearSolverBase(OptionSchemaProvider, ABC):
         dropped = {}
 
         for name, mpc in model.multiPointConstraints.items():
-            for record in mpc.getMultiPointConstraints(self.theDofManager):
+            for record in mpc.getMultiPointConstraints(dofLayout):
                 if record[0] in claimed:
                     if not mpc.mayYieldSlaveToEarlierClaim:
                         raise TopologyError(

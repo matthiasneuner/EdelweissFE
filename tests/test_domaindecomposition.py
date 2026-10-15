@@ -863,8 +863,9 @@ for directory in sys.argv[1:]:
 def test_vectors_of_the_subdomain_give_the_bits_of_vectors_of_the_whole_model(tmp_path):
     # A process numbering only the degrees of freedom of its subdomain -- the global numbering,
     # compressed -- computes the same bits as one holding vectors of the whole model: the elements,
-    # a constraint force, Dirichlet conditions on node sets split between the processes, the output.
-    decks = ["NED", "NEDEqualValuePenalty", "NEDNodeForcesSplit"]
+    # a constraint force, Dirichlet conditions on node sets split between the processes, the output, a
+    # tie (the multi-point-constraint transformation of the subdomain).
+    decks = ["NED", "NEDEqualValuePenalty", "NEDNodeForcesSplit", "TieNED"]
     testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
     for deck in decks:
         shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), tmp_path / deck)
@@ -2343,12 +2344,12 @@ from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposit
 requireSameLayout = DomainDecomposition._requireSameLayout
 
 
-def reorderedInProcessOne(self, model):
+def reorderedInProcessOne(self, model, *args):
     if rank == 1:
         sets = model.mesh.elementSets
         first = next(iter(sets))
         sets[first] = sets.pop(first)
-    return requireSameLayout(self, model)
+    return requireSameLayout(self, model, *args)
 
 
 DomainDecomposition._requireSameLayout = reorderedInProcessOne
@@ -2370,24 +2371,25 @@ with open(
 ) as _deck:
     _TIE_DECK = _deck.read()
 
-#: On process 1 only, one weight of the tie differs by an ulp.
+#: On process 1 only, one weight of the tie differs by an ulp, as the tie records it.
 _MPC_WEIGHT_PATCH = """
 import numpy as np
 
-from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
+from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 
-construct = MultiPointConstraintTransformation.__init__
+collect = NonlinearSolverBase._collectMultiPointConstraintRecords
 
 
-def perturbedInProcessOne(self, records, *args, **kwargs):
+def perturbedInProcessOne(self, model, dofLayout):
+    records = collect(self, model, dofLayout)
     if rank == 1:
         slave, masters = records[0]
         master, weight = masters[0]
         records = [(slave, [(master, np.nextafter(weight, np.inf))] + list(masters[1:]))] + list(records[1:])
-    construct(self, records, *args, **kwargs)
+    return records
 
 
-MultiPointConstraintTransformation.__init__ = perturbedInProcessOne
+NonlinearSolverBase._collectMultiPointConstraintRecords = perturbedInProcessOne
 """
 
 

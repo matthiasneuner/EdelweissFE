@@ -487,14 +487,22 @@ the mesh and the node objects do for now:
   the lumped operators assembled again are compared with the previous ones the same way;
 * the classification of every field as first or second order in time counts the coefficients at the
   degrees of freedom each process owns, added over all processes, so that every process classifies
-  every field alike.
+  every field alike;
+* the multi-point constraints (a tie) are recorded by global degree of freedom, from the global
+  numbering, before the DofManager exists -- every process holds every tie --; their groups decide,
+  with the elements and constraints, which degrees of freedom a process integrates (a process
+  integrating one of a group integrates all of it), and the transformation of a process is assembled
+  from the records whose slave it integrates, at their positions in its vectors
+  (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.multiPointConstraintRecordsOfSubdomain`):
+  the rows and columns of its subdomain of the transformation of the whole model, in the same order,
+  so that folding the forces and the masses onto the masters and interpolating the slaves gives the
+  same bits.
 
 What still reads or changes degrees of freedom outside a subdomain during a run keeps vectors of the
 whole model in every process, decided once per job and reported on rank 0 (``Vectors of the whole model
 on every process because: ...``; :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.reasonsForVectorsOfWholeModel`):
 a model holding every element on every process, a model modifier changing the mesh (adaptive
-refinement), a constraint searching its connectivity (contact), a rigid body, a multi-point constraint
-(a tie), and scalar variables. Until those read only what they receive, they run as described in the
+refinement), a constraint searching its connectivity (contact), a rigid body, and scalar variables. Until those read only what they receive, they run as described in the
 rest of this page, with vectors of the whole model current at the subdomain degrees of freedom.
 
 Where the whole model is read
@@ -1221,7 +1229,7 @@ time per increment                              0.256 / 0.240 s    0.099 / 0.076
 
 What is left per process is mostly what every process holds whole: the mesh, every node object with
 its fields and node fields, and the imports. On c1_150, which keeps vectors of the whole model
-(contact, ties, adaptive refinement), nothing changed: 2.81 s for the first build at 8x4 before and
+(contact, adaptive refinement), nothing changed: 2.81 s for the first build at 8x4 before and
 after.
 
 **The external work** (`Output and restart`_). On a 40 000-element block with 40 000 prescribed
