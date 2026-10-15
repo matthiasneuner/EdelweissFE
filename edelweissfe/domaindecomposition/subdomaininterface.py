@@ -47,6 +47,14 @@ it; a degree of freedom no process touches is owned (and integrated) by rank 0. 
 which process counts a quantity that must be counted once -- a concentrated load, a kinetic energy
 -- and which process' value is authoritative when the whole vector is gathered everywhere, by
 :meth:`SubdomainInterface.allgatherOwnedValues`.
+
+Every exchange is keyed by the global number of a degree of freedom
+(:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`), the same in every process.
+Where it reads or writes a vector of this process, it does so at the *position* of the degree of
+freedom in that vector (:meth:`SubdomainInterface.positionsOf`): its global number in a vector of the
+whole model; its place among the sorted subdomain degrees of freedom in a vector of the subdomain
+only -- the order-preserving compression of the global numbering, which the DofManager of the
+subdomain's node fields numbers alike.
 """
 
 from enum import IntEnum, unique
@@ -398,6 +406,9 @@ class SubdomainInterface:
     multiPointConstraintLinks
         The slave and the master of every dependency of the multi-point constraints, the same in every
         process, or None.
+    vectorsOfSubdomain
+        Whether the vectors of this process hold the subdomain degrees of freedom only, in ascending
+        global order; else every degree of freedom of the model (see :meth:`positionsOf`).
     """
 
     def __init__(
@@ -406,10 +417,13 @@ class SubdomainInterface:
         elementProcesses: "ElementProcessesAtDofs",
         touchedDofs: np.ndarray,
         multiPointConstraintLinks: tuple[np.ndarray, np.ndarray] | None = None,
+        vectorsOfSubdomain: bool = False,
     ):
         self.communicator = communicator
         #: The number of degrees of freedom of the model.
         self.nDof = elementProcesses.nDof
+        #: Whether the vectors of this process hold the subdomain degrees of freedom only.
+        self.vectorsOfSubdomain = vectorsOfSubdomain
         self._elementProcesses = elementProcesses
         touched = _sortedUnique(np.asarray(touchedDofs, dtype=np.int64))
 
@@ -420,6 +434,10 @@ class SubdomainInterface:
         self._defineSubdomainDofs(touched, closureDofs, closureProcesses, untouched)
         self._planWholeVectorGather()
         self._findNeighbours(closureDofs, closureProcesses)
+        #: The positions of the interface degrees of freedom in the vectors of this process.
+        self.interfacePositions = self.positionsOf(self.interfaceDofs)
+        #: Whether this process owns the degree of freedom at each position of its vectors.
+        self.ownedPositionMask = self.ownedDofMask[self.subdomainDofs] if vectorsOfSubdomain else self.ownedDofMask
         # what the steps above read, not kept beyond them
         self._elementProcesses = None
         self._constraintDofsBeyondElements = self._constraintProcessesBeyondElements = None
@@ -559,12 +577,72 @@ class SubdomainInterface:
         self.subdomainDofs = _sortedUnique(np.concatenate(subdomainDofs))
 
     def _planWholeVectorGather(self):
-        """The whole-vector gather: each process sends its owned entries, in ascending order."""
+        """The whole-vector gather: each process sends its owned entries, in ascending order. A buffer of
+        the whole model is kept only where the vectors are of the whole model; else a gather allocates
+        it for its own duration (:meth:`wholeVector`)."""
 
         self._ownedDofs = np.flatnonzero(self.ownedDofMask)
+        self._ownedPositions = self.positionsOf(self._ownedDofs)
         self._ownedCounts = np.bincount(self.dofOwners, minlength=self.communicator.Get_size()).astype(np.int64)
         self._gatheredOrder = np.argsort(self.dofOwners, kind="stable")
-        self._gatherBuffer = np.empty(self.nDof)
+        self._gatherBuffer = None if self.vectorsOfSubdomain else np.empty(self.nDof)
+
+    @property
+    def nPositions(self) -> int:
+        """The length of the vectors of this process: the number of subdomain degrees of freedom, or of
+        degrees of freedom of the model."""
+
+        return self.subdomainDofs.shape[0] if self.vectorsOfSubdomain else self.nDof
+
+    def positionsOf(self, dofs: np.ndarray) -> np.ndarray:
+        """The positions of degrees of freedom in the vectors of this process: their global numbers in a
+        vector of the whole model, their places among the sorted subdomain degrees of freedom in a vector
+        of the subdomain.
+
+        Parameters
+        ----------
+        dofs
+            Global degrees of freedom; subdomain degrees of freedom where the vectors are of the subdomain.
+
+        Returns
+        -------
+        np.ndarray
+            Their positions, in the same order.
+
+        Raises
+        ------
+        RuntimeError
+            If the vectors are of the subdomain, and a degree of freedom is not a subdomain degree of
+            freedom.
+        """
+
+        dofs = np.asarray(dofs, dtype=np.int64)
+        if not self.vectorsOfSubdomain:
+            return dofs
+        positions = np.searchsorted(self.subdomainDofs, dofs)
+        if dofs.shape[0] and not np.array_equal(
+            self.subdomainDofs[np.minimum(positions, self.subdomainDofs.shape[0] - 1)], dofs
+        ):
+            raise RuntimeError("A degree of freedom read or written here is not a subdomain degree of freedom.")
+        return positions
+
+    def globalDofsOf(self, positions: np.ndarray) -> np.ndarray:
+        """The global degrees of freedom at positions of the vectors of this process: the inverse of
+        :meth:`positionsOf`.
+
+        Parameters
+        ----------
+        positions
+            Positions in a vector of this process.
+
+        Returns
+        -------
+        np.ndarray
+            The global degrees of freedom.
+        """
+
+        positions = np.asarray(positions, dtype=np.int64)
+        return self.subdomainDofs[positions] if self.vectorsOfSubdomain else positions
 
     def _findNeighbours(self, closureDofs: np.ndarray, closureProcesses: np.ndarray):
         """The interface: every other process integrating a subdomain degree of freedom of this one."""
@@ -619,6 +697,7 @@ class SubdomainInterface:
             A vector over the whole equation system, correct at least at the owned entries.
         """
 
+        self._requireVectorsOfWholeModel()
         plain = vector.view(np.ndarray)
         self.communicator.Allgatherv(
             np.ascontiguousarray(plain[self._ownedDofs]),
@@ -638,6 +717,7 @@ class SubdomainInterface:
             A vector over the whole equation system, correct at least at the owned entries.
         """
 
+        self._requireVectorsOfWholeModel()
         plain = vector.view(np.ndarray)
         send = np.ascontiguousarray(plain[self._ownedDofs])
         if self.communicator.Get_rank() == 0:
@@ -647,6 +727,48 @@ class SubdomainInterface:
             plain[self._gatheredOrder] = self._gatherBuffer
         else:
             self.communicator.Gatherv(send, None, root=0)
+
+    def wholeVector(self, vector: np.ndarray, toEveryProcess: bool) -> np.ndarray | None:
+        """Collective. The vector of the whole model, every entry from its owner, from vectors of this
+        process' kind -- of the subdomain or of the whole model --, made for this call: in every process,
+        or on rank 0 only.
+
+        Parameters
+        ----------
+        vector
+            A vector of this process, correct at least at the owned entries.
+        toEveryProcess
+            Whether every process receives the whole vector, or rank 0 only.
+
+        Returns
+        -------
+        np.ndarray | None
+            The vector of the whole model, in global order; None in a process that receives none.
+        """
+
+        send = np.ascontiguousarray(vector.view(np.ndarray)[self._ownedPositions])
+        layout = [None, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE]
+        receives = toEveryProcess or self.communicator.Get_rank() == 0
+        gathered = np.empty(self.nDof) if receives else None
+        layout[0] = gathered
+        if toEveryProcess:
+            self.communicator.Allgatherv(send, layout)
+        elif receives:
+            self.communicator.Gatherv(send, layout, root=0)
+        else:
+            self.communicator.Gatherv(send, None, root=0)
+        if not receives:
+            return None
+        whole = np.empty(self.nDof)
+        whole[self._gatheredOrder] = gathered
+        return whole
+
+    def _requireVectorsOfWholeModel(self):
+        """Refuse an exchange that writes vectors of the whole model in place, where the vectors are of
+        the subdomain (:meth:`wholeVector` instead)."""
+
+        if self.vectorsOfSubdomain:
+            raise RuntimeError("the vectors of this process hold its subdomain only, not the whole model")
 
 
 def multiPointConstraintGroups(links: tuple[np.ndarray, np.ndarray] | None) -> tuple[np.ndarray, np.ndarray]:
@@ -754,7 +876,8 @@ class _TaggedContributions:
     interface
         The subdomain interface.
     entryDofs
-        The degree of freedom of every entry of this process' contribution buffer.
+        The degree of freedom of every entry of this process' contribution buffer, as its position in
+        the vectors of this process (:meth:`SubdomainInterface.positionsOf`).
     entryOrder
         The place of every entry in the order a single process adds the contributions in.
     ownEntries
@@ -768,9 +891,10 @@ class _TaggedContributions:
         #: The message tag of every message of this exchange.
         self.tag = tag
         communicator = interface.communicator
-        entryDofs = np.asarray(entryDofs, dtype=np.int64)
-        entryOrder = np.asarray(entryOrder, dtype=np.int64)
         interfaceEntries = self.entriesAtInterface(interface, entryDofs)
+        # tagged, sent and summed by the global degree of freedom
+        entryDofs = interface.globalDofsOf(entryDofs)
+        entryOrder = np.asarray(entryOrder, dtype=np.int64)
 
         #: The entries of the contribution buffer summed here, in buffer order.
         self.ownEntries = ownEntries
@@ -838,7 +962,7 @@ class _TaggedContributions:
         interface
             The subdomain interface.
         entryDofs
-            The degree of freedom of every entry.
+            The degree of freedom of every entry, as its position in the vectors of this process.
 
         Returns
         -------
@@ -846,8 +970,8 @@ class _TaggedContributions:
             The entries, as indices into the buffer, ascending.
         """
 
-        isInterface = np.zeros(interface.nDof, dtype=bool)
-        isInterface[interface.interfaceDofs] = True
+        isInterface = np.zeros(interface.nPositions, dtype=bool)
+        isInterface[interface.interfacePositions] = True
         return np.flatnonzero(isInterface[np.asarray(entryDofs, dtype=np.int64)])
 
     def exchange(self, contributions: np.ndarray):
@@ -896,7 +1020,8 @@ class InterfaceForceAssembly:
     interface
         The subdomain interface.
     entryDofs
-        The degree of freedom of every entry of this process' contribution buffer.
+        The degree of freedom of every entry of this process' contribution buffer, as its position in
+        the vectors of this process.
     entryElementPositions
         The position in the model of the element of every entry.
     """
@@ -928,10 +1053,10 @@ class InterfaceForceAssembly:
             return
 
         exchange.exchange(contributions)
-        interfaceDofs = exchange.interface.interfaceDofs
+        interfacePositions = exchange.interface.interfacePositions
         # A left fold per degree of freedom, in model order, as in the element loop.
-        vector.view(np.ndarray)[interfaceDofs] = sumAtPositions(
-            self._targets, exchange.merged[exchange.order], interfaceDofs.shape[0]
+        vector.view(np.ndarray)[interfacePositions] = sumAtPositions(
+            self._targets, exchange.merged[exchange.order], interfacePositions.shape[0]
         )
 
 
@@ -962,7 +1087,8 @@ class InterfaceLoadAssembly:
     interface
         The subdomain interface.
     entryDofs
-        The degree of freedom of every entry of this process' load buffer.
+        The degree of freedom of every entry of this process' load buffer, as its position in the
+        vectors of this process.
     entryLoadOrder
         The place of every entry in the order of all load contributions of the model.
     """
@@ -981,9 +1107,10 @@ class InterfaceLoadAssembly:
         starts = np.flatnonzero(firstOfDof)
         rankAtDof = np.arange(sortedDofs.shape[0]) - np.repeat(starts, np.diff(np.append(starts, sortedDofs.shape[0])))
 
-        #: Per layer, the merged entries added and the degrees of freedom they are added at.
+        #: Per layer, the merged entries added and the positions of the degrees of freedom they are
+        #: added at.
         self._layers = [
-            (order[rankAtDof == rank], sortedDofs[rankAtDof == rank])
+            (order[rankAtDof == rank], interface.positionsOf(sortedDofs[rankAtDof == rank]))
             for rank in range(int(rankAtDof.max()) + 1 if rankAtDof.size else 0)
         ]
 
@@ -1041,7 +1168,8 @@ class ConstraintForceExchange:
     ownedConstraints
         Those this process evaluates, by name.
     constraintDofs
-        The degrees of freedom of every owned constraint, by constraint.
+        The degrees of freedom of every owned constraint, by constraint, as their positions in the
+        vectors of this process.
     """
 
     def __init__(self, interface: SubdomainInterface, constraints: dict, ownedConstraints: dict, constraintDofs: dict):
@@ -1073,12 +1201,12 @@ class ConstraintForceExchange:
         tagOrder = self._contributions.tagOrder
         byOrder = np.argsort(tagOrder)
         constraintPositions = tagOrder[byOrder] // _ENTRIES_PER_CONSTRAINT
-        #: Per local constraint: its merged entries, their degrees of freedom, and whether one of
-        #: them is named more than once (see addNodalForces).
+        #: Per local constraint: its merged entries, the positions of their degrees of freedom, and
+        #: whether one of them is named more than once (see addNodalForces).
         self._additions = []
         for entries in np.split(byOrder, np.flatnonzero(np.diff(constraintPositions)) + 1):
             if entries.shape[0]:
-                dofs = self._contributions.tagDofs[entries]
+                dofs = interface.positionsOf(self._contributions.tagDofs[entries])
                 self._additions.append((entries, dofs, np.unique(dofs).shape[0] != dofs.shape[0]))
 
     @property
@@ -1134,9 +1262,21 @@ class ValuesFromOwners:
         Those it owns itself are not asked for.
     dofOwners
         The owner of every degree of freedom of the model, the same in every process.
+    receivedInto
+        The interface whose vectors receive the entries (:meth:`SubdomainInterface.positionsOf`); None
+        for vectors of the whole model.
+    sentFrom
+        The interface whose vectors the entries are sent from; None for vectors of the whole model.
     """
 
-    def __init__(self, communicator, neededDofs: np.ndarray, dofOwners: np.ndarray):
+    def __init__(
+        self,
+        communicator,
+        neededDofs: np.ndarray,
+        dofOwners: np.ndarray,
+        receivedInto: SubdomainInterface | None = None,
+        sentFrom: SubdomainInterface | None = None,
+    ):
         self.communicator = communicator
         rank = communicator.Get_rank()
         size = communicator.Get_size()
@@ -1146,10 +1286,20 @@ class ValuesFromOwners:
         asks = [neededDofs[owners == other] if other != rank else np.empty(0, dtype=np.int64) for other in range(size)]
         askedOfThisProcess = communicator.alltoall(asks)
 
-        #: The degrees of freedom received from each owner, by rank.
-        self._receiveDofs = {other: dofs for other, dofs in enumerate(asks) if dofs.shape[0]}
-        #: The degrees of freedom sent to each process asking, by rank.
-        self._sendDofs = {other: dofs for other, dofs in enumerate(askedOfThisProcess) if dofs.shape[0]}
+        #: The positions of the degrees of freedom received from each owner in the receiving vectors, by
+        #: rank.
+        self._receiveDofs = {
+            other: dofs if receivedInto is None else receivedInto.positionsOf(dofs)
+            for other, dofs in enumerate(asks)
+            if dofs.shape[0]
+        }
+        #: The positions of the degrees of freedom sent to each process asking in the sending vectors,
+        #: by rank.
+        self._sendDofs = {
+            other: dofs if sentFrom is None else sentFrom.positionsOf(dofs)
+            for other, dofs in enumerate(askedOfThisProcess)
+            if dofs.shape[0]
+        }
 
     @property
     def nReceived(self) -> int:
@@ -1157,20 +1307,23 @@ class ValuesFromOwners:
 
         return sum(dofs.shape[0] for dofs in self._receiveDofs.values())
 
-    def receive(self, vectors: list[np.ndarray]):
+    def receive(self, vectors: list[np.ndarray], sentFromVectors: list[np.ndarray] | None = None):
         """Collective among the processes taking part. Overwrite the needed entries of the vectors with
         their owners' values, in place, and send the owned entries other processes need.
 
         Parameters
         ----------
         vectors
-            Vectors over the whole equation system, the same vectors in every process, correct at
-            least at the owned entries.
+            The receiving vectors, the same vectors in every process.
+        sentFromVectors
+            The vectors the owned entries are sent from, one per receiving vector, correct at least at
+            the owned entries; None for ``vectors`` themselves.
         """
 
         plains = [vector.view(np.ndarray) for vector in vectors]
+        sending = plains if sentFromVectors is None else [vector.view(np.ndarray) for vector in sentFromVectors]
         receiveBuffers = {other: np.empty((len(plains), dofs.shape[0])) for other, dofs in self._receiveDofs.items()}
-        sendBuffers = {other: np.stack([plain[dofs] for plain in plains]) for other, dofs in self._sendDofs.items()}
+        sendBuffers = {other: np.stack([plain[dofs] for plain in sending]) for other, dofs in self._sendDofs.items()}
         _exchange(self.communicator, sendBuffers, receiveBuffers, MessageTag.VALUES_FROM_OWNERS)
         for other, dofs in self._receiveDofs.items():
             for plain, received in zip(plains, receiveBuffers[other]):
