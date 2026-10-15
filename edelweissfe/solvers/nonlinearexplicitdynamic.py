@@ -683,10 +683,8 @@ class NED(NonlinearSolverBase):
         theSystem = self._system
         V = theSystem.V
         lumpedTotalsBefore = self._perFieldLumpedTotals()
-        momentumBefore = self.secondOrderMomentum(self._rawLumpedMass, V, model)
-        kineticBefore = 0.5 * float(
-            np.sum(self._rawLumpedMass[self.ids_mechanicalEnergy] * V[self.ids_mechanicalEnergy] ** 2)
-        )
+        momentumBefore = self.momentum(V, model)
+        kineticBefore = self.kineticEnergy(V)
 
         topologyUpdate = self.updateTopologyAndConnectivity(model, step)
         meshChanged = topologyUpdate.topologyChanged or topologyUpdate.meshDependentsRefreshed
@@ -1467,21 +1465,26 @@ class NED(NonlinearSolverBase):
         """
 
         nonMechanical = [
-            self.halfMassTimesSquaredRate(self.theDofManager.idcsOfFieldsInDofVector[fieldName], V)
+            self.kineticEnergy(V, self.theDofManager.idcsOfFieldsInDofVector[fieldName])
             for fieldName in self.nonMechanicalSecondOrderFields
         ]
-        return psi, self.halfMassTimesSquaredRate(self.ids_mechanicalEnergy, V), self._externalWork, nonMechanical
+        return psi, self.kineticEnergy(V), self._externalWork, nonMechanical
 
-    def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
-        """:math:`\\frac{1}{2} \\sum m v^2` over the given degrees of freedom, with the unfolded lumped
-        mass: the kinetic energy, where :math:`m` is a mass.
+    def kineticEnergy(self, V: DofVector, dofs: slice | np.ndarray | None = None) -> float:
+        """The kinetic energy of the model, :math:`\\frac{1}{2} \\sum m v^2` over its degrees of
+        freedom where that is an energy (:attr:`ids_mechanicalEnergy`), with the unfolded lumped mass.
+
+        One of the two sums over every degree of freedom of the model in this solver, with
+        :meth:`momentum`; every diagnostic that needs one calls these. Given other degrees of freedom
+        -- those of a second-order field whose inertia is not a mass --, the same sum, which is then
+        not an energy.
 
         Parameters
         ----------
-        indices
-            The degrees of freedom.
         V
             The velocity vector.
+        dofs
+            The degrees of freedom to sum over; None for :attr:`ids_mechanicalEnergy`.
 
         Returns
         -------
@@ -1489,7 +1492,9 @@ class NED(NonlinearSolverBase):
             The sum.
         """
 
-        return 0.5 * float(np.sum(self._rawLumpedMass[indices] * V[indices] ** 2))
+        if dofs is None:
+            dofs = self.ids_mechanicalEnergy
+        return 0.5 * float(np.sum(self._rawLumpedMass[dofs] * V[dofs] ** 2))
 
     @performancetiming.timeit("elements")
     def assembleInternalForces(
@@ -2341,15 +2346,16 @@ class NED(NonlinearSolverBase):
 
         return constraintForce
 
-    def secondOrderMomentum(self, mass: DofVector, V: DofVector, model: FEModel) -> np.ndarray:
-        """The linear momentum of the fields whose inertia is a mass, per spatial component; see
-        :func:`~edelweissfe.solvers.base.conservationchecks.linearMomentum`.
+    def momentum(self, V: DofVector, model: FEModel) -> np.ndarray:
+        """The linear momentum of the model -- of the fields whose inertia is a mass --, per spatial
+        component; see :func:`~edelweissfe.solvers.base.conservationchecks.linearMomentum`.
+
+        Weighted with the *unfolded* lumped mass: a multi-point-constraint slave carries real velocity,
+        and folding its mass onto its masters would drop its momentum. One of the two sums over every
+        degree of freedom of the model in this solver, with :meth:`kineticEnergy`.
 
         Parameters
         ----------
-        mass
-            The lumped mass to weight with. Pass the *unfolded* mass: a multi-point-constraint slave
-            carries real velocity, and folding its mass onto its masters would drop its momentum.
         V
             The velocity vector.
         model
@@ -2361,7 +2367,9 @@ class NED(NonlinearSolverBase):
             The momentum, one entry per spatial component.
         """
 
-        return linearMomentum(np.asarray(mass) * np.asarray(V), self.theDofManager, self.linearMomentumFields, model)
+        return linearMomentum(
+            np.asarray(self._rawLumpedMass) * np.asarray(V), self.theDofManager, self.linearMomentumFields, model
+        )
 
     def _perFieldLumpedTotals(self) -> dict[str, float]:
         """The assembled lumped total of every first- and second-order field, each on its own.
@@ -2604,10 +2612,8 @@ class NED(NonlinearSolverBase):
         """
 
         lumpedTotalsAfter = self._perFieldLumpedTotals()
-        momentumAfter = self.secondOrderMomentum(self._rawLumpedMass, V, model)
-        kineticAfter = 0.5 * float(
-            np.sum(self._rawLumpedMass[self.ids_mechanicalEnergy] * V[self.ids_mechanicalEnergy] ** 2)
-        )
+        momentumAfter = self.momentum(V, model)
+        kineticAfter = self.kineticEnergy(V)
 
         tolerance = self.options["lumped-quantity-conservation-tolerance"]
         relativeChangeByField = {

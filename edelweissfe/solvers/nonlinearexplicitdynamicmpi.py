@@ -103,9 +103,10 @@ therefore bit-identical to :class:`NED` (and :class:`NEDParallel`) on the same i
 contact searches, refinements and repartitions -- and the load balancing below, whose partition
 depends on measured timings, changes the speed of a run and never its result. The external work is
 summed exactly (:meth:`gatherExternalWork`), so it, too, and the checkpoints recording it,
-are bit-identical. Only the kinetic and internal energy of the energy table are formed per
-subdomain and then added, and may differ from a serial run's in their last digits; they enter
-nothing but the table.
+are bit-identical. Only the kinetic and internal energy of the energy table, and the kinetic
+energy and momentum reported across a topology change, are formed per subdomain and then added
+(:meth:`kineticEnergy`, :meth:`momentum`), and may differ from a serial run's in their last digits;
+they enter nothing but the journal.
 
 **Load balancing.** The first partition weighs an element by its number of degrees of freedom. A
 softening material costs more where it softens, so every element kernel is timed, and so is every
@@ -888,32 +889,56 @@ class NEDMPI(NEDParallel):
             self._externalWork -= sum(ofProcesses, ExactSum()).rounded()
         self._pendingWorkAtPrescribedDofs = []
 
-    def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
-        """The sum of :meth:`NED.halfMassTimesSquaredRate` over the degrees of freedom this process owns, so
-        that the sums of all subdomains add up to that of the model.
+    def kineticEnergy(self, V: DofVector, dofs: slice | np.ndarray | None = None) -> float:
+        """Collective. The kinetic energy of the whole model (:meth:`NED.kineticEnergy`): each process
+        sums over the degrees of freedom it owns, and the sums are added in rank order -- so it may
+        differ from a serial run's in its last digits; it enters nothing but the journal.
 
         Parameters
         ----------
-        indices
-            The degrees of freedom.
         V
-            The velocity vector.
+            The velocity vector; current at the subdomain degrees of freedom.
+        dofs
+            As for :meth:`NED.kineticEnergy`.
 
         Returns
         -------
         float
-            The sum over those this process owns.
+            The sum over the whole model, the same in every process.
         """
 
-        indices = np.arange(V.shape[0])[indices]
-        return super().halfMassTimesSquaredRate(indices[self.domainDecomposition.ownedDofMask[indices]], V)
+        dofs = np.arange(V.shape[0])[self.ids_mechanicalEnergy if dofs is None else dofs]
+        ownedHere = super().kineticEnergy(V, dofs[self.domainDecomposition.ownedDofMask[dofs]])
+        return self.communicator.allreduceSum([ownedHere])[0]
+
+    def momentum(self, V: DofVector, model: FEModel) -> np.ndarray:
+        """Collective. The linear momentum of the whole model (:meth:`NED.momentum`): each process sums
+        over the degrees of freedom it owns, and the sums are added in rank order -- so it may differ
+        from a serial run's in its last digits; it enters nothing but the journal.
+
+        Parameters
+        ----------
+        V
+            The velocity vector; current at the subdomain degrees of freedom.
+        model
+            The model tree.
+
+        Returns
+        -------
+        np.ndarray
+            The momentum, one entry per spatial component, the same in every process.
+        """
+
+        ownedVelocity = np.where(self.domainDecomposition.ownedDofMask, np.asarray(V), 0.0)
+        return np.array(self.communicator.allreduceSum(super().momentum(ownedVelocity, model).tolist()))
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """Collective. The terms of :meth:`NED.energyBalanceTerms` of the whole model.
 
-        The internal and kinetic energies are formed per subdomain and then added in rank order, so
-        they may differ from a serial run's in their last digits; they enter nothing but the energy
-        table. The external work is that of the whole model (:meth:`gatherExternalWork`).
+        The internal energy is formed per subdomain and then added in rank order, as the kinetic
+        energies are (:meth:`kineticEnergy`), so they may differ from a serial run's in their last
+        digits; they enter nothing but the energy table. The external work is that of the whole model
+        (:meth:`gatherExternalWork`).
 
         Parameters
         ----------
@@ -930,7 +955,7 @@ class NEDMPI(NEDParallel):
 
         self.gatherExternalWork()
         Wint, Wkin, Wext, nonMechanical = super().energyBalanceTerms(psi, V)
-        Wint, Wkin, *nonMechanical = self.communicator.allreduceSum([Wint, Wkin] + nonMechanical)
+        (Wint,) = self.communicator.allreduceSum([Wint])
         return Wint, Wkin, Wext, nonMechanical
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):

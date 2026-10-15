@@ -308,8 +308,9 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``evaluateConstraintForces``                returns the forces evaluated with the elements (above)
 ``addConstraintForces``                     sends the own constraints' forces to neighbours, adds them
 ``getCriticalTimeStepForExplicitDynamics``  the minimum over the subdomains
-``energyBalanceTerms``                      the sums over the subdomains
-``halfMassTimesSquaredRate``                counts a degree of freedom where it is owned
+``energyBalanceTerms``                      the internal energy summed over the subdomains
+``kineticEnergy``, ``momentum``             count a degree of freedom where it is owned, then sum
+                                            over the subdomains
 ``addExternalWork``                         keeps the owned work until it is read (below)
 ``publishNodeFields``                       publishes the subdomain degrees of freedom
 ``acceptIncrement``                         the synchronization and rebalancing of an output increment
@@ -352,9 +353,10 @@ input.
 **What is bit-identical, exactly.** The solution, the velocity and the net nodal force at every
 degree of freedom; the state of every element and every constraint; the external work; and
 therefore every dataset of a restart checkpoint and every field output computed from them. Not
-bit-identical: the kinetic and the internal energy printed in the energy table, which each process
-sums over its own subdomain and the processes then add in rank order; they enter nothing but the
-table. Timings, and the load balancing that depends on them, change the speed of a run, never its
+bit-identical: the kinetic and the internal energy printed in the energy table, and the kinetic
+energy and momentum reported across a topology change, which each process sums over its own
+subdomain (the degrees of freedom it owns) and the processes then add in rank order; they enter
+nothing but the journal. Timings, and the load balancing that depends on them, change the speed of a run, never its
 result.
 
 **What the order rests on.** Within one process the contributions at each degree of freedom are
