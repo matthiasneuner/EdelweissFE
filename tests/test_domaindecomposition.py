@@ -625,6 +625,41 @@ def test_no_process_communicates_where_the_processes_agree_on_failures():
     assert communicator.allreduceSum([1.5]) == [1.5]
 
 
+def test_the_processes_may_communicate_where_they_agree_on_failures_while_setting_up():
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.mpienvironment import (
+        ErrorOnAllRanks,
+        StepFailedOnAllRanks,
+    )
+    from edelweissfe.utils.exceptions import StepFailed
+
+    communicator = Communicator(MPI.COMM_SELF)
+
+    # collective operations work inside, each after an agreement that no process has failed so far
+    with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+        assert communicator.allgather(1.0) == [1.0]
+        assert communicator.allreduceSum([2.0]) == [2.0]
+    # a failure is agreed on as in allRanksFailTogether
+    with pytest.raises(ErrorOnAllRanks, match="Setting up failed in process 0: KeyError"):
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            communicator.allgather(1.0)
+            raise KeyError("an error")
+    with pytest.raises(StepFailedOnAllRanks, match="Setting up failed in process 0: StepFailed"):
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            raise StepFailed("a step failure")
+    # an operation not every process takes part in is refused inside
+    with pytest.raises(ErrorOnAllRanks, match="Isend was called while setting up"):
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            communicator.Isend(np.zeros(1), dest=0, tag=1)
+    # and so is an agreement inside another
+    with pytest.raises(ErrorOnAllRanks, match="cannot agree on failures inside another agreement"):
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            with communicator.allRanksFailTogetherWhileCommunicating("Setting up again"):
+                pass
+    assert communicator.allgather(2.0) == [2.0]
+
+
 #: Runs each deck in the directories given twice -- as it is, and with every entry of the net force
 #: vector at a degree of freedom not integrated in the process set to NaN after each assembly -- and
 #: prints, per process and deck, whether the final solution, net force and velocity are the same bits.

@@ -93,6 +93,9 @@ class Communicator:
         #: What is done in the open agreement in which the processes communicate, or None if there is
         #: none; see :meth:`allRanksFailTogetherWhileCommunicating`.
         self._agreementWhileCommunicating = None
+        #: The outcome the processes agreed on inside that agreement, once this process learned of a
+        #: failure there; None before.
+        self._failureAgreedOn = None
 
     @contextmanager
     def withoutCommunication(self, operation: str):
@@ -146,6 +149,9 @@ class Communicator:
             )
         if self._agreementWhileCommunicating is None:
             return
+        if self._failureAgreedOn is not None:
+            # this process already learned of the failure, and leaves the context without communicating
+            raise _FailedInAnotherProcess(self._failureAgreedOn)
         if not collective:
             raise RuntimeError(
                 "{:} was called while {:} -- a step in which the processes agree on failures before every "
@@ -155,6 +161,7 @@ class Communicator:
             )
         outcome = self._agreedOutcome(_NO_FAILURE)
         if outcome != _NO_FAILURE:
+            self._failureAgreedOn = outcome
             raise _FailedInAnotherProcess(outcome)
 
     # --- Who --------------------------------------------------------------------------------------
@@ -553,10 +560,10 @@ class Communicator:
         self._agreementWhileCommunicating = operation
         try:
             yield
-        except Exception as exception:
+        except (Exception, _FailedInAnotherProcess) as exception:
             failure = exception
         finally:
-            self._agreementWhileCommunicating = None
+            self._agreementWhileCommunicating = self._failureAgreedOn = None
 
         if isinstance(failure, _FailedInAnotherProcess):
             # the agreement was reached before an operation, where this process learned of the failure
@@ -649,9 +656,11 @@ def _outcomeOf(failure: Exception | None) -> int:
     return _ERROR
 
 
-class _FailedInAnotherProcess(Exception):
+class _FailedInAnotherProcess(BaseException):
     """Another process failed inside :meth:`Communicator.allRanksFailTogetherWhileCommunicating`: this
-    process learned of it in the agreement before an operation, and leaves the context.
+    process learned of it in the agreement before an operation, and leaves the context -- without
+    communicating again there, and past any ``except Exception`` on the way, which would otherwise
+    let it go on to an operation the others never reach.
 
     Parameters
     ----------
