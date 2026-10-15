@@ -1116,6 +1116,43 @@ def test_a_vector_added_to_the_carried_vectors_reaches_every_path(tmp_path):
     assert exitCode == 0 and reports == ["PROCESS {:} SAME".format(rank) for rank in range(3)], output
 
 
+#: Elements moved between the processes on increment 3, which is no output increment: the model was
+#: last synchronized after increment 2.
+_MIGRATION_WITHOUT_SYNCHRONIZATION_PATCH = """
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+
+acceptIncrement = NEDMPI.acceptIncrement
+
+
+def movingElementsAfterIncrementThree(self, step, model, timeStep):
+    acceptIncrement(self, step, model, timeStep)
+    if timeStep.number == 3:
+        self._moveElements(model, step)
+
+
+NEDMPI.acceptIncrement = movingElementsAfterIncrementThree
+"""
+
+
+def test_elements_move_only_right_after_a_synchronization(tmp_path):
+    # The copies of the constraints and of the rigid-body surfaces every process holds are consistent
+    # only right after a synchronization of the model, from which a migration rebuilds every process'
+    # system; a migration anywhere else is refused, loudly, in every process.
+    (tmp_path / "test.inp").write_text(_MIGRATING_DECK)
+    (tmp_path / "run.py").write_text(
+        _FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _MIGRATION_WITHOUT_SYNCHRONIZATION_PATCH)
+    )
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("the refused migration left processes waiting")
+    assert exitCode != 0, output
+    assert (
+        "Moving elements between the processes reads the copies of the constraints and the rigid-body surfaces "
+        "every process holds, which are consistent only right after a synchronization of the model: it was last "
+        "synchronized after accepted increment 3, and 4 increment(s) have been accepted." in output
+    ), output
+
+
 _MATERIAL_PROPERTIES_DECK = """
 *material, name=LinearElastic, id=linearelastic
 20000.0, 0.2, 2.0e-9

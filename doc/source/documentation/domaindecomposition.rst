@@ -732,6 +732,14 @@ the increment was accepted, in every process:
    (:meth:`~edelweissfe.models.femodel.FEModel.assignSectionsAndPropertiesToElements`), and every
    element arriving from another process the state that process sent (``setStateVars``).
 
+A migration happens right after the synchronization of an output increment, and must: every process
+then rebuilds its equation system from its copies of the constraints owned elsewhere and of the
+rigid-body surfaces, which are consistent between the processes only right after a synchronization --
+each process moves the surfaces in every increment from the reference node as it holds it, current
+only where it integrates it. That order (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.acceptIncrement`) is
+asserted, not only followed: a migration after an increment accepted since the last synchronization
+is refused, in every process.
+
 Everything indexed by the elements a process holds is then built again, as after a change of the
 topology: the solver rebuilds the equation system for the elements now held, carrying the solution,
 the velocity and the force over -- each process completes them at the degrees of freedom it

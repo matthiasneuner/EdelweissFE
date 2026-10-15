@@ -363,6 +363,12 @@ class NEDMPI(NEDParallel):
         #: output increment synchronized to rank 0 only: :meth:`_receiveRigidBodyReferences`; planned
         #: for the current subdomain at its first use, None before.
         self._rigidBodyReferences: ReceivedSolution | None = None
+        #: The increments this solver accepted, over all steps of the job.
+        self._incrementsAccepted = 0
+        #: The value of :attr:`_incrementsAccepted` when the model was last synchronized with the
+        #: states of the elements and constraints (:meth:`_synchronizeModel`): 0 for the model as it
+        #: was set up, the same in every process. See :meth:`_requireSynchronizedSinceLastIncrement`.
+        self._synchronizedAfterIncrement = 0
 
     def beginStep(
         self,
@@ -905,6 +911,7 @@ class NEDMPI(NEDParallel):
         """
 
         super().acceptIncrement(step, model, timeStep)
+        self._incrementsAccepted += 1
         # the increment changed the solution at the degrees of freedom integrated here only
         self._wholeSolutionHere = False
 
@@ -1032,6 +1039,7 @@ class NEDMPI(NEDParallel):
             The step being solved.
         """
 
+        self._requireSynchronizedSinceLastIncrement("Moving elements between the processes")
         before = self._lumpedOperators()
         carried = self.releaseEquationSystem()
         self.subdomain.moveElements()
@@ -1568,6 +1576,41 @@ class NEDMPI(NEDParallel):
             self._receiveRigidBodyReferences(model)
         if timeStep is not None:
             self.updateRigidBodies(model, timeStep)
+        if includeStates:
+            self._synchronizedAfterIncrement = self._incrementsAccepted
+
+    def _requireSynchronizedSinceLastIncrement(self, reader: str):
+        """Refuse to continue unless the model was synchronized, with the states of the elements and
+        constraints, after the last increment this process accepted.
+
+        What every process holds a copy of is consistent between the processes only right after such
+        a synchronization: the copies of the constraints owned elsewhere -- their state, and with it
+        the degrees of freedom they couple -- and the surfaces of the rigid bodies, which each process
+        moves in every increment from the reference node as it holds it, current only where it
+        integrates that node. Moving elements rebuilds the equation system of every process from these
+        copies, and the processes must arrive at the same layout. That a migration follows a
+        synchronization is the order of :meth:`acceptIncrement`; asserted here, so that a migration
+        anywhere else fails loudly instead of building the processes' systems from stale copies.
+
+        Parameters
+        ----------
+        reader
+            What reads the copies, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            In every process alike, if an increment was accepted since the last synchronization.
+        """
+
+        if self._synchronizedAfterIncrement != self._incrementsAccepted:
+            raise RuntimeError(
+                "{:} reads the copies of the constraints and the rigid-body surfaces every process holds, "
+                "which are consistent only right after a synchronization of the model: it was last "
+                "synchronized after accepted increment {:}, and {:} increment(s) have been accepted.".format(
+                    reader, self._synchronizedAfterIncrement, self._incrementsAccepted
+                )
+            )
 
     def requireWholeSolutionHere(self, reader: str):
         """Refuse to let something read the whole solution -- the vectors at every degree of freedom,
