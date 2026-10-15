@@ -154,6 +154,8 @@ class FEModel:
         """
 
         clone = object.__new__(type(self))
+        # shared with the original too: the mesh, the nodes, and the caches of createNodesOfMesh, which
+        # name the mesh they hold for, so a copy given another mesh starts afresh
         clone.__dict__.update(self.__dict__)
         clone.topology = self.topology.boundTo(clone)
         return clone
@@ -281,6 +283,24 @@ class FEModel:
         self.mesh.setNodeSet(name, labels)
         return self.resolveNodeSetOfMesh(name)
 
+    def redefineNodeSet(self, name: str, labels: list):
+        """Give a node set new members, in place (references held to it stay valid): a node set of the
+        mesh is redefined in the mesh and resolved again (:meth:`defineNodeSetOfMesh`); a set of node
+        objects a model entity made (e.g. the slave nodes a tie tied) is given the node objects.
+
+        Parameters
+        ----------
+        name
+            The name of the node set.
+        labels
+            The labels of its new members, in order.
+        """
+
+        if name in self.mesh.nodeSets:
+            self.defineNodeSetOfMesh(name, labels)
+        else:
+            self.nodeSets[name].replaceMembers([self.nodes[label] for label in labels])
+
     def checkNodesAgreeWithMesh(self):
         """Raise unless :attr:`nodes` holds nodes of the mesh, in mesh order, and every node of the
         mesh (every process holds every node, for now).
@@ -317,11 +337,11 @@ class FEModel:
         """Add nodes a model entity (a discrete rigid body) makes itself, instead of the input
         describing them in the mesh; they are described in the mesh as well, from these objects.
 
-        This is the special path, the counterpart of :meth:`createAuxiliaryElement` for nodes: a
-        discrete rigid body makes its surface nodes with the coordinates of its surface file, in that
-        file's precision, which the mesh (holding double precision) does not reproduce. Every other node
-        is described in :attr:`mesh` first and created from there, by :meth:`createNodesOfMesh` --
-        which is called first here, so that the nodes stay in mesh order.
+        This special path is kept only so that the float32 arithmetic of the rigid bodies stays bitwise:
+        a discrete rigid body makes its surface nodes with the coordinates of its surface file in that
+        file's precision (single precision for an STL file), which the mesh (double precision) would
+        not reproduce. Every other node is described in :attr:`mesh` first and created from there, by
+        :meth:`createNodesOfMesh` -- which is called first here, so that the nodes stay in mesh order.
 
         Parameters
         ----------

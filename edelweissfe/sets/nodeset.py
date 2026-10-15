@@ -51,9 +51,7 @@ class NodeSet(LocalOrderedSet):
         A list of nodes.
     """
 
-    kindOfSet = "node set"
-    localMembersAre = "nodes are held here"
-    localPartHas = "is held here"
+    memberName = "node"
 
     def __init__(
         self,

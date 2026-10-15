@@ -214,16 +214,11 @@ class LocalOrderedSet(OrderedSet):
     from part of a set, silently, would be wrong. A reader that wants the local part asks for it
     explicitly (:meth:`localMembers`); membership (``member in theSet``) is always allowed.
 
-    The element set and the node set word their errors themselves (:attr:`kindOfSet`,
-    :attr:`localMembersAre`, :attr:`localPartHas`).
+    The element set and the node set name their members in the error messages (:attr:`memberName`).
     """
 
-    #: The kind of set, for the error messages, e.g. ``element set``.
-    kindOfSet = "set"
-    #: How the local members of the set are described in an error message.
-    localMembersAre = "members are held here"
-    #: How the local part of the set is described in an error message.
-    localPartHas = "is held here"
+    #: What a member of the set is, for the error messages, e.g. ``element``.
+    memberName = "member"
 
     @property
     def isComplete(self) -> bool:
@@ -306,13 +301,13 @@ class LocalOrderedSet(OrderedSet):
         """
 
         raise TopologyError(
-            "{:} {:} was read as a whole ({:} it), but only {:} of its {:} {:}: {:}".format(
-                self.kindOfSet,
+            "{:} set {:} was read as a whole ({:} it), but only {:} of its {:} {:}s are local here: {:}".format(
+                self.memberName,
                 self.name,
                 reading,
                 len(self.data),
                 self.sizeOfWholeSet(),
-                self.localMembersAre,
+                self.memberName,
                 self._whyIncomplete(),
             )
         )
@@ -327,7 +322,7 @@ class LocalOrderedSet(OrderedSet):
             The explanation.
         """
 
-        return "it holds only the {:}s it was given".format(self.kindOfSet.split()[0])
+        return "it holds only the {:}s it was given".format(self.memberName)
 
     def requireComplete(self, reader: str):
         """State that ``reader`` needs every member of this set, not only its local part.
@@ -349,7 +344,7 @@ class LocalOrderedSet(OrderedSet):
 
         if not self.isComplete:
             raise TopologyError(
-                "{:} needs the whole {:} {:}, but only part of it {:}: {:}".format(
-                    reader, self.kindOfSet, self.name, self.localPartHas, self._whyIncomplete()
+                "{:} needs the whole {:} set {:}, but only part of it is local here: {:}".format(
+                    reader, self.memberName, self.name, self._whyIncomplete()
                 )
             )

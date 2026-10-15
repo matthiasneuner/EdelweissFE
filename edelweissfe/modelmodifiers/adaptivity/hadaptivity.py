@@ -778,27 +778,6 @@ class ModelModifier(ModelModifierBase):
         model.createNodesOfMesh()
         return {label: model.nodes[label] for label in newLabels}
 
-    @staticmethod
-    def _redefineNodeSet(model: FEModel, setName: str, labels: list):
-        """Give a node set new members, in place: a node set of the mesh is redefined in the mesh and
-        resolved again; a set of node objects a model entity made (e.g. the slave nodes a tie tied) is
-        given the node objects.
-
-        Parameters
-        ----------
-        model
-            The model.
-        setName
-            The name of the node set.
-        labels
-            The labels of its new members, in order.
-        """
-
-        if setName in model.mesh.nodeSets:
-            model.defineNodeSetOfMesh(setName, labels)
-        else:
-            model.nodeSets[setName].replaceMembers([model.nodes[label] for label in labels])
-
     def _cellsToCreate(self, active: set) -> set:
         """Every octree cell that must become a model element but is not one yet.
 
@@ -999,12 +978,12 @@ class ModelModifier(ModelModifierBase):
         for setName, labels in octree.nodeSets.items():
             present = set(model.nodeSets[setName].nodeLabelsOfWholeSet())
             if any(label not in present and label not in slaves for label in labels):
-                self._redefineNodeSet(model, setName, [label for label in sorted(labels) if label not in slaves])
+                model.redefineNodeSet(setName, [label for label in sorted(labels) if label not in slaves])
                 change.changedNodeSets.add(setName)
 
         if newNodes:
             for setName in self._allLikeSets | {"all"}:
-                self._redefineNodeSet(model, setName, model.mesh.nodeLabels.tolist())
+                model.redefineNodeSet(setName, model.mesh.nodeLabels.tolist())
                 change.changedNodeSets.add(setName)
         for setName, eids in octree.elementSets.items():
             if setName in model.elementSets:

@@ -79,9 +79,7 @@ class ElementSet(LocalOrderedSet):
         A list of elements.
     """
 
-    kindOfSet = "element set"
-    localMembersAre = "elements have an element object here"
-    localPartHas = "has element objects here"
+    memberName = "element"
 
     def __init__(
         self,
