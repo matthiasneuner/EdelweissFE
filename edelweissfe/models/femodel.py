@@ -855,12 +855,18 @@ class FEModel:
             nodeField.resize(nodes)
 
         # a phenomenon activated for the first time (e.g. by a newly materialized constraint) has
-        # no NodeField yet -- create it exactly as _prepareVariablesAndFields would
+        # no NodeField yet -- create it exactly as _prepareVariablesAndFields would, and keep the node
+        # fields in the order of the phenomena, as there: the order the fields are numbered in
+        # (GlobalDofNumbering). The dict and the NodeFields keep their identity.
         for field in phenomena.keys():
             if field not in self.nodeFields:
                 newNodeField = NodeField(field, getFieldSize(field, self.domainSize), nodes)
                 if newNodeField.nodes:
                     self.nodeFields[field] = newNodeField
+        inPhenomenaOrder = [(field, self.nodeFields[field]) for field in phenomena if field in self.nodeFields]
+        if list(self.nodeFields) != [field for field, _ in inPhenomenaOrder]:
+            self.nodeFields.clear()
+            self.nodeFields.update(inPhenomenaOrder)
 
         journal.message("Assembling ScalarVariables", self.identification)
         # rebuilding scalarVariables cold-starts every value (ScalarVariable() defaults to 0.0), which
