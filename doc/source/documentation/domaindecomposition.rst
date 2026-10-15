@@ -1122,18 +1122,18 @@ objects, and the constraints were assigned to the process holding most of their 
 ===============================================  =================  =================
                                                  8 processes x 4    32 processes x 1
 ===============================================  =================  =================
-rebuild at the start, before                     3.54 s             4.25 s
-rebuild at the start, now                        2.83 s             3.25 s
-of which defining the subdomains, before / now   1.44 s / 0.73 s    1.98 s / 0.99 s
-rebuild after a migration, before / now          3.41 s / 2.70 s    --
-peak memory above the rebuild's start            364 / 387 MB       277 / 299 MB
+rebuild at the start, before                     3.53 s             4.27 s
+rebuild at the start, now                        2.81 s             3.23 s
+of which defining the subdomains, before / now   1.43 s / 0.70 s    2.01 s / 1.00 s
+rebuild after a migration, before / now          3.61 s / 2.70 s    --
+peak memory above the rebuild's start (mean)     319 / 340 MB       253 / 263 MB
 constraint force entries sent per increment      294 000 / 199 000  386 000 / 303 000
 interface DOFs, all processes                    200 000 / 177 000  405 000 / 396 000
 ===============================================  =================  =================
 
 What is left of a rebuild does not yet fall with the number of processes: the DofManager numbers every
 node of the model in every process (1.25--1.4 s), and the processes at each degree of freedom are
-derived for the whole model (0.15 s at 8x4, 0.25 s at 32x1), both until the vectors become local to a
+derived for the whole model, once per partition, both until the vectors become local to a
 subdomain. The largest contact, under the slab, still sends most of the constraint forces: its slave
 surface spans many subdomains wherever it is evaluated.
 
