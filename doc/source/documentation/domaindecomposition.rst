@@ -568,7 +568,9 @@ Synchronization point              What is gathered, to whom
 =================================  ==================================================================
 output increment                   to **rank 0**, which writes the output and the checkpoints: the
                                    solution, the velocity and the net force at every degree of freedom
-                                   (published into its node fields), the state of every stateful
+                                   (published into its node fields; not where each process holds the
+                                   nodes of its subdomain only: there the per-node field outputs and
+                                   the checkpoint gather what they read by node), the state of every stateful
                                    constraint, the results of every element field output, and -- if a
                                    checkpoint is written -- the element states; and to **every
                                    process** the solution at the reference nodes of the rigid bodies,

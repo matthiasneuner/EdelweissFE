@@ -2135,6 +2135,12 @@ class NEDMPI(NEDParallel):
         """
 
         carried = self._system.carried
+        # Rank 0 reads the whole model from its node fields -- unless each process holds the nodes of its
+        # subdomain only: then every reader of the whole model on rank 0 gathers what it reads by node from
+        # the processes computing it (a per-node field output, a checkpoint; see
+        # ElementDistribution.nodeValuesOfWholeSet), and nothing reads the vectors gathered here.
+        if not toEveryProcess and model.elementDistribution.holdsNodesOfSubdomainOnly:
+            carried = {}
         with performancetiming.timeit("gather solution"):
             for entry, vector in carried.items():
                 if self.vectorsOfSubdomain:
@@ -2146,7 +2152,7 @@ class NEDMPI(NEDParallel):
                     self.domainDecomposition.allgatherOwnedValues(vector)
                 else:
                     self.domainDecomposition.gatherOwnedValuesToRoot(vector)
-        wholeSolutionHere = toEveryProcess or self.domainDecomposition.rank == 0
+        wholeSolutionHere = toEveryProcess or (self.domainDecomposition.rank == 0 and carried)
         if wholeSolutionHere:
             # every degree of freedom is current now, not only the subdomain ones
             if not self.vectorsOfSubdomain:
