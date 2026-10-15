@@ -182,7 +182,7 @@ one of the methods that sum over the model** (:meth:`NED.kineticEnergy`, :meth:`
 through :meth:`NED.sumsOverModel`, which ``NEDMPI`` overrides, or :meth:`NED.energyBalanceTerms`). In ``NEDMPI`` those vectors are current only at the subdomain
 degrees of freedom, so a sum over them written inline is a sum over the subdomain of one process: a
 plausible number, and a wrong one. A sum over the lumped operators -- the inertia, the damping --
-may be written inline: they are complete in every process.
+may be written inline: they are complete at every degree of freedom of the vectors of a process.
 """
 
 import math

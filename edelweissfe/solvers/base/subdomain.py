@@ -40,7 +40,8 @@ view of the whole vector and costs nothing.
 
 In a domain-decomposed run (:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`), each
 process computes one subdomain of the model: the elements a graph partitioner assigned to it, the
-constraints dealt to it, and the degrees of freedom those touch, as a sorted index array. How the
+constraints dealt to it, and the degrees of freedom those touch: ``slice(None)`` again where its vectors
+hold the subdomain only, else a sorted index array into vectors of the whole model. How the
 subdomains exchange what they share -- the forces at their common degrees of freedom, the constraint
 forces, the states before an output -- and which process counts a degree of freedom two of them
 integrate is not the subdomain's business but the decomposition's; see
@@ -67,7 +68,7 @@ class Subdomain:
         The constraints of the subdomain, by name, in model order.
     dofs
         The subdomain degrees of freedom -- those its elements and constraints touch -- as an index
-        into a vector of the whole model: ``slice(None)`` for all of them, or a sorted index array.
+        into the vectors of the process: ``slice(None)`` for all of them, or a sorted index array.
     """
 
     elements: dict

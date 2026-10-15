@@ -42,10 +42,19 @@ each evaluated by one process, are shared with all. That is the communication mo
 need, and its volume is the interface and the constraints, not the model.
 
 The lumped mass and the damping are assembled once per mesh, by each process from its own elements,
-completed at the interface like the forces and shared from the owners, so that they are the same
-bits as without decomposition; the critical time step is the minimum over the subdomains. The
-lumped operators of the whole model are therefore known everywhere, which is what lets a contact
-search move a constraint onto nodes another process integrated until then.
+and completed at the interface like the forces, so that they are the same bits as without
+decomposition; the critical time step is the minimum over the subdomains.
+
+**Vectors of the subdomain.** Each process numbers and holds the vectors -- the carried vectors, the
+lumped operators -- at the degrees of freedom of its subdomain only, by a DofManager of the node
+fields of its subdomain whose numbering is the global one compressed
+(:meth:`NEDMPI.createDofManager`); the node fields keep every node and are filled from the owners
+where the whole model is read. A model with a reason against it
+(:meth:`NEDMPI.reasonsForVectorsOfWholeModel`: every element on every process, adaptive refinement,
+contact, rigid bodies, multi-point constraints, scalar variables) holds vectors of the whole model
+instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
+owners at every degree of freedom -- which is what lets a contact search move a constraint onto
+nodes another process integrated until then.
 
 **Where the whole model is read -- and by whom.** Field outputs, output managers, a marker deciding
 a refinement, the refinement itself, and a contact search all read more than one subdomain. Each of
@@ -148,8 +157,9 @@ at the end of the documentation of :mod:`~edelweissfe.solvers.nonlinearexplicitd
   contact search, a topology update, writing the output -- fails on all ranks together
   (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
-**Limits of this prototype.** Every process holds the whole mesh, every node, every contact facet
-and global-length vectors; a model under the whole-model rule
+**Limits of this prototype.** Every process holds the whole mesh, every node with its node fields,
+and every contact facet, and a model with a reason against vectors of the subdomain vectors of the
+whole model; a model under the whole-model rule
 (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements`) holds every
 element in every process, so that its memory per process does not shrink with the number of
 processes. The topology of a refinement costs every process what it costs a serial run. Constraints
@@ -802,7 +812,8 @@ class NEDMPI(NEDParallel):
 
     def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
         """Collective. Assemble a lumped operator of the elements of the subdomain, complete at every degree
-        of freedom of the model: completed at the interface like the forces, and shared from the owners.
+        of freedom of the vectors of this process: completed at the interface like the forces, and, for
+        vectors of the whole model, shared from the owners.
 
         Parameters
         ----------

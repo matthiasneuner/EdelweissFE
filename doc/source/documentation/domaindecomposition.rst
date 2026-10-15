@@ -73,8 +73,9 @@ Invariants
    (``U``, ``dU``, ``V``, ``P``) at its subdomain degrees of freedom only; the readers of the
    whole model are listed under `Where the whole model is read`_ and refuse to read otherwise. A
    sum over a carried vector belongs in a method ``NEDMPI`` overrides; written inline in ``NED``,
-   it is a sum over one process. (The lumped operators are complete in every process, and may be
-   summed inline.)
+   it is a sum over one process. (The lumped operators are complete at every degree of freedom of the
+   vectors of a process, and may be summed inline over them -- over the whole model only where the
+   vectors are of the whole model, see `Vectors of the subdomain`_.)
 5. **No communication inside an agreement,** enforced by the
    :class:`~edelweissfe.domaindecomposition.communicator.Communicator`.
 
@@ -218,8 +219,9 @@ make a distributed model possible:
   (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`): per field, which nodes of the
   mesh carry it, in mesh order, and where its range starts; the scalar variables last. Whenever the
   equation system is built, every process checks its DofManager against it, degree of freedom by
-  degree of freedom. Vectors stay global-length: a process holds the solution at every node, and
-  receives it from the owners of the degrees of freedom whenever the whole model is read.
+  degree of freedom. A process numbers its own vectors by it: the degrees of freedom of its
+  subdomain only, wherever nothing still requires vectors of the whole model (see `Vectors of the
+  subdomain`_).
 * **The mesh owns the nodes.** The nodes are described in the mesh too -- labels and reference
   coordinates, as arrays, and the node sets as lists of labels -- and the node objects are made from
   it (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`), in mesh order, the order of the
@@ -334,8 +336,9 @@ An increment is the central-difference increment of ``NED``, unchanged. ``NED`` 
 subdomain, its constraints, and the subdomain degrees of freedom. For ``NED`` that is the whole
 model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]`` is the whole vector; for
 ``NEDMPI`` it is the subdomain of the process, as its
-:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines it, and the
-degrees of freedom are a sorted index array. Which of them a process owns -- counts once for the
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines it -- and the
+degrees of freedom are ``slice(None)`` as well where the vectors hold the subdomain only (`Vectors of
+the subdomain`_), else a sorted index array into vectors of the whole model. Which of them a process owns -- counts once for the
 model, e.g. in the external work -- is the decomposition's business
 (``DomainDecomposition.ownedDofMask``), not the subdomain's.
 
@@ -439,9 +442,60 @@ one of the last synchronization, which a load evaluated on another process' elem
 
 The volume exchanged per increment is that of the interface and of the constraint forces at it. The lumped mass
 and damping are assembled once per mesh by each process from its own elements, completed at the
-interface like the forces and then shared from the owners, so that every process holds them, the
-same bits as without decomposition, at every degree of freedom of the model. The critical time step
+interface like the forces -- the same bits as without decomposition at every subdomain degree of
+freedom -- and, where the vectors are of the whole model, shared from the owners, so that every
+process holds them at every degree of freedom of the model. The critical time step
 is the minimum over the subdomains.
+
+Vectors of the subdomain
+------------------------
+
+A process holds the vectors an increment computes on -- the solution, its increment, the velocity, the
+net force, and the lumped inertia and damping -- at the degrees of freedom of its subdomain only,
+numbered by a :class:`~edelweissfe.numerics.dofmanager.DofManager` of the *node fields of the
+subdomain*: per field, the nodes at which the process integrates it, in mesh order
+(:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.subdomainNodeFields`).
+Its numbering is the global one (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`)
+compressed, order preserved: the degree of freedom at position *i* of a vector is the *i*-th of the
+sorted subdomain degrees of freedom, checked whenever the system is built. The memory of the vectors
+and of the DofManager's maps per node therefore falls with the number of processes.
+
+The subdomain is decided first, from what every process holds whole
+(:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.defineSubdomainDofs`):
+the partition, the global numbering, and the nodes of the constraints the process evaluates. Every
+exchange is keyed by the global degree of freedom, as before, and reads or writes a vector at the
+position of that degree of freedom in it
+(:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.positionsOf`). The
+increment runs over the whole of its vectors (``Subdomain.dofs`` is ``slice(None)``).
+
+What a process does not hold in its vectors, it holds in its node fields, which keep every node, as
+the mesh and the node objects do for now:
+
+* every accepted increment publishes the vectors at the rows of the subdomain's nodes;
+* an output increment, the end of a step and a topology check gather the vectors from the owners of
+  the degrees of freedom, for that synchronization only, into the node fields of the processes that
+  read the whole model (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.wholeVector`) --
+  so output and checkpoints are written as before, and a checkpoint is the same file;
+* an equation system built afresh -- at the start of a step, on a resume -- reads the vectors from the
+  rows of the subdomain's nodes in the node fields;
+* a Dirichlet condition and a concentrated load act on the part of their node set whose degrees of
+  freedom the process integrates
+  (:attr:`~edelweissfe.stepactions.base.dirichletbase.DirichletBase.constrainedRows`);
+* after elements moved between processes, each process fills its new vectors from its previous ones
+  where both hold a degree of freedom, and receives the rest from the previous owners
+  (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.carryOverToSubdomain`);
+  the lumped operators assembled again are compared with the previous ones the same way;
+* the classification of every field as first or second order in time counts the coefficients at the
+  degrees of freedom each process owns, added over all processes, so that every process classifies
+  every field alike.
+
+What still reads or changes degrees of freedom outside a subdomain during a run keeps vectors of the
+whole model in every process, decided once per job and reported on rank 0 (``Vectors of the whole model
+on every process because: ...``; :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.reasonsForVectorsOfWholeModel`):
+a model holding every element on every process, a model modifier changing the mesh (adaptive
+refinement), a constraint searching its connectivity (contact), a rigid body, a multi-point constraint
+(a tie), and scalar variables. Until those read only what they receive, they run as described in the
+rest of this page, with vectors of the whole model current at the subdomain degrees of freedom.
 
 Where the whole model is read
 -----------------------------
@@ -1051,7 +1105,8 @@ Limitations
 -----------
 
 * Memory: a distributed process holds its own elements, but every process holds the whole mesh,
-  every node with its fields, global-length vectors, and every contact facet and rigid body. Jobs
+  every node with its fields, and every contact facet and rigid body; and vectors of the whole model
+  wherever `Vectors of the subdomain`_ names a reason. Jobs
   under the fallback rule hold the whole model on every process (c1_150 at 8 processes: 7.6 GB per
   process with the whole model, 2.55 GB distributed).
 * A migration rebuilds the equation system of every process, which costs about what building it
