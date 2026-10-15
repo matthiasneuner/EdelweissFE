@@ -312,6 +312,22 @@ class DomainDecomposition:
                         owners, self._elementOwners, self.nProcesses, self._processShares
                     )
             self._setPartition(model, owners)
+            if not byMeasuredCosts:
+                # A changed mesh: partitioned again for the shares of the processes its constraints are
+                # expected to have, keeping the elements where they were as far as the shares allow.
+                shares = self._sharesForTheChangedMesh(model)
+                if not _sameShares(shares, self._processShares):
+                    self._processShares = shares
+                    with performancetiming.timeit("partition"):
+                        owners = keepElementsWhereTheyWere(
+                            partitionElementsOfMesh(
+                                model.mesh, self.nProcesses, model.domainSize, self.communicator, None, shares
+                            ),
+                            owners,
+                            self.nProcesses,
+                            shares,
+                        )
+                    self._setPartition(model, owners)
         else:
             # A copy: the distribution changes its own as the mesh changes (see
             # DistributedElements.placeChildElement), and this partition must not change with it.
@@ -421,12 +437,10 @@ class DomainDecomposition:
         current (:meth:`constraintCopiesAreSynchronized`) -- it does before a topology update, which
         follows a synchronization of the whole model to every process.
 
-        The shares of the element work the processes are given beside their constraints follow the
-        constraints: computed from the measured cost of each constraint, by name, for its new process.
-        Where every process holds every element, a partition made for other shares is made again for
-        these, keeping the elements where they were as far as the shares allow; a distributed model
-        partitions with them when it moves its elements
-        (:meth:`rebalanceAfterTopologyChange`, which assigns the constraints first).
+        The shares of the element work follow the constraints, from the measured cost of each by name:
+        the partition of a changed mesh is made with the shares of the owners the constraints are
+        expected to have (:meth:`_sharesForTheChangedMesh`), and the next repartition with those of the
+        owners assigned here.
 
         Parameters
         ----------
@@ -448,29 +462,57 @@ class DomainDecomposition:
             )
         self._constraintCopiesSynchronized = False
 
+        owners = self._majorityOwners(model)
+        self.communicator.requireSameOnAllRanks(tuple(owners.items()), "the processes the constraints are assigned to")
+        self._constraintOwners = owners
+        self._constraintOwnersMesh = (model.mesh, model.mesh.elementsVersion)
+        # the shares of the next repartition: for these owners
+        self._processShares = self._sharesFor(owners, model)
+
+    def _majorityOwners(self, model: FEModel) -> dict:
+        """The process holding most of the nodes of every constraint under the current partition
+        (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the nodes
+        its search may couple, or, for a constraint without a search, those it couples. Local.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        dict
+            The rank of every constraint, by name.
+        """
+
         mesh = model.mesh
         nodeRows = {}
         for name, constraint in model.constraints.items():
             # the nodes a search may couple; those coupled now for a constraint without a search
             nodes = constraint.nodesReadByConnectivityUpdate() or constraint.nodes
             nodeRows[name] = mesh.rowsOfNodes([node.label for node in nodes])
-        owners = assignConstraintsByMajority(nodeRows, self._elementsAtNodes.lowestProcessAtNodes(), self.nProcesses)
-        self.communicator.requireSameOnAllRanks(tuple(owners.items()), "the processes the constraints are assigned to")
-        self._constraintOwners = owners
-        self._constraintOwnersMesh = (mesh, mesh.elementsVersion)
+        return assignConstraintsByMajority(nodeRows, self._elementsAtNodes.lowestProcessAtNodes(), self.nProcesses)
 
-        shares = self._sharesFor(owners, model)
-        sharesChanged = (shares is None) != (self._processShares is None) or (
-            shares is not None and not np.array_equal(shares, self._processShares)
-        )
-        self._processShares = shares
-        if sharesChanged and model.elementDistribution.replicatesElements:
-            with performancetiming.timeit("partition"):
-                partitioned = partitionElementsOfMesh(
-                    mesh, self.nProcesses, model.domainSize, self.communicator, processShares=shares
-                )
-                partitioned = keepElementsWhereTheyWere(partitioned, self._elementOwners, self.nProcesses, shares)
-            self._setPartition(model, partitioned)
+    def _sharesForTheChangedMesh(self, model: FEModel) -> np.ndarray | None:
+        """The shares of the element work for a partition of a changed mesh: for the processes the
+        constraints are expected to have -- the majority under the partition at hand (the one the mesh
+        inherited, or one made for the previous shares) --, since the constraints are assigned afresh on
+        the partition made with them.
+
+        Parameters
+        ----------
+        model
+            The model tree, partitioned (:meth:`_setPartition`) for its current mesh.
+
+        Returns
+        -------
+        np.ndarray | None
+            The shares, by rank; None for equal shares.
+        """
+
+        if self._elementTime is None:
+            return None
+        return self._sharesFor(self._majorityOwners(model), model)
 
     def _constraintCostsOfProcesses(self, owners: dict) -> np.ndarray:
         """The measured cost per increment of the constraints each process evaluates under an assignment,
@@ -1298,10 +1340,14 @@ class DomainDecomposition:
         if distribution.replicatesElements or not tolerance or self.nProcesses == 1:
             return
 
-        # The constraints are assigned for the changed mesh on the partition it inherited, and the shares
-        # of the element work follow them; a new partition is then made for those shares.
+        # The shares of the element work are those of the processes the constraints are expected to have
+        # -- the majority under the partition the mesh inherited --; they are assigned afresh on the
+        # partition made with them.
         self._model = model
-        self._constraintOwnersOf(model)
+        if not self._isFor(self._partitionedMesh, model):
+            self._partition(model, measuredCosts=None, byMeasuredCosts=False)
+        self._processShares = self._sharesForTheChangedMesh(model)
+        expectedConstraintCosts = self._constraintCostsOfProcesses(self._majorityOwners(model))
         mesh = model.mesh
         inherited = self._elementOwners
         counts = np.zeros(self.nProcesses)
@@ -1311,9 +1357,8 @@ class DomainDecomposition:
         if self._meanElementCost is None:
             imbalance, timeBeyondTolerance = self._imbalance(counts, np.zeros(self.nProcesses))
         else:
-            constraintCosts = self._constraintCostsOfProcesses(self._constraintOwners)
-            busyTimes = counts * self._meanElementCost + constraintCosts
-            imbalance, timeBeyondTolerance = self._imbalance(busyTimes, constraintCosts)
+            busyTimes = counts * self._meanElementCost + expectedConstraintCosts
+            imbalance, timeBeyondTolerance = self._imbalance(busyTimes, expectedConstraintCosts)
         if timeBeyondTolerance <= 0.0:
             self.journal.message(
                 "After the topology change: element imbalance {:.3f} within 1 + {:}".format(imbalance, tolerance),
@@ -1399,6 +1444,14 @@ class DomainDecomposition:
                 self.identification,
                 1,
             )
+
+
+def _sameShares(shares: np.ndarray | None, others: np.ndarray | None) -> bool:
+    """Whether two shares of the element work are the same; None stands for equal shares."""
+
+    if shares is None or others is None:
+        return shares is None and others is None
+    return np.array_equal(shares, others)
 
 
 def layoutFingerprint(
