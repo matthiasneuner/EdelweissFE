@@ -182,6 +182,7 @@ from edelweissfe.domaindecomposition.mpienvironment import (
     abortAllProcesses,
     worldCommunicator,
 )
+from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.domaindecomposition.subdomaininterface import (
     InterfaceForceAssembly,
     ValuesFromOwners,
@@ -189,7 +190,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.modelmodifiers.base.modelmodifierbase import fieldOutputsReadByAll
 from edelweissfe.models.femodel import FEModel
-from edelweissfe.numerics.dofmanager import DofVector
+from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.exactsum import ExactSum
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
@@ -384,6 +385,16 @@ class NEDMPI(NEDParallel):
         #: constraints (:meth:`_synchronizeModel`); 0 for the model as it was set up, the same in every
         #: process. See :meth:`_copiesConsistentInEveryProcess`.
         self._copiesConsistentAfterIncrement = 0
+        #: Whether the vectors of this process -- the carried vectors, the lumped operators -- hold the
+        #: degrees of freedom of its subdomain only, or every degree of freedom of the model; decided once
+        #: per job, at the start of its first step (:meth:`reasonsForVectorsOfWholeModel`). None before.
+        self._vectorsOfSubdomain: bool | None = None
+        #: The interface of the subdomain before the equation system now being rebuilt, while it is; see
+        #: :meth:`carryVectorsOver`.
+        self._interfaceBeforeRebuild = None
+        #: Per node set and field, the rows of the set held in the vectors of the subdomain and the
+        #: positions of their degrees of freedom (:meth:`_partOfNodeSetHere`); for the current system.
+        self._partsOfNodeSetsHere = {}
 
     def beginStep(
         self,
@@ -415,7 +426,78 @@ class NEDMPI(NEDParallel):
         )
         self._incrementsDoneAtLastTopologyChange = 0
         self._pendingWorkAtPrescribedDofs = []
+        if self._vectorsOfSubdomain is None:
+            self._decideVectors(model)
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
+
+    def _decideVectors(self, model: FEModel):
+        """Decide, once per job, whether the vectors of each process hold its subdomain only or the whole
+        model (:meth:`reasonsForVectorsOfWholeModel`), the same in every process, and report it once.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+        reasons = self.reasonsForVectorsOfWholeModel(model)
+        self._vectorsOfSubdomain = not reasons
+        self.domainDecomposition.vectorsOfSubdomain = self._vectorsOfSubdomain
+        self.journal.message(
+            (
+                "Vectors of the subdomain: each process numbers and holds the degrees of freedom it integrates only"
+                if not reasons
+                else "Vectors of the whole model on every process because: " + "; ".join(reasons)
+            ),
+            self.identification,
+            0,
+        )
+
+    @staticmethod
+    def reasonsForVectorsOfWholeModel(model: FEModel) -> list[str]:
+        """Why every process must hold vectors of the whole model -- the carried vectors and the lumped
+        operators at every degree of freedom, numbered by a DofManager of every node -- instead of its
+        subdomain's only; empty if nothing requires it.
+
+        What still reads, or changes, degrees of freedom outside a subdomain during a run, until each
+        receives what it reads: a model whose every process holds every element (and so the states to
+        synchronize); a model modifier changing the mesh, whose refinement interpolates the node fields
+        of the whole model; a constraint searching its connectivity (contact), which may couple degrees
+        of freedom of another subdomain at its next search; a rigid body, whose reference node every
+        process reads; a multi-point constraint, whose closure the DofManager of a subdomain does not
+        yet number; and scalar variables.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        list[str]
+            The reasons.
+        """
+
+        reasons = []
+        if model.elementDistribution.replicatesElements:
+            reasons.append("every process holds every element")
+        modifiers = [name for name, modifier in model.modelModifiers.items() if modifier.initiatesTopologyChanges]
+        if modifiers:
+            reasons.append("model modifier(s) {:} change the mesh".format(", ".join(modifiers)))
+        searched = [
+            name
+            for name, constraint in model.constraints.items()
+            if type(constraint).updateConnectivity is not ConstraintBase.updateConnectivity
+        ]
+        if searched:
+            reasons.append("constraint(s) {:} search their connectivity (contact)".format(", ".join(searched)))
+        if model.rigidBodies:
+            reasons.append("rigid bodies {:}".format(", ".join(model.rigidBodies)))
+        if model.multiPointConstraints:
+            reasons.append("multi-point constraint(s) {:}".format(", ".join(model.multiPointConstraints)))
+        if model.scalarVariables:
+            reasons.append("scalar variables")
+        return reasons
 
     def attemptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Collective. Attempt the increment of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.attemptIncrement`; a step failure it raises is
@@ -518,14 +600,90 @@ class NEDMPI(NEDParallel):
         """
 
         if self._system is not None:
-            for slot in self._integratedNodeFieldSlots:
-                values = slot.nodeField
-                for entry, vector in self._system.carried.items():
-                    vector.asPlainArray()[slot.dofs] = values[entry].reshape(-1)[slot.positions]
+            self._readFromNodeFields(self._integratedNodeFieldSlots, self._system.carried)
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
         self.gatherExternalWork()
 
     # --- The subdomain ------------------------------------------------------------------------------
+
+    def createDofManager(self, model: FEModel) -> DofManager:
+        """Collective. The degree-of-freedom layout of a new equation system; see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.createDofManager`. Where the vectors are
+        of the subdomain, the subdomain is decided first, from what every process holds
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.defineSubdomainDofs`),
+        and the DofManager numbers the node fields of the subdomain only
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.subdomainNodeFields`),
+        with its elements and constraints: in global order, so that its numbering is the global one,
+        compressed.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        DofManager
+            The DofManager.
+        """
+
+        if not self._vectorsOfSubdomain:
+            return super().createDofManager(model)
+
+        self._partsOfNodeSetsHere = {}
+        decomposition = self.domainDecomposition
+        decomposition.defineSubdomainDofs(model)
+        return DofManager(
+            decomposition.subdomainNodeFields(model).values(),
+            [],
+            decomposition.ownedElements.values(),
+            decomposition.ownedConstraints.values(),
+            [],
+            initializeVIJPattern=False,
+            determiningIndexToHostObjectMapping=False,
+        )
+
+    def readCarriedFromNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
+        """Fill the carried vectors of a new equation system from the node fields; see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.readCarriedFromNodeFields`. Vectors of
+        the subdomain read the rows of their nodes.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        carried
+            The carried vectors, by node field entry; filled.
+        """
+
+        if not self._vectorsOfSubdomain:
+            return super().readCarriedFromNodeFields(model, carried)
+        self._readFromNodeFields(self._integratedNodeFieldSlots, carried)
+
+    def carryVectorsOver(self, previous: ExplicitSystem, carried: dict[str, DofVector]):
+        """Collective. Carry the vectors of the system being replaced over to the rebuilt one, and complete
+        them at the degrees of freedom this process integrates from now on, from their previous owners; see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.carryVectorsOver`. Vectors of the
+        subdomain are filled from the previous subdomain's
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.carryOverToSubdomain`).
+
+        Parameters
+        ----------
+        previous
+            The system being replaced.
+        carried
+            The carried vectors of the rebuilt system, by node field entry; filled.
+        """
+
+        before = self._interfaceBeforeRebuild
+        if self._vectorsOfSubdomain:
+            entries = list(carried)
+            self.domainDecomposition.carryOverToSubdomain(
+                before, [previous.carried[entry] for entry in entries], [carried[entry] for entry in entries]
+            )
+        else:
+            super().carryVectorsOver(previous, carried)
+            self.domainDecomposition.receiveNewlyIntegratedValues(before, list(carried.values()))
 
     def defineSubdomain(self, model: FEModel, topologyChanged: bool) -> Subdomain:
         """Collective. The subdomain of this process; see :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.defineSubdomain`.
@@ -562,7 +720,11 @@ class NEDMPI(NEDParallel):
         """
 
         plan = super().planIncrement(model)
-        self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.subdomain.dofs)
+        self._integratedNodeFieldSlots = (
+            self._subdomainNodeFieldSlots(model)
+            if self._vectorsOfSubdomain
+            else self._nodeFieldSlotsOf(model, self.subdomain.dofs)
+        )
         # planned again for this subdomain at the next search
         self._forgetReceivePlans()
         self._interfaceAssembly = self.domainDecomposition.interfaceAssemblyFor(plan.elementLoop)
@@ -658,8 +820,46 @@ class NEDMPI(NEDParallel):
         vector, contributions = self.lumpedDiagonalAndContributions(elementLoop, elementContribution)
         with performancetiming.timeit("interface forces"):
             self.domainDecomposition.interfaceAssemblyFor(elementLoop).assemble(contributions, vector)
-            self.domainDecomposition.allgatherOwnedValues(vector)
+            # complete at every subdomain degree of freedom now; vectors of the whole model complete there too
+            if not self._vectorsOfSubdomain:
+                self.domainDecomposition.allgatherOwnedValues(vector)
         return vector
+
+    def coefficientCountsOfFields(self, inertia: DofVector, damping: DofVector) -> dict[str, tuple[int, int, int]]:
+        """Collective. The counts of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.coefficientCountsOfFields`
+        over the whole model: each process counts the degrees of freedom it owns, and the counts of all
+        processes are added -- so that every process classifies every field alike, also one it does not
+        integrate.
+
+        Parameters
+        ----------
+        inertia
+            The assembled lumped inertia.
+        damping
+            The assembled lumped damping.
+
+        Returns
+        -------
+        dict[str, tuple[int, int, int]]
+            Per field: its number of degrees of freedom, of those with an inertia, and of those with a
+            damping.
+        """
+
+        owned = self.domainDecomposition.ownedDofMask
+        fields = list(self.theDofManager.idcsOfFieldsInDofVector.items())
+        countsHere = np.array(
+            [
+                (
+                    np.count_nonzero(owned[indices]),
+                    np.count_nonzero(owned[indices] & (np.asarray(inertia[indices]) != 0.0)),
+                    np.count_nonzero(owned[indices] & (np.asarray(damping[indices]) != 0.0)),
+                )
+                for _, indices in fields
+            ],
+            dtype=np.int64,
+        ).reshape(-1, 3)
+        counts = self.communicator.allreduce(countsHere)
+        return {fieldName: tuple(int(count) for count in counts[i]) for i, (fieldName, _) in enumerate(fields)}
 
     # --- The increment ------------------------------------------------------------------------------
 
@@ -993,7 +1193,8 @@ class NEDMPI(NEDParallel):
                 else:
                     self.subdomain = self.domainDecomposition.subdomain
                     self._incrementPlan = self.planIncrement(model)
-                    self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
+                    if not self._vectorsOfSubdomain:
+                        self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
                 self.domainDecomposition.recordRepartitionCost(perf_counter() - startOfRebalancing)
             else:
                 # the next check weighs what was measured from now on (a new plan starts afresh itself)
@@ -1015,6 +1216,15 @@ class NEDMPI(NEDParallel):
             The model tree.
         """
 
+        if self._vectorsOfSubdomain:
+            # the vectors hold nothing else; the node fields hold every node
+            for slot in self._integratedNodeFieldSlots:
+                for entry in self._system.carried:
+                    values = slot.nodeField[entry].reshape(-1)
+                    stale = np.ones(values.shape[0], dtype=bool)
+                    stale[slot.positions] = False
+                    values[stale] = np.nan
+            return
         outside = np.ones(self._system.U.shape[0], dtype=bool)
         outside[self.subdomain.dofs] = False
         for vector in self._system.carried.values():
@@ -1114,14 +1324,15 @@ class NEDMPI(NEDParallel):
         # processes from these copies: current, as just made sure.
         self.domainDecomposition.constraintCopiesAreSynchronized()
         before = self._lumpedOperators()
+        interfaceBefore = self.domainDecomposition.interface
         carried = self.releaseEquationSystem()
         self.domainDecomposition.moveElements()
         self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
-        self._requireSameLumpedOperators(before)
+        self._requireSameLumpedOperators(before, interfaceBefore)
 
     def _lumpedOperators(self) -> dict[str, np.ndarray]:
         """Plain copies of the lumped operators of the current equation system, complete at every
-        degree of freedom of the model.
+        degree of freedom of its vectors.
 
         Returns
         -------
@@ -1137,20 +1348,23 @@ class NEDMPI(NEDParallel):
             "damping rate": np.array(self._dampingRate),
         }
 
-    def _requireSameLumpedOperators(self, before: dict[str, np.ndarray]):
-        """Refuse to continue unless the lumped operators are the same bits as ``before``.
+    def _requireSameLumpedOperators(self, before: dict[str, np.ndarray], interfaceBefore):
+        """Collective. Refuse to continue unless the lumped operators are the same bits as ``before``.
 
         Elements moved between processes, and the equation system was built again for the elements
         now local, which assembles the lumped operators again. A serial run keeps them between
         rebuilds of its equation system, and has none here: the two agree only if an element's lumped inertia and damping do not
         depend on its state. That holds for the elements of this package, and is checked here rather
-        than assumed, at every migration. The operators are complete in every process, so every
-        process decides the same.
+        than assumed, at every migration. Vectors of the subdomain compare the operators before at the
+        degrees of freedom of the new subdomain, received from their previous owners where this process
+        did not integrate them before; the processes then agree on what changed anywhere.
 
         Parameters
         ----------
         before
             The operators before the elements moved (:meth:`_lumpedOperators`).
+        interfaceBefore
+            The interface of the subdomain before the elements moved.
 
         Raises
         ------
@@ -1159,7 +1373,17 @@ class NEDMPI(NEDParallel):
         """
 
         after = self._lumpedOperators()
-        changed = [name for name in before if before[name].tobytes() != after[name].tobytes()]
+        if self._vectorsOfSubdomain:
+            names = list(before)
+            mapped = [np.empty_like(after[name]) for name in names]
+            self.domainDecomposition.carryOverToSubdomain(interfaceBefore, [before[name] for name in names], mapped)
+            before = dict(zip(names, mapped))
+        changedHere = [name for name in before if before[name].tobytes() != after[name].tobytes()]
+        changed = [
+            name
+            for name in before
+            if any(name in changedThere for changedThere in self.communicator.allgather(changedHere))
+        ]
         if changed:
             raise RuntimeError(
                 "Elements moved between processes, and the lumped operators assembled again from the elements "
@@ -1200,6 +1424,7 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots = []
         self._interfaceAssembly = None
         self._elementCosts = None
+        self._partsOfNodeSetsHere = {}
         self._forgetReceivePlans()
         return carried
 
@@ -1318,6 +1543,166 @@ class NEDMPI(NEDParallel):
                 if not values.flags.c_contiguous:
                     raise RuntimeError("Node field entry {:}/{:} is not contiguous.".format(nodeField.name, entry))
                 values.reshape(-1)[slot.positions] = vector.asPlainArray()[slot.dofs]
+
+    @staticmethod
+    def _readFromNodeFields(slots: list[NodeFieldSlot], vectors: dict[str, DofVector]):
+        """Read the degrees of freedom of the slots from the node fields: the inverse of
+        :meth:`_publishIntoNodeFields`. An entry a node field does not hold is left as it is.
+
+        Parameters
+        ----------
+        slots
+            Where the degrees of freedom are published.
+        vectors
+            The vectors, by the node field entry each is read from; written.
+        """
+
+        for slot in slots:
+            for entry, vector in vectors.items():
+                if entry in slot.nodeField:
+                    vector.asPlainArray()[slot.dofs] = slot.nodeField[entry].reshape(-1)[slot.positions]
+
+    def _publishWholeVector(self, model: FEModel, entry: str, whole: np.ndarray):
+        """Publish a vector of the whole model, in global order
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.wholeVector`), into
+        an entry of every node field: each field holds the range of its degrees of freedom in the global
+        numbering, its nodes in its order.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        entry
+            The node field entry.
+        whole
+            The vector of the whole model.
+        """
+
+        numbering = self.domainDecomposition.numbering
+        for field, nodeField in model.nodeFields.items():
+            if entry not in nodeField:
+                nodeField.createFieldValueEntry(entry)
+            values = nodeField[entry]
+            first = numbering.firstDofOfField[field]
+            values[:] = whole[first : first + values.size].reshape(values.shape)
+
+    def _subdomainNodeFieldSlots(self, model: FEModel) -> list[NodeFieldSlot]:
+        """Where the degrees of freedom of vectors of the subdomain are published in the node fields of the
+        model: each field's range of the vectors, at the rows of the subdomain's nodes of the field.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        list[NodeFieldSlot]
+            One slot per node field.
+        """
+
+        numbering = self.domainDecomposition.numbering
+        rowsOfFields = self.domainDecomposition.rowsOfSubdomainNodeFields
+        slots = []
+        for field, nodeField in model.nodeFields.items():
+            dofs = self.theDofManager.idcsOfFieldsInDofVector[field]
+            ranks = numbering.rankInField[field][rowsOfFields[field]].astype(np.int64)
+            if ranks.shape[0] == len(nodeField.nodes):
+                positions = slice(None)
+            else:
+                positions = (ranks[:, None] * nodeField.dimension + np.arange(nodeField.dimension)).ravel()
+            slots.append(NodeFieldSlot(nodeField, positions, dofs))
+        return slots
+
+    def _partOfNodeSetHere(self, nodeSet, field: str) -> tuple[np.ndarray, np.ndarray]:
+        """The part of a node set whose degrees of freedom of a field the vectors of the subdomain hold: its
+        rows -- the positions of its nodes in the set, counting those carrying the field, as a step action
+        on the set lays out its values -- and the positions of their degrees of freedom in the vectors.
+
+        Parameters
+        ----------
+        nodeSet
+            The node set.
+        field
+            The field.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            The rows, and the positions, one row per node and one column per component.
+
+        Raises
+        ------
+        RuntimeError
+            If the subdomain holds some, but not every component of the field at a node of the set.
+        """
+
+        key = (nodeSet, field)
+        if key not in self._partsOfNodeSetsHere:
+            carrying = [node.label for node in nodeSet if field in node.fields]
+            globalDofs = self.domainDecomposition.numbering.dofsAtNodes(
+                field, self.domainDecomposition.rowsOfNodes(carrying)
+            )
+            subdomainDofs = self.domainDecomposition.interface.subdomainDofs
+            positions = np.minimum(np.searchsorted(subdomainDofs, globalDofs), max(subdomainDofs.shape[0] - 1, 0))
+            heldComponents = subdomainDofs[positions] == globalDofs if subdomainDofs.shape[0] else globalDofs < 0
+            held = heldComponents.all(axis=1)
+            if not np.array_equal(held, heldComponents.any(axis=1)):
+                raise RuntimeError(
+                    "the subdomain holds some, but not every component of field {:} at a node of a node set".format(
+                        field
+                    )
+                )
+            self._partsOfNodeSetsHere[key] = (np.flatnonzero(held), positions[held])
+        return self._partsOfNodeSetsHere[key]
+
+    def locateConstrainedDofs(self, dirichlets: list):
+        """Determine which degrees of freedom each Dirichlet condition constrains; see
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.locateConstrainedDofs`.
+        Vectors of the subdomain hold the part of a node set whose degrees of freedom this process
+        integrates (:meth:`_partOfNodeSetHere`), and the condition is imposed on that part
+        (:attr:`~edelweissfe.stepactions.base.dirichletbase.DirichletBase.constrainedRows`).
+
+        Parameters
+        ----------
+        dirichlets
+            The Dirichlet conditions of the step.
+        """
+
+        if not self._vectorsOfSubdomain:
+            return super().locateConstrainedDofs(dirichlets)
+        for dirichlet in dirichlets:
+            rows, positions = self._partOfNodeSetHere(dirichlet.nSet, dirichlet.field)
+            dirichlet.constrainedRows = rows
+            dirichlet.constrainedDofIndices = positions[:, dirichlet.components].ravel()
+
+    def computeNodeForces(self, nodeForces: list[StepActionBase], PExt: DofVector, timeStep: TimeStep) -> DofVector:
+        """Add the concentrated loads; see
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.computeNodeForces`.
+        Vectors of the subdomain add them at the part of each node set whose degrees of freedom this
+        process integrates (:meth:`_partOfNodeSetHere`).
+
+        Parameters
+        ----------
+        nodeForces
+            The concentrated (nodal) loads.
+        PExt
+            The external load vector.
+        timeStep
+            The current time step.
+
+        Returns
+        -------
+        DofVector
+            The updated external load vector.
+        """
+
+        if not self._vectorsOfSubdomain:
+            return super().computeNodeForces(nodeForces, PExt, timeStep)
+        for nodeForce in nodeForces:
+            rows, positions = self._partOfNodeSetHere(nodeForce.nodeSet, nodeForce.field)
+            PExt[positions.ravel()] += nodeForce.getCurrentLoad(timeStep)[rows].flatten()
+        return PExt
 
     def _nodeFieldSlotsOf(self, model: FEModel, dofs: slice | np.ndarray) -> list[NodeFieldSlot]:
         """Where the given degrees of freedom are published in the node fields.
@@ -1639,15 +2024,21 @@ class NEDMPI(NEDParallel):
 
         carried = self._system.carried
         with performancetiming.timeit("gather solution"):
-            for vector in carried.values():
-                if toEveryProcess:
+            for entry, vector in carried.items():
+                if self._vectorsOfSubdomain:
+                    # gathered for this synchronization only, into the node fields, which hold every node
+                    whole = self.domainDecomposition.wholeVector(vector, toEveryProcess)
+                    if whole is not None:
+                        self._publishWholeVector(model, entry, whole)
+                elif toEveryProcess:
                     self.domainDecomposition.allgatherOwnedValues(vector)
                 else:
                     self.domainDecomposition.gatherOwnedValuesToRoot(vector)
         wholeSolutionHere = toEveryProcess or self.domainDecomposition.rank == 0
         if wholeSolutionHere:
             # every degree of freedom is current now, not only the subdomain ones
-            super().publishNodeFields(model, carried)
+            if not self._vectorsOfSubdomain:
+                super().publishNodeFields(model, carried)
             self._wholeSolutionHere = True
 
         if includeStates:
@@ -1740,9 +2131,15 @@ class NEDMPI(NEDParallel):
             self.requireWholeSolutionHere("Building the equation system from the node fields")
             return super().buildEquationSystem(model, step)
 
-        interfaceBefore = self.domainDecomposition.interface
-        theSystem = super().buildEquationSystem(model, step, previous)
-        self._receiveNewlyIntegratedValues(interfaceBefore, theSystem.carried)
+        # read by carryVectorsOver, which completes the carried vectors at the degrees of freedom this
+        # process integrates from now on
+        self._interfaceBeforeRebuild = self.domainDecomposition.interface
+        try:
+            theSystem = super().buildEquationSystem(model, step, previous)
+        finally:
+            self._interfaceBeforeRebuild = None
+        # as an accepted increment publishes what it integrates (see _receiveNewlyIntegratedValues)
+        self._publishIntoNodeFields(self._integratedNodeFieldSlots, theSystem.carried)
         return theSystem
 
     def _receiveNewlyIntegratedValues(self, interfaceBefore, carried: dict[str, DofVector]):

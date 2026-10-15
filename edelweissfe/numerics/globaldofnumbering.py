@@ -222,3 +222,99 @@ class GlobalDofNumbering:
             differ("the degrees of freedom of the scalar variables")
         if dofManager.nDof != self.nDof:
             differ("{:} degrees of freedom instead of {:}".format(dofManager.nDof, self.nDof))
+
+    def dofsAtNodes(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """The degrees of freedom of a field at nodes of the mesh.
+
+        Parameters
+        ----------
+        field
+            The field.
+        rows
+            The nodes, by their row in the mesh; each must carry the field.
+
+        Returns
+        -------
+        np.ndarray
+            One row per node, one column per component of the field.
+
+        Raises
+        ------
+        KeyError
+            If a node does not carry the field.
+        """
+
+        ranks = self.rankInField[field][np.asarray(rows, dtype=np.int64)].astype(np.int64)
+        if np.any(ranks < 0):
+            raise KeyError("a node does not carry field {:}".format(field))
+        dimension = self.dimensionOfField[field]
+        return self.firstDofOfField[field] + ranks[:, None] * dimension + np.arange(dimension, dtype=np.int64)
+
+    def nodesOfFieldsAgreeWith(self, nodeFields: dict) -> bool:
+        """Whether the node fields of a model hold, per field, the nodes of the mesh carrying it, in mesh
+        order -- the order of this numbering.
+
+        Parameters
+        ----------
+        nodeFields
+            The node fields of the model, by name.
+
+        Returns
+        -------
+        bool
+            Whether they agree.
+        """
+
+        if list(nodeFields) != self.fields:
+            return False
+        for field in self.fields:
+            nodes = nodeFields[field].nodes
+            labels = np.fromiter((node.label for node in nodes), dtype=np.int64, count=len(nodes))
+            if not np.array_equal(labels, self.nodeLabels[self.nodesCarryingField[field]]):
+                return False
+        return True
+
+    def requireAgreementOfSubdomain(self, dofManager, rowsOfFields: dict, nodeFields: dict, subdomainDofs: np.ndarray):
+        """Raise unless a DofManager of the node fields of a subdomain numbers its degrees of freedom as
+        the order-preserving compression of this numbering -- its degree of freedom ``i`` is the global
+        ``subdomainDofs[i]`` --, and unless the node fields of the model, which hold every node, are
+        ordered as this numbering.
+
+        Parameters
+        ----------
+        dofManager
+            The DofManager of the subdomain's node fields.
+        rowsOfFields
+            Per field, in the order the DofManager numbers them, the nodes of the subdomain's node field
+            by their row in the mesh, in its order.
+        nodeFields
+            The node fields of the model, by name.
+        subdomainDofs
+            The global degrees of freedom of the subdomain, sorted.
+
+        Raises
+        ------
+        RuntimeError
+            Naming the first difference.
+        """
+
+        def differ(what: str):
+            raise RuntimeError(
+                "the DofManager of the subdomain does not number its degrees of freedom as the global "
+                "numbering of the mesh (GlobalDofNumbering), compressed: {:}".format(what)
+            )
+
+        if not self.nodesOfFieldsAgreeWith(nodeFields):
+            differ("the node fields of the model are not the nodes of the mesh carrying them, in mesh order")
+        if list(dofManager.idcsOfFieldsInDofVector) != self.fields or list(rowsOfFields) != self.fields:
+            differ("its fields are not those of the numbering, in its order")
+        first = 0
+        globalDofs = []
+        for field, rows in rowsOfFields.items():
+            dofs = self.dofsAtNodes(field, rows).ravel()
+            if dofManager.idcsOfFieldsInDofVector[field] != slice(first, first + dofs.shape[0]):
+                differ("the range of field {:}".format(field))
+            first += dofs.shape[0]
+            globalDofs.append(dofs)
+        if dofManager.nDof != first or not np.array_equal(np.concatenate(globalDofs), subdomainDofs):
+            differ("its degrees of freedom are not the subdomain degrees of freedom, in global order")

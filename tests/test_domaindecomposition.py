@@ -2263,18 +2263,18 @@ def test_the_end_of_a_step_on_an_output_increment_leaves_its_result_in_every_pro
 _ELEMENT_SET_ORDER_PATCH = """
 from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposition
 
-define = DomainDecomposition.define
+requireSameLayout = DomainDecomposition._requireSameLayout
 
 
-def reorderedInProcessOne(self, model, *args):
+def reorderedInProcessOne(self, model):
     if rank == 1:
         sets = model.mesh.elementSets
         first = next(iter(sets))
         sets[first] = sets.pop(first)
-    return define(self, model, *args)
+    return requireSameLayout(self, model)
 
 
-DomainDecomposition.define = reorderedInProcessOne
+DomainDecomposition._requireSameLayout = reorderedInProcessOne
 """
 
 #: On process 1 only, the first surface of the mesh is moved behind the others.

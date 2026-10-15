@@ -77,6 +77,7 @@ from edelweissfe.domaindecomposition.subdomaininterface import (
     SubdomainInterface,
     ValuesFromOwners,
 )
+from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
@@ -190,6 +191,12 @@ class DomainDecomposition:
 
         #: The global numbering of the degrees of freedom the layout was last checked against.
         self._numbering = None
+        #: The nodes of each node field of the subdomain, by their row in the mesh (:meth:`subdomainNodeFields`).
+        self._rowsOfSubdomainNodeFields = None
+        #: Whether the vectors of this process hold the subdomain degrees of freedom only, numbered by a
+        #: DofManager of the subdomain's node fields (:meth:`subdomainNodeFields`); else every degree of
+        #: freedom of the model. Decided by the solver, once per job.
+        self.vectorsOfSubdomain = False
 
         self._interface = None
         self._stateSynchronization = None
@@ -260,16 +267,170 @@ class DomainDecomposition:
         self._mpcTransformation = mpcTransformation
 
         with performancetiming.timeit("subdomain definition"):
-            if topologyChanged:
-                self._checkReplicatedLayout(model, dofManager)
+            if self.vectorsOfSubdomain:
+                # the interface was defined before the DofManager (defineSubdomainDofs)
+                self._requireDofManagerOfSubdomain(model, dofManager)
+            else:
+                if topologyChanged:
+                    self._checkReplicatedLayout(model, dofManager)
 
-                self._constraintOwnersOf(model)
+                    self._constraintOwnersOf(model)
 
-                self._adoptOwnership(model)
+                    self._adoptOwnership(model)
 
-            self._defineInterface(model, ownershipChanged=topologyChanged)
+                self._defineInterface(model)
+
+            self._completeDefinition(model, ownershipChanged=topologyChanged)
 
         self._reportSubdomains(topologyChanged)
+
+    def defineSubdomainDofs(self, model: FEModel) -> np.ndarray:
+        """Collective. Where the vectors are of the subdomain (:attr:`vectorsOfSubdomain`): partition the
+        model if its elements changed, assign the constraints, and determine this process' subdomain
+        degrees of freedom and interface -- before any DofManager exists, from what every process holds:
+        the partition, the mesh and its global numbering of the degrees of freedom, and the nodes of the
+        constraints this process evaluates. The DofManager of the subdomain is then made for exactly these
+        (:meth:`subdomainNodeFields`), and :meth:`define` completes the definition.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        np.ndarray
+            The subdomain degrees of freedom, global, sorted.
+        """
+
+        self._model = model
+        with performancetiming.timeit("subdomain definition"):
+            self._numbering = GlobalDofNumbering.ofModel(model)
+            self._requireSameLayout(model)
+            self._constraintOwnersOf(model)
+            self._adoptOwnership(model)
+
+            elementProcesses = ElementProcessesAtDofs.ofNodes(self._elementsAtNodes, self._numbering)
+            touched = [elementProcesses.dofsOfProcess(self.rank)]
+            mesh = model.mesh
+            for constraint in self._ownedConstraints.values():
+                rows = mesh.rowsOfNodes([node.label for node in constraint.nodes])
+                touched += [
+                    self._numbering.dofsAtNodes(field, rows[i : i + 1]).ravel()
+                    for i, fields in enumerate(constraint.fieldsOnNodes)
+                    for field in fields
+                ]
+            self._interface = SubdomainInterface(
+                self.communicator, elementProcesses, np.concatenate(touched), None, vectorsOfSubdomain=True
+            )
+        return self._interface.subdomainDofs
+
+    def subdomainNodeFields(self, model: FEModel) -> dict:
+        """The node fields of the subdomain: per field of the model, the nodes at which this process
+        integrates it, in mesh order (:meth:`defineSubdomainDofs`) -- what the DofManager of a process
+        whose vectors are of the subdomain numbers, in the order of the global numbering, so that its
+        numbering is the order-preserving compression of the global one. A field this process does not
+        integrate anywhere has a node field without nodes.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        dict
+            The node fields, by field, in the order the fields are numbered.
+
+        Raises
+        ------
+        RuntimeError
+            If this process integrates some but not every component of a field at a node.
+        """
+
+        numbering = self._numbering
+        subdomainDofs = self._interface.subdomainDofs
+        labels = model.mesh.nodeLabels
+        nodes = model.nodes
+        nodeFields, rowsOfFields = {}, {}
+        for field in numbering.fields:
+            first, dimension = numbering.firstDofOfField[field], numbering.dimensionOfField[field]
+            nCarrying = int(np.count_nonzero(numbering.nodesCarryingField[field]))
+            fieldDofs = subdomainDofs[
+                np.searchsorted(subdomainDofs, first) : np.searchsorted(subdomainDofs, first + nCarrying * dimension)
+            ]
+            ranks = (fieldDofs - first) // dimension
+            if fieldDofs.shape[0] % dimension or not np.array_equal(
+                fieldDofs,
+                first
+                + np.repeat(ranks[::dimension], dimension) * dimension
+                + np.tile(np.arange(dimension), fieldDofs.shape[0] // dimension),
+            ):
+                raise RuntimeError(
+                    "process {:} integrates some, but not every component of field {:} at a node".format(
+                        self.rank, field
+                    )
+                )
+            rows = np.flatnonzero(numbering.nodesCarryingField[field])[ranks[::dimension]]
+            nodeFields[field] = NodeField(field, dimension, [nodes[label] for label in labels[rows].tolist()])
+            rowsOfFields[field] = rows
+        #: The nodes of each node field of the subdomain, by their row in the mesh.
+        self._rowsOfSubdomainNodeFields = rowsOfFields
+        return nodeFields
+
+    def _requireDofManagerOfSubdomain(self, model: FEModel, dofManager: DofManager):
+        """Raise unless a DofManager numbers the degrees of freedom of the subdomain as the global
+        numbering does, compressed (:meth:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering.requireAgreementOfSubdomain`),
+        and locates every element and constraint of the subdomain.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        dofManager
+            The DofManager of the subdomain's node fields (:meth:`subdomainNodeFields`).
+
+        Raises
+        ------
+        RuntimeError
+            If it does not.
+        """
+
+        self._numbering.requireAgreementOfSubdomain(
+            dofManager, self._rowsOfSubdomainNodeFields, model.nodeFields, self._interface.subdomainDofs
+        )
+        if len(dofManager.idcsOfElementsInDofVector) != len(self._ownedElements) or len(
+            dofManager.idcsOfConstraintsInDofVector
+        ) != len(self._ownedConstraints):
+            raise RuntimeError(
+                "the DofManager of the subdomain does not locate every element and constraint of the subdomain"
+            )
+
+    def _requireSameLayout(self, model: FEModel):
+        """Collective. Refuse to continue unless every process built the same mesh and degree-of-freedom
+        layout (:func:`layoutFingerprint`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Raises
+        ------
+        RuntimeError
+            On every process, if any two fingerprints differ.
+        """
+
+        fingerprints = self.communicator.allgather(layoutFingerprint(model, self._numbering, self._mpcTransformation))
+        if len(set(fingerprints)) > 1:
+            raise RuntimeError(
+                "The processes hold different models: their layout fingerprints are {:}. Every process "
+                "must build, and refine, the model identically -- the same elements, element sets and "
+                "surfaces in the same order, the same degrees of freedom and multi-point constraints -- for "
+                "the subdomain interface and the order of the loads to be meaningful.".format(
+                    ", ".join(sorted(set(fingerprints)))
+                )
+            )
 
     def _partition(self, model: FEModel, measuredCosts: dict | None, byMeasuredCosts: bool):
         """Collective. Partition the elements of the mesh, by estimated or by measured cost.
@@ -632,16 +793,14 @@ class DomainDecomposition:
             if self._constraintOwners[name] == self.rank
         }
 
-    def _defineInterface(self, model: FEModel, ownershipChanged: bool):
-        """Collective. Determine the subdomain degrees of freedom and the interface from the owned entities;
-        with new ownership, also the layout of the state synchronization.
+    def _defineInterface(self, model: FEModel):
+        """Collective. Determine the subdomain degrees of freedom and the interface from the degrees of
+        freedom the owned entities touch in the DofManager of the whole model.
 
         Parameters
         ----------
         model
             The model tree.
-        ownershipChanged
-            Whether the elements this process owns may have changed since the last call.
         """
 
         dofManager = self._dofManager
@@ -659,6 +818,20 @@ class DomainDecomposition:
             None if self._mpcTransformation is None else self._mpcTransformation.slaveMasterDofPairs(),
         )
 
+    def _completeDefinition(self, model: FEModel, ownershipChanged: bool):
+        """Collective among neighbours. Complete a definition from its interface: with new ownership, the
+        layout of the state synchronization; the exchange of the constraint forces; and the
+        :attr:`subdomain`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        ownershipChanged
+            Whether the elements this process owns may have changed since the last call.
+        """
+
+        dofManager = self._dofManager
         if ownershipChanged:
             # The states of the elements other processes compute are kept current only where every
             # element was created; a distributed model gathers what it reads instead.
@@ -676,7 +849,12 @@ class DomainDecomposition:
         )
         self._loadsOnSubdomain = None
 
-        self.subdomain = Subdomain(self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs)
+        # A vector of the subdomain holds exactly the subdomain degrees of freedom: all of it.
+        self.subdomain = Subdomain(
+            self._ownedElements,
+            self._ownedConstraints,
+            slice(None) if self.vectorsOfSubdomain else self._interface.subdomainDofs,
+        )
 
     def _refuseElementsWithoutState(self, model: FEModel):
         """Refuse a model with elements that expose no state, on more than one process.
@@ -734,16 +912,7 @@ class DomainDecomposition:
         numbering = GlobalDofNumbering.ofModel(model)
         numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
         self._numbering = numbering
-        fingerprints = self.communicator.allgather(layoutFingerprint(model, numbering, self._mpcTransformation))
-        if len(set(fingerprints)) > 1:
-            raise RuntimeError(
-                "The processes hold different models: their layout fingerprints are {:}. Every process "
-                "must build, and refine, the model identically -- the same elements, element sets and "
-                "surfaces in the same order, the same degrees of freedom and multi-point constraints -- for "
-                "the subdomain interface and the order of the loads to be meaningful.".format(
-                    ", ".join(sorted(set(fingerprints)))
-                )
-            )
+        self._requireSameLayout(model)
 
     def _reportSubdomains(self, topologyChanged: bool):
         """Collective. Report the size of every subdomain and of its interface, and the constraints each
@@ -980,19 +1149,85 @@ class DomainDecomposition:
 
     @property
     def ownedDofMask(self) -> np.ndarray:
-        """Whether each degree of freedom of the model is owned by this process: True at most at its
-        subdomain degrees of freedom, and at each degree of freedom of the model in exactly one process. A
-        degree of freedom at the interface is integrated by several processes, but a quantity to be
-        counted once for the model -- the work done at a prescribed degree of freedom, a kinetic
-        energy -- is counted by its owner only.
+        """Whether each degree of freedom of the vectors of this process is owned by this process: True
+        at most at its subdomain degrees of freedom, and at each degree of freedom of the model in exactly
+        one process. A degree of freedom at the interface is integrated by several processes, but a
+        quantity to be counted once for the model -- the work done at a prescribed degree of freedom, a
+        kinetic energy -- is counted by its owner only.
 
         Returns
         -------
         np.ndarray
-            The mask, one entry per degree of freedom of the model.
+            The mask, one entry per position of the vectors of this process
+            (:meth:`~.subdomaininterface.SubdomainInterface.positionsOf`).
         """
 
-        return self._interface.ownedDofMask
+        return self._interface.ownedPositionMask
+
+    @property
+    def ownedElements(self) -> dict:
+        """The elements this process computes under the current partition, by number, in model order.
+
+        Returns
+        -------
+        dict
+            The elements.
+        """
+
+        return self._ownedElements
+
+    @property
+    def ownedConstraints(self) -> dict:
+        """The constraints this process evaluates under the current assignment, by name, in model order.
+
+        Returns
+        -------
+        dict
+            The constraints.
+        """
+
+        return self._ownedConstraints
+
+    @property
+    def rowsOfSubdomainNodeFields(self) -> dict:
+        """The nodes of each node field of the subdomain (:meth:`subdomainNodeFields`), by their row in
+        the mesh, in the order of the node field.
+
+        Returns
+        -------
+        dict
+            The rows, by field.
+        """
+
+        return self._rowsOfSubdomainNodeFields
+
+    def rowsOfNodes(self, labels: list) -> np.ndarray:
+        """The rows of nodes in the mesh of the current definition.
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+
+        Returns
+        -------
+        np.ndarray
+            Their rows.
+        """
+
+        return self._model.mesh.rowsOfNodes(labels)
+
+    @property
+    def numbering(self) -> GlobalDofNumbering:
+        """The global numbering of the degrees of freedom of the current definition.
+
+        Returns
+        -------
+        GlobalDofNumbering
+            The numbering.
+        """
+
+        return self._numbering
 
     # --- Completing the results of the whole model ------------------------------------------------
 
@@ -1053,6 +1288,53 @@ class DomainDecomposition:
         """
 
         return self._interface
+
+    def wholeVector(self, vector: DofVector, toEveryProcess: bool) -> np.ndarray | None:
+        """Collective. The vector of the whole model, every entry from its owner, made for this call from
+        a vector of this process (:meth:`~.subdomaininterface.SubdomainInterface.wholeVector`): in every
+        process, or on rank 0 only.
+
+        Parameters
+        ----------
+        vector
+            A vector of this process, correct at least at the owned entries.
+        toEveryProcess
+            Whether every process receives it, or rank 0 only.
+
+        Returns
+        -------
+        np.ndarray | None
+            The vector of the whole model; None in a process that receives none.
+        """
+
+        return self._interface.wholeVector(vector, toEveryProcess)
+
+    def carryOverToSubdomain(self, before: SubdomainInterface, previous: list, vectors: list):
+        """Collective. After the subdomain was defined afresh -- elements moved between the processes --
+        fill vectors of the new subdomain from vectors of the previous one: at the degrees of freedom both
+        hold, from this process' previous vectors; at those this process integrates now but did not
+        before, from the processes that owned them before, which send them from their previous vectors.
+        Each entry is the bits of a process that integrated it.
+
+        Parameters
+        ----------
+        before
+            The interface of the previous definition.
+        previous
+            The vectors of the previous subdomain.
+        vectors
+            The vectors of the new subdomain, one per previous vector; filled.
+        """
+
+        now = self._interface
+        held = np.intersect1d(now.subdomainDofs, before.subdomainDofs, assume_unique=True)
+        heldNow, heldBefore = now.positionsOf(held), before.positionsOf(held)
+        for vector, previousVector in zip(vectors, previous):
+            vector.view(np.ndarray)[heldNow] = previousVector.view(np.ndarray)[heldBefore]
+        newlyIntegrated = np.setdiff1d(now.subdomainDofs, before.subdomainDofs, assume_unique=True)
+        ValuesFromOwners(
+            self.communicator, newlyIntegrated, before.dofOwners, receivedInto=now, sentFrom=before
+        ).receive(vectors, sentFromVectors=previous)
 
     def valuesFromOwners(self, neededDofs: np.ndarray) -> ValuesFromOwners:
         """Collective. How this process receives the entries of vectors at the given degrees of freedom from
@@ -1310,10 +1592,13 @@ class DomainDecomposition:
 
         model = self._model
         self._partition(model, measuredCosts, byMeasuredCosts=True)
-        if not self.elementsMustMove():
+        # Vectors of the subdomain are only of a distributed model, whose elements either move or keep the
+        # partition -- and with it the subdomain -- as it is.
+        if not self.elementsMustMove() and not self.vectorsOfSubdomain:
             self._adoptOwnership(model)
             with performancetiming.timeit("subdomain definition"):
-                self._defineInterface(model, ownershipChanged=True)
+                self._defineInterface(model)
+                self._completeDefinition(model, ownershipChanged=True)
             self._reportSubdomains(topologyChanged=True)
         return True
 
