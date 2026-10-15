@@ -354,14 +354,11 @@ def test_full_step_and_solver_cycle_driven_programmatically():
 
     # --- field outputs, built through the controller's typed methods ---
     fieldOutputController = FieldOutputController(model, journal)
-    displacement = model.nodeFields["displacement"]
-    fieldOutputController.addPerNodeFieldOutput(
-        "topU", displacement.subset(model.nodeSets["top"]), "U", saveHistory=True
-    )
-    fieldOutputController.addPerNodeFieldOutput("bottomP", displacement.subset(model.nodeSets["bottom"]), "P")
-    fieldOutputController.addPerNodeFieldOutput("topP", displacement.subset(model.nodeSets["top"]), "P")
-    fieldOutputController.addPerNodeFieldOutput("leftU", displacement.subset(model.nodeSets["left"]), "U")
-    fieldOutputController.addPerNodeFieldOutput("rightU", displacement.subset(model.nodeSets["right"]), "U")
+    fieldOutputController.addPerNodeFieldOutput("topU", "displacement", model.nodeSets["top"], "U", saveHistory=True)
+    fieldOutputController.addPerNodeFieldOutput("bottomP", "displacement", model.nodeSets["bottom"], "P")
+    fieldOutputController.addPerNodeFieldOutput("topP", "displacement", model.nodeSets["top"], "P")
+    fieldOutputController.addPerNodeFieldOutput("leftU", "displacement", model.nodeSets["left"], "U")
+    fieldOutputController.addPerNodeFieldOutput("rightU", "displacement", model.nodeSets["right"], "U")
     model.fieldOutputController = fieldOutputController
     fieldOutputController.initializeJob()
 

@@ -149,46 +149,20 @@ def createFieldOutputFromInputFile(inputfile: dict, model: FEModel, journal: Jou
                 )
                 continue
 
-            if not model.elementDistribution.holdsEveryNodeHere:
-                # A process holding the nodes of its subdomain only gathers the result from the processes
-                # computing the nodes of the set (the whole field: the node set of every node).
-                if definition["nSet"]:
-                    associatedSet = model.nodeSets[definition["nSet"]]
-                elif definition["elSet"]:
-                    associatedSet = model.elementSets[definition["elSet"]]
-                else:
-                    associatedSet = model.nodeSets["all"]
-                fieldOutputController.addGatheredPerNodeFieldOutput(
-                    name=definition["name"],
-                    fieldName=field,
-                    associatedSet=associatedSet,
-                    result=definition["result"],
-                    saveHistory=definition["saveHistory"],
-                    f_x=f_of_x,
-                    export=definition["export"],
-                    fExport_x=f_export_of_x,
-                )
-                continue
-
-            nodeField = model.nodeFields[field]
-
-            subset = None
+            # The nodes of the whole set, through the set, so that they follow a refinement of the set; from
+            # the mesh, also where a domain-decomposed process holds only part of it. A named set selects
+            # its nodes, even if it has none: an empty set gives an empty output, not the whole field.
             if definition["nSet"]:
-                subset = model.nodeSets[definition["nSet"]]
+                associatedSet = model.nodeSets[definition["nSet"]]
             elif definition["elSet"]:
-                # The nodes of the whole set, through the set, so that they follow a refinement of the
-                # set; from the mesh, also where a domain-decomposed process created only part of it.
-                subset = model.elementSets[definition["elSet"]]
-
-            # A named set selects its nodes, even if it has none: an empty set gives an empty output, not
-            # the whole field. (An element set may also hold none of its elements in this process, and is
-            # then empty -- but its nodes are still those of the whole set.)
-            if subset is not None:
-                nodeField = nodeField.subset(subset)
+                associatedSet = model.elementSets[definition["elSet"]]
+            else:
+                associatedSet = model.nodeSets["all"]
 
             fieldOutputController.addPerNodeFieldOutput(
                 name=definition["name"],
-                nodeField=nodeField,
+                fieldName=field,
+                associatedSet=associatedSet,
                 result=definition["result"],
                 saveHistory=definition["saveHistory"],
                 f_x=f_of_x,

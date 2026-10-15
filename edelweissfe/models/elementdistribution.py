@@ -333,6 +333,9 @@ class ElementDistribution:
             The values, one row per node of ``labels``; None in a process not receiving them.
         """
 
+        if np.array_equal(labelsHere, labels):
+            # every node read here, in the order asked for: the values as read
+            return valuesHere
         return assembleNodeValues(labels, [(labelsHere, valuesHere)])
 
     def nodeFieldsOfWholeModel(self, model, piece: dict, toEveryProcess: bool = False) -> dict | None:

@@ -538,7 +538,7 @@ contributed by several processes holds the same bits in each:
 
 * a per-node field output gathers its result, by node, in the order of its set, to rank 0 -- or to every
   process, where a reader there names it --, as an element field output gathers the results of its
-  elements (:class:`~edelweissfe.utils.fieldoutput.GatheredNodeFieldOutput`);
+  elements (:class:`~edelweissfe.utils.fieldoutput.NodeFieldOutput`);
 * a restart checkpoint is written by rank 0 from the node fields of the whole model gathered for it
   (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldsOfWholeModel`,
   :meth:`~edelweissfe.models.femodel.FEModel.nodeFieldsFromElsewhere`), the same file as a serial run's;
@@ -672,7 +672,7 @@ restart checkpoint                      on an increment rank 0 writes one
                                         of its subdomain only, the node fields
                                         (``FEModel.nodeFieldsFromElsewhere``)
 node field output over a set            with the nodes of the subdomain only: gathered by node, in set order
-(``>>perNode``)                         (``GatheredNodeFieldOutput``)
+(``>>perNode``)                         (``NodeFieldOutput``)
 ======================================  =================================================================
 
 Still guarded, and refused loudly on a partial model: an expression field output over an element
