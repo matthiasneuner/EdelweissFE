@@ -272,16 +272,32 @@ of freedom are already in that subdomain -- or, if it has none, as a point mass,
 part 0 of the partition (rank 0, unless a repartition renumbered the parts)
 (:func:`~edelweissfe.domaindecomposition.partitioning.processOfAuxiliaryElement`). Each constraint is
 evaluated by one process: the one whose elements hold most of the nodes the constraint couples, or
-may couple after a contact search -- a node is held by the lowest-ranked process computing an element
-at it; among processes holding equally many, the lowest-ranked
-(:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`). The constraint
-then adds few degrees of freedom to its process' interface, and sends its forces to few neighbours. The
-assignment is made from what every process holds alike -- the mesh, the partition, the nodes of the
-copies of the constraints -- and made again only where the mesh changes: at the start and after a
-topology change, before the contact search that follows it, where every copy of every constraint is
-current. A repartition for load balancing keeps every constraint where it is. Part *p* of the partition
-is computed by process *p*, and once a constraint's cost has been measured, the process evaluating it
-is given a correspondingly smaller part (see `Load balancing`_).
+may couple after a contact search -- a node is held by the lowest-ranked process whose elements touch
+it (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`). Ties, and
+constraints no element's node belongs to, are dealt out round-robin in name order among the
+candidates, from the highest rank down, so that they do not all fall to rank 0, which already
+integrates the degrees of freedom nothing touches and writes the output. The constraint then adds few
+degrees of freedom to its process' interface, and sends its forces to few neighbours. The assignment is
+made from what every process holds alike -- the mesh, the partition, the nodes of the copies of the
+constraints --, checked to be the same in every process, and made again only where the mesh or the set
+of constraints changes: at the start and after a topology change, before the contact search that
+follows it. A repartition for load balancing keeps every constraint where it is.
+
+A constraint that changes process is evaluated from then on from the new process' copy, which must be
+its owner's. That holds after a topology change because a topology update follows a synchronization of
+the whole model -- the constraint states included -- to every process; ``NEDMPI.updateTopology`` checks
+that synchronization and states it to the decomposition
+(``DomainDecomposition.constraintCopiesAreSynchronized``), and assigning the constraints afresh without
+that statement stops the run.
+
+Part *p* of the partition is computed by process *p*, and once the constraints' costs have been
+measured, the process evaluating a costly one is given a correspondingly smaller part (see `Load
+balancing`_). The cost of every constraint is measured by name, so the shares follow a constraint to
+its new process: after a topology change, the partition is made with the shares of the processes the
+constraints are expected to have -- their majority on the partition the changed mesh inherited, or,
+where every process holds every element, on a partition made for the previous shares --, and the
+constraints are then assigned on that partition. Where that moves a constraint after all, the shares
+are those of its new process from the next repartition on.
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
 degrees of freedom. A degree of freedom touched by several processes lies on their *interface*. Each
