@@ -66,6 +66,10 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
     replicatedElementsReason: str | None = NOT_VERIFIED_WITH_DISTRIBUTED_ELEMENTS
 
+    #: Whether this constraint searches its connectivity -- which nodes it couples is the outcome of a
+    #: search, as for contact -- and so implements :meth:`updateConnectivity`; declared once per class.
+    searchesConnectivity: bool = False
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None

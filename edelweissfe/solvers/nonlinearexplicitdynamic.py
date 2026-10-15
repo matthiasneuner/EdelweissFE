@@ -654,9 +654,7 @@ class NED(NonlinearSolverBase):
         # Constraints whose DOF footprint is the outcome of a search, i.e. contact, by name. Collected
         # once, so a model without any pays nothing for the per-increment tick in the loop below.
         self._dynamicConnectivityConstraints = {
-            name: constraint
-            for name, constraint in model.constraints.items()
-            if type(constraint).updateConnectivity is not ConstraintBase.updateConnectivity
+            name: constraint for name, constraint in model.constraints.items() if constraint.searchesConnectivity
         }
 
         # Modifiers that can still act once the analysis is running. Collected once, so a model whose
@@ -2139,12 +2137,44 @@ class NED(NonlinearSolverBase):
             The DofManager.
         """
 
-        return DofManager(
+        return self.explicitDofManager(
             model.nodeFields.values(),
             model.scalarVariables.values(),
             model.elements.values(),
             model.constraints.values(),
             model.nodeSets.values(),
+        )
+
+    @staticmethod
+    def explicitDofManager(nodeFields, scalarVariables, elements, constraints, nodeSets) -> DofManager:
+        """A DofManager for an explicit solver: without the sparsity pattern and the index-to-host-object
+        map, which it never reads (see :meth:`createDofManager`).
+
+        Parameters
+        ----------
+        nodeFields
+            The node fields to number.
+        scalarVariables
+            The scalar variables to number.
+        elements
+            The elements to locate.
+        constraints
+            The constraints to locate.
+        nodeSets
+            The node sets to locate.
+
+        Returns
+        -------
+        DofManager
+            The DofManager.
+        """
+
+        return DofManager(
+            nodeFields,
+            scalarVariables,
+            elements,
+            constraints,
+            nodeSets,
             initializeVIJPattern=False,
             determiningIndexToHostObjectMapping=False,
         )

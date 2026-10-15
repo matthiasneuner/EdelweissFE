@@ -285,9 +285,12 @@ class DomainDecomposition:
         self._reportSubdomains(topologyChanged)
 
     def defineSubdomainDofs(self, model: FEModel) -> np.ndarray:
-        """Collective. Where the vectors are of the subdomain (:attr:`vectorsOfSubdomain`): partition the
-        model if its elements changed, assign the constraints, and determine this process' subdomain
-        degrees of freedom and interface -- before any DofManager exists, from what every process holds:
+        """Collective. Where the vectors are of the subdomain (:attr:`vectorsOfSubdomain`): check that every
+        process holds the same model, take the partition of the current mesh -- adopting the distribution's
+        if the mesh was not partitioned yet; a repartition is decided by :meth:`rebalance` beforehand --,
+        assign the constraints afresh where the mesh or the elements changed (:meth:`_constraintOwnersOf`),
+        and determine this process' subdomain degrees of freedom and interface -- before any DofManager
+        exists, from what every process holds:
         the partition, the mesh and its global numbering of the degrees of freedom, and the nodes of the
         constraints this process evaluates. The DofManager of the subdomain is then made for exactly these
         (:meth:`subdomainNodeFields`), and :meth:`define` completes the definition.
@@ -1291,7 +1294,7 @@ class DomainDecomposition:
 
     def wholeVector(self, vector: DofVector, toEveryProcess: bool) -> np.ndarray | None:
         """Collective. The vector of the whole model, every entry from its owner, made for this call from
-        a vector of this process (:meth:`~.subdomaininterface.SubdomainInterface.wholeVector`): in every
+        a vector of this process (:meth:`~.subdomaininterface.SubdomainInterface.gatherOwnedValues`): in every
         process, or on rank 0 only.
 
         Parameters
@@ -1307,7 +1310,7 @@ class DomainDecomposition:
             The vector of the whole model; None in a process that receives none.
         """
 
-        return self._interface.wholeVector(vector, toEveryProcess)
+        return self._interface.gatherOwnedValues(vector, toEveryProcess)
 
     def carryOverToSubdomain(self, before: SubdomainInterface, previous: list, vectors: list):
         """Collective. After the subdomain was defined afresh -- elements moved between the processes --
@@ -1351,6 +1354,8 @@ class DomainDecomposition:
             The exchange.
         """
 
+        # global degrees of freedom are positions in vectors of the whole model only
+        self._interface.requireVectorsOfWholeModel()
         return ValuesFromOwners(self.communicator, neededDofs, self._interface.dofOwners)
 
     def receiveNewlyIntegratedValues(self, before: SubdomainInterface, vectors: list[DofVector]):
@@ -1374,6 +1379,8 @@ class DomainDecomposition:
             The vectors carried over to the new definition.
         """
 
+        # global degrees of freedom are positions in vectors of the whole model only
+        self._interface.requireVectorsOfWholeModel()
         newlyIntegrated = np.setdiff1d(self._interface.subdomainDofs, before.subdomainDofs, assume_unique=True)
         ValuesFromOwners(self.communicator, newlyIntegrated, before.dofOwners).receive(vectors)
 
@@ -1592,9 +1599,12 @@ class DomainDecomposition:
 
         model = self._model
         self._partition(model, measuredCosts, byMeasuredCosts=True)
-        # Vectors of the subdomain are only of a distributed model, whose elements either move or keep the
-        # partition -- and with it the subdomain -- as it is.
-        if not self.elementsMustMove() and not self.vectorsOfSubdomain:
+        if not self.elementsMustMove() and self.vectorsOfSubdomain:
+            # Vectors of the subdomain are only of a distributed model: no element moves, so the partition --
+            # and with it the subdomain -- is the one it was; nothing changed, and nothing is to be assigned.
+            self._decidedConstraintOwners = None
+            return False
+        if not self.elementsMustMove():
             self._adoptOwnership(model)
             with performancetiming.timeit("subdomain definition"):
                 self._defineInterface(model)

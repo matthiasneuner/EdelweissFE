@@ -332,6 +332,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     #: see ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = None
 
+    searchesConnectivity = True
+
     #: The normal and tangential force and the gap of every slave node, and the sum of the normal
     #: forces, read by getNormalPressures, getTangentialTractions, getGaps and totalNormalForce; see
     #: ConstraintBase.outputResults.

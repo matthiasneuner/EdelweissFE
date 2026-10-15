@@ -34,7 +34,6 @@ import numpy as np
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.linsolve import getDefaultLinSolver, getLinSolverByName
 from edelweissfe.config.timing import createTimingDict
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.csrgeneratorv2 import CSRGenerator
 from edelweissfe.numerics.dofmanager import DofManager, DofVector, VIJSystemMatrix
@@ -253,7 +252,7 @@ class NEST(NIST):
         self.validateModelCapabilities(model)
 
         for constraintName, constraint in model.constraints.items():
-            if type(constraint).updateConnectivity is not ConstraintBase.updateConnectivity:
+            if constraint.searchesConnectivity:
                 raise Exception(
                     f"Constraint '{constraintName}' requires a dynamic connectivity update "
                     f"(contact) every increment, which {self.identification} never performs -- "

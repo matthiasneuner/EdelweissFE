@@ -47,6 +47,11 @@ class DirichletBase(StepActionBase):
 
         * which global DOFs are constrained  -> ``constrainedDofIndices``
         * by how much they must move this step -> ``getPrescribedIncrement()``
+
+    :meth:`getPrescribedIncrement` gives the increment at every node of ``nSet``;
+    :meth:`prescribedIncrementAtConstrainedDofs` gives it at the entries of ``constrainedDofIndices``
+    only, which a solver holding part of the model's degrees of freedom locates for the rows
+    ``constrainedRows`` of the set -- a solver reading ``constrainedDofIndices`` reads the latter.
     """
 
     #: The field whose components are prescribed, e.g. "displacement".

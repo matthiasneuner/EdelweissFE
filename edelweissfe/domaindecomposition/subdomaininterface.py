@@ -579,7 +579,7 @@ class SubdomainInterface:
     def _planWholeVectorGather(self):
         """The whole-vector gather: each process sends its owned entries, in ascending order. A buffer of
         the whole model is kept only where the vectors are of the whole model; else a gather allocates
-        it for its own duration (:meth:`wholeVector`)."""
+        it for its own duration (:meth:`gatherOwnedValues`)."""
 
         self._ownedDofs = np.flatnonzero(self.ownedDofMask)
         self._ownedPositions = self.positionsOf(self._ownedDofs)
@@ -688,8 +688,8 @@ class SubdomainInterface:
         return self._sharedWith[neighbour]
 
     def allgatherOwnedValues(self, vector: np.ndarray):
-        """Collective. Overwrite every entry of a vector with its owner's value, in place, so that it is the
-        same, complete vector on every process.
+        """Collective. Overwrite every entry of a vector of the whole model with its owner's value, in place,
+        so that it is the same, complete vector on every process (:meth:`gatherOwnedValues`).
 
         Parameters
         ----------
@@ -697,19 +697,14 @@ class SubdomainInterface:
             A vector over the whole equation system, correct at least at the owned entries.
         """
 
-        self._requireVectorsOfWholeModel()
-        plain = vector.view(np.ndarray)
-        self.communicator.Allgatherv(
-            np.ascontiguousarray(plain[self._ownedDofs]),
-            [self._gatherBuffer, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE],
-        )
-        plain[self._gatheredOrder] = self._gatherBuffer
+        self.requireVectorsOfWholeModel()
+        self.gatherOwnedValues(vector, toEveryProcess=True, into=vector.view(np.ndarray))
 
     def gatherOwnedValuesToRoot(self, vector: np.ndarray):
-        """Collective. Overwrite every entry of a vector on rank 0 with its owner's value, in place, so that
-        it is the complete vector there -- as :meth:`allgatherOwnedValues` does on every process. The
-        other processes send their owned entries and keep their vector as it was: complete at the degrees
-        of freedom they integrate only.
+        """Collective. Overwrite every entry of a vector of the whole model on rank 0 with its owner's value,
+        in place, so that it is the complete vector there (:meth:`gatherOwnedValues`). The other processes
+        send their owned entries and keep their vector as it was: complete at the degrees of freedom they
+        integrate only.
 
         Parameters
         ----------
@@ -717,21 +712,15 @@ class SubdomainInterface:
             A vector over the whole equation system, correct at least at the owned entries.
         """
 
-        self._requireVectorsOfWholeModel()
-        plain = vector.view(np.ndarray)
-        send = np.ascontiguousarray(plain[self._ownedDofs])
-        if self.communicator.Get_rank() == 0:
-            self.communicator.Gatherv(
-                send, [self._gatherBuffer, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE], root=0
-            )
-            plain[self._gatheredOrder] = self._gatherBuffer
-        else:
-            self.communicator.Gatherv(send, None, root=0)
+        self.requireVectorsOfWholeModel()
+        self.gatherOwnedValues(vector, toEveryProcess=False, into=vector.view(np.ndarray))
 
-    def wholeVector(self, vector: np.ndarray, toEveryProcess: bool) -> np.ndarray | None:
-        """Collective. The vector of the whole model, every entry from its owner, from vectors of this
-        process' kind -- of the subdomain or of the whole model --, made for this call: in every process,
-        or on rank 0 only.
+    def gatherOwnedValues(
+        self, vector: np.ndarray, toEveryProcess: bool, into: np.ndarray | None = None
+    ) -> np.ndarray | None:
+        """Collective. Gather the vector of the whole model, every entry from its owner, from a vector of this
+        process -- of the subdomain or of the whole model --: to every process, or to rank 0 only. Each
+        process sends its owned entries, in ascending order.
 
         Parameters
         ----------
@@ -739,33 +728,33 @@ class SubdomainInterface:
             A vector of this process, correct at least at the owned entries.
         toEveryProcess
             Whether every process receives the whole vector, or rank 0 only.
+        into
+            The array of the whole model the gathered entries are written into, in global order -- the
+            vector itself, where it is of the whole model --; None for one made for this call.
 
         Returns
         -------
         np.ndarray | None
-            The vector of the whole model, in global order; None in a process that receives none.
+            The vector of the whole model; None in a process that receives none.
         """
 
         send = np.ascontiguousarray(vector.view(np.ndarray)[self._ownedPositions])
-        layout = [None, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE]
-        receives = toEveryProcess or self.communicator.Get_rank() == 0
-        gathered = np.empty(self.nDof) if receives else None
-        layout[0] = gathered
+        if not toEveryProcess and self.communicator.Get_rank() != 0:
+            self.communicator.Gatherv(send, None, root=0)
+            return None
+        gathered = self._gatherBuffer if self._gatherBuffer is not None else np.empty(self.nDof)
+        layout = [gathered, self._ownedCounts, _displacements(self._ownedCounts), MPI.DOUBLE]
         if toEveryProcess:
             self.communicator.Allgatherv(send, layout)
-        elif receives:
-            self.communicator.Gatherv(send, layout, root=0)
         else:
-            self.communicator.Gatherv(send, None, root=0)
-        if not receives:
-            return None
-        whole = np.empty(self.nDof)
+            self.communicator.Gatherv(send, layout, root=0)
+        whole = np.empty(self.nDof) if into is None else into
         whole[self._gatheredOrder] = gathered
         return whole
 
-    def _requireVectorsOfWholeModel(self):
-        """Refuse an exchange that writes vectors of the whole model in place, where the vectors are of
-        the subdomain (:meth:`wholeVector` instead)."""
+    def requireVectorsOfWholeModel(self):
+        """Refuse an exchange that reads or writes vectors of the whole model at global degrees of
+        freedom, where the vectors are of the subdomain (:meth:`gatherOwnedValues` instead)."""
 
         if self.vectorsOfSubdomain:
             raise RuntimeError("the vectors of this process hold its subdomain only, not the whole model")

@@ -91,6 +91,8 @@ class Constraint(ConstraintBase):
     #: Carries nothing from one increment to the next.
     checkpointedState = {}
 
+    searchesConnectivity = True
+
     def __init__(
         self,
         name: str,

@@ -474,7 +474,7 @@ the mesh and the node objects do for now:
 * every accepted increment publishes the vectors at the rows of the subdomain's nodes;
 * an output increment, the end of a step and a topology check gather the vectors from the owners of
   the degrees of freedom, for that synchronization only, into the node fields of the processes that
-  read the whole model (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.wholeVector`) --
+  read the whole model (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.gatherOwnedValues`) --
   so output and checkpoints are written as before, and a checkpoint is the same file;
 * an equation system built afresh -- at the start of a step, on a resume -- reads the vectors from the
   rows of the subdomain's nodes in the node fields;

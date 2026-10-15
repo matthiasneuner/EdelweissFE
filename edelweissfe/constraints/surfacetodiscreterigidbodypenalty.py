@@ -200,6 +200,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     #: It reads the contact facets of its surface, the nodes and the rigid body, which every process
     #: holds whole; see ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = None
+
+    searchesConnectivity = True
     #: The normal force and the gap of every contact point and their sum, read by
     #: getNormalPressures, getGaps, getSlaveNodalNormalForces and totalNormalForce; see
     #: ConstraintBase.outputResults.

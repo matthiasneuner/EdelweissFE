@@ -184,6 +184,8 @@ class Constraint(ConstraintBase, MeshDependent):
     #: ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = None
 
+    searchesConnectivity = True
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = NodeToDiscreteRigidBodyPenaltySchema
 
