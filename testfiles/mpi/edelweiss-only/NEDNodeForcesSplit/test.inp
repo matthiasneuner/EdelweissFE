@@ -1,0 +1,33 @@
+** Node forces on a node set split between the processes, Dirichlet conditions on split node sets, and
+** per-node outputs of the net force and the solution there: each process acts on the part of a set whose
+** degrees of freedom it holds (vectors of the subdomain); the output gathers the whole set.
+*material, name=VonMises, id=myMaterial, provider=edelweiss
+210000, 0.3, 550, 1000, 200, 1400, 1
+
+*section, name=section1, material=myMaterial, type=plane, thickness=1
+all
+
+*job, name=c3d8job, domain=2d
+*solver, solver=NEDMPI, name=theSolver
+output-frequency=5
+*modelGenerator, generator=planeRectQuad, name=gen
+l=10
+h=10
+nX=4
+nY=4
+elType=CPE4
+elProvider=edelweiss
+
+*fieldOutput
+>>perNode, name=PRight, nSet=gen_right, field=displacement, result=P, saveHistory=True
+>>perNode, name=URight, nSet=gen_right, field=displacement, result=U, saveHistory=True
+
+*output, type=monitor, name=monitor
+fieldOutput=PRight
+fieldOutput=URight
+
+*step, type=adaptiveForExplicitSimulations, solver=theSolver
+maxInc=1e0, minInc=1e-2, maxNumInc=10000, maxIter=25, stepLength=1
+>>dirichlet, name=left, nSet=gen_left, field=displacement, 1=0, 2=0
+>>dirichlet, name=top, nSet=gen_top, field=displacement, 2=0.05
+>>nodeforces, name=pull, nSet=gen_right, components='200, -50', field=displacement

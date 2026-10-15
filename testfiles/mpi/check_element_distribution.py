@@ -47,6 +47,7 @@ EXPECTED_DISTRIBUTED = {
     "edelweiss-only/NEDContact",
     "edelweiss-only/NEDDirectionalSpringPenalty",
     "edelweiss-only/NEDEqualValuePenalty",
+    "edelweiss-only/NEDNodeForcesSplit",
     "edelweiss-only/NEDNodeToDiscreteRigidBodyContact",
     "edelweiss-only/NEDNodeToRigidSurfacePenalty",
     "edelweiss-only/NEDRestart1Write",

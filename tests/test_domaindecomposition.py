@@ -864,7 +864,7 @@ def test_vectors_of_the_subdomain_give_the_bits_of_vectors_of_the_whole_model(tm
     # A process numbering only the degrees of freedom of its subdomain -- the global numbering,
     # compressed -- computes the same bits as one holding vectors of the whole model: the elements,
     # a constraint force, Dirichlet conditions on node sets split between the processes, the output.
-    decks = ["NED", "NEDEqualValuePenalty"]
+    decks = ["NED", "NEDEqualValuePenalty", "NEDNodeForcesSplit"]
     testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
     for deck in decks:
         shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), tmp_path / deck)
