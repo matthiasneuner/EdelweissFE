@@ -589,3 +589,14 @@ def test_the_global_numbering_of_the_mesh_is_the_dof_managers(tmp_path, isLocal)
     field.nodes[0], field.nodes[1] = field.nodes[1], field.nodes[0]
     with pytest.raises(RuntimeError, match="are not the nodes of the mesh carrying it"):
         numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
+
+
+def test_released_mesh_data_lines_cannot_be_read_in_any_way(tmp_path):
+    deck = tmp_path / "test.inp"
+    deck.write_text(DECK)
+    inputFile = parseInputFile(str(deck))
+    releaseMeshDataLines(inputFile)
+    released = inputFile["node"][0]["datalines"]
+    for read in (list, len, bool, lambda lines: lines[0]):
+        with pytest.raises(RuntimeError, match=r"the data lines of \*node were released"):
+            read(released)

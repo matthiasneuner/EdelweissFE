@@ -298,6 +298,32 @@ class ReleasedDataLines:
             Always.
         """
 
+        self._raiseReleased()
+
+    def __len__(self):
+        """Raise: the data lines are gone (see :meth:`__iter__`)."""
+
+        self._raiseReleased()
+
+    def __getitem__(self, index):
+        """Raise: the data lines are gone (see :meth:`__iter__`)."""
+
+        self._raiseReleased()
+
+    def __bool__(self):
+        """Raise: the data lines are gone (see :meth:`__iter__`)."""
+
+        self._raiseReleased()
+
+    def _raiseReleased(self):
+        """Raise the error of reading the released data lines.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+
         raise RuntimeError(
             "the data lines of *{:} were released after the model was built from them (releaseMeshDataLines); "
             "parse the input file again to build another model".format(self.keyword)

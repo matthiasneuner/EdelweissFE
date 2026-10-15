@@ -85,7 +85,10 @@ def finiteElementSimulation(
     Parameters
     ----------
     inputfile
-        The input file in dictionary form.
+        The input file in dictionary form. Its mesh data lines (``*node``, ``*element``, ``*nSet``,
+        ``*elSet``) are consumed: released once the model holds the mesh
+        (:func:`~edelweissfe.helpers.inputfilehelpers.releaseMeshDataLines`), so the same parsed input
+        cannot build a second model -- parse the file again for that.
     verbose
         Be verbose during the simulation.
     suppressPlots
