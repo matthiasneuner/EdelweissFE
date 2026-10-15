@@ -1206,6 +1206,24 @@ after the migrations a quarter of that, computing more elements in the time it h
 time per increment, set by the costliest process, could therefore not improve noticeably, and did
 not. Balancing pays where damage localizes and the imbalance grows large.
 
+**Vectors of the subdomain** (`Vectors of the subdomain`_). On the 192 000-element GC3D8 block
+(203 401 nodes, 813 604 degrees of freedom, 50 increments, one thread per process; rabbit, before and
+after, two to four runs each, alternated):
+
+==============================================  =================  =================
+                                                8 processes        32 processes
+==============================================  =================  =================
+peak resident memory per process (mean)         1 909 / 1 712 MB   1 143 / 925 MB
+building the equation system (slowest process)  1.83 / 1.08 s      1.77 / 0.57 s
+memory the build adds                           282 / 81 MB        267 / 31 MB
+time per increment                              0.256 / 0.240 s    0.099 / 0.076 s
+==============================================  =================  =================
+
+What is left per process is mostly what every process holds whole: the mesh, every node object with
+its fields and node fields, and the imports. On c1_150, which keeps vectors of the whole model
+(contact, ties, adaptive refinement), nothing changed: 2.81 s for the first build at 8x4 before and
+after.
+
 **The external work** (`Output and restart`_). On a 40 000-element block with 40 000 prescribed
 degrees of freedom and an output every 1000 increments, keeping and gathering the products cost each
 of 4 processes 2.3 s over 2000 increments, the exact sums 0.5 s.
