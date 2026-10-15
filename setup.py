@@ -184,6 +184,19 @@ extensions += [
     )
 ]
 
+print("Gather the extension for the scatter-add of the explicit element loops")
+extensions += [
+    Extension(
+        "*",
+        ["edelweissfe/numerics/scatteradd.pyx"],
+        include_dirs=[numpy.get_include()],
+        language="c++",
+        # Its sums must be formed in the order the values are given: no flag reassociating floating-point
+        # operations (-ffast-math), and no architecture flags.
+        extra_compile_args=compile_flags(),
+    )
+]
+
 print("Gather the extensions for fast dirichlet application")
 extensions += [
     Extension(

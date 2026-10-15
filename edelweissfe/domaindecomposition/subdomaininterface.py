@@ -55,6 +55,7 @@ import numpy as np
 from mpi4py import MPI
 
 from edelweissfe.numerics.assembly import addNodalForces
+from edelweissfe.numerics.scatteradd import sumAtPositions
 
 
 @unique
@@ -415,10 +416,9 @@ class InterfaceForceAssembly:
 
         exchange.exchange(contributions)
         interfaceDofs = exchange.interface.interfaceDofs
-        # A left fold per degree of freedom, in model order, as in the element loop; see
-        # ElementPlan.assembleInto for why np.bincount sums in the order given.
-        vector.view(np.ndarray)[interfaceDofs] = np.bincount(
-            self._targets, weights=exchange.merged[exchange.order], minlength=interfaceDofs.shape[0]
+        # A left fold per degree of freedom, in model order, as in the element loop.
+        vector.view(np.ndarray)[interfaceDofs] = sumAtPositions(
+            self._targets, exchange.merged[exchange.order], interfaceDofs.shape[0]
         )
 
 

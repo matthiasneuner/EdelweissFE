@@ -40,6 +40,7 @@ from edelweissfe.numerics.parallelizationutilities import (
     getThreadPool,
     isFreeThreadingSupported,
 )
+from edelweissfe.numerics.scatteradd import sumAtPositions
 from edelweissfe.timesteppers.timestep import TimeStep
 
 
@@ -207,12 +208,11 @@ class ElementPlan:
         """Add the contribution buffer into ``vector`` at the plan's degrees of freedom, summing the
         entries at each degree of freedom in element order.
 
-        :func:`numpy.bincount` with weights adds the weights into each bin one after another, in the
-        order given: a left fold, the sum ``P[dofs_e] += Pe`` forms element after element. That is
-        how NumPy implements it rather than a documented guarantee, and the bit-identity of the
-        threaded and the domain-decomposed loops rests on it, so
-        ``tests/test_domaindecomposition.py`` checks it with values whose sum differs in any other
-        order.
+        :func:`~edelweissfe.numerics.scatteradd.sumAtPositions` adds the entries at each degree of
+        freedom one after another, in the order of the buffer, from zero: a left fold, the sum
+        ``P[dofs_e] += Pe`` forms element after element. The bit-identity of the threaded and the
+        domain-decomposed loops with the plain one rests on that order, which is the function's
+        contract.
 
         Parameters
         ----------
@@ -222,7 +222,7 @@ class ElementPlan:
             The vector to add into.
         """
 
-        vector.asPlainArray()[self.dofs] += np.bincount(self.positions, weights=contributions, minlength=self.nDofs)
+        vector.asPlainArray()[self.dofs] += sumAtPositions(self.positions, contributions, self.nDofs)
 
 
 def planElements(
@@ -293,6 +293,7 @@ def planElements(
         positions = np.searchsorted(selected, entryDofs)
     if entryDofs.size and not np.array_equal(selected[positions], entryDofs):
         raise ValueError("An element has a degree of freedom that is not among those its plan assembles into.")
+    positions = np.ascontiguousarray(positions, dtype=np.int64)
 
     return ElementPlan(elements, chunks, dofs, selected.shape[0], entryDofs, positions, nThreads)
 

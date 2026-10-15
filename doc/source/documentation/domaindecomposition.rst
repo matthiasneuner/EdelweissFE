@@ -279,15 +279,18 @@ table. Timings, and the load balancing that depends on them, change the speed of
 result.
 
 **What the order rests on.** Within one process the contributions at each degree of freedom are
-summed by :func:`numpy.bincount` (:meth:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan.assembleInto`,
-:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`), which adds the
-weights into each bin one after another, in the order given -- a left fold, the sum the plain
-element loop of ``NED`` forms, element after element. That is how NumPy implements it, not a documented guarantee, so it is tested rather
-than assumed: ``tests/test_domaindecomposition.py`` sums values of very different magnitudes and
-signed zeros, whose sum differs in any other order, through the element loop and -- over three
-processes -- through the interface exchange, and compares the bits with the left fold;
-``tests/test_explicit_element_loop.py`` compares the two loops on whole models. It was last
-verified with NumPy 2.5.2; run these tests after upgrading NumPy.
+summed by :func:`~edelweissfe.numerics.scatteradd.sumAtPositions`
+(:meth:`~edelweissfe.solvers.base.parallelelementcomputation.ElementPlan.assembleInto`,
+:class:`~edelweissfe.domaindecomposition.subdomaininterface.InterfaceForceAssembly`), a small
+sequential loop of EdelweissFE's own (Cython, compiled without reassociating floating-point
+operations), which adds the contributions at each degree of freedom one after another, in the order
+given, from zero -- a left fold, the sum the plain element loop of ``NED`` forms, element after
+element. That order is its contract. ``tests/test_domaindecomposition.py`` sums values of very
+different magnitudes and signed zeros, whose sum differs in any other order, through the element loop
+and -- over three processes -- through the interface exchange, and compares the bits with the left
+fold; ``tests/test_explicit_element_loop.py`` compares the two loops on whole models. (Until
+2026-10 it was :func:`numpy.bincount`, which sums in the same order as NumPy implements it, without
+documenting it; the test still compares the two, bit for bit.)
 
 **Loads.** A distributed load or a body force acting on an element is a contribution of that element,
 and is assembled like its forces
@@ -982,6 +985,9 @@ Package reference
    :members:
 
 .. automodule:: edelweissfe.numerics.exactsum
+   :members:
+
+.. automodule:: edelweissfe.numerics.scatteradd
    :members:
 
 .. automodule:: edelweissfe.constraints.base.wholemodel

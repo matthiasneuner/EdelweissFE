@@ -228,13 +228,11 @@ def _adversarialContributions(rng, n: int) -> np.ndarray:
 
 
 def test_assembly_sums_every_degree_of_freedom_from_left_to_right_in_element_order():
-    # The element loop assembles with np.bincount, which adds the weights into each bin one after
-    # another, in the order they are given -- a left fold, the order a loop `P[dofs] += Pe` over the
-    # elements forms. Nothing else makes a result independent of the number of threads, chunks and
-    # processes, so a NumPy that summed a bin in any other order (pairwise, say) must fail here.
-    # NumPy does not document that order: it is how its implementation works, verified here with
-    # NumPy 2.5.2 (2026-10-07). After upgrading NumPy, this test -- and the interface test below,
-    # over three processes -- is what says whether the bit-identity of a decomposed run still holds.
+    # The element loop assembles with sumAtPositions, which adds the contributions at each degree of
+    # freedom one after another, in the order they are given -- a left fold, the order a loop
+    # `P[dofs] += Pe` over the elements forms. Nothing else makes a result independent of the number
+    # of threads, chunks and processes, so an assembly summing in any other order (pairwise, say) must
+    # fail here.
     from edelweissfe.numerics.dofvector import DofVector
     from edelweissfe.solvers.base.parallelelementcomputation import (
         computeLumpedDiagonalForExplicit,
@@ -269,12 +267,45 @@ def test_assembly_sums_every_degree_of_freedom_from_left_to_right_in_element_ord
     assert not np.array_equal(pairwise, expected)
 
 
+def test_the_scatter_add_is_a_left_fold_the_same_bits_as_numpy_bincount():
+    # sumAtPositions replaced np.bincount(positions, weights=values, minlength=n), which summed in the
+    # same order -- as NumPy implements it, without documenting it. The same bits, on values whose sum
+    # differs in any other order: values of very different magnitudes, signed zeros, and positions
+    # with no value, one value, and many.
+    from edelweissfe.numerics.scatteradd import sumAtPositions
+
+    rng = np.random.default_rng(3)
+    for n, nPositions in ((0, 5), (1, 1), (17, 3), (5000, 40), (20000, 7000)):
+        positions = rng.integers(0, nPositions, n).astype(np.int64)
+        values = _adversarialContributions(rng, n)
+        values[rng.random(n) < 0.05] = 0.0
+        sums = sumAtPositions(positions, values, nPositions)
+
+        leftFold = np.zeros(nPositions)
+        for position, value in zip(positions.tolist(), values.tolist()):
+            leftFold[position] += value
+        assert np.array_equal(sums.view(np.int64), leftFold.view(np.int64))
+        assert np.array_equal(
+            sums.view(np.int64), np.bincount(positions, weights=values, minlength=nPositions).view(np.int64)
+        )
+
+    # a negative zero alone stays one, as in a left fold from +0.0: +0.0 + -0.0 is +0.0
+    assert np.signbit(sumAtPositions(np.zeros(1, dtype=np.int64), np.array([-0.0]), 1)[0]) == np.signbit(0.0 + -0.0)
+    with pytest.raises(ValueError, match="outside"):
+        sumAtPositions(np.array([0, 3], dtype=np.int64), np.ones(2), 3)
+    with pytest.raises(ValueError, match="outside"):
+        sumAtPositions(np.array([-1], dtype=np.int64), np.ones(1), 3)
+    with pytest.raises(ValueError, match="values for"):
+        sumAtPositions(np.array([0], dtype=np.int64), np.ones(2), 3)
+
+
 #: Assembles adversarial element contributions over three processes, each holding a random third of
 #: the elements, and checks every degree of freedom it integrates against the serial left fold.
 _INTERFACE_ASSEMBLY_SCRIPT = """
 import numpy as np
 from mpi4py import MPI
 from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly, SubdomainInterface
+from edelweissfe.numerics.scatteradd import sumAtPositions
 
 communicator = MPI.COMM_WORLD
 rank = communicator.Get_rank()
@@ -297,7 +328,7 @@ contributions = values[mine].ravel()
 
 interface = SubdomainInterface(communicator, entryDofs, nDof)
 # the own elements, in model order, assembled as the element loop assembles them
-vector = np.zeros(nDof) + np.bincount(entryDofs, weights=contributions, minlength=nDof)
+vector = np.zeros(nDof) + sumAtPositions(entryDofs.astype(np.int64), contributions, nDof)
 InterfaceForceAssembly(interface, entryDofs, entryPositions).assemble(contributions, vector)
 
 integrated = interface.subdomainDofs
