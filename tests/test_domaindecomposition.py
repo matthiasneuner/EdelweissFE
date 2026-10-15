@@ -1701,6 +1701,106 @@ def test_a_partition_by_measured_costs_leaves_no_process_without_elements(outlie
     assert np.bincount(list(owners.values()), minlength=4).min() > 0
 
 
+def test_a_stall_in_one_increment_does_not_change_the_partition():
+    # Per element the least kernel time over the increments since the last check, as the element loop
+    # measures it (computeElementsForExplicit): a stall of 1e5 times an element's cost in one increment
+    # partitions the mesh exactly as no stall does; the mean -- what was summed before -- does not.
+    MPI = pytest.importorskip("mpi4py.MPI")
+    _metis()
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.partitioning import partitionElementsOfMesh
+
+    mesh = _quadGridMesh(16, 8)
+    numbers = list(mesh.elements)
+    rng = np.random.default_rng(7)
+    # five increments; the elements of the left half cost twice the others, each increment a little
+    # more than its least
+    cost = np.where((np.arange(len(numbers)) % 16) < 8, 7e-6, 3.5e-6)
+    times = cost * (1.0 + 0.05 * rng.random((5, len(numbers))))
+    stalled = times.copy()
+    stalled[2, 37] = 1e5 * cost[37]
+
+    def partition(measured):
+        owners = partitionElementsOfMesh(
+            mesh, 4, 2, Communicator(MPI.COMM_SELF), dict(zip(numbers, measured.tolist())), None
+        )
+        return [owners[number] for number in numbers]
+
+    withoutStall = partition(times.min(axis=0))
+    assert partition(stalled.min(axis=0)) == withoutStall
+    # the test has teeth: the mean over the increments gives the stalled element another part
+    assert partition(stalled.mean(axis=0)) != partition(times.mean(axis=0))
+
+
+#: Records, in process 0, the least kernel time of its elements at every check of the balance, which
+#: never repartitions; from increment 3 on, every element of process 0 costs 2 ms more (a material
+#: softening, say).
+_COSTS_GROWING_SCRIPT = """
+import contextlib, io, time
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.elements.displacementelement.element import DisplacementElement
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+increment = [0]
+checks = []
+
+acceptIncrement = NEDMPI.acceptIncrement
+
+
+def counting(self, step, model, timeStep):
+    increment[0] = timeStep.number + 1
+    acceptIncrement(self, step, model, timeStep)
+
+
+NEDMPI.acceptIncrement = counting
+
+computeKernelsExplicit = DisplacementElement.computeKernelsExplicit
+
+
+def growing(self, *args):
+    if rank == 0 and increment[0] >= 3:
+        time.sleep(2e-3)
+    return computeKernelsExplicit(self, *args)
+
+
+DisplacementElement.computeKernelsExplicit = growing
+
+
+def recording(self, plan, load):
+    if load.nIncrements:  # the zero increment computes no element
+        checks.append(float(np.median(load.elementCosts)))
+    return False
+
+
+Subdomain.rebalance = recording
+
+with contextlib.redirect_stdout(io.StringIO()):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+if rank == 0:
+    print("CHECKS", " ".join("{:.6f}".format(cost) for cost in checks), flush=True)
+"""
+
+
+def test_a_check_of_the_balance_weighs_what_elements_cost_since_the_previous_one(tmp_path):
+    # Measured afresh after every check, an element that grew costlier weighs what it costs now at the
+    # next check -- not the least it ever cost since its increment plan was made.
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK)
+    (tmp_path / "run.py").write_text(_COSTS_GROWING_SCRIPT)
+    output, exitCode = _runUnderMPI(tmp_path, nProcesses=2)
+    if output is None:
+        pytest.fail("the run left processes waiting")
+    checks = [line for line in output.splitlines() if line.startswith("CHECKS")]
+    assert exitCode == 0 and len(checks) == 1, output
+    costs = [float(cost) for cost in checks[0].split()[1:]]
+    # checks at increments 2 and 4: before the growth microseconds, after it at least the 2 ms
+    assert len(costs) == 2 and costs[0] < 1e-3 and costs[1] >= 2e-3, output
+
+
 def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
     from edelweissfe.domaindecomposition.partitioning import (
         elementSharesBesideConstraints,

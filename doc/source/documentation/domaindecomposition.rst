@@ -655,7 +655,8 @@ with its element loop, on all its threads, and with evaluating the constraints i
 times, as the time of an increment is. On an output increment, as a step of the increment loop of
 its own right after the synchronization of the output, the busy times of all processes are gathered
 to every process, so that every process takes the same decision
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`).
+(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`). Everything is measured
+afresh after every such check: a check weighs the increments since the previous one.
 
 A constraint is evaluated whole, by one process, and stays where it is. What a partition of the
 elements can attain is therefore that every process is as busy as the mean -- or, if the constraints
@@ -672,13 +673,14 @@ it does. The partition then depends on measured timings; the result does not, si
 depend on the partition at all.
 
 The new partition weighs every element by its kernel time -- the least measured in any increment
-since the last check. A time measured is a wall time: it can only grow by what else happened
+since the previous check. A time measured is a wall time: it can only grow by what else happened
 meanwhile, never shrink below what the element costs, and a process descheduled while one element is
 timed -- on a loaded machine -- charges the whole stall to that element, thousands of times its cost
 in that increment. Summed over the increments, such an element weighed 40 to 100 000 times its peers,
-and METIS gave its process a part of hardly more than that element; the least time is what the
-element costs, the same on a loaded machine as on an idle one, while an element that has grown
-costlier -- a material softening -- is measured costlier in every increment. The new partition gives
+and METIS gave its process a part of hardly more than that element. The least time is what the
+element cost in the increments since the previous check, unaffected by a stall in any one of them;
+an element that grew costlier -- a material softening -- weighs, at the next check, the least it
+cost since the previous one, which lags its growth by at most that interval. The new partition gives
 each process the share
 of them that makes it as busy as the others with its constraints
 (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`, METIS' target

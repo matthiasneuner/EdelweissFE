@@ -95,9 +95,9 @@ class MeasuredLoad:
     ----------
     elementCosts
         The cost of every element of the plan per increment, in plan order -- the weights of a
-        repartition: the least kernel time measured over ``nIncrements`` increments, which a
-        descheduled process cannot inflate, or the element number --, or None if nothing was measured.
-        An element measured in no increment costs ``inf``.
+        repartition: the least kernel time measured in the ``nIncrements`` increments since the last
+        check, which a descheduled process cannot inflate, or the element number --, or None if
+        nothing was measured.
     nIncrements
         The increments it was measured over.
     incrementsUntilNextCheck
@@ -1016,8 +1016,7 @@ class Subdomain:
                 )
                 return False
 
-        # An element not measured (inf) is weighed as an element of its type is (_measuredWeights).
-        measured = dict(zip(plan.elements.keys(), np.where(np.isfinite(costs), costs, 0.0).tolist()))
+        measured = dict(zip(plan.elements.keys(), costs.tolist()))
         gathered = self.communicator.gather(measured, root=0)
         measuredCosts = None
         if gathered is not None:

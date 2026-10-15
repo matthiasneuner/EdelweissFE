@@ -325,10 +325,12 @@ class NEDMPI(NEDParallel):
         #: How the element forces of the current increment plan are completed at the interface.
         self._interfaceAssembly: InterfaceForceAssembly | None = None
         #: The kernel time of every element of the current increment plan, in plan order, the least
-        #: over :attr:`_nMeasuredIncrements` increments (:func:`computeElementsForExplicit`), if the
-        #: subdomain balances load by measured costs; else None.
+        #: over the :attr:`_nMeasuredIncrements` increments since the last check of the balance
+        #: (:func:`computeElementsForExplicit`), if the subdomain balances load by measured costs; else
+        #: None. See :meth:`_startMeasuring`.
         self._elementCosts: np.ndarray | None = None
-        #: The increments computed with the current increment plan.
+        #: The increments computed since the last check of the balance, or since the increment plan
+        #: was made.
         self._nMeasuredIncrements = 0
         #: The time this process spent computing its elements -- the element loop, on all its threads
         #: -- and evaluating its constraints, over :attr:`_nMeasuredIncrements` increments; see
@@ -554,10 +556,24 @@ class NEDMPI(NEDParallel):
         self._forgetReceivePlans()
         self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementLoop)
         timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
-        self._elementCosts = np.full(len(plan.elementLoop.elements), np.inf) if timesKernels else None
+        self._startMeasuring(len(plan.elementLoop.elements) if timesKernels else None)
+        return plan
+
+    def _startMeasuring(self, nElements: int | None):
+        """Start measuring the load of this process afresh: the kernel times of its elements and the
+        times it is busy. After every check of the balance, and for every new increment plan, so that
+        what a check weighs is what the elements and the process cost since the previous one -- an
+        element whose material softens since is measured as it costs now, not as it once did.
+
+        Parameters
+        ----------
+        nElements
+            The number of elements whose kernel times are measured; None to measure none.
+        """
+
+        self._elementCosts = None if nElements is None else np.full(nElements, np.inf)
         self._nMeasuredIncrements = 0
         self._elementLoopTime = self._constraintEvaluationTime = 0.0
-        return plan
 
     def _loadBalanceCosts(self) -> str:
         """The ``load-balance-costs`` option, checked.
@@ -937,6 +953,9 @@ class NEDMPI(NEDParallel):
                     self._incrementPlan = self.planIncrement(model)
                     self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
+            else:
+                # the next check weighs what was measured from now on (a new plan starts afresh itself)
+                self._startMeasuring(None if self._elementCosts is None else self._elementCosts.shape[0])
 
         if self.options["debug-poison-stale-solution"] and not self._wholeSolutionHere:
             self._poisonStaleSolution(model)
