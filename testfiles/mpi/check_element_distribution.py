@@ -21,6 +21,12 @@ by the garbage collector, are exactly those of the model).
 In a distributed test case, every auxiliary element on a host element -- a contact facet --
 must be computed by the process computing its host element, also after elements migrated.
 
+The distributed test cases expected to hold the **nodes of the subdomain** only (no reason of
+:func:`edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`) are checked
+further: every node of the mesh is held by some process, and every process holds exactly the nodes
+the element distribution names as the model ends -- after a migration, too -- in mesh order
+(:meth:`edelweissfe.models.femodel.FEModel.checkNodesAgreeWithMesh`).
+
 Run it under the MPI launcher, from anywhere::
 
     mpirun -n 2 python testfiles/mpi/check_element_distribution.py
@@ -79,6 +85,27 @@ EXPECTED_DISTRIBUTED = {
     "marmot/NEDRebalanceDistributed",
 }
 
+#: The distributed test cases expected to hold the nodes of the subdomain only in each process.
+EXPECTED_NODES_OF_SUBDOMAIN = {
+    "edelweiss-only/NED",
+    "edelweiss-only/NEDDirectionalSpringPenalty",
+    "edelweiss-only/NEDEqualValuePenalty",
+    "edelweiss-only/NEDNodeForcesSplit",
+    "edelweiss-only/TieNED",
+    "marmot/GCDPNEDExplicit",
+    "marmot/GCDPNEDExplicitHyperbolic",
+    "marmot/NED",
+    "marmot/NEDChangeMaterialPropertyRebalanceDistributed",
+    "marmot/NEDCylinderGenerator",
+    "marmot/NEDFollowerPressureUL",
+    "marmot/NEDInitialStressPressure",
+    "marmot/NEDLoadsEqualValuePenalty",
+    "marmot/NEDParallel",
+    "marmot/NEDRebalanceDistributed",
+    "marmot/NEDRestartDistributed1Write",
+    "marmot/NEDRestartDistributed2Resume",
+}
+
 #: The test cases expected to move elements between processes (a distributed model rebalanced).
 EXPECTED_MIGRATING = {
     "marmot/NEDChangeMaterialPropertyRebalanceDistributed",
@@ -118,6 +145,29 @@ def facetsWithTheirHosts(model, communicator) -> str:
     apart = sum(processOf[record.number] != processOf[record.hostElement] for record in hosted)
     return "{:} facet(s) {:}".format(
         len(hosted), "with their hosts" if not apart else "{:} APART FROM THEIR HOSTS".format(apart)
+    )
+
+
+def nodesOf(model, communicator) -> str:
+    """Which nodes each process holds as the model ends: every node, or the nodes of its subdomain
+    -- then every node of the mesh must be held by some process, and each process hold exactly those
+    the element distribution names, in mesh order."""
+
+    if not model.elementDistribution.holdsNodesOfSubdomainOnly:
+        return "every node"
+    held = communicator.allgather(set(model.nodes))
+    meshNodes = set(model.mesh.nodeLabels.tolist())
+    try:
+        model.checkNodesAgreeWithMesh()
+        agree = True
+    except Exception:
+        agree = False
+    consistent = set().union(*held) == meshNodes and all(communicator.allgather(agree))
+    return "nodes of the subdomain, {:}..{:} of {:} held{:}".format(
+        min(len(labels) for labels in held),
+        max(len(labels) for labels in held),
+        len(meshNodes),
+        "" if consistent else " INCONSISTENT",
     )
 
 
@@ -179,6 +229,10 @@ def main() -> int:
             facets = facetsWithTheirHosts(model, communicator)
             failed = failed or "APART" in facets
             details += [facets] if facets else []
+            nodes = nodesOf(model, communicator)
+            expectedNodes = case in EXPECTED_NODES_OF_SUBDOMAIN
+            failed = failed or "INCONSISTENT" in nodes or nodes.startswith("nodes of the subdomain") != expectedNodes
+            details.append(nodes)
         if case in EXPECTED_MIGRATING and not failed:
             migration = migrationOf(model, communicator, aliveBefore)
             failed = migration.startswith("0 moved") or "ALIVE" in migration
