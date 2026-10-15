@@ -70,6 +70,11 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
     #: search, as for contact -- and so implements :meth:`updateConnectivity`; declared once per class.
     searchesConnectivity: bool = False
 
+    #: Whether it introduces scalar variables of its own (Lagrange multipliers), which only the implicit
+    #: solvers solve for -- a reason for vectors of the whole model in a domain-decomposed run
+    #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`).
+    introducesScalarVariables: bool = False
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None

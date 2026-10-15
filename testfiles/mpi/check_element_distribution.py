@@ -22,7 +22,7 @@ In a distributed test case, every auxiliary element on a host element -- a conta
 must be computed by the process computing its host element, also after elements migrated.
 
 The distributed test cases expected to hold the **nodes of the subdomain** only (no reason of
-:func:`edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`) are checked
+:func:`edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`) are checked
 further: every node of the mesh is held by some process, and every process holds exactly the nodes
 the element distribution names as the model ends -- after a migration, too -- in mesh order
 (:meth:`edelweissfe.models.femodel.FEModel.checkNodesAgreeWithMesh`).

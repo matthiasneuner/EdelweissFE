@@ -99,7 +99,7 @@ class GeneratorBase(OptionSchemaProvider, ABC):
 
     #: Whether this generator makes rigid bodies, whose surfaces every process of a domain-decomposed
     #: run moves from the reference node -- a reason to hold every node in every process
-    #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`).
+    #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`).
     makesRigidBodies: bool = False
 
     @classmethod

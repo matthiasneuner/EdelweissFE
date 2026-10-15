@@ -146,19 +146,25 @@ def reasonsToReplicateElements(inputfile: dict) -> list[str]:
     return reasons
 
 
-def reasonsToHoldEveryNode(inputfile: dict) -> list[str]:
-    """Why every process of a distributed job must hold every node -- a node object, with its fields,
-    for every node of the mesh -- instead of the nodes of its subdomain: what reads, or changes, nodes
-    outside a subdomain during a run, read from the input before any node exists. These are the reasons
-    for vectors of the whole model
-    (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.reasonsForVectorsOfWholeModel`,
-    which checks that the two agree), as far as the input names them:
+def reasonsForWholeModel(inputfile: dict) -> list[str]:
+    """Why the processes of a job must hold every node -- a node object, with its fields, for every node
+    of the mesh -- and vectors of the whole model, instead of the nodes and the degrees of freedom of
+    their subdomains: what reads, or changes, nodes outside a subdomain during a run. Read from the
+    input, before any node exists, from what the classes of the model entities declare -- the one rule
+    for the nodes (:meth:`DistributedElements.isNodeHeldHere`) and for the vectors
+    (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.vectorsOfSubdomain`; NEDMPI checks the
+    model it finds against it):
 
-    * **a model modifier changing the mesh** (``initiatesTopologyChanges``, e.g. ``hAdaptivity``): its
-      refinement reads the node fields of the whole model;
+    * **every process holds every element** (:func:`reasonsToReplicateElements`), and so synchronizes their
+      states;
+    * **a model modifier changing the mesh**
+      (:attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.initiatesTopologyChanges`,
+      e.g. ``hAdaptivity``): its refinement reads the node fields of the whole model;
     * **a constraint searching its connectivity** (contact,
       :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.searchesConnectivity`): a search
       may couple nodes of another subdomain;
+    * **a constraint introducing scalar variables**
+      (:attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.introducesScalarVariables`);
     * **a generator making rigid bodies**
       (:attr:`~edelweissfe.generators.base.generatorbase.GeneratorBase.makesRigidBodies`): every process
       moves the surface of a rigid body from its reference node.
@@ -171,17 +177,25 @@ def reasonsToHoldEveryNode(inputfile: dict) -> list[str]:
     Returns
     -------
     list[str]
-        The reasons; empty if each process may hold the nodes of its subdomain only.
+        The reasons; empty if each process may hold the nodes and the degrees of freedom of its subdomain
+        only.
     """
 
     reasons = []
+    if reasonsToReplicateElements(inputfile):
+        reasons.append("every process holds every element")
     for definition in inputfile["modelModifier"]:
         if getModelModifierClass(definition["type"]).initiatesTopologyChanges:
             reasons.append("model modifier {:} ({:}) changes the mesh".format(definition["name"], definition["type"]))
     for definition in inputfile["constraint"]:
-        if getConstraintClass(definition["type"]).searchesConnectivity:
+        constraintClass = getConstraintClass(definition["type"])
+        if constraintClass.searchesConnectivity:
             reasons.append(
                 "constraint {:} ({:}) searches its connectivity".format(definition["name"], definition["type"])
+            )
+        if constraintClass.introducesScalarVariables:
+            reasons.append(
+                "constraint {:} ({:}) introduces scalar variables".format(definition["name"], definition["type"])
             )
     for definition in inputfile["modelGenerator"]:
         if getGeneratorClass(definition["generator"]).makesRigidBodies:
@@ -194,7 +208,8 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
 
     A serial job creates every element. A job on several MPI processes distributes the elements over
     them, unless :func:`reasonsToReplicateElements` names a reason to hold the whole model in every
-    process.
+    process; a distributed job holds the nodes of each subdomain only, unless :func:`reasonsForWholeModel`
+    names a reason.
 
     Parameters
     ----------
@@ -227,18 +242,18 @@ def elementDistributionOfThisJob(inputfile: dict, journal: Journal) -> ElementDi
         "DomainDecomposition",
         0,
     )
-    nodeReasons = reasonsToHoldEveryNode(inputfile)
+    wholeModelReasons = reasonsForWholeModel(inputfile)
     journal.message(
         (
             "Nodes of the subdomain: each process holds the nodes of its elements and those its model entities "
             "read whole"
-            if not nodeReasons
-            else "Every node on every process because: " + "; ".join(nodeReasons)
+            if not wholeModelReasons
+            else "Every node on every process because: " + "; ".join(wholeModelReasons)
         ),
         "DomainDecomposition",
         0,
     )
-    return DistributedElements(worldCommunicator(), holdsNodesOfSubdomainOnly=not nodeReasons)
+    return DistributedElements(worldCommunicator(), wholeModelReasons)
 
 
 class DistributedElements(ElementDistribution):
@@ -248,16 +263,19 @@ class DistributedElements(ElementDistribution):
     ----------
     communicator
         The communicator of the processes sharing the model.
-    holdsNodesOfSubdomainOnly
-        Whether each process holds only the nodes of its subdomain; see :func:`reasonsToHoldEveryNode`.
+    reasonsForWholeModel
+        Why each process holds every node and vectors of the whole model (:func:`reasonsForWholeModel`);
+        empty if it holds those of its subdomain only.
     """
 
     replicatesElements = False
 
-    def __init__(self, communicator, holdsNodesOfSubdomainOnly: bool = False):
+    def __init__(self, communicator, reasonsForWholeModel):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
-        self.holdsNodesOfSubdomainOnly = holdsNodesOfSubdomainOnly
+        #: Why each process holds every node and vectors of the whole model; see :func:`reasonsForWholeModel`.
+        self.reasonsForWholeModel = list(reasonsForWholeModel)
+        self.holdsNodesOfSubdomainOnly = not self.reasonsForWholeModel
         #: Where this process holds the nodes of its subdomain only: the labels of the nodes of the elements
         #: it creates (:meth:`decideLocalElements`); None where it holds every node.
         self._nodesOfLocalElements = None
@@ -502,7 +520,7 @@ class DistributedElements(ElementDistribution):
             if self._nodesOfLocalElements is not None:
                 raise TopologyError(
                     "a process holding the nodes of its subdomain only cannot refine: a model modifier changing "
-                    "the mesh requires every node on every process (reasonsToHoldEveryNode)"
+                    "the mesh requires every node on every process (reasonsForWholeModel)"
                 )
 
     def placeAuxiliaryElement(self, record: MeshElement):

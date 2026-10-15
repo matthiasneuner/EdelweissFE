@@ -502,7 +502,7 @@ holds (`Nodes of the subdomain`_), its subdomain's and those its model entities 
 
 What still reads or changes degrees of freedom outside a subdomain during a run keeps vectors of the
 whole model in every process, decided once per job and reported on rank 0 (``Vectors of the whole model
-on every process because: ...``; :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.reasonsForVectorsOfWholeModel`):
+on every process because: ...``; :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`):
 a model holding every element on every process, a model modifier changing the mesh (adaptive
 refinement), a constraint searching its connectivity (contact), a rigid body, and scalar variables. Until those read only what they receive, they run as described in the
 rest of this page, with vectors of the whole model current at the subdomain degrees of freedom.
@@ -512,7 +512,7 @@ Nodes of the subdomain
 
 A distributed model whose processes compute their subdomains only -- no contact search, no adaptive
 refinement, no rigid body: the reasons of
-:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`, read from the input
+:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`, read from the input
 file, the reasons for vectors of the whole model as far as the input names them -- holds in each
 process the node objects, and the node fields, of the nodes of its subdomain only. Decided once per
 job, with the partition, before any node object exists, and reported on rank 0 (``Nodes of the

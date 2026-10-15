@@ -84,6 +84,9 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
     #: its records are fixed between topology changes.
     searchesConnectivity: bool = False
 
+    #: Whether it introduces scalar variables (see ``ConstraintBase.introducesScalarVariables``): never.
+    introducesScalarVariables: bool = False
+
     @classmethod
     def fromConstraintDefinition(
         cls, name: str, definition: dict, model: FEModel, journal: "Journal" = None

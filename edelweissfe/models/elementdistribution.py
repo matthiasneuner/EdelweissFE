@@ -58,7 +58,7 @@ method                             called by                                    
 for each node of the mesh *held* here (:meth:`isNodeHeldHere`): every node, here and wherever a
 process must read nodes outside its subdomain. A distributed job whose processes compute their
 subdomains only -- no contact search, no refinement, no rigid body
-(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`) -- holds in each
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`) -- holds in each
 process the nodes of its elements and those a model entity reads whole (:meth:`holdNodes`); what reads
 the nodes of the whole model -- a per-node field output, a checkpoint -- gathers their values from the
 processes computing them (:meth:`nodeValuesOfWholeSet`, :meth:`nodeFieldsOfWholeModel`).
@@ -110,6 +110,9 @@ class ElementDistribution:
 
     #: Whether every process creates every element of the mesh.
     replicatesElements = True
+
+    #: Why every process holds every node and vectors of the whole model -- here, every element.
+    reasonsForWholeModel = ("every process holds every element",)
 
     #: Whether a process holds only the nodes of its subdomain -- those of its elements, and those a
     #: model entity reads whole (:meth:`holdNodes`) --, decided once per job, the same in every process.

@@ -827,8 +827,7 @@ from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 rank = worldCommunicator().Get_rank()
-reasons = NEDMPI.__dict__["reasonsForVectorsOfWholeModel"]
-nodeReasons = distributedelements.reasonsToHoldEveryNode
+reasons = distributedelements.reasonsForWholeModel
 sizes = []
 nodesHeld = []
 createDofManager = NEDMPI.createDofManager
@@ -865,12 +864,10 @@ for directory in sys.argv[1:]:
     nodesHeld.clear()
     held, ofSubdomain = finalFields(directory)
     sizeOfSubdomain = sizes[0]
-    NEDMPI.reasonsForVectorsOfWholeModel = staticmethod(lambda model: ["a test"])
-    distributedelements.reasonsToHoldEveryNode = lambda inputfile: ["a test"]
+    distributedelements.reasonsForWholeModel = lambda inputfile: ["a test"]
     sizes.clear()
     _, ofWholeModel = finalFields(directory, held)
-    NEDMPI.reasonsForVectorsOfWholeModel = reasons
-    distributedelements.reasonsToHoldEveryNode = nodeReasons
+    distributedelements.reasonsForWholeModel = reasons
     same = np.array_equal(ofSubdomain.view(np.int64), ofWholeModel.view(np.int64))
     # never more nodes than with every node held
     fewerNodes = nodesHeld[0] <= nodesHeld[1]

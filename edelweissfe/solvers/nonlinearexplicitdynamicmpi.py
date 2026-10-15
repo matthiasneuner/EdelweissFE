@@ -53,7 +53,7 @@ distributed model those of its subdomain and those its model entities read whole
 (:mod:`~edelweissfe.domaindecomposition.distributedelements`) -- and are filled from the owners
 where the whole model is read; a per-node field output and a checkpoint gather the node fields of
 the whole model from the processes computing them. A model with a reason against it
-(:meth:`NEDMPI.reasonsForVectorsOfWholeModel`: every element on every process, adaptive refinement,
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`: every element on every process, adaptive refinement,
 contact, rigid bodies, scalar variables) holds vectors of the whole model
 instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
 owners at every degree of freedom -- which is what lets a contact search move a constraint onto
@@ -399,7 +399,7 @@ class NEDMPI(NEDParallel):
         self._copiesConsistentAfterIncrement = 0
         #: Whether the vectors of this process -- the carried vectors, the lumped operators -- hold the
         #: degrees of freedom of its subdomain only, or every degree of freedom of the model; decided once
-        #: per job, at the start of its first step (:meth:`reasonsForVectorsOfWholeModel`). None before.
+        #: per job, at the start of its first step (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`). None before.
         self._vectorsOfSubdomain: bool | None = None
         #: The interface of the subdomain before the equation system now being rebuilt, while it is; see
         #: :meth:`carryVectorsOver`.
@@ -445,7 +445,7 @@ class NEDMPI(NEDParallel):
     @property
     def vectorsOfSubdomain(self) -> bool:
         """Whether the vectors of this process hold the degrees of freedom of its subdomain only; see
-        :meth:`reasonsForVectorsOfWholeModel`.
+        :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`.
 
         Returns
         -------
@@ -464,19 +464,29 @@ class NEDMPI(NEDParallel):
 
     def _decideVectors(self, model: FEModel):
         """Decide, once per job, whether the vectors of each process hold its subdomain only or the whole
-        model (:meth:`reasonsForVectorsOfWholeModel`), the same in every process, and report it once.
+        model, the same in every process, and report it once: by the one rule the nodes a process holds
+        follow, decided from the input with the model's element distribution
+        (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`). What the model
+        built from the input holds is checked against it (:meth:`reasonsSeenInModel`).
 
         Parameters
         ----------
         model
             The model tree.
+
+        Raises
+        ------
+        RuntimeError
+            If the model holds something the rule should have named.
         """
 
-        reasons = self.reasonsForVectorsOfWholeModel(model)
-        if reasons and model.elementDistribution.holdsNodesOfSubdomainOnly:
+        reasons = list(model.elementDistribution.reasonsForWholeModel)
+        seen = self.reasonsSeenInModel(model)
+        if seen and not reasons:
             raise RuntimeError(
-                "Each process holds the nodes of its subdomain only (reasonsToHoldEveryNode found no reason in the "
-                "input), but the model needs vectors of the whole model because: {:}".format("; ".join(reasons))
+                "The model needs every node and vectors of the whole model on every process because: {:} -- which "
+                "the rule read from the input (reasonsForWholeModel) did not name; a model entity does not declare "
+                "it".format("; ".join(seen))
             )
         self._vectorsOfSubdomain = not reasons
         self.domainDecomposition.vectorsOfSubdomain = self._vectorsOfSubdomain
@@ -491,10 +501,12 @@ class NEDMPI(NEDParallel):
         )
 
     @staticmethod
-    def reasonsForVectorsOfWholeModel(model: FEModel) -> list[str]:
-        """Why every process must hold vectors of the whole model -- the carried vectors and the lumped
-        operators at every degree of freedom, numbered by a DofManager of every node -- instead of its
-        subdomain's only; empty if nothing requires it.
+    def reasonsSeenInModel(model: FEModel) -> list[str]:
+        """What the model holds that requires every node and vectors of the whole model on every process --
+        the carried vectors and the lumped operators at every degree of freedom, numbered by a DofManager of
+        every node: the invariant behind
+        :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`, which decides it
+        from the input; empty if nothing requires it.
 
         What still reads, or changes, degrees of freedom outside a subdomain during a run, until each
         receives what it reads: a model whose every process holds every element (and so the states to

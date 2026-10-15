@@ -102,6 +102,9 @@ class Constraint(ConstraintBase, MeshDependent):
     #: It solves for Lagrange multipliers; see ConstraintBase.replicatedElementsReason.
     replicatedElementsReason = IMPLICIT_ONLY
 
+    #: Its Lagrange multipliers; see ConstraintBase.introducesScalarVariables.
+    introducesScalarVariables = True
+
     #: Option schema for this constraint, per OptionSchemaProvider.
     schema = EqualValueLagrangianSchema
 
