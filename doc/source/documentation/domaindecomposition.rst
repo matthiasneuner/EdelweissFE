@@ -40,12 +40,14 @@ owned degree of freedom
 local element, local node
     One that has an object in this process. A **distributed** model creates only the elements of a
     process' subdomain there (and the surface-sized auxiliary elements everywhere); under the
-    fallback rule every element is local in every process.
+    fallback rule every element is local in every process. A node is *held* where it has an object:
+    in a distributed model without a reason against it, the nodes of the process' elements and those
+    its model entities read whole (`Nodes of the subdomain`_); else every node.
 complete set
     A set all of whose members are local; reading a set that is not complete as a whole raises.
 replicated
-    Held identically in every process: the mesh, the nodes, the sets, the contact facets, the rigid
-    bodies, the degree-of-freedom numbering, and the copies of the constraints.
+    Held identically in every process: the mesh -- with its nodes and sets, as data --, the contact
+    facets, the rigid bodies, the degree-of-freedom numbering, and the copies of the constraints.
 collective
     A method every process must call, in the same order, since it communicates; its docstring
     starts with the word *Collective*. "Collective among neighbours": every process sharing an
@@ -226,9 +228,8 @@ make a distributed model possible:
   coordinates, as arrays, and the node sets as lists of labels -- and the node objects are made from
   it (:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh`), in mesh order, the order of the
   degrees of freedom. A node set of the mesh, a :class:`~edelweissfe.sets.nodeset.NodeSetOfMesh`, holds
-  the nodes of its set held in this process and fails safe like an element set. For now every process
-  holds every node, so every node set is complete; a process holding only the nodes of its subdomain
-  will need no other change of the mesh.
+  the nodes of its set held in this process and fails safe like an element set; a process holding the
+  nodes of its subdomain only holds part of most of them (`Nodes of the subdomain`_).
 * **An element set holds its local elements, and fails safe.** Each element set of the model, an
   :class:`~edelweissfe.sets.elementset.ElementSetOfMesh`, holds the elements of its set in the mesh
   that are *local* to this process (created here), and is *complete* if that is all of them
@@ -468,16 +469,17 @@ position of that degree of freedom in it
 (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.positionsOf`). The
 increment runs over the whole of its vectors (``Subdomain.dofs`` is ``slice(None)``).
 
-What a process does not hold in its vectors, it holds in its node fields, which keep every node, as
-the mesh and the node objects do for now:
+What a process does not hold in its vectors, it holds in its node fields -- those of the nodes it
+holds (`Nodes of the subdomain`_), its subdomain's and those its model entities read:
 
 * every accepted increment publishes the vectors at the rows of the subdomain's nodes;
 * an output increment, the end of a step and a topology check gather the vectors from the owners of
-  the degrees of freedom, for that synchronization only, into the node fields of the processes that
-  read the whole model (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.gatherOwnedValues`) --
+  the degrees of freedom, for that synchronization only, into the node fields -- at every node held
+  there -- of the processes that read the whole model (:meth:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface.gatherOwnedValues`) --
   so output and checkpoints are written as before, and a checkpoint is the same file;
 * an equation system built afresh -- at the start of a step, on a resume -- reads the vectors from the
-  rows of the subdomain's nodes in the node fields;
+  rows of the subdomain's nodes in the node fields; a resume reads the node fields of a checkpoint --
+  of the whole model -- at the rows of the nodes held here;
 * a Dirichlet condition and a concentrated load act on the part of their node set whose degrees of
   freedom the process integrates
   (:attr:`~edelweissfe.stepactions.base.dirichletbase.DirichletBase.constrainedRows`);
@@ -504,6 +506,52 @@ on every process because: ...``; :meth:`~edelweissfe.solvers.nonlinearexplicitdy
 a model holding every element on every process, a model modifier changing the mesh (adaptive
 refinement), a constraint searching its connectivity (contact), a rigid body, and scalar variables. Until those read only what they receive, they run as described in the
 rest of this page, with vectors of the whole model current at the subdomain degrees of freedom.
+
+Nodes of the subdomain
+~~~~~~~~~~~~~~~~~~~~~~
+
+A distributed model whose processes compute their subdomains only -- no contact search, no adaptive
+refinement, no rigid body: the reasons of
+:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToHoldEveryNode`, read from the input
+file, the reasons for vectors of the whole model as far as the input names them -- holds in each
+process the node objects, and the node fields, of the nodes of its subdomain only. Decided once per
+job, with the partition, before any node object exists, and reported on rank 0 (``Nodes of the
+subdomain: ...``); ``NEDMPI`` refuses a model it finds a reason for vectors of the whole model in, that
+the input rule missed. The element distribution says which nodes a process holds
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`), and
+:meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh` makes those, in mesh order:
+
+* the nodes of its elements, the auxiliary elements included;
+* the nodes a model entity reads whole in every process
+  (:meth:`~edelweissfe.models.femodel.FEModel.holdNodes`): the node set of a constraint, whose copy every
+  process holds, and the node set of a Dirichlet condition or a concentrated load -- read as a whole
+  (:meth:`~edelweissfe.models.femodel.FEModel.wholeNodeSet`), and acted on at the part the process
+  integrates, as above --, and the nodes of the elements a contact facet is cut from. These are
+  surface-sized. (A load accumulated over earlier steps lives in its step action, row by row of its
+  set; holding the whole set keeps every row where a migration may need it.)
+
+Every other node set holds the part of its set held here, and refuses to be read as a whole, like an
+element set. What reads the nodes of the whole model gathers their values from the processes computing
+them -- each process contributes the nodes of the elements it computes, which it integrates
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodesProvidingValuesHere`), and a node
+contributed by several processes holds the same bits in each:
+
+* a per-node field output gathers its result, by node, in the order of its set, to rank 0 -- or to every
+  process, where a reader there names it --, as an element field output gathers the results of its
+  elements (:class:`~edelweissfe.utils.fieldoutput.GatheredNodeFieldOutput`);
+* a restart checkpoint is written by rank 0 from the node fields of the whole model gathered for it
+  (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldsOfWholeModel`,
+  :meth:`~edelweissfe.models.femodel.FEModel.nodeFieldsFromElsewhere`), the same file as a serial run's;
+  a resume reads in every process the rows of the nodes it holds;
+* Ensight draws the nodes it holds no object of from the mesh -- labels and reference coordinates
+  (:class:`~edelweissfe.outputmanagers.ensight.NodeOfMesh`) --, and writes the gathered results;
+* the test runner and the verification tools compare the gathered node fields of the whole model.
+
+When elements move between the
+processes, the nodes follow them: a process makes the node objects of its new elements and drops
+those no element or reader needs any more, its node fields resized -- the values of the nodes it keeps
+kept -- and filled with the carried vectors when the equation system is built again
+(:meth:`~edelweissfe.models.femodel.FEModel.holdNodesOfDistribution`).
 
 Where the whole model is read
 -----------------------------
@@ -620,7 +668,11 @@ restart checkpoint                      on an increment rank 0 writes one
                                         gathered to rank 0 (``DomainDecomposition.gatherElementStatesToRoot``);
                                         rank 0 writes them in the format of a serial checkpoint
                                         (``FEModel.elementStatesFromElsewhere``) and releases them,
-                                        however the output ended
+                                        however the output ended; so, where each process holds the nodes
+                                        of its subdomain only, the node fields
+                                        (``FEModel.nodeFieldsFromElsewhere``)
+node field output over a set            with the nodes of the subdomain only: gathered by node, in set order
+(``>>perNode``)                         (``GatheredNodeFieldOutput``)
 ======================================  =================================================================
 
 Still guarded, and refused loudly on a partial model: an expression field output over an element
@@ -666,8 +718,9 @@ contact facets of its surfaces          made by every process, from the surface 
                                         :meth:`~edelweissfe.models.femodel.FEModel.wholeElementSet`, which
                                         refuses a partial set; a facet's parent face (for the
                                         surface-to-surface quadrature) is stamped on the facet itself
-node sets                               every process holds every node set (whole, for now)
-nodes, their coordinates and fields     every process holds every node (for now); the positions of the nodes a
+node sets                               every process holds every node set (whole: a contact search is a reason
+                                        to hold every node, see `Nodes of the subdomain`_)
+nodes, their coordinates and fields     every process holds every node; the positions of the nodes a
                                         search reads are current on the constraint's process before the
                                         search (below)
 rigid bodies                            made by every process (``discreteRigidBodyGenerator``), with the
@@ -938,8 +991,9 @@ Output and restart
 Only rank 0 creates output managers. A restart checkpoint is the last output of an output
 increment, written after the synchronization of that output, so rank 0's copy of the model holds
 every element and every constraint as the process computing it left it. A distributed model
-gathers the element states to rank 0 for it instead (see `Where the whole model is read`_); the
-file is the same, bit for bit, as a serial run's. That includes the solver's external work: the
+gathers the element states to rank 0 for it instead (see `Where the whole model is read`_), and,
+where each process holds the nodes of its subdomain only, the node fields (`Nodes of the
+subdomain`_); the file is the same, bit for bit, as a serial run's. That includes the solver's external work: the
 work at the prescribed degrees of freedom of each increment is the correctly rounded sum of the
 products of force and prescribed increment (:func:`math.fsum` in a serial run), which does not depend
 on the order of the terms nor on how they are split among processes. Each process keeps, increment
@@ -1112,9 +1166,11 @@ decks over 2 and 3 processes compared with them at ``--tolerance 0``, checkpoint
 Limitations
 -----------
 
-* Memory: a distributed process holds its own elements, but every process holds the whole mesh,
-  every node with its fields, and every contact facet and rigid body; and vectors of the whole model
-  wherever `Vectors of the subdomain`_ names a reason. Jobs
+* Memory: a distributed process holds its own elements, but every process holds the whole mesh and
+  every contact facet and rigid body; every node with its fields, and vectors of the whole model,
+  wherever `Vectors of the subdomain`_ and `Nodes of the subdomain`_ name a reason. Rank 0 holds the
+  values of a gathered node field output, and of the node fields of the whole model while it writes a
+  checkpoint. Jobs
   under the fallback rule hold the whole model on every process (c1_150 at 8 processes: 7.6 GB per
   process with the whole model, 2.55 GB distributed).
 * A migration rebuilds the equation system of every process, which costs about what building it
@@ -1227,10 +1283,33 @@ memory the build adds                           282 / 81 MB        267 / 31 MB
 time per increment                              0.256 / 0.240 s    0.099 / 0.076 s
 ==============================================  =================  =================
 
-What is left per process is mostly what every process holds whole: the mesh, every node object with
-its fields and node fields, and the imports. On c1_150, which keeps vectors of the whole model
+What was left per process was mostly what every process held whole then: the mesh, every node object
+with its fields and node fields, and the imports (see the next measurement). On c1_150, which keeps vectors of the whole model
 (contact, adaptive refinement), nothing changed: 2.81 s for the first build at 8x4 before and
 after.
+
+**Nodes of the subdomain, and the transformation of the ties** (`Nodes of the subdomain`_,
+`Vectors of the subdomain`_). Before and after each process held the nodes of its subdomain only, and a
+tie stopped requiring vectors of the whole model (rabbit, 50 increments, one thread per process, two
+runs each, alternated; the slowest process' first build, the mean time per increment): on the
+192 000-element GC3D8 block above, and on two GC3D8 blocks of 96 000 and 54 000 elements tied at a
+non-matching interface (5 043 slave degrees of freedom), which held vectors of the whole model before:
+
+==============================================  =================  =================
+                                                8 processes        32 processes
+==============================================  =================  =================
+block: peak resident memory per process (mean)  1 711 / 1 507 MB   927 / 688 MB
+block: building the equation system             1.05 / 1.05 s      0.57 / 0.53 s
+block: time per increment                       0.238 / 0.239 s    0.076 / 0.076 s
+tie: peak resident memory per process (mean)    1 549 / 1 248 MB   959 / 613 MB
+tie: building the equation system               1.60 / 1.17 s      1.83 / 0.78 s
+tie: time per increment                         0.194 / 0.187 s    0.075 / 0.060 s
+==============================================  =================  =================
+
+The node objects, their fields and node fields of the other subdomains were about 200 MB per process
+on the block (203 401 nodes); what is left per process is mostly the mesh and the imports. c1_150, which
+holds every node (contact, adaptive refinement), is unchanged: 2.82--2.84 s for the first build at 8x4
+and 0.083--0.086 s per increment before and after.
 
 **The external work** (`Output and restart`_). On a 40 000-element block with 40 000 prescribed
 degrees of freedom and an output every 1000 increments, keeping and gathering the products cost each
