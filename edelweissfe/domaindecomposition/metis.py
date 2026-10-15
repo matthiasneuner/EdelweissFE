@@ -172,6 +172,9 @@ def partitionMeshDual(
         raise ValueError("METIS partitions into at least 2 parts, not {:}.".format(nParts))
     if elementWeights.shape[0] != nElements or np.any(elementWeights < 1):
         raise ValueError("One positive integer weight per element is required.")
+    if elementWeights.sum(dtype=np.int64) > np.iinfo(np.int32).max:
+        # METIS sums the weights in its 32-bit index: the sum would wrap around, unreported.
+        raise OverflowError("METIS is bound with 32-bit indices; the element weights sum beyond them.")
     if partShares is not None:
         partShares = np.ascontiguousarray(partShares, dtype=np.float32)
         if partShares.shape != (nParts,) or np.any(partShares <= 0.0) or abs(float(partShares.sum()) - 1.0) > 1e-4:

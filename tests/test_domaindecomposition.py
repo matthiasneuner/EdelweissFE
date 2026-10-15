@@ -1141,7 +1141,7 @@ def test_no_process_is_left_without_elements():
     assert counts.shape == (8,) and counts.min() > 0
 
 
-def test_a_partition_leaving_a_process_without_elements_is_refused(monkeypatch):
+def test_a_part_left_empty_is_given_an_element_and_an_empty_part_is_refused(monkeypatch):
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition import partitioning
     from edelweissfe.domaindecomposition.communicator import Communicator
@@ -1150,11 +1150,53 @@ def test_a_partition_leaving_a_process_without_elements_is_refused(monkeypatch):
     mesh = Mesh()
     for number in range(1, 5):
         mesh.addElement(number, "CPE4", "edelweiss", [number, number + 1, number + 6, number + 5])
-    # METIS reports success with an empty part: the partition must not be used.
+    # METIS reports success with an empty part: the part is given an element.
     monkeypatch.setattr(partitioning, "partitionMeshDual", lambda *arguments: np.array([0, 0, 1, 1]))
+    owners = partitioning.partitionElementsOfMesh(mesh, 3, 2, Communicator(MPI.COMM_SELF), None, np.full(3, 1.0 / 3))
+    assert owners == {1: 2, 2: 0, 3: 1, 4: 1}
 
+    # Were it not, the partition must not be used.
+    monkeypatch.setattr(partitioning, "giveEveryPartAnElement", lambda *arguments: None)
     with pytest.raises(RuntimeError, match="without elements"):
         partitioning.partitionElementsOfMesh(mesh, 3, 2, Communicator(MPI.COMM_SELF), None, np.full(3, 1.0 / 3))
+
+
+def _quadGridMesh(nX: int, nY: int):
+    """A mesh of an nX x nY grid of CPE4 elements, numbered from 1 row by row."""
+
+    from edelweissfe.models.mesh import Mesh
+
+    mesh = Mesh()
+    for j in range(nY):
+        for i in range(nX):
+            a = j * (nX + 1) + i + 1
+            mesh.addElement(j * nX + i + 1, "CPE4", "edelweiss", [a, a + 1, a + nX + 2, a + nX + 1])
+    return mesh
+
+
+@pytest.mark.parametrize("shares", [None, np.array([0.2502, 0.2502, 0.2495, 0.2501])])
+@pytest.mark.parametrize(
+    "outliers",
+    [
+        # A process descheduled while it timed one element: that element alone measured 1e5 times the
+        # others, more than the weight of all others together (METIS left three parts empty).
+        {37: 1e5},
+        # Measured costs whose integer weights sum beyond METIS' 32-bit index.
+        {number: 1e6 for number in range(1, 128, 4)},
+    ],
+)
+def test_a_partition_by_measured_costs_leaves_no_process_without_elements(outliers, shares):
+    MPI = pytest.importorskip("mpi4py.MPI")
+    _metis()
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.partitioning import partitionElementsOfMesh
+
+    mesh = _quadGridMesh(16, 8)
+    measuredCosts = {number: 3.5e-6 * outliers.get(number, 1.0) for number in mesh.elements}
+
+    owners = partitionElementsOfMesh(mesh, 4, 2, Communicator(MPI.COMM_SELF), measuredCosts, shares)
+
+    assert np.bincount(list(owners.values()), minlength=4).min() > 0
 
 
 def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():

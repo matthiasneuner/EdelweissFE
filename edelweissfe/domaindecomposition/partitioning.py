@@ -56,13 +56,18 @@ from edelweissfe.models.mesh import ElementTypeInfo, Mesh, MeshElement
 #: (:func:`elementSharesBesideConstraints`). METIS bisects recursively, and a part of a much smaller
 #: share than the others comes out empty -- on a 64 x 64 grid in 32 parts already at a tenth of an
 #: equal share --, while METIS still reports success; at half an equal share every part kept a
-#: quarter of an equal part's elements in every test. A process without elements is never intended.
+#: quarter of an equal part's elements in every test. That no process is left without elements does
+#: not rest on it: :func:`giveEveryPartAnElement` guarantees that.
 MINIMUM_SHARE_OF_AN_EQUAL_SHARE = 0.5
 
 #: The fewest elements per process for which the elements are partitioned into unequal shares at all
 #: (:func:`elementSharesBesideConstraints`): at 8 elements per part, half an equal share still kept 2
-#: elements in every test; with fewer, a part of a smaller share may come out empty.
+#: elements in every test; with fewer, a part of a smaller share may come out (nearly) empty.
 ELEMENTS_PER_PROCESS_FOR_SHARES = 8
+
+#: The total weight of the elements given to METIS from measured costs: METIS sums the weights in its
+#: 32-bit index, and a sum beyond it wraps around (METIS then put every element into one part).
+METIS_TOTAL_WEIGHT = 2**30
 
 #: By how much, as a fraction of an equal share, the share a part was made for and the share of the
 #: process computing it may differ when a repartition keeps elements where they were
@@ -90,7 +95,8 @@ def partitionElementsOfMesh(
     measuredCosts: dict = None,
     processShares: np.ndarray | None = None,
 ) -> dict:
-    """Assign every element of the mesh to one of ``nParts`` processes.
+    """Assign every element of the mesh to one of ``nParts`` processes; every process is given at
+    least one element wherever there are as many elements as processes (:func:`giveEveryPartAnElement`).
 
     Parameters
     ----------
@@ -144,18 +150,21 @@ def partitionElementsOfMesh(
                 max(1, domainSize),
                 processShares,
             )
+            giveEveryPartAnElement(parts, weights, nParts)
 
         communicator.Bcast(parts, root=0)
 
-        # Shares are given no smaller than MINIMUM_SHARE_OF_AN_EQUAL_SHARE so that no part is empty;
-        # checked, the same in every process, since every process holds the broadcast partition. (Equal
-        # shares of a mesh of hardly more elements than processes may leave a process without
-        # elements, as they always could.)
+        # Every part has an element by construction wherever there are as many elements as parts;
+        # checked, the same in every process, since every process holds the broadcast partition. A
+        # violation is a defect of the construction, never a partition to compute with.
         emptyParts = np.flatnonzero(np.bincount(parts, minlength=nParts) == 0)
-        if processShares is not None and emptyParts.size:
+        if len(numbers) >= nParts and emptyParts.size:
             raise RuntimeError(
                 "the partition of {:} elements into {:} parts of shares {:} left part(s) {:} without elements".format(
-                    len(numbers), nParts, np.round(processShares, 4).tolist(), emptyParts.tolist()
+                    len(numbers),
+                    nParts,
+                    "equal" if processShares is None else np.round(processShares, 4).tolist(),
+                    emptyParts.tolist(),
                 )
             )
 
@@ -165,6 +174,41 @@ def partitionElementsOfMesh(
             owners[number] = processOfAuxiliaryElement(record, owners)
     # in mesh order, as the elements are listed everywhere else
     return {number: owners[number] for number in mesh.elements}
+
+
+def giveEveryPartAnElement(parts: np.ndarray, weights: np.ndarray, nParts: int):
+    """Give every part left empty one element, in place: the lightest element of the part with the
+    most elements (the first of them where several are equally light, the part of the lowest number
+    where several have as many).
+
+    METIS does not guarantee that every part receives an element, and reports success without. It
+    leaves parts empty whenever one element weighs about as much as a part should: a measured cost
+    is a wall time, and an element whose process was descheduled while it was timed -- on a loaded
+    machine -- measures thousands of times its cost; at as much as all other elements together, METIS
+    put every element into one of four parts. The partition is only as good as its measurement, but
+    a process without elements must never result from it. Wherever there are at least as many
+    elements as parts, every part has an element afterwards.
+
+    Parameters
+    ----------
+    parts
+        The part of each element, as METIS made it; changed in place.
+    weights
+        The weight of each element, in the same order.
+    nParts
+        The number of parts.
+    """
+
+    counts = np.bincount(parts, minlength=nParts)
+    for emptyPart in np.flatnonzero(counts == 0):
+        donor = int(np.argmax(counts))
+        if counts[donor] < 2:
+            return
+        members = np.flatnonzero(parts == donor)
+        moved = members[np.argmin(weights[members])]
+        parts[moved] = emptyPart
+        counts[donor] -= 1
+        counts[emptyPart] += 1
 
 
 def processOfAuxiliaryElement(record: MeshElement, owners: dict) -> int:
@@ -321,7 +365,9 @@ def elementSharesBesideConstraints(
 
 
 def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.ndarray:
-    """Integer METIS weights from measured element costs, 1000 per median measured element.
+    """Integer METIS weights from measured element costs, 1000 per median measured element -- or
+    fewer, so that the weights of all elements together fit into METIS' 32-bit index
+    (:data:`METIS_TOTAL_WEIGHT`).
 
     Parameters
     ----------
@@ -348,13 +394,15 @@ def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.
     )
     unit = np.median(measured) / 1000.0
 
-    weights = np.empty(len(numbers), dtype=np.int64)
+    costs = np.empty(len(numbers))
     for position, (number, typeInfo) in enumerate(zip(numbers, typeInfos)):
         cost = measuredCosts.get(number, 0.0)
         if cost <= 0.0:
             cost = costPerDof * typeInfo.nDof if typeInfo.hasKernels else unit
-        weights[position] = max(1, int(round(cost / unit)))
-    return weights
+        costs[position] = cost
+    # Each weight is rounded up by at most 1: their sum stays below the total weight METIS can count.
+    unit = max(unit, costs.sum() / (METIS_TOTAL_WEIGHT - len(numbers)))
+    return np.maximum(1, np.rint(costs / unit)).astype(np.int64)
 
 
 def assignConstraints(constraints: dict, nParts: int) -> dict:

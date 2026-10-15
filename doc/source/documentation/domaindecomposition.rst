@@ -666,10 +666,17 @@ of them that makes it as busy as the others with its constraints
 (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`, METIS' target
 part weights): the process evaluating a large contact computes correspondingly fewer elements --
 but never less than half an equal share, since METIS leaves a part of a much smaller share empty while
-reporting success; a mesh of fewer than 8 elements per process keeps equal shares, and a partition
-by shares leaving a process without elements is refused, loudly
+reporting success; a mesh of fewer than 8 elements per process keeps equal shares
 (:data:`~edelweissfe.domaindecomposition.partitioning.MINIMUM_SHARE_OF_AN_EQUAL_SHARE`,
-:data:`~edelweissfe.domaindecomposition.partitioning.ELEMENTS_PER_PROCESS_FOR_SHARES`). That
+:data:`~edelweissfe.domaindecomposition.partitioning.ELEMENTS_PER_PROCESS_FOR_SHARES`). METIS also
+empties parts when a single element weighs about as much as a part should -- and a measured kernel
+time is a wall time: on a loaded machine, an element whose process was descheduled while it was
+timed measures thousands of times its cost. A part METIS leaves empty is therefore given the lightest
+element of the part with the most elements
+(:func:`~edelweissfe.domaindecomposition.partitioning.giveEveryPartAnElement`), so that every
+process has elements by construction wherever there are as many elements as processes; a partition
+that still leaves one without is a defect, refused loudly. The measured weights are scaled so that
+their sum fits into METIS' 32-bit index, beyond which it would wrap around unreported. That
 helps only because the constraints are evaluated *with* the elements -- right after them, inside the
 same agreement on failures, before the forces are exchanged at the interface
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.assembleInternalForces`) --, while
