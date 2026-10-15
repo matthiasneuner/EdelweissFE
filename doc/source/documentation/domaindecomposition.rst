@@ -1302,12 +1302,12 @@ non-matching interface (5 043 slave degrees of freedom), which held vectors of t
 ==============================================  =================  =================
                                                 8 processes        32 processes
 ==============================================  =================  =================
-block: peak resident memory per process (mean)  1 711 / 1 507 MB   927 / 688 MB
-block: building the equation system             1.05 / 1.05 s      0.57 / 0.53 s
+block: peak resident memory per process (mean)  1 711 / 1 499 MB   926 / 685 MB
+block: building the equation system             1.05 / 1.03 s      0.56 / 0.52 s
 block: time per increment                       0.238 / 0.239 s    0.076 / 0.076 s
-tie: peak resident memory per process (mean)    1 549 / 1 248 MB   959 / 613 MB
-tie: building the equation system               1.60 / 1.17 s      1.83 / 0.78 s
-tie: time per increment                         0.194 / 0.187 s    0.075 / 0.060 s
+tie: peak resident memory per process (mean)    1 547 / 1 241 MB   960 / 599 MB
+tie: building the equation system               1.60 / 1.10 s      1.84 / 0.68 s
+tie: time per increment                         0.195 / 0.184 s    0.075 / 0.060 s
 ==============================================  =================  =================
 
 The node objects, their fields and node fields of the other subdomains were about 200 MB per process
