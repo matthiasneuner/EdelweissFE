@@ -260,7 +260,11 @@ force ``P`` -- are listed once, by the node field entry each is published into
 (:attr:`~edelweissfe.solvers.nonlinearexplicitdynamic.ExplicitSystem.carriedEntries`). Every override
 above that publishes, synchronizes, completes, carries over or takes back the carried vectors
 iterates that list, so that a vector added to it -- an acceleration, say -- is treated as these
-three everywhere, rather than published only where it was remembered.
+three everywhere, rather than published only where it was remembered. A refinement during the run
+carries the entries it declares onto the nodes it creates
+(:attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.nodeFieldEntriesOfNewNodes`);
+a carried vector it does not carry, and the solver does not restart after a topology change itself
+(the net force), is refused at the start of the step rather than started from zero at new nodes.
 
 Each process evaluates the kernels of its own elements. At an interior degree of freedom of its
 subdomain that is every contribution there is. At an interface degree of freedom the contributions

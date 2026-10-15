@@ -283,6 +283,9 @@ class ModelModifier(ModelModifierBase):
     #: see the module documentation and ModelModifierBase.replicatedElementsReason.
     replicatedElementsReason = None
 
+    #: See ModelModifierBase.nodeFieldEntriesOfNewNodes.
+    nodeFieldEntriesOfNewNodes = WARM_STARTED_NODE_FIELD_ENTRIES
+
     #: Whether the step-start markers are still to be evaluated: they act on the first decision only.
     checkpointedState = {"_isFirstCall": bool}
 

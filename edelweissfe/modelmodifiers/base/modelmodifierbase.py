@@ -78,6 +78,13 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     #: with a safe default -- see :mod:`~edelweissfe.models.elementdistribution`.
     replicatedElementsReason: str | None = CHANGES_THE_MESH_READING_ELEMENT_OBJECTS
 
+    #: The node field entries this modifier carries onto the nodes it creates -- interpolated there
+    #: from what the nodes it refines hold --, or None if it creates no nodes. A solver that carries
+    #: an entry from one increment to the next requires every modifier creating nodes to carry it, or
+    #: restarts the entry itself after a topology change; it refuses to start otherwise, so that a new
+    #: carried entry cannot silently start from zero on a refined mesh.
+    nodeFieldEntriesOfNewNodes: tuple[str, ...] | None = None
+
     @property
     def actsOnlyAtSimulationStart(self) -> bool:
         """Whether every topology change this modifier can plan happens on the very first topology

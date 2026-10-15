@@ -973,7 +973,7 @@ class NEDMPI(NEDParallel):
             The model tree.
         """
 
-        outside = np.ones(self._U.shape[0], dtype=bool)
+        outside = np.ones(self._system.U.shape[0], dtype=bool)
         outside[self.partition.dofs] = False
         for vector in self._system.carried.values():
             vector.asPlainArray()[outside] = np.nan
@@ -1088,7 +1088,7 @@ class NEDMPI(NEDParallel):
 
         return {
             "lumped mass": np.array(self._lumpedMass),
-            "inverse lumped mass": np.array(self._Minv),
+            "inverse lumped mass": np.array(self._system.Minv),
             "unfolded lumped mass": np.array(self._rawLumpedMass),
             "damping rate": np.array(self._dampingRate),
         }
@@ -1145,7 +1145,7 @@ class NEDMPI(NEDParallel):
         """
 
         carried = self._system.plainCopyOfCarried()
-        self._system = self._Minv = self._U = self._dU = self._V = self._P = None
+        self._system = None
         self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
         self._secondOrderMask = self._halfDampingRate = None
         self._reusableOperators = None
@@ -1355,8 +1355,8 @@ class NEDMPI(NEDParallel):
         with performancetiming.timeit("positions for searches"):
             searched = self._solutionReadBySearches
             # the solution only, of the carried vectors: what a search reads
-            searched.received.receive([self._U])
-            self._publishIntoNodeFields(searched.slots, {"U": self._U})
+            searched.received.receive([self._system.U])
+            self._publishIntoNodeFields(searched.slots, {"U": self._system.U})
 
     def _planSolutionReadBySearches(self, model: FEModel):
         """Plan what the periodic contact searches of this process read: the degrees of freedom, at

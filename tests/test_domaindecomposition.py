@@ -1250,6 +1250,33 @@ print("PROCESS", rank, "SAME" if not differences else differences, flush=True)
 """
 
 
+def test_a_carried_vector_a_refinement_would_not_carry_is_refused(monkeypatch):
+    # A refinement interpolates the entries it knows onto the nodes it creates; a carried vector it does
+    # not know, and the solver does not restart itself, would start from zero there -- refused instead.
+    from types import SimpleNamespace
+
+    from edelweissfe.modelmodifiers.adaptivity.hadaptivity import (
+        ModelModifier as HAdaptivity,
+    )
+    from edelweissfe.solvers.nonlinearexplicitdynamic import NED, ExplicitSystem
+
+    refinement = SimpleNamespace(nodeFieldEntriesOfNewNodes=HAdaptivity.nodeFieldEntriesOfNewNodes)
+    creatingNoNodes = SimpleNamespace(nodeFieldEntriesOfNewNodes=None)
+    NED.requireCarriedOntoNewNodes([refinement, creatingNoNodes])
+
+    monkeypatch.setattr(ExplicitSystem, "carriedEntries", ExplicitSystem.carriedEntries + ("B",))
+    with pytest.raises(ValueError, match=r"without carrying the vector\(s\) \['B'\]"):
+        NED.requireCarriedOntoNewNodes([refinement])
+    NED.requireCarriedOntoNewNodes([creatingNoNodes])
+    # restarted by the solver itself after a topology change, it need not be carried
+    monkeypatch.setattr(
+        ExplicitSystem,
+        "entriesRestartedAfterTopologyChange",
+        ExplicitSystem.entriesRestartedAfterTopologyChange + ("B",),
+    )
+    NED.requireCarriedOntoNewNodes([refinement])
+
+
 def test_a_vector_added_to_the_carried_vectors_reaches_every_path(tmp_path):
     # The carried vectors are listed once (ExplicitSystem.carriedEntries); every path iterates that
     # list. A vector enumerated by hand somewhere would be published only where that path ran, and the

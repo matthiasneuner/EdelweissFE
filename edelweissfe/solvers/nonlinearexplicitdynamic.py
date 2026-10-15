@@ -336,6 +336,12 @@ class ExplicitSystem:
     #: so that a vector added here reaches every one of them.
     carriedEntries: ClassVar[tuple[str, ...]] = ("U", "V", "P")
 
+    #: Those of :attr:`carriedEntries` an explicit solver starts afresh, at zero, after a topology
+    #: change, rather than carrying them onto the new nodes: the net force (see
+    #: :meth:`NED.prepareIncrement`). Every other carried entry must be carried onto the nodes a
+    #: model modifier creates (:meth:`NED.requireCarriedOntoNewNodes`).
+    entriesRestartedAfterTopologyChange: ClassVar[tuple[str, ...]] = ("P",)
+
     Minv: DofVector | None
     dU: DofVector | None
     carried: dict[str, DofVector]
@@ -625,6 +631,7 @@ class NED(NonlinearSolverBase):
             for modifier in model.modelModifiers.values()
             if modifier.initiatesTopologyChanges and not modifier.actsOnlyAtSimulationStart
         ]
+        self.requireCarriedOntoNewNodes(self._liveTopologyModifiers)
 
         # Step actions before the equation system, matching NIST: nothing they do depends on it.
         self.applyStepActionsAtStepStart(model, step)
@@ -673,7 +680,8 @@ class NED(NonlinearSolverBase):
         if not self.topologyCheckDueAfter(self.prevTimeStep):
             return
 
-        theSystem, V = self._system, self._V
+        theSystem = self._system
+        V = theSystem.V
         lumpedTotalsBefore = self._perFieldLumpedTotals()
         momentumBefore = self.secondOrderMomentum(self._rawLumpedMass, V, model)
         kineticBefore = 0.5 * float(
@@ -691,7 +699,7 @@ class NED(NonlinearSolverBase):
             self._buildSystem(self.buildEquationSystem(model, step, previous=None if meshChanged else theSystem))
             theSystem = self._system
 
-        V, P = self._V, self._P
+        V = theSystem.V
 
         if meshChanged:
             # The net force is deliberately NOT re-evaluated on the new mesh. It
@@ -702,7 +710,8 @@ class NED(NonlinearSolverBase):
             # velocity update: an O(dT) error confined to the increment following an
             # event, after which it is computed normally. A bounded known error is
             # preferable to an unbounded unknown one.
-            P[:] = 0.0
+            for entry in ExplicitSystem.entriesRestartedAfterTopologyChange:
+                theSystem.carried[entry][:] = 0.0
             self.publishNodeFields(model, theSystem.carried)
 
             self.reportTopologyChangeConservation(lumpedTotalsBefore, momentumBefore, kineticBefore, V, model)
@@ -744,8 +753,42 @@ class NED(NonlinearSolverBase):
             and timeStep.number % topologyCheckFrequency == 0
         )
 
+    @staticmethod
+    def requireCarriedOntoNewNodes(modifiers: list):
+        """Refuse model modifiers that create nodes during the analysis without carrying every carried
+        vector onto them that this solver does not restart itself after a topology change
+        (:attr:`ExplicitSystem.entriesRestartedAfterTopologyChange`): such an entry would silently start
+        from zero at the new nodes.
+
+        Parameters
+        ----------
+        modifiers
+            The model modifiers acting during the analysis.
+
+        Raises
+        ------
+        ValueError
+            If a modifier does not carry an entry it must.
+        """
+
+        for modifier in modifiers:
+            carriedOnto = modifier.nodeFieldEntriesOfNewNodes
+            if carriedOnto is None:
+                continue
+            lost = [
+                entry
+                for entry in ExplicitSystem.carriedEntries
+                if entry not in carriedOnto and entry not in ExplicitSystem.entriesRestartedAfterTopologyChange
+            ]
+            if lost:
+                raise ValueError(
+                    "The model modifier {:} creates nodes without carrying the vector(s) {:} this solver carries "
+                    "from one increment to the next onto them (it carries {:}); they would start from zero "
+                    "there.".format(type(modifier).__name__, lost, list(carriedOnto))
+                )
+
     def _buildSystem(self, theSystem):
-        """Adopt a (re)built equation system, and the vectors the increments work on.
+        """Adopt a (re)built equation system: the increments work on its vectors.
 
         Parameters
         ----------
@@ -754,8 +797,6 @@ class NED(NonlinearSolverBase):
         """
 
         self._system = theSystem
-        self._Minv = theSystem.Minv
-        self._U, self._dU, self._V, self._P = theSystem.U, theSystem.dU, theSystem.V, theSystem.P
 
     def isOutputIncrement(self, timeStep: TimeStep) -> bool:
         """Only every ``output-frequency``-th increment: an explicit run has millions.
@@ -794,8 +835,8 @@ class NED(NonlinearSolverBase):
 
         contactUpdateFrequency = self.options["contact-update-frequency"]
         topologyCheckFrequency = self.options["topology-check-frequency"]
-        theSystem, Minv = self._system, self._Minv
-        U, dU, V, P = self._U, self._dU, self._V, self._P
+        theSystem = self._system
+        Minv, U, dU, V, P = theSystem.Minv, theSystem.U, theSystem.dU, theSystem.V, theSystem.P
 
         # only print for increments matching the configured output-frequency
         if timeStep.number % self.options["output-frequency"] == 0:
@@ -847,8 +888,8 @@ class NED(NonlinearSolverBase):
             if connectivityChanged:
                 self.journal.message("Constraint connectivity changed", self.identification, 2)
                 self._buildSystem(self.buildEquationSystem(model, step, previous=theSystem))
-                theSystem, Minv = self._system, self._Minv
-                U, dU, V, P = self._U, self._dU, self._V, self._P
+                theSystem = self._system
+                Minv, U, dU, V, P = theSystem.Minv, theSystem.U, theSystem.dU, theSystem.V, theSystem.P
 
         dU[:] = 0.0
         try:
@@ -886,7 +927,7 @@ class NED(NonlinearSolverBase):
                 "model looked at, not a smaller step.".format(timeStep.number, e)
             ) from e
 
-        self._U, self._V, self._P = U, V, P
+        # The increment updated the vectors of the system in place; nothing to adopt.
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Commit the increment to the model; see
