@@ -45,12 +45,23 @@ raises there --, the agreement that closes the context reports it as a failure o
 Setting up the model cannot be split so: the processes communicate in the middle of it -- the
 partition of the mesh is broadcast before the elements are made. Its agreement
 (:meth:`Communicator.allRanksFailTogetherWhileCommunicating`) lets the processes communicate, and
-every process first agrees, at each collective operation, that no process has failed so far: a
-process that failed meets the others there with its failure, at the agreement that closes its
-context, instead of leaving them waiting.
+every process first agrees, at each collective operation, that no process has failed so far. That
+holds as long as a process that failed does not communicate any more on its way out of the context:
+it then meets the others, waiting at their next operation, with its failure, at the agreement that
+closes its context. So a process does not communicate inside that context while it handles an
+exception -- in an ``except`` clause, a ``finally`` clause or an ``__exit__`` during unwinding --:
+the communication raises instead, without communicating, and the agreement reports it as a failure.
+A handler that recovers from an exception and then communicates counts as a failure there, too.
+
+The ``mpi4py`` communicator itself is private to this class, so that every operation passes these
+checks.
 """
 
+import builtins
+import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import cache
 
 import numpy as np
 from mpi4py import MPI
@@ -58,6 +69,7 @@ from mpi4py import MPI
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.mpienvironment import (
     ErrorOnAllRanks,
+    RaisedOnAllRanks,
     StepFailedOnAllRanks,
 )
 from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
@@ -87,7 +99,7 @@ class Communicator:
 
     def __init__(self, mpiCommunicator):
         #: The ``mpi4py`` communicator every operation is forwarded to.
-        self.mpiCommunicator = mpiCommunicator
+        self._mpiCommunicator = mpiCommunicator
         #: What is done in the open context without communication, or None if there is none.
         self._operationWithoutCommunication = None
         #: What is done in the open agreement in which the processes communicate, or None if there is
@@ -96,6 +108,8 @@ class Communicator:
         #: The outcome the processes agreed on inside that agreement, once this process learned of a
         #: failure there; None before.
         self._failureAgreedOn = None
+        #: The exception being handled where that agreement was entered, if any: not one handled inside.
+        self._exceptionHandledOutside = None
 
     @contextmanager
     def withoutCommunication(self, operation: str):
@@ -133,8 +147,9 @@ class Communicator:
         Raises
         ------
         RuntimeError
-            Inside :meth:`withoutCommunication`; and for an operation not every process takes part in,
-            inside :meth:`allRanksFailTogetherWhileCommunicating`.
+            Inside :meth:`withoutCommunication`; and, inside
+            :meth:`allRanksFailTogetherWhileCommunicating`, for an operation not every process takes
+            part in, or while this process handles an exception raised inside.
         _FailedInAnotherProcess
             Inside :meth:`allRanksFailTogetherWhileCommunicating`, if a process has failed.
         """
@@ -152,6 +167,18 @@ class Communicator:
         if self._failureAgreedOn is not None:
             # this process already learned of the failure, and leaves the context without communicating
             raise _FailedInAnotherProcess(self._failureAgreedOn)
+        handled = sys.exception()
+        if handled is not None and handled is not self._exceptionHandledOutside:
+            # A process that failed communicates on its way out -- in an except or finally clause, an
+            # __exit__ --, while the others are at their next operation: agreeing here, it would tell
+            # them that nothing failed, and the operations would not match. It raises instead.
+            raise RuntimeError(
+                "{:} was called while {:}, during the handling of {:}: {:} -- a process communicates "
+                "there only while no exception is being handled, since one that failed would meet the "
+                "others in an operation they never reach.".format(
+                    communication, self._agreementWhileCommunicating.lower(), type(handled).__name__, handled
+                )
+            )
         if not collective:
             raise RuntimeError(
                 "{:} was called while {:} -- a step in which the processes agree on failures before every "
@@ -175,7 +202,7 @@ class Communicator:
             The rank.
         """
 
-        return self.mpiCommunicator.Get_rank()
+        return self._mpiCommunicator.Get_rank()
 
     def Get_size(self) -> int:
         """The number of processes.
@@ -186,7 +213,7 @@ class Communicator:
             The number of processes.
         """
 
-        return self.mpiCommunicator.Get_size()
+        return self._mpiCommunicator.Get_size()
 
     def Abort(self, errorcode: int = 1):
         """Abort every process; allowed anywhere.
@@ -197,7 +224,7 @@ class Communicator:
             The exit code.
         """
 
-        self.mpiCommunicator.Abort(errorcode)
+        self._mpiCommunicator.Abort(errorcode)
 
     # --- Collective operations ----------------------------------------------------------------------
 
@@ -205,7 +232,7 @@ class Communicator:
         """Wait for every process; see ``mpi4py``. Collective."""
 
         self._requireCommunicationAllowed("Barrier")
-        self.mpiCommunicator.Barrier()
+        self._mpiCommunicator.Barrier()
 
     def bcast(self, obj, root: int = 0):
         """Broadcast a Python object from ``root``; see ``mpi4py``. Collective.
@@ -224,7 +251,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("bcast")
-        return self.mpiCommunicator.bcast(obj, root=root)
+        return self._mpiCommunicator.bcast(obj, root=root)
 
     def Bcast(self, buffer, root: int = 0):
         """Broadcast a buffer from ``root``, in place; see ``mpi4py``. Collective.
@@ -238,7 +265,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Bcast")
-        self.mpiCommunicator.Bcast(buffer, root=root)
+        self._mpiCommunicator.Bcast(buffer, root=root)
 
     def gather(self, obj, root: int = 0):
         """Gather a Python object of every process to ``root``; see ``mpi4py``. Collective.
@@ -257,7 +284,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("gather")
-        return self.mpiCommunicator.gather(obj, root=root)
+        return self._mpiCommunicator.gather(obj, root=root)
 
     def allgather(self, obj) -> list:
         """Gather a Python object of every process to every process; see ``mpi4py``. Collective.
@@ -274,7 +301,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("allgather")
-        return self.mpiCommunicator.allgather(obj)
+        return self._mpiCommunicator.allgather(obj)
 
     def Allgatherv(self, sendbuf, recvbuf):
         """Gather buffers of varying size of every process to every process; see ``mpi4py``.
@@ -289,7 +316,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Allgatherv")
-        self.mpiCommunicator.Allgatherv(sendbuf, recvbuf)
+        self._mpiCommunicator.Allgatherv(sendbuf, recvbuf)
 
     def Gatherv(self, sendbuf, recvbuf, root: int = 0):
         """Gather buffers of varying size of every process to ``root``; see ``mpi4py``. Collective.
@@ -305,7 +332,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Gatherv")
-        self.mpiCommunicator.Gatherv(sendbuf, recvbuf, root=root)
+        self._mpiCommunicator.Gatherv(sendbuf, recvbuf, root=root)
 
     def allreduce(self, obj, op=MPI.SUM):
         """Reduce a Python object over every process; see ``mpi4py``. Collective.
@@ -324,7 +351,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("allreduce")
-        return self.mpiCommunicator.allreduce(obj, op=op)
+        return self._mpiCommunicator.allreduce(obj, op=op)
 
     def Allreduce(self, sendbuf, recvbuf, op=MPI.SUM):
         """Reduce a buffer over every process; see ``mpi4py``. Collective.
@@ -340,7 +367,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Allreduce")
-        self.mpiCommunicator.Allreduce(sendbuf, recvbuf, op=op)
+        self._mpiCommunicator.Allreduce(sendbuf, recvbuf, op=op)
 
     def alltoall(self, objects: list) -> list:
         """Send a Python object to every process, and receive one from each; see ``mpi4py``.
@@ -358,7 +385,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("alltoall")
-        return self.mpiCommunicator.alltoall(objects)
+        return self._mpiCommunicator.alltoall(objects)
 
     # --- Point-to-point operations ------------------------------------------------------------------
 
@@ -381,7 +408,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Isend", collective=False)
-        return self.mpiCommunicator.Isend(buffer, dest=dest, tag=tag)
+        return self._mpiCommunicator.Isend(buffer, dest=dest, tag=tag)
 
     def Irecv(self, buffer, source: int, tag: int):
         """Start receiving a buffer from a process; see ``mpi4py``.
@@ -402,7 +429,7 @@ class Communicator:
         """
 
         self._requireCommunicationAllowed("Irecv", collective=False)
-        return self.mpiCommunicator.Irecv(buffer, source=source, tag=tag)
+        return self._mpiCommunicator.Irecv(buffer, source=source, tag=tag)
 
     # --- Agreeing among the processes ---------------------------------------------------------------
 
@@ -515,6 +542,13 @@ class Communicator:
         None
         """
 
+        if self._agreementWhileCommunicating is not None:
+            raise RuntimeError(
+                "{:} cannot agree on failures inside another agreement ({:}).".format(
+                    operation, self._agreementWhileCommunicating.lower()
+                )
+            )
+
         failure = None
         try:
             with self.withoutCommunication(operation):
@@ -525,6 +559,7 @@ class Communicator:
         outcome = _outcomeOf(failure)
         # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
         with performancetiming.timeit("waiting for all ranks"):
+            # refused inside an enclosing context without communication, like any other operation
             self._requireCommunicationAllowed("Allreduce")
             agreed = self._agreedOutcome(outcome)
         self._raiseAgreedOutcome(operation, agreed, outcome, failure)
@@ -558,12 +593,13 @@ class Communicator:
 
         failure = None
         self._agreementWhileCommunicating = operation
+        self._exceptionHandledOutside = sys.exception()
         try:
             yield
         except (Exception, _FailedInAnotherProcess) as exception:
             failure = exception
         finally:
-            self._agreementWhileCommunicating = self._failureAgreedOn = None
+            self._agreementWhileCommunicating = self._failureAgreedOn = self._exceptionHandledOutside = None
 
         if isinstance(failure, _FailedInAnotherProcess):
             # the agreement was reached before an operation, where this process learned of the failure
@@ -588,7 +624,7 @@ class Communicator:
         """
 
         status = np.array([outcome], dtype=np.int32)
-        self.mpiCommunicator.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
+        self._mpiCommunicator.Allreduce(MPI.IN_PLACE, status, op=MPI.MAX)
         return int(status[0])
 
     def _raiseAgreedOutcome(self, operation: str, agreed: int, outcome: int, failure: Exception | None):
@@ -612,23 +648,129 @@ class Communicator:
         if agreed == _CONDITIONAL_STOP:
             raise ConditionalStop() from failure
 
-        reports = self.allgather(
-            None
-            if failure is None
-            else (
-                "{:}: {:}".format(type(failure).__name__, failure),
-                failure.cutbackSize if outcome == _CUTBACK else None,
-            )
-        )
+        reports = self.allgather(None if failure is None else _reportOf(failure, outcome))
+        failed = [report for report in reports if report is not None]
+        if (
+            failure is not None
+            and all(report.alreadyAgreed for report in failed)
+            and len({report.text for report in failed}) == 1
+        ):
+            # agreed on already, in every process that raised it: raised on as it is, not wrapped again
+            raise failure
         message = "; ".join(
-            "process {:}: {:}".format(rank, report[0]) for rank, report in enumerate(reports) if report is not None
+            "process {:}: {:}".format(rank, report.text) for rank, report in enumerate(reports) if report is not None
         )
         if agreed == _CUTBACK:
-            cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
+            cutbackSize = min(report.cutbackSize for report in failed if report.cutbackSize is not None)
             raise CutbackRequest(message, cutbackSize) from failure
         if agreed == _ERROR:
-            raise ErrorOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
+            errorTypes = {report.builtinErrorType for report in failed if report.outcome == _ERROR}
+            raise _errorOnAllRanks(errorTypes, "{:} failed in {:}".format(operation, message)) from failure
         raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
+
+
+@dataclass(frozen=True)
+class _FailureReport:
+    """What one process tells the others of its failure in an agreement.
+
+    Parameters
+    ----------
+    text
+        What went wrong, for the message.
+    outcome
+        What it means for the agreement (:func:`_outcomeOf`).
+    cutbackSize
+        The cutback size requested, for a cutback request; else None.
+    builtinErrorType
+        For an error, the name of its type if that is a built-in exception type; else None.
+    alreadyAgreed
+        Whether the failure was agreed on already, in an agreement inside this one.
+    """
+
+    text: str
+    outcome: int
+    cutbackSize: float | None
+    builtinErrorType: str | None
+    alreadyAgreed: bool
+
+
+def _reportOf(failure: Exception, outcome: int) -> _FailureReport:
+    """The report of a process' failure.
+
+    Parameters
+    ----------
+    failure
+        The exception.
+    outcome
+        What it means for the agreement.
+
+    Returns
+    -------
+    _FailureReport
+        The report.
+    """
+
+    alreadyAgreed = isinstance(failure, RaisedOnAllRanks)
+    errorType = type(failure).__name__
+    return _FailureReport(
+        text=str(failure) if alreadyAgreed else "{:}: {:}".format(errorType, failure),
+        outcome=outcome,
+        cutbackSize=failure.cutbackSize if outcome == _CUTBACK else None,
+        builtinErrorType=errorType if vars(builtins).get(errorType) is type(failure) else None,
+        alreadyAgreed=alreadyAgreed,
+    )
+
+
+def _errorOnAllRanks(errorTypes: set, message: str) -> ErrorOnAllRanks:
+    """The error every process raises: an :class:`ErrorOnAllRanks` that is also of the built-in type
+    every failing process raised, if they raised one and the same -- so that a caller catching that
+    type (a test runner skipping a test case on a ``NotImplementedError``) catches it in every process,
+    as it would the error of a serial run --; a plain :class:`ErrorOnAllRanks` otherwise. The same in
+    every process.
+
+    Parameters
+    ----------
+    errorTypes
+        The names of the built-in types of the errors raised, None for an error of another type.
+    message
+        The message.
+
+    Returns
+    -------
+    ErrorOnAllRanks
+        The error.
+    """
+
+    if len(errorTypes) == 1 and None not in errorTypes:
+        try:
+            return _errorOnAllRanksOfType(vars(builtins)[next(iter(errorTypes))])(message)
+        except TypeError:
+            # a built-in type that cannot be combined or constructed so (its layout, its arguments)
+            pass
+    return ErrorOnAllRanks(message)
+
+
+@cache
+def _errorOnAllRanksOfType(errorType: type) -> type:
+    """The class of an :class:`ErrorOnAllRanks` that is also an ``errorType``.
+
+    Parameters
+    ----------
+    errorType
+        A built-in exception type.
+
+    Returns
+    -------
+    type
+        The class.
+    """
+
+    return type(
+        "ErrorOnAllRanks",
+        (ErrorOnAllRanks, errorType),
+        # the message as given, also where the built-in type quotes it (KeyError)
+        {"__module__": ErrorOnAllRanks.__module__, "__str__": BaseException.__str__},
+    )
 
 
 def _outcomeOf(failure: Exception | None) -> int:

@@ -832,8 +832,10 @@ everywhere, with the smallest size requested; a step failure
 (:class:`~edelweissfe.utils.exceptions.StepFailed`) as a step failure; and any other exception -- an
 error, a ``KeyError`` of a programming error, an exhausted memory, which a serial run does not end as
 a failed step but with a non-zero exit status -- as an error
-(:class:`~edelweissfe.domaindecomposition.mpienvironment.ErrorOnAllRanks`), which leaves the job as
-in a serial run: uncaught, it aborts every process with a non-zero exit status, and a caller catching
+(:class:`~edelweissfe.domaindecomposition.mpienvironment.ErrorOnAllRanks`; also of the built-in type
+every failing process raised, if they raised one and the same -- a ``NotImplementedError``, say, on
+which the test runner skips a test case --, so that every process catches it as a serial run would),
+which leaves the job as in a serial run: uncaught, it aborts every process with a non-zero exit status, and a caller catching
 it catches it in every process. A failure anywhere else aborts all processes, and so does an
 interrupt (``Ctrl+C``) of any one of them: the others would otherwise wait forever for the one that stopped
 (:mod:`~edelweissfe.domaindecomposition.mpienvironment`). The driver finishes a job normally after a
@@ -867,7 +869,12 @@ partition is broadcast before the elements are made, the field outputs gather th
 of their sets --, so this agreement lets the processes communicate: before every collective
 operation inside it, they first agree that no process has failed so far. A process that failed is not
 at that operation but at the end of the setup, where it agrees on its failure; the others learn of it
-there instead of waiting for it in the operation.
+there instead of waiting for it in the operation. That requires that a process that failed does not
+communicate on its way out -- in an ``except`` or ``finally`` clause, an ``__exit__`` --: there it
+would agree that nothing failed, and meet the others in an operation they never reach. Inside the
+setup, a communication while an exception is being handled therefore raises, without communicating,
+and is reported as the failure; a handler that recovers from an exception and then communicates counts
+as a failure there, too.
 
 Nothing inside an agreement of a step may communicate: a process that failed before a collective operation
 would skip it, and leave the others waiting in it. That is enforced: the communicator

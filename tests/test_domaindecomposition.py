@@ -660,6 +660,55 @@ def test_the_processes_may_communicate_where_they_agree_on_failures_while_settin
     assert communicator.allgather(2.0) == [2.0]
 
 
+def test_an_error_agreed_on_keeps_a_built_in_type_and_is_not_wrapped_again():
+    MPI = pytest.importorskip("mpi4py.MPI")
+    from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.mpienvironment import ErrorOnAllRanks
+
+    communicator = Communicator(MPI.COMM_SELF)
+
+    # an error of a built-in type is agreed on as that type too, with the message as given
+    with pytest.raises(ModuleNotFoundError) as caught:
+        with communicator.allRanksFailTogether("testing"):
+            raise ModuleNotFoundError("no module")
+    assert isinstance(caught.value, ErrorOnAllRanks)
+    with pytest.raises(KeyError) as caught:
+        with communicator.allRanksFailTogether("testing"):
+            raise KeyError("no key")
+    assert str(caught.value) == "testing failed in process 0: KeyError: 'no key'"
+
+    # an error of another type is a plain ErrorOnAllRanks
+    class _Own(Exception):
+        pass
+
+    with pytest.raises(ErrorOnAllRanks) as caught:
+        with communicator.allRanksFailTogether("testing"):
+            raise _Own("own")
+    assert type(caught.value) is ErrorOnAllRanks
+
+    # agreed on already, it is raised on unchanged
+    agreed = ErrorOnAllRanks("inner failed in process 0: KeyError: 'x'")
+    with pytest.raises(ErrorOnAllRanks) as caught:
+        with communicator.allRanksFailTogether("outer"):
+            raise agreed
+    assert caught.value is agreed
+
+    # no process communicates inside the agreement of the setup while it handles an exception: it
+    # would agree that nothing failed
+    with pytest.raises(ErrorOnAllRanks, match="Barrier was called while setting up, during the handling of KeyError"):
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            try:
+                raise KeyError("x")
+            finally:
+                communicator.Barrier()
+    # but where it was entered while handling one, that one does not count
+    try:
+        raise ValueError("handled outside")
+    except ValueError:
+        with communicator.allRanksFailTogetherWhileCommunicating("Setting up"):
+            assert communicator.allgather(1.0) == [1.0]
+
+
 #: Runs each deck in the directories given twice -- as it is, and with every entry of the net force
 #: vector at a degree of freedom not integrated in the process set to NaN after each assembly -- and
 #: prints, per process and deck, whether the final solution, net force and velocity are the same bits.
@@ -962,6 +1011,72 @@ def test_setting_up_the_model_failing_in_one_process_fails_in_every_process(tmp_
         failingRank, failure
     )
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
+
+
+#: Setting up the model fails in process 1, which communicates on its way out -- in a finally clause --
+#: while the others wait in their next operation (the gather of the element results).
+_SETUP_FAILING_AND_COMMUNICATING_PATCH = """
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.models.femodel import FEModel
+
+prepareYourself = FEModel.prepareYourself
+
+
+def failingInProcessOne(self, journal):
+    if rank == 1:
+        try:
+            raise RuntimeError("preparing the model failed in process 1")
+        finally:
+            worldCommunicator().Barrier()
+    return prepareYourself(self, journal)
+
+
+FEModel.prepareYourself = failingInProcessOne
+"""
+
+
+def test_a_process_failing_while_setting_up_does_not_communicate_on_its_way_out(tmp_path):
+    # Agreeing before the barrier that nothing failed, process 1 would meet the others' gather with a
+    # barrier: a hang (the timeout). It raises instead, and every process raises that.
+    (tmp_path / "test.inp").write_text(_FIELD_OUTPUT_DECK)
+    (tmp_path / "run.py").write_text(
+        _CATCHING_IN_EVERY_PROCESS_SCRIPT.replace("PATCH", _SETUP_FAILING_AND_COMMUNICATING_PATCH)
+    )
+    output, _ = _runUnderMPI(tmp_path, timeout=60)
+    if output is None:
+        pytest.fail("a process communicating on its way out of a failed setup left the others waiting")
+
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    expected = (
+        "ErrorOnAllRanks: Setting up the model failed in process 1: RuntimeError: Barrier was called while setting "
+        "up the model, during the handling of RuntimeError: preparing the model failed in process 1"
+    )
+    assert len(reports) == 3 and all(
+        report.startswith("PROCESS {:} {:}".format(rank, expected)) for rank, report in enumerate(reports)
+    ), output
+
+
+#: An element kernel raising NotImplementedError in process 1 -- what a missing optional module raises.
+_NOT_IMPLEMENTED_PATCH = _ELEMENT_ERROR_PATCH.replace(
+    'KeyError("a programming error")', 'NotImplementedError("not built")'
+)
+
+
+def test_an_error_on_all_ranks_is_of_the_type_every_failing_process_raised(tmp_path):
+    # The test runner skips a test case on a NotImplementedError: under MPI every process must see that
+    # type, not only the one that raised it.
+    (tmp_path / "test.inp").write_text(_FAILING_LOAD_DECK)
+    (tmp_path / "run.py").write_text(
+        _CATCHING_IN_EVERY_PROCESS_SCRIPT.replace("PATCH", _NOT_IMPLEMENTED_PATCH).replace(
+            'outcome = "{:}: {:}".format(type(exception).__name__, exception)',
+            'outcome = "{:} {:}".format(type(exception).__name__, isinstance(exception, NotImplementedError))',
+        )
+    )
+    output, _ = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("an error in one process left the others waiting")
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert reports == ["PROCESS {:} ErrorOnAllRanks True".format(rank) for rank in range(3)], output
 
 
 #: A step failing in process 1 alone, outside any step the processes agree on: on increment 3, which

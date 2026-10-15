@@ -92,7 +92,9 @@ class ErrorOnAllRanks(RaisedOnAllRanks):
     and the process exits with a non-zero status. So does every process here: the driver raises it
     on, and, uncaught, it aborts all processes with a non-zero status
     (:func:`abortAllProcessesOnUncaughtException`). A caller catching it -- the test runner, which
-    goes on to the next test case -- catches it in every process, so that none is left waiting."""
+    goes on to the next test case -- catches it in every process, so that none is left waiting. If every
+    failing process raised the same built-in exception type, the error is of that type too, so that
+    every process catches it where a serial run would."""
 
 
 @cache
