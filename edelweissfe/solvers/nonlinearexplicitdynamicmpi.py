@@ -345,6 +345,8 @@ class NEDMPI(NEDParallel):
         #: :meth:`_measuredLoad`.
         self._elementLoopTime = 0.0
         self._constraintEvaluationTime = 0.0
+        #: The same for each constraint it evaluates, by name.
+        self._constraintEvaluationTimes = {}
         #: The forces of the constraints of the subdomain, evaluated with the elements of the current
         #: increment in :meth:`assembleInternalForces` and not yet returned by
         #: :meth:`evaluateConstraintForces`, by name; None otherwise.
@@ -583,6 +585,7 @@ class NEDMPI(NEDParallel):
         self._elementCosts = None if nElements is None else np.full(nElements, np.inf)
         self._nMeasuredIncrements = 0
         self._elementLoopTime = self._constraintEvaluationTime = 0.0
+        self._constraintEvaluationTimes = {}
 
     def _loadBalanceCosts(self) -> str:
         """The ``load-balance-costs`` option, checked.
@@ -625,13 +628,14 @@ class NEDMPI(NEDParallel):
         nIncrements = self._nMeasuredIncrements
         if self._loadBalanceCosts() == "elementNumber" and self.domainDecomposition.measuresElementCosts():
             numbers = np.array(list(self._incrementPlan.elementLoop.elements.keys()), dtype=float)
-            return MeasuredLoad(numbers, nIncrements, None, float(numbers.sum()), 0.0)
+            return MeasuredLoad(numbers, nIncrements, None, float(numbers.sum()), 0.0, {})
         return MeasuredLoad(
             self._elementCosts,
             nIncrements,
             self.options["output-frequency"],
             self._elementLoopTime / max(nIncrements, 1),
             self._constraintEvaluationTime / max(nIncrements, 1),
+            {name: seconds / max(nIncrements, 1) for name, seconds in self._constraintEvaluationTimes.items()},
         )
 
     def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
@@ -701,9 +705,15 @@ class NEDMPI(NEDParallel):
                 self._incrementPlan.elementLoop, U_np, dU, P, timeStep, self._elementCosts
             )
             startOfConstraints = perf_counter()
-            self._constraintForcesOfIncrement = super().evaluateConstraintForces(
-                self.subdomain.constraints, U_np, dU, P, timeStep
-            )
+            # one at a time, as NED.evaluateConstraintForces evaluates them, each timed: the shares of
+            # the load balancing follow a constraint to whichever process evaluates it
+            forces = {}
+            for name, constraint in self.subdomain.constraints.items():
+                startOfConstraint = perf_counter()
+                forces[name] = self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
+                seconds = perf_counter() - startOfConstraint
+                self._constraintEvaluationTimes[name] = self._constraintEvaluationTimes.get(name, 0.0) + seconds
+            self._constraintForcesOfIncrement = forces
             self._elementLoopTime += startOfConstraints - startOfElements
             self._constraintEvaluationTime += perf_counter() - startOfConstraints
         self._nMeasuredIncrements += 1
@@ -1594,6 +1604,9 @@ class NEDMPI(NEDParallel):
                     "from the copies of the constraints and rigid-body surfaces every process holds; they "
                     "were not synchronized to every process since the last increment was accepted."
                 )
+            # The changed mesh has the constraints assigned afresh, possibly to other processes, which
+            # evaluate them from their copies: current, as just checked.
+            self.domainDecomposition.constraintCopiesAreSynchronized()
             self.domainDecomposition.rebalanceAfterTopologyChange(model, horizon)
         return changed
 

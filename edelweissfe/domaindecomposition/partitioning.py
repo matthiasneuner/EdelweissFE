@@ -39,15 +39,12 @@ host element (the solid element a facet lies on, whose degrees of freedom are th
 has none, by the process given part 0 of the partition (:func:`processOfAuxiliaryElement`). Their
 owner is still unique.
 
-Constraints are not partitioned: each is one object, evaluated whole by one process -- the process
-whose elements hold most of the nodes the constraint couples, or may couple after a search
-(:func:`assignConstraintsByMajority`), so that the constraint adds few degrees of freedom to its
-process' interface and sends its forces to few neighbours. The assignment is made from what every
-process holds alike, and made again only when the mesh changes, where every copy of a constraint is
-synchronized: a repartition for load balancing keeps every constraint where it is. A process
-evaluating a costly constraint is given correspondingly fewer elements instead: the elements are
-partitioned into parts of unequal shares (:func:`elementSharesBesideConstraints`), and part *p* is
-computed by process *p*.
+Constraints are not partitioned; each is evaluated whole by one process
+(:func:`assignConstraintsByMajority`). A process evaluating a costly constraint is given
+correspondingly fewer elements: the elements are partitioned into parts of unequal shares
+(:func:`elementSharesBesideConstraints`), and part *p* is computed by process *p*. When the
+assignment is made again is decided by the domain decomposition, see
+:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition._constraintOwnersOf`.
 """
 
 import numpy as np
@@ -408,60 +405,16 @@ def _measuredWeights(numbers: list, typeInfos: list, measuredCosts: dict) -> np.
     return np.maximum(1, np.rint(costs / unit)).astype(np.int64)
 
 
-def assignConstraints(constraints: dict, nParts: int) -> dict:
-    """Assign every constraint to one process, round-robin in name order.
-
-    Parameters
-    ----------
-    constraints
-        The constraints of the model, by name.
-    nParts
-        The number of processes.
-
-    Returns
-    -------
-    dict
-        The rank of every constraint, by name.
-    """
-
-    # Dealt from the last rank downwards: rank 0 already carries the degrees of freedom no element
-    # touches, and writes the output.
-    return {name: (nParts - 1 - position) % nParts for position, name in enumerate(sorted(constraints))}
-
-
-def lowestProcessAtNodes(connectivity, processOfElements: np.ndarray, nNodes: int, nProcesses: int) -> np.ndarray:
-    """The lowest-ranked process computing an element at each node of the mesh.
-
-    Parameters
-    ----------
-    connectivity
-        The connectivity of the mesh (:meth:`~edelweissfe.models.mesh.Mesh.connectivity`).
-    processOfElements
-        The process of every element, in mesh order.
-    nNodes
-        The number of nodes of the mesh.
-    nProcesses
-        The number of processes: the entry of a node no element holds.
-
-    Returns
-    -------
-    np.ndarray
-        The process per node, in mesh order.
-    """
-
-    lowest = np.full(nNodes, nProcesses, dtype=np.int64)
-    for group in connectivity.groups:
-        processes = processOfElements[group.positions]
-        for i in range(group.nodeRows.shape[1]):
-            np.minimum.at(lowest, group.nodeRows[:, i], processes)
-    return lowest
-
-
 def assignConstraintsByMajority(nodeRowsOfConstraints: dict, lowestProcessOfNodes: np.ndarray, nParts: int) -> dict:
-    """Assign every constraint to the process holding most of its nodes -- the lowest-ranked process
-    computing an element at a node holds it (:func:`lowestProcessAtNodes`) --; among processes holding
-    equally many, the lowest-ranked. A constraint none of whose nodes an element holds is dealt out as
-    :func:`assignConstraints` deals it.
+    """Assign every constraint to the process holding most of its nodes -- a node is held by the
+    lowest-ranked process whose elements touch it --, so that the constraint adds few degrees of freedom
+    to its process' interface and sends its forces to few neighbours.
+
+    One rule settles both a tie and a constraint none of whose nodes an element holds (where every
+    process holds equally many, none): among the processes holding the most, the constraints are dealt
+    out round-robin in name order, from the highest-ranked candidate down. Dealt rather than given to the
+    lowest rank, so that such constraints spread over the processes instead of all falling to rank 0,
+    which already integrates the degrees of freedom no element touches and writes the output.
 
     Parameters
     ----------
@@ -478,11 +431,11 @@ def assignConstraintsByMajority(nodeRowsOfConstraints: dict, lowestProcessOfNode
         The rank of every constraint, by name, in the order given.
     """
 
-    dealt = assignConstraints(nodeRowsOfConstraints, nParts)
+    positionInNameOrder = {name: position for position, name in enumerate(sorted(nodeRowsOfConstraints))}
     owners = {}
     for name, rows in nodeRowsOfConstraints.items():
         processes = lowestProcessOfNodes[np.asarray(rows, dtype=np.int64)]
         held = np.bincount(processes[processes < nParts], minlength=nParts)
-        # argmax: the first of the largest counts, the lowest rank among equals
-        owners[name] = int(np.argmax(held)) if held.any() else dealt[name]
+        candidates = np.flatnonzero(held == held.max())
+        owners[name] = int(candidates[(candidates.shape[0] - 1 - positionInNameOrder[name]) % candidates.shape[0]])
     return owners

@@ -2744,26 +2744,22 @@ def test_the_kinetic_energy_and_the_momentum_are_the_same_bits_on_any_number_of_
 
 
 def test_a_constraint_is_evaluated_by_the_process_holding_most_of_its_nodes():
-    from edelweissfe.domaindecomposition.partitioning import (
-        assignConstraints,
-        assignConstraintsByMajority,
-        lowestProcessAtNodes,
+    from edelweissfe.domaindecomposition.partitioning import assignConstraintsByMajority
+    from edelweissfe.domaindecomposition.subdomaininterface import (
+        ElementProcessesAtNodes,
     )
     from edelweissfe.models.mesh import ElementGroup, ElementTypeInfo, MeshConnectivity
 
     # Four two-node elements in a row, on processes 2, 1, 1, 0; node 5 belongs to no element.
     typeInfo = ElementTypeInfo([["displacement"], ["displacement"]], "bar2", 2, True)
     connectivity = MeshConnectivity(
-        np.arange(4), [ElementGroup(typeInfo, np.arange(4), np.array([[0, 1], [1, 2], [2, 3], [3, 4]]))]
+        np.arange(4), [ElementGroup(typeInfo, np.arange(4), np.array([[0, 1], [1, 2], [2, 3], [3, 4]]))], 0
     )
-    lowest = lowestProcessAtNodes(connectivity, np.array([2, 1, 1, 0]), 6, 3)
+    lowest = ElementProcessesAtNodes.ofMesh(connectivity, np.array([2, 1, 1, 0]), 6, 3).lowestProcessAtNodes()
     assert lowest.tolist() == [2, 1, 1, 0, 0, 3]
 
-    nodeRows = {"most on 1": [1, 2, 3], "tie of 1 and 2": [0, 2], "on no element": [5], "majority 0": [3, 4, 5]}
+    # In name order: "a tie of 1 and 2" (candidates 1, 2), "majority 0", "most on 1", "on no element"
+    # (candidates 0, 1, 2) -- ties and node-less constraints dealt from the highest candidate down.
+    nodeRows = {"most on 1": [1, 2, 3], "a tie of 1 and 2": [0, 2], "on no element": [5], "majority 0": [3, 4, 5]}
     owners = assignConstraintsByMajority(nodeRows, lowest, 3)
-    assert owners == {
-        "most on 1": 1,
-        "tie of 1 and 2": 1,
-        "on no element": assignConstraints(nodeRows, 3)["on no element"],
-        "majority 0": 0,
-    }
+    assert owners == {"most on 1": 1, "a tie of 1 and 2": 2, "on no element": 2, "majority 0": 0}

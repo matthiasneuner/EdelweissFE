@@ -62,7 +62,6 @@ from edelweissfe.domaindecomposition.partitioning import (
     assignConstraintsByMajority,
     elementSharesBesideConstraints,
     keepElementsWhereTheyWere,
-    lowestProcessAtNodes,
     partitionElementsOfMesh,
 )
 from edelweissfe.domaindecomposition.statesynchronization import (
@@ -72,6 +71,7 @@ from edelweissfe.domaindecomposition.statesynchronization import (
 from edelweissfe.domaindecomposition.subdomaininterface import (
     ConstraintForceExchange,
     ElementProcessesAtDofs,
+    ElementProcessesAtNodes,
     InterfaceForceAssembly,
     InterfaceLoadAssembly,
     SubdomainInterface,
@@ -111,6 +111,9 @@ class MeasuredLoad:
     constraintTime
         The time per increment it is busy evaluating its constraints, in the same unit; 0 where the
         costs are no times.
+    constraintTimes
+        The time per increment of each constraint it evaluates, by name; empty where the costs are no
+        times.
     """
 
     elementCosts: np.ndarray | None
@@ -118,6 +121,7 @@ class MeasuredLoad:
     incrementsUntilNextCheck: int | None
     elementTime: float
     constraintTime: float
+    constraintTimes: dict
 
 
 class DomainDecomposition:
@@ -154,19 +158,28 @@ class DomainDecomposition:
         #: times over the number of elements --, at the last rebalancing check that measured times;
         #: None before.
         self._meanElementCost = None
-        #: The measured time per increment of the constraints each process evaluates, by rank, at the
-        #: last rebalancing check that measured times; zeros before.
-        self._constraintCosts = np.zeros(self.nProcesses)
+        #: The measured time per increment of every constraint, by name, and of all elements together, at
+        #: the last rebalancing check that measured times; empty and None before. Kept by name, so that
+        #: the shares of the processes follow the constraints wherever they are evaluated.
+        self._constraintCostsByName = {}
+        self._elementTime = None
         #: The share of the element work each process is given beside its constraints, by rank
-        #: (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`), as
-        #: of the last rebalancing check; None for equal shares.
+        #: (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`), for the
+        #: current constraint owners; None for equal shares.
         self._processShares = None
 
-        #: The rank of every element and of every constraint, and the element keys the partition was
-        #: made for.
+        #: The rank of every element, by number and as an array in mesh order, which processes' elements
+        #: touch each node, and the mesh and its version the partition was made for (:meth:`_setPartition`).
         self._elementOwners = None
-        self._partitionedElementKeys = None
+        self._processOfElements = None
+        self._elementsAtNodes = None
+        self._partitionedMesh = None
+        #: The rank of every constraint, by name, and the mesh and its version it was assigned for.
         self._constraintOwners = None
+        self._constraintOwnersMesh = None
+        #: Whether the solver stated, since the constraints were last assigned, that every copy of every
+        #: constraint is its owner's (:meth:`constraintCopiesAreSynchronized`).
+        self._constraintCopiesSynchronized = False
 
         self._ownedConstraints = {}
 
@@ -178,9 +191,10 @@ class DomainDecomposition:
         self._interface = None
         self._stateSynchronization = None
         self._constraintForceExchange = None
-        #: The position of every element in the model, by number: the order interface forces are
-        #: summed in.
-        self._elementPositions = {}
+        #: The element numbers of the mesh, sorted, and the position in the mesh of each: the order
+        #: interface forces are summed in.
+        self._sortedElementNumbers = None
+        self._meshPositionOfSorted = None
 
         #: What the last definition was made for; a rebalance redefines from it.
         self._model = None
@@ -246,10 +260,7 @@ class DomainDecomposition:
             if topologyChanged:
                 self._checkReplicatedLayout(model, dofManager)
 
-                if self._elementOwners is None or model.mesh.elements.keys() != self._partitionedElementKeys:
-                    self._partition(model, measuredCosts=None, byMeasuredCosts=False)
-
-                self._constraintOwners = self._constraintOwnersOf(model)
+                self._constraintOwnersOf(model)
 
                 self._adoptOwnership(model)
 
@@ -302,33 +313,74 @@ class DomainDecomposition:
                     owners = keepElementsWhereTheyWere(
                         owners, self._elementOwners, self.nProcesses, self._processShares
                     )
-            self._elementOwners = owners
+            self._setPartition(model, owners)
         else:
             # A copy: the distribution changes its own as the mesh changes (see
             # DistributedElements.placeChildElement), and this partition must not change with it.
-            self._elementOwners = dict(distribution.owners)
-        self._partitionedElementKeys = set(model.mesh.elements.keys())
-        if not byMeasuredCosts:
-            # a changed mesh: the constraints are assigned afresh (_constraintOwnersOf)
-            self._constraintOwners = None
+            self._setPartition(model, dict(distribution.owners))
+
+    def _setPartition(self, model: FEModel, owners: dict):
+        """Adopt a partition of the mesh, and derive from it, once, what is read per mesh node: the process
+        of every element in mesh order, and which processes' elements touch each field at each node
+        (:class:`~.subdomaininterface.ElementProcessesAtNodes`).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        owners
+            The rank of every element of the mesh, by number.
+        """
+
+        mesh = model.mesh
+        connectivity = mesh.connectivity()
+        self._elementOwners = owners
+        self._processOfElements = np.fromiter(
+            (owners[number] for number in connectivity.numbers.tolist()),
+            dtype=np.int64,
+            count=connectivity.numbers.shape[0],
+        )
+        self._elementsAtNodes = ElementProcessesAtNodes.ofMesh(
+            connectivity, self._processOfElements, mesh.nNodes, self.nProcesses
+        )
+        self._partitionedMesh = (mesh, mesh.elementsVersion)
+
+    @staticmethod
+    def _isFor(meshAndVersion: tuple | None, model: FEModel) -> bool:
+        """Whether something derived from a mesh at a version is for the current mesh of the model: in
+        constant time, by the mesh's count of changes (:attr:`~edelweissfe.models.mesh.Mesh.elementsVersion`).
+
+        Parameters
+        ----------
+        meshAndVersion
+            The mesh and its version it was derived for, or None.
+        model
+            The model tree.
+
+        Returns
+        -------
+        bool
+            True if it is current.
+        """
+
+        return (
+            meshAndVersion is not None
+            and meshAndVersion[0] is model.mesh
+            and meshAndVersion[1] == model.mesh.elementsVersion
+        )
 
     def _constraintOwnersOf(self, model: FEModel) -> dict:
-        """The rank of every constraint of the model: the current assignment while the model has the
-        mesh and the constraints it was made for, otherwise the assignment the next definition adopts,
-        made now.
+        """Collective. The rank of every constraint of the model: the current assignment while it was made
+        for the current mesh and the current set of constraints, otherwise a new assignment
+        (:meth:`_assignConstraints`), made now -- the one the next definition adopts. A mesh not yet
+        partitioned is partitioned first.
 
-        A constraint is evaluated by the process holding most of its nodes under the partition of the
-        mesh (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the
-        nodes its search may couple, or, for a constraint without a search, those it couples. The
-        assignment is made from what every process holds alike -- the mesh, the partition, the nodes
-        of the copies of the constraints -- where the mesh changed, and only there: before the first
-        definition, and after a topology change, where every copy of every constraint is current
-        (:meth:`requireConstraintCopiesCurrent`). A repartition of the same mesh keeps it, since a
-        copy elsewhere is current only after a synchronization to every process. A mesh not yet
-        partitioned is partitioned first -- the partition the next definition adopts.
+        This is the one place that decides when the constraints are assigned afresh: where the mesh or
+        the set of constraints changed. Assigning them afresh after a migration, too, would be decided
+        here.
 
-        That a connectivity update right after a topology change, before the subdomain is defined
-        afresh, already searches on the process that is going to evaluate a constraint rests on this.
+        A connectivity update right after a topology change, before the subdomain is defined afresh,
+        searches on the process that is going to evaluate a constraint because of this.
 
         Parameters
         ----------
@@ -341,10 +393,62 @@ class DomainDecomposition:
             The rank of every constraint, by name.
         """
 
-        if self._elementOwners is None or model.mesh.elements.keys() != self._partitionedElementKeys:
+        if not self._isFor(self._partitionedMesh, model):
             self._partition(model, measuredCosts=None, byMeasuredCosts=False)
-        if self._constraintOwners is not None and model.constraints.keys() == self._constraintOwners.keys():
-            return self._constraintOwners
+        if not (
+            self._isFor(self._constraintOwnersMesh, model)
+            and self._constraintOwners is not None
+            and model.constraints.keys() == self._constraintOwners.keys()
+        ):
+            self._assignConstraints(model)
+        return self._constraintOwners
+
+    def constraintCopiesAreSynchronized(self):
+        """State that every process' copy of every constraint is its owner's -- the model was synchronized
+        to every process, with the constraint states, since the last increment was accepted. The solver
+        states it before a topology update (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.updateTopology`);
+        assigning the constraints afresh requires it (:meth:`_assignConstraints`), and consumes it."""
+
+        self._constraintCopiesSynchronized = True
+
+    def _assignConstraints(self, model: FEModel):
+        """Collective. Assign every constraint to the process holding most of its nodes under the current
+        partition (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the
+        nodes its search may couple, or, for a constraint without a search, those it couples.
+
+        Made from what every process holds alike -- the mesh, the partition, the nodes of the copies of
+        the constraints --, and checked to be the same in every process. A constraint whose process
+        changes is evaluated from then on from the new process' copy, which must therefore be its
+        owner's: except for the first assignment, the solver must have stated that every copy is
+        current (:meth:`constraintCopiesAreSynchronized`) -- it does before a topology update, which
+        follows a synchronization of the whole model to every process.
+
+        The shares of the element work the processes are given beside their constraints follow the
+        constraints: computed from the measured cost of each constraint, by name, for its new process.
+        Where every process holds every element, a partition made for other shares is made again for
+        these, keeping the elements where they were as far as the shares allow; a distributed model
+        partitions with them when it moves its elements
+        (:meth:`rebalanceAfterTopologyChange`, which assigns the constraints first).
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Raises
+        ------
+        RuntimeError
+            If the constraints were assigned before, and no synchronization of their copies was stated
+            since; or, in every process, if the processes assigned them differently.
+        """
+
+        if self._constraintOwners is not None and not self._constraintCopiesSynchronized:
+            raise RuntimeError(
+                "The constraints are to be assigned to processes afresh, which evaluate them from their copies "
+                "from then on; but the copies were not stated to be synchronized from their owners since they "
+                "were last assigned (DomainDecomposition.constraintCopiesAreSynchronized)."
+            )
+        self._constraintCopiesSynchronized = False
 
         mesh = model.mesh
         nodeRows = {}
@@ -352,33 +456,75 @@ class DomainDecomposition:
             # the nodes a search may couple; those coupled now for a constraint without a search
             nodes = constraint.nodesReadByConnectivityUpdate() or constraint.nodes
             nodeRows[name] = mesh.rowsOfNodes([node.label for node in nodes])
-        lowestProcess = lowestProcessAtNodes(
-            mesh.connectivity(), self._processOfElementsInMeshOrder(model), mesh.nNodes, self.nProcesses
-        )
-        self._constraintOwners = assignConstraintsByMajority(nodeRows, lowestProcess, self.nProcesses)
-        return self._constraintOwners
+        owners = assignConstraintsByMajority(nodeRows, self._elementsAtNodes.lowestProcessAtNodes(), self.nProcesses)
+        self.communicator.requireSameOnAllRanks(tuple(owners.items()), "the processes the constraints are assigned to")
+        self._constraintOwners = owners
+        self._constraintOwnersMesh = (mesh, mesh.elementsVersion)
 
-    def _processOfElementsInMeshOrder(self, model: FEModel) -> np.ndarray:
-        """The process of every element of the mesh under the current partition, in mesh order.
+        shares = self._sharesFor(owners, model)
+        sharesChanged = (shares is None) != (self._processShares is None) or (
+            shares is not None and not np.array_equal(shares, self._processShares)
+        )
+        self._processShares = shares
+        if sharesChanged and model.elementDistribution.replicatesElements:
+            with performancetiming.timeit("partition"):
+                partitioned = partitionElementsOfMesh(
+                    mesh, self.nProcesses, model.domainSize, self.communicator, processShares=shares
+                )
+                partitioned = keepElementsWhereTheyWere(partitioned, self._elementOwners, self.nProcesses, shares)
+            self._setPartition(model, partitioned)
+
+    def _constraintCostsOfProcesses(self, owners: dict) -> np.ndarray:
+        """The measured cost per increment of the constraints each process evaluates under an assignment,
+        from the cost of every constraint by name; zeros before anything was measured.
 
         Parameters
         ----------
+        owners
+            The rank of every constraint, by name.
+
+        Returns
+        -------
+        np.ndarray
+            The cost, by rank.
+        """
+
+        costs = np.zeros(self.nProcesses)
+        for name, cost in self._constraintCostsByName.items():
+            if name in owners:
+                costs[owners[name]] += cost
+        return costs
+
+    def _sharesFor(self, owners: dict, model: FEModel) -> np.ndarray | None:
+        """The shares of the element work for an assignment of the constraints
+        (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`), from the
+        last measurement; None for equal shares, and before anything was measured.
+
+        Parameters
+        ----------
+        owners
+            The rank of every constraint, by name.
         model
             The model tree.
 
         Returns
         -------
-        np.ndarray
-            The ranks.
+        np.ndarray | None
+            The shares, by rank.
         """
 
-        numbers = model.mesh.connectivity().numbers
-        return np.fromiter(
-            (self._elementOwners[number] for number in numbers.tolist()), dtype=np.int64, count=numbers.shape[0]
+        if self._elementTime is None:
+            return None
+        connectivity = model.mesh.connectivity()
+        return elementSharesBesideConstraints(
+            self._elementTime,
+            self._constraintCostsOfProcesses(owners),
+            connectivity.numbers.shape[0] - connectivity.nAuxiliary,
         )
 
     def _adoptOwnership(self, model: FEModel):
-        """Collect the elements and constraints this process owns under the current partition.
+        """Collect the elements and constraints this process owns under the current partition, and which
+        processes' elements touch each degree of freedom.
 
         Parameters
         ----------
@@ -388,7 +534,9 @@ class DomainDecomposition:
 
         # The order of the mesh, which is the order of the elements in a model that created all of
         # them, and so the order a serial run sums their contributions in.
-        self._elementPositions = {number: position for position, number in enumerate(model.mesh.elements)}
+        numbers = model.mesh.connectivity().numbers
+        self._meshPositionOfSorted = np.argsort(numbers, kind="stable")
+        self._sortedElementNumbers = numbers[self._meshPositionOfSorted]
 
         self._ownedElements = {
             number: element for number, element in model.elements.items() if self._elementOwners[number] == self.rank
@@ -399,9 +547,7 @@ class DomainDecomposition:
             if self._constraintOwners[name] == self.rank
         }
 
-        self._elementProcesses = ElementProcessesAtDofs.ofMesh(
-            model.mesh.connectivity(), self._numbering, self._processOfElementsInMeshOrder(model), self.nProcesses
-        )
+        self._elementProcesses = ElementProcessesAtDofs.ofNodes(self._elementsAtNodes, self._numbering)
 
     def _defineInterface(self, model: FEModel, ownershipChanged: bool):
         """Collective. Determine the subdomain degrees of freedom and the interface from the owned entities;
@@ -516,7 +662,8 @@ class DomainDecomposition:
             )
 
     def _reportSubdomains(self, topologyChanged: bool):
-        """Collective. Report the size of every subdomain and of its interface.
+        """Collective. Report the size of every subdomain and of its interface, and the constraints each
+        process evaluates with the force entries they send per increment, one line each.
 
         Parameters
         ----------
@@ -539,25 +686,33 @@ class DomainDecomposition:
         if statistics is None:
             return
 
+        def perProcess(column: int) -> str:
+            return "/".join(str(entry[column]) for entry in statistics)
+
         elementCounts = np.array([entry[0] for entry in statistics])
         imbalance = elementCounts.max() / max(elementCounts.mean(), 1e-300)
+        level = 0 if topologyChanged else 2
         self.journal.message(
             "Subdomains: {:} element(s) per process (max/mean {:.3f}); subdomain DOFs {:}; interface DOFs {:}; "
-            "neighbours {:}; elements created {:} of {:}; constraints evaluated {:}, their force entries sent per "
-            "increment {:}; degrees of freedom of constraints beyond the elements', gathered to every process: {:}".format(
-                "/".join(str(count) for count in elementCounts),
+            "neighbours {:}; elements created {:} of {:}".format(
+                perProcess(0),
                 imbalance,
-                "/".join(str(entry[1]) for entry in statistics),
-                "/".join(str(entry[2]) for entry in statistics),
-                "/".join(str(entry[3]) for entry in statistics),
-                "/".join(str(entry[4]) for entry in statistics),
+                perProcess(1),
+                perProcess(2),
+                perProcess(3),
+                perProcess(4),
                 len(self._model.mesh.elements),
-                "/".join(str(entry[5]) for entry in statistics),
-                "/".join(str(entry[6]) for entry in statistics),
-                self._interface.nClaimedDofs,
             ),
             self.identification,
-            0 if topologyChanged else 2,
+            level,
+        )
+        self.journal.message(
+            "Constraints per process: {:}; their force entries sent per increment: {:}; constraint DOFs beyond "
+            "the elements', gathered: {:}".format(
+                perProcess(5), perProcess(6), self._interface.nConstraintDofsBeyondElements
+            ),
+            self.identification,
+            level,
         )
 
     # --- The subdomain -------------------------------------------------------------------------
@@ -772,10 +927,9 @@ class DomainDecomposition:
             The exchange.
         """
 
-        entryElementPositions = np.repeat(
-            [self._elementPositions[number] for number in plan.elements],
-            [element.nDof for element in plan.elements.values()],
-        )
+        planNumbers = np.fromiter(plan.elements.keys(), dtype=np.int64, count=len(plan.elements))
+        positions = self._meshPositionOfSorted[np.searchsorted(self._sortedElementNumbers, planNumbers)]
+        entryElementPositions = np.repeat(positions, [element.nDof for element in plan.elements.values()])
         return InterfaceForceAssembly(self._interface, plan.entryDofs, entryElementPositions)
 
     def allgatherOwnedValues(self, vector: DofVector):
@@ -1017,12 +1171,11 @@ class DomainDecomposition:
         if incrementsUntilNextCheck is not None:
             nElements = self.communicator.allreduce(costs.shape[0])
             self._meanElementCost = float(elementTimes.sum()) / max(nElements, 1)
-        self._constraintCosts = constraintTimes
-        self._processShares = elementSharesBesideConstraints(
-            float(elementTimes.sum()),
-            constraintTimes,
-            sum(not record.isAuxiliary for record in self._model.mesh.elements.values()),
-        )
+        self._elementTime = float(elementTimes.sum())
+        self._constraintCostsByName = {}
+        for costsOfProcess in self.communicator.allgather(load.constraintTimes):
+            self._constraintCostsByName.update(costsOfProcess)
+        self._processShares = self._sharesFor(self._constraintOwners, self._model)
         if timeBeyondTolerance <= 0.0:
             self.journal.message(
                 "Load imbalance {:.3f} (the busiest process / the attainable) within 1 + {:}".format(
@@ -1149,16 +1302,22 @@ class DomainDecomposition:
         if distribution.replicatesElements or not tolerance or self.nProcesses == 1:
             return
 
+        # The constraints are assigned for the changed mesh on the partition it inherited, and the shares
+        # of the element work follow them; a new partition is then made for those shares.
+        self._model = model
+        self._constraintOwnersOf(model)
         mesh = model.mesh
-        inherited = distribution.owners
+        inherited = self._elementOwners
         counts = np.zeros(self.nProcesses)
-        for number, owner in inherited.items():
-            counts[owner] += mesh.typeOf(mesh.elements[number]).hasKernels
+        for group in mesh.connectivity().groups:
+            if group.typeInfo.hasKernels:
+                counts += np.bincount(self._processOfElements[group.positions], minlength=self.nProcesses)
         if self._meanElementCost is None:
             imbalance, timeBeyondTolerance = self._imbalance(counts, np.zeros(self.nProcesses))
         else:
-            busyTimes = counts * self._meanElementCost + self._constraintCosts
-            imbalance, timeBeyondTolerance = self._imbalance(busyTimes, self._constraintCosts)
+            constraintCosts = self._constraintCostsOfProcesses(self._constraintOwners)
+            busyTimes = counts * self._meanElementCost + constraintCosts
+            imbalance, timeBeyondTolerance = self._imbalance(busyTimes, constraintCosts)
         if timeBeyondTolerance <= 0.0:
             self.journal.message(
                 "After the topology change: element imbalance {:.3f} within 1 + {:}".format(imbalance, tolerance),
@@ -1195,11 +1354,8 @@ class DomainDecomposition:
                 mesh, self.nProcesses, model.domainSize, self.communicator, processShares=self._processShares
             )
             owners = keepElementsWhereTheyWere(owners, inherited, self.nProcesses, self._processShares)
-        self._model = model
-        self._elementOwners = owners
+        self._setPartition(model, owners)
         self.moveElements()
-        # the next definition adopts the partition the elements were moved to
-        self._partitionedElementKeys = None
 
     def elementsMustMove(self) -> bool:
         """Whether the current partition computes elements in processes that do not hold them: after
