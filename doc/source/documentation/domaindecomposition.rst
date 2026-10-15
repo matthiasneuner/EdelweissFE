@@ -270,16 +270,37 @@ broadcast. The auxiliary elements are not given to METIS: each is computed by th
 of its host element -- a facet by that of the solid element whose face it tiles, so that its degrees
 of freedom are already in that subdomain -- or, if it has none, as a point mass, by the process given
 part 0 of the partition (rank 0, unless a repartition renumbered the parts)
-(:func:`~edelweissfe.domaindecomposition.partitioning.processOfAuxiliaryElement`). The constraints
-are dealt out by name, one process each; part *p* of the partition is computed by process *p*, and
-once a constraint's cost has been measured, the process evaluating it is given a correspondingly
-smaller part (see `Load balancing`_).
+(:func:`~edelweissfe.domaindecomposition.partitioning.processOfAuxiliaryElement`). Each constraint is
+evaluated by one process: the one whose elements hold most of the nodes the constraint couples, or
+may couple after a contact search -- a node is held by the lowest-ranked process computing an element
+at it; among processes holding equally many, the lowest-ranked
+(:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`). The constraint
+then adds few degrees of freedom to its process' interface, and sends its forces to few neighbours. The
+assignment is made from what every process holds alike -- the mesh, the partition, the nodes of the
+copies of the constraints -- and made again only where the mesh changes: at the start and after a
+topology change, before the contact search that follows it, where every copy of every constraint is
+current. A repartition for load balancing keeps every constraint where it is. Part *p* of the partition
+is computed by process *p*, and once a constraint's cost has been measured, the process evaluating it
+is given a correspondingly smaller part (see `Load balancing`_).
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
 degrees of freedom. A degree of freedom touched by several processes lies on their *interface*. Each
 degree of freedom is also *owned* by exactly one process, the lowest-ranked one integrating it; the
 owner is the process that counts a quantity which must be counted once, such as a kinetic energy
 (:class:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface`).
+
+No process gathers the subdomain degrees of freedom of the others to find its interface. Which
+processes' elements touch a degree of freedom, every process derives itself from what it holds whole
+-- the partition, the connectivity of the mesh and the global numbering of the degrees of freedom --,
+node by node and field by field: the lowest-ranked such process for every degree of freedom, and every
+one at the few the elements of several processes touch
+(:class:`~edelweissfe.domaindecomposition.subdomaininterface.ElementProcessesAtDofs`); made again when
+the partition or the mesh changes, not after a contact search. What a process cannot derive are the
+degrees of freedom another touches beyond its elements' -- those of the constraints it evaluates, only
+current there --: each process sends those, and they are gathered to every process. From both, and
+from the multi-point constraints every process holds, each process finds the owner of every degree of
+freedom, its subdomain degrees of freedom, its neighbours and what it shares with each. A process
+whose derived element degrees of freedom are not among those its elements touch stops every process.
 
 A multi-point constraint -- a tie, a hanging node -- folds a slave's force onto its masters and
 interpolates the slave's velocity from theirs. A process integrating any degree of freedom of such
@@ -550,7 +571,8 @@ Contact, ties and rigid bodies
 ------------------------------
 
 A constraint is surface-sized: it couples the nodes of one or two surfaces, or of a surface and a
-rigid body. It is evaluated whole, by one process (dealt out by name), and runs distributed because
+rigid body. It is evaluated whole, by one process (the one holding most of its nodes, see
+`Subdomains, interface, ownership`_), and runs distributed because
 nothing it reads is an element object of the solid mesh:
 
 ======================================  =================================================================
@@ -661,9 +683,12 @@ fingerprint
 connectivity), its element sets and surfaces with their elements, all in order -- the order the loads
 are added in follows from them --, the global numbering of the degrees of freedom of the mesh
 (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`, which every process first checks
-its DofManager against, degree of freedom by degree of freedom), the node coordinates, the size of the
-system and every slave, master and weight of the multi-point constraints is compared across all
-processes, and the run stops if any two differ.
+its DofManager against, node by node), the reference coordinates of the nodes and the current ones of
+the nodes rigid bodies move, the size of the system and every slave, master and weight of the
+multi-point constraints is compared across all processes, and the run stops if any two differ. It is
+made from arrays every process holds -- the connectivity of the mesh as arrays
+(:meth:`~edelweissfe.models.mesh.Mesh.connectivity`, made once after the mesh changed), its node
+coordinates, the numbering --, not by walking element or node objects.
 
 Every process must therefore build its model in the same order. Python orders a ``dict`` by insertion,
 the same in every process, but a ``set`` of strings by their hashes, which differ between processes
@@ -1072,6 +1097,29 @@ At 8x4 the contact's process computed 10--11 % of the element work instead of 12
 longer the busiest; at 32x1 the default tolerance found the processes balanced enough (the contact
 is a smaller part of a 32nd), and a forced repartition gave its process 2.6--4.4 % of the elements
 instead of 6 %.
+
+**Rebuilding the equation system** (`Subdomains, interface, ownership`_). On c1_150 (rabbit, the
+slowest process, the mean of two runs each), before and after the interface was derived from the
+element partition instead of gathered, the layout check read arrays instead of element and node
+objects, and the constraints were assigned to the process holding most of their nodes:
+
+===============================================  =================  =================
+                                                 8 processes x 4    32 processes x 1
+===============================================  =================  =================
+rebuild at the start, before                     3.54 s             4.25 s
+rebuild at the start, now                        2.83 s             3.25 s
+of which defining the subdomains, before / now   1.44 s / 0.73 s    1.98 s / 0.99 s
+rebuild after a migration, before / now          3.41 s / 2.70 s    --
+peak memory above the rebuild's start            364 / 387 MB       277 / 299 MB
+constraint force entries sent per increment      294 000 / 199 000  386 000 / 303 000
+interface DOFs, all processes                    200 000 / 177 000  405 000 / 396 000
+===============================================  =================  =================
+
+What is left of a rebuild does not yet fall with the number of processes: the DofManager numbers every
+node of the model in every process (1.25--1.4 s), and the processes at each degree of freedom are
+derived for the whole model (0.15 s at 8x4, 0.25 s at 32x1), both until the vectors become local to a
+subdomain. The largest contact, under the slab, still sends most of the constraint forces: its slave
+surface spans many subdomains wherever it is evaluated.
 
 **Migration** (`Load balancing`_). On a 192 000-element GC3D8 block at 8 processes, two migrations
 raised the peak resident memory per process by 80--150 MB (the transient of the exchange and the
