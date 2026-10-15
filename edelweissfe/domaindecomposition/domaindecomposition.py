@@ -183,10 +183,8 @@ class DomainDecomposition:
 
         self._ownedConstraints = {}
 
-        #: The global numbering of the degrees of freedom the layout was last checked against, and which
-        #: processes' elements touch each degree of freedom under the current partition.
+        #: The global numbering of the degrees of freedom the layout was last checked against.
         self._numbering = None
-        self._elementProcesses = None
 
         self._interface = None
         self._stateSynchronization = None
@@ -337,7 +335,7 @@ class DomainDecomposition:
         self._elementOwners = owners
         self._processOfElements = np.fromiter(
             (owners[number] for number in connectivity.numbers.tolist()),
-            dtype=np.int64,
+            dtype=np.int32,
             count=connectivity.numbers.shape[0],
         )
         self._elementsAtNodes = ElementProcessesAtNodes.ofMesh(
@@ -523,8 +521,7 @@ class DomainDecomposition:
         )
 
     def _adoptOwnership(self, model: FEModel):
-        """Collect the elements and constraints this process owns under the current partition, and which
-        processes' elements touch each degree of freedom.
+        """Collect the elements and constraints this process owns under the current partition.
 
         Parameters
         ----------
@@ -547,8 +544,6 @@ class DomainDecomposition:
             if self._constraintOwners[name] == self.rank
         }
 
-        self._elementProcesses = ElementProcessesAtDofs.ofNodes(self._elementsAtNodes, self._numbering)
-
     def _defineInterface(self, model: FEModel, ownershipChanged: bool):
         """Collective. Determine the subdomain degrees of freedom and the interface from the owned entities;
         with new ownership, also the layout of the state synchronization.
@@ -570,7 +565,8 @@ class DomainDecomposition:
 
         self._interface = SubdomainInterface(
             self.communicator,
-            self._elementProcesses,
+            # expanded to the degrees of freedom for this interface only; held per node, a fraction of it
+            ElementProcessesAtDofs.ofNodes(self._elementsAtNodes, self._numbering),
             touched,
             None if self._mpcTransformation is None else self._mpcTransformation.slaveMasterDofPairs(),
         )

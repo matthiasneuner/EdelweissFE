@@ -218,7 +218,9 @@ class ElementProcessesAtDofs:
             The processes at the degrees of freedom.
         """
 
-        lowest, sharedDofs, sharedProcesses = _processesAtPlaces(dofs, processes, nDof, nProcesses)
+        lowest, sharedDofs, sharedProcesses = _processesAtPlaces(
+            np.asarray(dofs, dtype=np.int64), processes, nDof, nProcesses
+        )
         return cls(lowest, sharedDofs, sharedProcesses, nProcesses)
 
     @classmethod
@@ -332,12 +334,12 @@ def _processesAtPlaces(places: np.ndarray, processes: np.ndarray, nPlaces: int, 
         sorted; the process of each of those entries.
     """
 
-    places = np.asarray(places, dtype=np.int64)
-    processes = np.asarray(processes, dtype=np.int64)
+    # 32-bit throughout: an entry per element and node of the mesh, the largest arrays of a rebuild
+    processes = np.asarray(processes, dtype=np.int32)
     lowest = np.full(nPlaces, nProcesses, dtype=np.int32)
-    np.minimum.at(lowest, places, processes.astype(np.int32))
+    np.minimum.at(lowest, places, processes)
     highest = np.full(nPlaces, -1, dtype=np.int32)
-    np.maximum.at(highest, places, processes.astype(np.int32))
+    np.maximum.at(highest, places, processes)
     several = (highest > lowest)[places]
     sharedPlaces, sharedProcesses = _uniquePairs(places[several], processes[several], nProcesses)
     return lowest, sharedPlaces, sharedProcesses
