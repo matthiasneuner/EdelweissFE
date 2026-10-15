@@ -446,15 +446,17 @@ class DomainDecomposition:
         if not slaves.size:
             return touched
 
-        links = coo_matrix((np.ones(slaves.shape[0]), (slaves, masters)), shape=(nDof, nDof))
+        # The groups among the linked degrees of freedom only, numbered compactly: a graph of the size
+        # of the multi-point constraints, not of the equation system.
+        linked, positions = np.unique(np.concatenate([slaves, masters]), return_inverse=True)
+        nLinks = slaves.shape[0]
+        links = coo_matrix(
+            (np.ones(nLinks), (positions[:nLinks], positions[nLinks:])), shape=(linked.shape[0], linked.shape[0])
+        )
         _, group = connected_components(links, directed=False)
 
-        linked = np.zeros(nDof, dtype=bool)
-        linked[slaves] = True
-        linked[masters] = True
-
-        groupsTouched = np.unique(group[touched[linked[touched]]])
-        return np.concatenate([touched, np.flatnonzero(linked & np.isin(group, groupsTouched))])
+        groupsTouched = np.unique(group[np.isin(linked, touched)])
+        return np.concatenate([touched, linked[np.isin(group, groupsTouched)]])
 
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
         """Collective. Refuse to continue unless the DofManager numbers the degrees of freedom as the global
