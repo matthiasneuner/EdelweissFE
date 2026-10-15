@@ -521,17 +521,19 @@ the input rule missed. The element distribution says which nodes a process holds
 (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isNodeHeldHere`), and
 :meth:`~edelweissfe.models.femodel.FEModel.createNodesOfMesh` makes those, in mesh order:
 
-* the nodes of its elements, the auxiliary elements included;
+* the nodes of its elements;
 * the nodes a model entity reads whole in every process
-  (:meth:`~edelweissfe.models.femodel.FEModel.holdNodes`): the node set of a constraint, whose copy every
-  process holds, and the node set of a Dirichlet condition or a concentrated load -- read as a whole
-  (:meth:`~edelweissfe.models.femodel.FEModel.wholeNodeSet`), and acted on at the part the process
-  integrates, as above --, and the nodes of the elements a contact facet is cut from. These are
-  surface-sized. (A load accumulated over earlier steps lives in its step action, row by row of its
-  set; holding the whole set keeps every row where a migration may need it.)
+  (:meth:`~edelweissfe.models.femodel.FEModel.holdNodes`): the node set of a constraint
+  (:meth:`~edelweissfe.models.femodel.FEModel.wholeNodeSet`) -- the process evaluating it reads it, the
+  others hold it so that their copies of the constraint can be synchronized from it --, and the nodes of
+  the elements a contact facet (of a tie) is cut from, which every process makes. These are
+  surface-sized.
 
 Every other node set holds the part of its set held here, and refuses to be read as a whole, like an
-element set. What reads the nodes of the whole model gathers their values from the processes computing
+element set. A Dirichlet condition and a concentrated load lay out their values one row per node of
+the whole set, from its labels -- a load accumulated over earlier steps by node label --, and a process
+acts on the rows of the part whose degrees of freedom it integrates, found from the labels, the mesh and
+the global numbering, not from node objects. What reads the nodes of the whole model gathers their values from the processes computing
 them -- each process contributes the nodes of the elements it computes, which it integrates
 (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodesProvidingValuesHere`), and a node
 contributed by several processes holds the same bits in each:

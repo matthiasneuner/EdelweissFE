@@ -275,8 +275,8 @@ class FEModel:
         self.elementDistribution.holdNodes(labels)
         nodes = self.nodes
         if any(label not in nodes for label in labels):
-            # making node objects is a change of the topology, also where a reader holds nodes later
-            # (a step action at the start of its step)
+            # making node objects is a change of the topology, also where a reader holds nodes after the
+            # model was set up
             with self.topology.changes():
                 self.holdNodesOfDistribution()
 

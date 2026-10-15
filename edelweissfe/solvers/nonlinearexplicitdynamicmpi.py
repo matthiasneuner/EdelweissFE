@@ -53,9 +53,9 @@ distributed model those of its subdomain and those its model entities read whole
 (:mod:`~edelweissfe.domaindecomposition.distributedelements`) -- and are filled from the owners
 where the whole model is read; a per-node field output and a checkpoint gather the node fields of
 the whole model from the processes computing them. A model with a reason against it
-(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`: every element on every process, adaptive refinement,
-contact, rigid bodies, scalar variables) holds vectors of the whole model
-instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
+(:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`: every element on
+every process, adaptive refinement, contact, rigid bodies, scalar variables) holds vectors of the whole
+model instead, current at its subdomain degrees of freedom, with the lumped operators shared from the
 owners at every degree of freedom -- which is what lets a contact search move a constraint onto
 nodes another process integrated until then.
 
@@ -160,8 +160,9 @@ at the end of the documentation of :mod:`~edelweissfe.solvers.nonlinearexplicitd
   contact search, a topology update, writing the output -- fails on all ranks together
   (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
 
-**Limits of this prototype.** Every process holds the whole mesh and every contact facet. A model with a reason against vectors of the subdomain holds vectors
-of the whole model, and every node, in every process; a model under the whole-model rule
+**Limits of this prototype.** Every process holds the whole mesh and every contact facet. A model with
+a reason against vectors of the subdomain holds vectors of the whole model, and every node, in every
+process; a model under the whole-model rule
 (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsToReplicateElements`) holds every
 element in every process, so that its memory per process does not shrink with the number of
 processes. The topology of a refinement costs every process what it costs a serial run. Constraints
@@ -399,7 +400,8 @@ class NEDMPI(NEDParallel):
         self._copiesConsistentAfterIncrement = 0
         #: Whether the vectors of this process -- the carried vectors, the lumped operators -- hold the
         #: degrees of freedom of its subdomain only, or every degree of freedom of the model; decided once
-        #: per job, at the start of its first step (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`). None before.
+        #: per job, at the start of its first step, by the rule the nodes follow
+        #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`). None before.
         self._vectorsOfSubdomain: bool | None = None
         #: The interface of the subdomain before the equation system now being rebuilt, while it is; see
         #: :meth:`carryVectorsOver`.
