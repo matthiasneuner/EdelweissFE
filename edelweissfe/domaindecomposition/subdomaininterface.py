@@ -49,13 +49,33 @@ which process counts a quantity that must be counted once -- a concentrated load
 :meth:`SubdomainInterface.allgatherOwnedValues`.
 """
 
+from enum import IntEnum, unique
+
 import numpy as np
 from mpi4py import MPI
 
 from edelweissfe.numerics.assembly import addNodalForces
 
-_INTERFACE_TAG = 7
-_VALUES_TAG = 8
+
+@unique
+class MessageTag(IntEnum):
+    """The message tag of every kind of point-to-point exchange, named in one place. Two kinds never
+    share a tag, so that a message of one kind cannot be received as one of another between the same
+    two processes -- as it could the day two exchanges overlapped; today each waits for all its
+    messages before the next begins. An exchange sends its layout, when it is built, under its own
+    tag as well. Two kinds of the same value are refused when this module is imported
+    (:func:`enum.unique`)."""
+
+    #: The element contributions at the interface (:class:`InterfaceForceAssembly`).
+    ELEMENT_FORCES = 7
+    #: The load contributions of the elements at the interface (:class:`InterfaceLoadAssembly`).
+    LOADS = 8
+    #: The forces of the constraints (:class:`ConstraintForceExchange`).
+    CONSTRAINT_FORCES = 9
+    #: Vector entries received from their owners (:class:`ValuesFromOwners`).
+    VALUES_FROM_OWNERS = 10
+
+
 #: The bound on the entries of one constraint: an entry of a constraint force is ordered by the
 #: position of its constraint in the model times this, plus its index within the constraint.
 _ENTRIES_PER_CONSTRAINT = 2**32
@@ -231,10 +251,14 @@ class _TaggedContributions:
         The place of every entry in the order a single process adds the contributions in.
     ownEntries
         The entries of the buffer that are summed here, as indices into it.
+    tag
+        The message tag of this kind of exchange.
     """
 
-    def __init__(self, interface: SubdomainInterface, entryDofs, entryOrder, ownEntries: np.ndarray):
+    def __init__(self, interface: SubdomainInterface, entryDofs, entryOrder, ownEntries: np.ndarray, tag: MessageTag):
         self.interface = interface
+        #: The message tag of every message of this exchange.
+        self.tag = tag
         communicator = interface.communicator
         entryDofs = np.asarray(entryDofs, dtype=np.int64)
         entryOrder = np.asarray(entryOrder, dtype=np.int64)
@@ -255,7 +279,7 @@ class _TaggedContributions:
             neighbour: np.array([entries.shape[0]], dtype=np.int64) for neighbour, entries in sendEntries.items()
         }
         receiveCounts = {neighbour: np.empty(1, dtype=np.int64) for neighbour in interface.neighbours}
-        _exchange(communicator, sendCounts, receiveCounts)
+        _exchange(communicator, sendCounts, receiveCounts, tag)
 
         self._sendEntries = {neighbour: entries for neighbour, entries in sendEntries.items() if entries.shape[0]}
         receiveCounts = {neighbour: int(count[0]) for neighbour, count in receiveCounts.items() if count[0]}
@@ -265,7 +289,7 @@ class _TaggedContributions:
             for neighbour, entries in self._sendEntries.items()
         }
         receiveTags = {neighbour: np.empty(2 * count, dtype=np.int64) for neighbour, count in receiveCounts.items()}
-        _exchange(communicator, sendTags, receiveTags)
+        _exchange(communicator, sendTags, receiveTags, tag)
 
         tagDofs = [entryDofs[ownEntries]]
         tagOrder = [entryOrder[ownEntries]]
@@ -324,12 +348,12 @@ class _TaggedContributions:
 
         communicator = self.interface.communicator
         requests = [
-            communicator.Irecv(self.merged[receiveSlice], source=neighbour, tag=_INTERFACE_TAG)
+            communicator.Irecv(self.merged[receiveSlice], source=neighbour, tag=self.tag)
             for neighbour, receiveSlice in self._receiveSlices.items()
         ]
         for neighbour, entries in self._sendEntries.items():
             np.take(contributions, entries, out=self._sendBuffers[neighbour])
-            requests.append(communicator.Isend(self._sendBuffers[neighbour], dest=neighbour, tag=_INTERFACE_TAG))
+            requests.append(communicator.Isend(self._sendBuffers[neighbour], dest=neighbour, tag=self.tag))
 
         np.take(contributions, self.ownEntries, out=self.merged[: self.ownEntries.shape[0]])
         # Waits on the requests, not the communicator: the guard against communicating inside an
@@ -369,6 +393,7 @@ class InterfaceForceAssembly:
             entryDofs,
             entryElementPositions,
             _TaggedContributions.entriesAtInterface(interface, entryDofs),
+            MessageTag.ELEMENT_FORCES,
         )
         self._targets = np.searchsorted(interface.interfaceDofs, self._contributions.tagDofs[self._contributions.order])
 
@@ -432,7 +457,7 @@ class InterfaceLoadAssembly:
     def __init__(self, interface: SubdomainInterface, entryDofs: np.ndarray, entryLoadOrder: np.ndarray):
         entryDofs = np.asarray(entryDofs, dtype=np.int64)
         self._contributions = _TaggedContributions(
-            interface, entryDofs, entryLoadOrder, np.arange(entryDofs.shape[0], dtype=np.int64)
+            interface, entryDofs, entryLoadOrder, np.arange(entryDofs.shape[0], dtype=np.int64), MessageTag.LOADS
         )
         order = self._contributions.order
         sortedDofs = self._contributions.tagDofs[order]
@@ -528,6 +553,7 @@ class ConstraintForceExchange:
             np.concatenate(entryDofs),
             np.concatenate(entryOrder),
             np.arange(self._ownedForces.shape[0], dtype=np.int64),
+            MessageTag.CONSTRAINT_FORCES,
         )
 
         # The merged entries, constraint by constraint in model order, each in its own order.
@@ -627,15 +653,15 @@ class ValuesFromOwners:
         plains = [vector.view(np.ndarray) for vector in vectors]
         receiveBuffers = {other: np.empty((len(plains), dofs.shape[0])) for other, dofs in self._receiveDofs.items()}
         sendBuffers = {other: np.stack([plain[dofs] for plain in plains]) for other, dofs in self._sendDofs.items()}
-        _exchange(self.communicator, sendBuffers, receiveBuffers, tag=_VALUES_TAG)
+        _exchange(self.communicator, sendBuffers, receiveBuffers, MessageTag.VALUES_FROM_OWNERS)
         for other, dofs in self._receiveDofs.items():
             for plain, received in zip(plains, receiveBuffers[other]):
                 plain[dofs] = received
 
 
-def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict, tag: int = _INTERFACE_TAG):
+def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict, tag: MessageTag):
     """Send a buffer to each process of ``sendBuffers`` and receive one from each of ``receiveBuffers``,
-    with the message tag ``tag``. Collective among those processes."""
+    with the message tag of the exchange (:class:`MessageTag`). Collective among those processes."""
 
     requests = [
         communicator.Irecv(receiveBuffers[neighbour], source=neighbour, tag=tag) for neighbour in receiveBuffers
