@@ -143,7 +143,7 @@ class ElementGroup:
         ascending.
     nodeRows
         The rows of the nodes of each element (:meth:`Mesh.rowsOfNodes`), one row per element, in the
-        element's node order.
+        element's node order; 32-bit, as a mesh holds fewer nodes than that counts.
     """
 
     typeInfo: ElementTypeInfo
@@ -771,7 +771,7 @@ class Mesh:
                     ElementGroup(
                         typeInfo,
                         np.asarray(positions, dtype=np.int64),
-                        self.rowsOfNodes(np.asarray(labels, dtype=np.int64)).reshape(len(labels), -1),
+                        self.rowsOfNodes(np.asarray(labels, dtype=np.int64)).astype(np.int32).reshape(len(labels), -1),
                     )
                     for typeInfo, positions, labels in groups.values()
                 ],
