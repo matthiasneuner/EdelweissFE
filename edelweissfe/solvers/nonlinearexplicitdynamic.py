@@ -155,6 +155,7 @@ import math
 from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter
+from typing import ClassVar
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -315,25 +316,65 @@ class ExplicitSystem:
         equation of motion of their own. The lumped mass it was built from is not carried here:
         the diagnostics need the *unfolded* mass, which is held as ``_rawLumpedMass``, and a
         second mass on this dataclass that no caller reads would only invite reading the wrong
-        one.
-    U
-        The solution vector.
+        one. None in a plain copy of the carried vectors (:meth:`plainCopyOfCarried`).
     dU
-        The solution increment of the increment being computed.
-    V
-        The velocity vector, staggered half an increment behind ``U``.
-    P
-        The net nodal force -- external minus internal -- which drives the velocity update.
+        The solution increment of the increment being computed; None in a plain copy.
+    carried
+        The vectors an increment carries to the next, by the node field entry each is published
+        into, one per :attr:`carriedEntries`: the solution ``U``, the velocity ``V`` and the net
+        nodal force ``P``.
     criticalTimeStep
         The stable time increment for the current mesh, already scaled by the courant number.
     """
 
-    Minv: DofVector
-    U: DofVector
-    dU: DofVector
-    V: DofVector
-    P: DofVector
+    #: The node field entries of the vectors an increment carries to the next: the solution, the
+    #: velocity, staggered half an increment behind the solution, and the net nodal force -- external
+    #: minus internal --, which drives the velocity update. The one list of them: building the system,
+    #: publishing into the node fields, and, in a domain-decomposed run, synchronizing, completing at
+    #: newly integrated degrees of freedom, carrying over a migration and taking back after a failed
+    #: increment all iterate over it (and a restart checkpoint writes every entry of the node fields),
+    #: so that a vector added here reaches every one of them.
+    carriedEntries: ClassVar[tuple[str, ...]] = ("U", "V", "P")
+
+    Minv: DofVector | None
+    dU: DofVector | None
+    carried: dict[str, DofVector]
     criticalTimeStep: float
+
+    @property
+    def U(self) -> DofVector:
+        """The solution vector."""
+
+        return self.carried["U"]
+
+    @property
+    def V(self) -> DofVector:
+        """The velocity vector, staggered half an increment behind ``U``."""
+
+        return self.carried["V"]
+
+    @property
+    def P(self) -> DofVector:
+        """The net nodal force -- external minus internal -- which drives the velocity update."""
+
+        return self.carried["P"]
+
+    def plainCopyOfCarried(self) -> "ExplicitSystem":
+        """Plain copies of the carried vectors, and the critical time step: what a rebuild of the
+        system carries over, without anything indexed by the elements the system was built for.
+
+        Returns
+        -------
+        ExplicitSystem
+            The copy; no ``Minv`` and no ``dU``.
+        """
+
+        return ExplicitSystem(
+            Minv=None,
+            dU=None,
+            carried={entry: np.array(vector) for entry, vector in self.carried.items()},
+            criticalTimeStep=self.criticalTimeStep,
+        )
 
 
 @dataclass
@@ -650,7 +691,7 @@ class NED(NonlinearSolverBase):
             self._buildSystem(self.buildEquationSystem(model, step, previous=None if meshChanged else theSystem))
             theSystem = self._system
 
-        U, V, P = self._U, self._V, self._P
+        V, P = self._V, self._P
 
         if meshChanged:
             # The net force is deliberately NOT re-evaluated on the new mesh. It
@@ -662,7 +703,7 @@ class NED(NonlinearSolverBase):
             # event, after which it is computed normally. A bounded known error is
             # preferable to an unbounded unknown one.
             P[:] = 0.0
-            self.publishNodeFields(model, U, V, P)
+            self.publishNodeFields(model, theSystem.carried)
 
             self.reportTopologyChangeConservation(lumpedTotalsBefore, momentumBefore, kineticBefore, V, model)
 
@@ -861,15 +902,13 @@ class NED(NonlinearSolverBase):
             The increment.
         """
 
-        U, V, P = self._U, self._V, self._P
-
         # The zero increment, before the first real one, is not a completed step: the
         # velocity update returns early for it, and the first real increment must be the
         # half step that starts the leapfrog.
         if timeStep.timeIncrement > 0.0:
             self.prevTimeStep = timeStep
 
-        self.publishNodeFields(model, U, V, P)
+        self.publishNodeFields(model, self._system.carried)
 
         self.updateRigidBodies(model, timeStep)
 
@@ -1563,8 +1602,9 @@ class NED(NonlinearSolverBase):
                 )
 
     @performancetiming.timeit("publish node fields")
-    def publishNodeFields(self, model: FEModel, U: DofVector, V: DofVector, P: DofVector):
-        """Write the solution, velocity and force to the node fields and the scalar variables.
+    def publishNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
+        """Write the carried vectors -- the solution, velocity and force -- to the node fields, and the
+        solution to the scalar variables.
 
         Published every increment, not only on output increments, for two reasons: an h-adaptivity
         event can fall on any increment and its interpolation reads these entries, and a restart
@@ -1575,22 +1615,19 @@ class NED(NonlinearSolverBase):
         ----------
         model
             The model tree.
-        U
-            The solution vector.
-        V
-            The velocity vector.
-        P
-            The net force vector.
+        carried
+            The carried vectors, by node field entry (:attr:`ExplicitSystem.carriedEntries`).
         """
 
         for nodeField in model.nodeFields.values():
             indices = self.theDofManager.idcsOfNodeFieldsInDofVector[nodeField.name]
-            for vector, entry in ((U, "U"), (P, "P"), (V, "V")):
+            for entry, vector in carried.items():
                 if entry not in nodeField:
                     nodeField.createFieldValueEntry(entry)
                 values = nodeField[entry]
                 values[:] = vector.asPlainArray()[indices].reshape(values.shape)
 
+        U = carried["U"]
         for variable in model.scalarVariables.values():
             variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
 
@@ -2088,24 +2125,21 @@ class NED(NonlinearSolverBase):
 
         self._incrementPlan = self.planIncrement(model)
 
-        U = self.theDofManager.constructDofVector()  # initialize displacement vector
-        dU = self.theDofManager.constructDofVector()  # initialize displacement vector
-        V = self.theDofManager.constructDofVector()  # initilize velocity vector
-        P = self.theDofManager.constructDofVector()  # initialize reaction vector
+        dU = self.theDofManager.constructDofVector()
+        carried = {entry: self.theDofManager.constructDofVector() for entry in ExplicitSystem.carriedEntries}
+        U = carried["U"]
 
         if not isRebuild:
-            for fieldName, field in model.nodeFields.items():
-                U = self.theDofManager.writeNodeFieldToDofVector(U, field, "U")
-                P = self.theDofManager.writeNodeFieldToDofVector(P, field, "P")
-
-                # The velocity entry exists only once this solver has published one, i.e. from the
-                # second build onwards. Reading it back is what carries the kinetic state across an
-                # h-adaptivity event: the modifier interpolated it onto the new nodes with the same
-                # operator it used for U (see hadaptivity.WARM_STARTED_NODE_FIELD_ENTRIES), and there
-                # is nowhere else it could come from -- a fresh vector would silently resume from
-                # rest.
-                if "V" in field:
-                    V = self.theDofManager.writeNodeFieldToDofVector(V, field, "V")
+            for field in model.nodeFields.values():
+                for entry, vector in carried.items():
+                    # Read back from every node field holding the entry. The velocity is what this
+                    # carries across an h-adaptivity event: the modifier interpolated it onto the new
+                    # nodes with the same operator it used for U (see
+                    # hadaptivity.WARM_STARTED_NODE_FIELD_ENTRIES), and there is nowhere else it could
+                    # come from -- a fresh vector would silently resume from rest. An entry a field
+                    # does not hold (the velocity of a field without inertia) starts at zero.
+                    if entry in field:
+                        self.theDofManager.writeNodeFieldToDofVector(vector, field, entry)
 
             for variable in model.scalarVariables.values():
                 U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]] = variable.value
@@ -2118,11 +2152,10 @@ class NED(NonlinearSolverBase):
                     "cannot be carried across safely.".format(U.shape[0], previous.U.shape[0])
                 )
 
-            # Carried straight over, not re-read from the node fields: the velocity is not a node
-            # field, so re-reading would silently resume from rest.
-            U[:] = previous.U
-            V[:] = previous.V
-            P[:] = previous.P
+            # Carried straight over, not re-read from the node fields: a process holds the node
+            # fields current only where it integrates, and the carried vectors are what it computes.
+            for entry, vector in carried.items():
+                vector[:] = previous.carried[entry]
 
         if isRebuild:
             # The mesh is unchanged (the layout check above establishes that), so the stable time
@@ -2142,10 +2175,8 @@ class NED(NonlinearSolverBase):
 
         return ExplicitSystem(
             Minv=Minv,
-            U=U,
             dU=dU,
-            V=V,
-            P=P,
+            carried=carried,
             criticalTimeStep=criticalTimeStep,
         )
 

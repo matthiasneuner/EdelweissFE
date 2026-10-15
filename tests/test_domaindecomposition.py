@@ -1038,6 +1038,84 @@ def test_elements_move_only_with_the_lumped_operators_a_serial_run_keeps(tmp_pat
     assert "the lumped operators assembled again from the elements now held here differ" in output, output
 
 
+#: A fourth carried vector, the acceleration ``A``, added to the one list of them -- here a copy of
+#: the velocity, set at the end of every increment --, and checked to be published, synchronized,
+#: migrated, poisoned and checkpointed exactly as the velocity is, in every process.
+_FOURTH_CARRIED_VECTOR_SCRIPT = """
+import contextlib, io
+import h5py
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamic import NED, ExplicitSystem
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+ExplicitSystem.carriedEntries = ExplicitSystem.carriedEntries + ("A",)
+
+attemptIncrement = NED.attemptIncrement
+
+
+def mirroringTheVelocity(self, step, model, timeStep):
+    attemptIncrement(self, step, model, timeStep)
+    self._system.carried["A"].asPlainArray()[:] = self._system.V.asPlainArray()
+
+
+NED.attemptIncrement = mirroringTheVelocity
+
+differences = []
+
+
+def sameAsTheVelocity(model, where):
+    for nodeField in model.nodeFields.values():
+        if "V" in nodeField and not np.array_equal(nodeField["A"], nodeField["V"], equal_nan=True):
+            differences.append(where)
+
+
+acceptIncrement = NEDMPI.acceptIncrement
+
+
+def checkedAfterAccepting(self, step, model, timeStep):
+    acceptIncrement(self, step, model, timeStep)
+    sameAsTheVelocity(model, "increment {:}".format(timeStep.number))
+
+
+NEDMPI.acceptIncrement = checkedAfterAccepting
+
+with contextlib.redirect_stdout(io.StringIO()):
+    model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+sameAsTheVelocity(model, "the end")
+if rank == 0:
+    with h5py.File("restart_0.h5") as checkpoint:
+        names = []
+        checkpoint.visit(names.append)
+        accelerations = [name for name in names if name.endswith("/A")]
+        for name in accelerations:
+            if not np.array_equal(checkpoint[name][()], checkpoint[name[:-1] + "V"][()]):
+                differences.append("checkpoint " + name)
+        if not accelerations:
+            differences.append("checkpoint without A")
+print("PROCESS", rank, "SAME" if not differences else differences, flush=True)
+"""
+
+
+def test_a_vector_added_to_the_carried_vectors_reaches_every_path(tmp_path):
+    # The carried vectors are listed once (ExplicitSystem.carriedEntries); every path iterates that
+    # list. A vector enumerated by hand somewhere would be published only where that path ran, and the
+    # copy of the velocity would differ from it -- in a migration, a synchronization, the poison, the
+    # checkpoint.
+    deck = _MIGRATING_DECK.replace("output-frequency=2", "output-frequency=2\ndebug-poison-stale-solution=True")
+    deck += "*output, type=restart, name=restart\nwriteInterval=2, baseName=restart, numberOfFilesToKeep=1\n"
+    (tmp_path / "test.inp").write_text(deck)
+    (tmp_path / "run.py").write_text(_FOURTH_CARRIED_VECTOR_SCRIPT)
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("the run left processes waiting")
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert exitCode == 0 and reports == ["PROCESS {:} SAME".format(rank) for rank in range(3)], output
+
+
 _MATERIAL_PROPERTIES_DECK = """
 *material, name=LinearElastic, id=linearelastic
 20000.0, 0.2, 2.0e-9

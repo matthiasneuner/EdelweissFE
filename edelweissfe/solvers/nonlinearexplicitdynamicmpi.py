@@ -499,7 +499,7 @@ class NEDMPI(NEDParallel):
         if self._system is not None:
             for slot in self._integratedNodeFieldSlots:
                 values = slot.nodeField
-                for vector, entry in ((self._U, "U"), (self._P, "P"), (self._V, "V")):
+                for entry, vector in self._system.carried.items():
                     vector.asPlainArray()[slot.dofs] = values[entry].reshape(-1)[slot.positions]
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
         self.gatherExternalWork()
@@ -926,7 +926,7 @@ class NEDMPI(NEDParallel):
                 else:
                     self.partition = self.subdomain.partition
                     self._incrementPlan = self.planIncrement(model)
-                    self._receiveNewlyIntegratedValues(interfaceBefore, self._U, self._V, self._P)
+                    self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
                 self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
 
         if self.options["debug-poison-stale-solution"] and not self._wholeSolutionHere:
@@ -947,9 +947,9 @@ class NEDMPI(NEDParallel):
 
         outside = np.ones(self._U.shape[0], dtype=bool)
         outside[self.partition.dofs] = False
-        for vector in (self._U, self._V, self._P):
+        for vector in self._system.carried.values():
             vector.asPlainArray()[outside] = np.nan
-        super().publishNodeFields(model, self._U, self._V, self._P)
+        super().publishNodeFields(model, self._system.carried)
 
     def outputSynchronizationReachesEveryProcess(self) -> bool:
         """Whether every process reads the whole model before the next increment, and so the output
@@ -1092,7 +1092,7 @@ class NEDMPI(NEDParallel):
     def releaseEquationSystem(self) -> ExplicitSystem:
         """Release the equation system and everything built with it -- the counterpart of
         :meth:`NED.buildEquationSystem`, and of :meth:`planIncrement` -- keeping only plain copies of
-        the solution, the velocity and the net force, and the critical time step.
+        the carried vectors (the solution, the velocity and the net force), and the critical time step.
 
         Everything released is indexed by the elements and constraints the system was built for:
         the DofManager (whose entity indices hold the elements themselves), every vector carrying
@@ -1104,18 +1104,10 @@ class NEDMPI(NEDParallel):
         Returns
         -------
         ExplicitSystem
-            The carried state: plain copies of ``U``, ``V`` and ``P``, and the critical time step;
-            no ``Minv`` and no ``dU``.
+            The carried state (:meth:`ExplicitSystem.plainCopyOfCarried`).
         """
 
-        carried = ExplicitSystem(
-            Minv=None,
-            U=np.array(self._system.U),
-            dU=None,
-            V=np.array(self._system.V),
-            P=np.array(self._system.P),
-            criticalTimeStep=self._system.criticalTimeStep,
-        )
+        carried = self._system.plainCopyOfCarried()
         self._system = self._Minv = self._U = self._dU = self._V = self._P = None
         self._lumpedMass = self._rawLumpedMass = self._dampingRate = None
         self._secondOrderMask = self._halfDampingRate = None
@@ -1201,7 +1193,7 @@ class NEDMPI(NEDParallel):
         super().applyStepActionsAtStepEnd(model, stepActions)
 
     @performancetiming.timeit("publish node fields")
-    def publishNodeFields(self, model: FEModel, U: DofVector, V: DofVector, P: DofVector):
+    def publishNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
         """Publish the degrees of freedom integrated here; see :meth:`NED.publishNodeFields`. The
         others are current only in the processes integrating them, and are published by
         :meth:`_synchronizeModel` in the processes reading them -- rank 0 on an output increment,
@@ -1212,21 +1204,18 @@ class NEDMPI(NEDParallel):
         ----------
         model
             The model tree.
-        U
-            The solution vector.
-        V
-            The velocity vector.
-        P
-            The net force vector.
+        carried
+            The carried vectors, by node field entry (:attr:`ExplicitSystem.carriedEntries`).
         """
 
-        self._publishIntoNodeFields(self._integratedNodeFieldSlots, ((U, "U"), (P, "P"), (V, "V")))
+        self._publishIntoNodeFields(self._integratedNodeFieldSlots, carried)
 
+        U = carried["U"]
         for variable in model.scalarVariables.values():
             variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
 
     @staticmethod
-    def _publishIntoNodeFields(slots: list[NodeFieldSlot], vectors: tuple[tuple[DofVector, str], ...]):
+    def _publishIntoNodeFields(slots: list[NodeFieldSlot], vectors: dict[str, DofVector]):
         """Publish the degrees of freedom of the slots into the node fields.
 
         Parameters
@@ -1234,12 +1223,12 @@ class NEDMPI(NEDParallel):
         slots
             Where the degrees of freedom are published.
         vectors
-            Each vector, with the node field entry it is published into.
+            The vectors, by the node field entry each is published into.
         """
 
         for slot in slots:
             nodeField = slot.nodeField
-            for vector, entry in vectors:
+            for entry, vector in vectors.items():
                 if entry not in nodeField:
                     nodeField.createFieldValueEntry(entry)
                 values = nodeField[entry]
@@ -1328,8 +1317,9 @@ class NEDMPI(NEDParallel):
 
         with performancetiming.timeit("positions for searches"):
             searched = self._solutionReadBySearches
+            # the solution only, of the carried vectors: what a search reads
             searched.received.receive([self._U])
-            self._publishIntoNodeFields(searched.slots, ((self._U, "U"),))
+            self._publishIntoNodeFields(searched.slots, {"U": self._U})
 
     def _planSolutionReadBySearches(self, model: FEModel):
         """Plan what the periodic contact searches of this process read: the degrees of freedom, at
@@ -1402,8 +1392,8 @@ class NEDMPI(NEDParallel):
         self._rigidBodyReferences = None
 
     def _receiveRigidBodyReferences(self, model: FEModel):
-        """Receive the solution, the velocity and the net force at the reference nodes of the rigid
-        bodies from their owners, and publish them into the node fields: every process moves the
+        """Receive the carried vectors -- the solution, the velocity and the net force -- at the
+        reference nodes of the rigid bodies from their owners, and publish them into the node fields: every process moves the
         surfaces of the rigid bodies with them, which are nodes of the model as well, and so part of
         what every process must hold alike (the layout fingerprint of
         :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.define` compares their coordinates).
@@ -1420,9 +1410,9 @@ class NEDMPI(NEDParallel):
             self._rigidBodyReferences = self._receivedSolutionAt(
                 model, [rigidBody.rpNode for rigidBody in model.rigidBodies.values()]
             )
-        U, V, P = self._U, self._V, self._P
-        self._rigidBodyReferences.received.receive([U, V, P])
-        self._publishIntoNodeFields(self._rigidBodyReferences.slots, ((U, "U"), (P, "P"), (V, "V")))
+        carried = self._system.carried
+        self._rigidBodyReferences.received.receive(list(carried.values()))
+        self._publishIntoNodeFields(self._rigidBodyReferences.slots, carried)
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let those of the given constraints update their connectivity whose search runs in this
@@ -1554,9 +1544,9 @@ class NEDMPI(NEDParallel):
             Whether every process receives the whole model, or rank 0 only.
         """
 
-        U, V, P = self._U, self._V, self._P
+        carried = self._system.carried
         with performancetiming.timeit("gather solution"):
-            for vector in (U, V, P):
+            for vector in carried.values():
                 if toEveryProcess:
                     self.subdomain.allgatherOwnedValues(vector)
                 else:
@@ -1564,7 +1554,7 @@ class NEDMPI(NEDParallel):
         wholeSolutionHere = toEveryProcess or self.subdomain.rank == 0
         if wholeSolutionHere:
             # every degree of freedom is current now, not only those integrated here
-            super().publishNodeFields(model, U, V, P)
+            super().publishNodeFields(model, carried)
             self._wholeSolutionHere = True
 
         if includeStates:
@@ -1637,12 +1627,12 @@ class NEDMPI(NEDParallel):
 
         interfaceBefore = self.subdomain.interface
         theSystem = super().buildEquationSystem(model, step, previous)
-        self._receiveNewlyIntegratedValues(interfaceBefore, theSystem.U, theSystem.V, theSystem.P)
+        self._receiveNewlyIntegratedValues(interfaceBefore, theSystem.carried)
         return theSystem
 
-    def _receiveNewlyIntegratedValues(self, interfaceBefore, U: DofVector, V: DofVector, P: DofVector):
-        """Complete the solution, the velocity and the net force at the degrees of freedom this process
-        integrates from now on, from their previous owners
+    def _receiveNewlyIntegratedValues(self, interfaceBefore, carried: dict[str, DofVector]):
+        """Complete the carried vectors -- the solution, the velocity and the net force -- at the
+        degrees of freedom this process integrates from now on, from their previous owners
         (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.receiveNewlyIntegratedValues`), and
         publish them into the node fields, as an accepted increment publishes what it integrates: the
         node fields hold the last accepted increment at every degree of freedom a process integrates,
@@ -1652,13 +1642,9 @@ class NEDMPI(NEDParallel):
         ----------
         interfaceBefore
             The interface of the subdomain before it changed.
-        U
-            The solution vector.
-        V
-            The velocity vector.
-        P
-            The net force vector.
+        carried
+            The carried vectors, by node field entry (:attr:`ExplicitSystem.carriedEntries`).
         """
 
-        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, [U, V, P])
-        self._publishIntoNodeFields(self._integratedNodeFieldSlots, ((U, "U"), (P, "P"), (V, "V")))
+        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, list(carried.values()))
+        self._publishIntoNodeFields(self._integratedNodeFieldSlots, carried)

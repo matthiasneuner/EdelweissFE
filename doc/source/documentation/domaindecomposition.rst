@@ -255,6 +255,13 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ``releaseEquationSystem``                   (its own) releases the system before elements move
 ==========================================  =========================================================
 
+The vectors an increment carries to the next -- the solution ``U``, the velocity ``V`` and the net
+force ``P`` -- are listed once, by the node field entry each is published into
+(:attr:`~edelweissfe.solvers.nonlinearexplicitdynamic.ExplicitSystem.carriedEntries`). Every override
+above that publishes, synchronizes, completes, carries over or takes back the carried vectors
+iterates that list, so that a vector added to it -- an acceleration, say -- is treated as these
+three everywhere, rather than published only where it was remembered.
+
 Each process evaluates the kernels of its own elements. At an interior degree of freedom of its
 subdomain that is every contribution there is. At an interface degree of freedom the contributions
 of the neighbouring subdomains' elements are missing, and the neighbours exchange them -- the
