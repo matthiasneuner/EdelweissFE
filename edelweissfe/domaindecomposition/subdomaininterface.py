@@ -53,6 +53,8 @@ from enum import IntEnum, unique
 
 import numpy as np
 from mpi4py import MPI
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from edelweissfe.numerics.assembly import addNodalForces
 from edelweissfe.numerics.scatteradd import sumAtPositions
@@ -82,8 +84,214 @@ class MessageTag(IntEnum):
 _ENTRIES_PER_CONSTRAINT = 2**32
 
 
+class ElementProcessesAtDofs:
+    """Which processes' elements touch each degree of freedom of the model, derived in every process from
+    data every process holds -- the element partition, the connectivity of the mesh and the global
+    numbering of the degrees of freedom (:meth:`ofMesh`) -- instead of gathered from the processes.
+
+    Most degrees of freedom are touched by the elements of one process: for each it holds the
+    lowest-ranked process whose elements touch it. The few touched by the elements of several
+    processes -- the element interface -- it lists with every one of them.
+
+    Parameters
+    ----------
+    lowestProcess
+        Per degree of freedom of the model, the lowest rank whose elements touch it; ``nProcesses``
+        where no element does.
+    sharedDofs
+        The degrees of freedom touched by the elements of more than one process, one entry per such
+        process, sorted by degree of freedom and then by process.
+    sharedProcesses
+        The process of each of those entries.
+    nProcesses
+        The number of processes.
+    """
+
+    def __init__(self, lowestProcess: np.ndarray, sharedDofs: np.ndarray, sharedProcesses: np.ndarray, nProcesses: int):
+        self.lowestProcess = lowestProcess
+        self.sharedDofs = sharedDofs
+        self.sharedProcesses = sharedProcesses
+        self.nProcesses = nProcesses
+
+    @property
+    def nDof(self) -> int:
+        """The number of degrees of freedom of the model."""
+
+        return self.lowestProcess.shape[0]
+
+    @classmethod
+    def ofElementDofs(cls, dofs: np.ndarray, processes: np.ndarray, nDof: int, nProcesses: int):
+        """From the degrees of freedom every element touches, each entry with its element's process.
+
+        Parameters
+        ----------
+        dofs
+            A degree of freedom an element touches, per entry, with repetitions.
+        processes
+            The process of the element of each entry.
+        nDof
+            The number of degrees of freedom of the model.
+        nProcesses
+            The number of processes.
+
+        Returns
+        -------
+        ElementProcessesAtDofs
+            The processes at the degrees of freedom.
+        """
+
+        lowest, sharedDofs, sharedProcesses = _processesAtPlaces(dofs, processes, nDof, nProcesses)
+        return cls(lowest, sharedDofs, sharedProcesses, nProcesses)
+
+    @classmethod
+    def ofMesh(cls, connectivity, numbering, processOfElements: np.ndarray, nProcesses: int):
+        """From the connectivity of the mesh, the global numbering of its degrees of freedom and the process
+        of every element. Node by node and field by field -- an element touches every component of
+        each field at each of its nodes --, so that no array per element and degree of freedom is made.
+
+        Parameters
+        ----------
+        connectivity
+            The connectivity of the mesh (:meth:`~edelweissfe.models.mesh.Mesh.connectivity`).
+        numbering
+            The global numbering of the degrees of freedom
+            (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`).
+        processOfElements
+            The process of every element of the mesh, in mesh order.
+        nProcesses
+            The number of processes.
+
+        Returns
+        -------
+        ElementProcessesAtDofs
+            The processes at the degrees of freedom.
+        """
+
+        lowest = np.full(numbering.nDof, nProcesses, dtype=np.int32)
+        sharedDofs, sharedProcesses = [], []
+        for field in numbering.fields:
+            rows, processes = [], []
+            for group in connectivity.groups:
+                groupProcesses = processOfElements[group.positions]
+                for i, fields in enumerate(group.typeInfo.fields):
+                    if field in fields:
+                        rows.append(group.nodeRows[:, i])
+                        processes.append(groupProcesses)
+            if not rows:
+                continue
+            nodeLowest, sharedNodes, sharedNodeProcesses = _processesAtPlaces(
+                np.concatenate(rows), np.concatenate(processes), numbering.nodeLabels.shape[0], nProcesses
+            )
+            carrying = numbering.nodesCarryingField[field]
+            first, dimension = numbering.firstDofOfField[field], numbering.dimensionOfField[field]
+            if np.any(nodeLowest[~carrying] < nProcesses):
+                raise RuntimeError("an element touches field {:} at a node not carrying it".format(field))
+            lowest[first : first + np.count_nonzero(carrying) * dimension] = np.repeat(nodeLowest[carrying], dimension)
+            components = np.arange(dimension, dtype=np.int64)
+            dofs = first + numbering.rankInField[field][sharedNodes].astype(np.int64)[:, None] * dimension + components
+            sharedDofs.append(dofs.ravel())
+            sharedProcesses.append(np.repeat(sharedNodeProcesses, dimension))
+
+        sharedDofs, sharedProcesses = _uniquePairs(
+            np.concatenate(sharedDofs) if sharedDofs else np.empty(0, dtype=np.int64),
+            np.concatenate(sharedProcesses) if sharedProcesses else np.empty(0, dtype=np.int64),
+            nProcesses,
+        )
+        return cls(lowest, sharedDofs, sharedProcesses, nProcesses)
+
+    def dofsOfProcess(self, process: int) -> np.ndarray:
+        """The degrees of freedom the elements of a process touch.
+
+        Parameters
+        ----------
+        process
+            The rank.
+
+        Returns
+        -------
+        np.ndarray
+            The degrees of freedom, sorted.
+        """
+
+        return np.union1d(
+            np.flatnonzero(self.lowestProcess == process), self.sharedDofs[self.sharedProcesses == process]
+        )
+
+    def processesAt(self, dofs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Every process whose elements touch one of the given degrees of freedom.
+
+        Parameters
+        ----------
+        dofs
+            Degrees of freedom, sorted and without repetitions.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Pairs of a degree of freedom and a process, as two arrays.
+        """
+
+        lowest = self.lowestProcess[dofs]
+        touched = lowest < self.nProcesses
+        positions = np.searchsorted(dofs, self.sharedDofs)
+        positions[positions == dofs.shape[0]] = 0
+        atDofs = dofs.shape[0] > 0
+        shared = (dofs[positions] == self.sharedDofs) if atDofs else np.zeros(self.sharedDofs.shape[0], dtype=bool)
+        return _uniquePairs(
+            np.concatenate([dofs[touched], self.sharedDofs[shared]]),
+            np.concatenate([lowest[touched].astype(np.int64), self.sharedProcesses[shared]]),
+            self.nProcesses,
+        )
+
+
+def _processesAtPlaces(places: np.ndarray, processes: np.ndarray, nPlaces: int, nProcesses: int) -> tuple:
+    """The lowest process at each place, and every process at the places with more than one.
+
+    Parameters
+    ----------
+    places
+        A place per entry, with repetitions.
+    processes
+        The process of each entry.
+    nPlaces
+        The number of places.
+    nProcesses
+        The number of processes, the lowest process of a place without entries.
+
+    Returns
+    -------
+    tuple
+        The lowest process at each place; the places with more than one process, one entry per process,
+        sorted; the process of each of those entries.
+    """
+
+    places = np.asarray(places, dtype=np.int64)
+    processes = np.asarray(processes, dtype=np.int64)
+    lowest = np.full(nPlaces, nProcesses, dtype=np.int32)
+    np.minimum.at(lowest, places, processes.astype(np.int32))
+    highest = np.full(nPlaces, -1, dtype=np.int32)
+    np.maximum.at(highest, places, processes.astype(np.int32))
+    several = (highest > lowest)[places]
+    sharedPlaces, sharedProcesses = _uniquePairs(places[several], processes[several], nProcesses)
+    return lowest, sharedPlaces, sharedProcesses
+
+
+def _uniquePairs(places: np.ndarray, processes: np.ndarray, nProcesses: int) -> tuple[np.ndarray, np.ndarray]:
+    """Pairs of a place and a process without repetitions, sorted by place and then by process."""
+
+    keys = np.unique(np.asarray(places, dtype=np.int64) * nProcesses + np.asarray(processes, dtype=np.int64))
+    return keys // nProcesses, keys % nProcesses
+
+
 class SubdomainInterface:
     """The subdomain degrees of freedom of this process, their ownership, and the exchange plans.
+
+    Which processes integrate a degree of freedom is derived in every process from what every process
+    holds: which processes' elements touch it (:class:`ElementProcessesAtDofs`, from the element
+    partition and the mesh) and the multi-point constraints linking it to others. Only the degrees of
+    freedom a process touches beyond its elements' -- those of the constraints it evaluates, which
+    only it holds current -- are gathered to every process. No process gathers the subdomain degrees
+    of freedom of the others.
 
     Constructed collectively: every process of the communicator must construct its instance at the
     same time.
@@ -92,48 +300,86 @@ class SubdomainInterface:
     ----------
     communicator
         The communicator of the processes sharing the model.
+    elementProcesses
+        Which processes' elements touch each degree of freedom; the same in every process.
     touchedDofs
         The degrees of freedom this process' elements and constraints touch, in any order and with
         repetitions.
-    nDof
-        The size of the equation system.
+    multiPointConstraintLinks
+        The slave and the master of every dependency of the multi-point constraints, the same in every
+        process, or None.
     """
 
-    def __init__(self, communicator, touchedDofs: np.ndarray, nDof: int):
+    def __init__(
+        self,
+        communicator,
+        elementProcesses: "ElementProcessesAtDofs",
+        touchedDofs: np.ndarray,
+        multiPointConstraintLinks: tuple[np.ndarray, np.ndarray] | None = None,
+    ):
         self.communicator = communicator
         rank = communicator.Get_rank()
         size = communicator.Get_size()
+        nDof = elementProcesses.nDof
         self.nDof = nDof
 
-        localDofs = np.unique(np.asarray(touchedDofs, dtype=np.int64))
+        touched = np.unique(np.asarray(touchedDofs, dtype=np.int64))
 
-        counts = np.array(communicator.allgather(localDofs.shape[0]), dtype=np.int64)
-        allDofs = np.empty(counts.sum(), dtype=np.int64)
-        communicator.Allgatherv(localDofs, [allDofs, counts, _displacements(counts), MPI.INT64_T])
-        allRanks = np.repeat(np.arange(size, dtype=np.int64), counts)
+        # Which processes' elements touch a degree of freedom, every process derives itself. What it
+        # cannot derive are the degrees of freedom a process touches beyond its elements' -- those of
+        # its constraints --: each process sends those, and they are gathered to every process.
+        byOwnElements = elementProcesses.dofsOfProcess(rank)
+        derivedWrongly = np.setdiff1d(byOwnElements, touched, assume_unique=True).shape[0] > 0
+        if communicator.allreduce(int(derivedWrongly), op=MPI.MAX):
+            raise RuntimeError(
+                "The degrees of freedom the elements of a process touch, as derived from the element partition "
+                "and the mesh, include some its elements do not touch: the processes would disagree on which "
+                "process integrates which degree of freedom."
+            )
+        claimed = np.setdiff1d(touched, byOwnElements, assume_unique=True)
+        counts = np.array(communicator.allgather(claimed.shape[0]), dtype=np.int64)
+        claimedDofs = np.empty(counts.sum(), dtype=np.int64)
+        communicator.Allgatherv(claimed, [claimedDofs, counts, _displacements(counts), MPI.INT64_T])
+        claimedProcesses = np.repeat(np.arange(size, dtype=np.int64), counts)
+        #: The number of degrees of freedom the processes touch beyond their elements', gathered to every
+        #: process.
+        self.nClaimedDofs = claimedDofs.shape[0]
 
-        # A degree of freedom no process touches has no force but its own and is integrated by rank
-        # 0, so that the equation of every degree of freedom is integrated somewhere.
-        touched = np.zeros(nDof, dtype=bool)
-        touched[allDofs] = True
-        untouched = np.flatnonzero(~touched)
-        if untouched.size:
-            allDofs = np.concatenate([allDofs, untouched])
-            allRanks = np.concatenate([allRanks, np.zeros(untouched.shape[0], dtype=np.int64)])
-            if rank == 0:
-                localDofs = np.union1d(localDofs, untouched)
+        def touchingProcessesAt(dofs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            """Every process touching one of the given sorted degrees of freedom, with its elements or its
+            constraints, as pairs of a degree of freedom and a process."""
 
+            elementDofs, elementRanks = elementProcesses.processesAt(dofs)
+            atDofs = np.isin(claimedDofs, dofs)
+            return _uniquePairs(
+                np.concatenate([elementDofs, claimedDofs[atDofs]]),
+                np.concatenate([elementRanks, claimedProcesses[atDofs]]),
+                size,
+            )
+
+        # A process touching a degree of freedom of a group linked by multi-point constraints integrates
+        # all of the group (a slave's force is folded onto its masters, its velocity interpolated from
+        # theirs): every degree of freedom of a group, with every process touching the group.
+        linkedDofs, groupOfLinked = multiPointConstraintGroups(multiPointConstraintLinks)
+        pairDofs, pairRanks = touchingProcessesAt(linkedDofs)
+        groupKeys = np.unique(groupOfLinked[np.searchsorted(linkedDofs, pairDofs)] * size + pairRanks)
+        closureDofs, closureRanks = _membersWithProcesses(
+            linkedDofs, groupOfLinked, groupKeys // size, groupKeys % size
+        )
+
+        # The owner: the lowest-ranked process integrating a degree of freedom; rank 0 for one nothing
+        # touches, which rank 0 integrates, so that every equation is integrated somewhere.
+        owner = elementProcesses.lowestProcess.astype(np.int64)
+        np.minimum.at(owner, claimedDofs, claimedProcesses)
+        np.minimum.at(owner, closureDofs, closureRanks)
+        untouched = owner == size
+        owner[untouched] = 0
+
+        subdomainDofs = np.union1d(touched, closureDofs[closureRanks == rank])
+        if rank == 0:
+            subdomainDofs = np.union1d(subdomainDofs, np.flatnonzero(untouched))
         #: The sorted degrees of freedom this process integrates.
-        self.subdomainDofs = localDofs
-
-        order = np.lexsort((allRanks, allDofs))
-        allDofs = allDofs[order]
-        allRanks = allRanks[order]
-
-        firstOfDof = np.ones(allDofs.shape[0], dtype=bool)
-        firstOfDof[1:] = allDofs[1:] != allDofs[:-1]
-        owner = np.empty(nDof, dtype=np.int64)
-        owner[allDofs[firstOfDof]] = allRanks[firstOfDof]
+        self.subdomainDofs = subdomainDofs
 
         #: Whether this process owns each degree of freedom, over the whole equation system.
         self.ownedDofMask = owner == rank
@@ -147,18 +393,22 @@ class SubdomainInterface:
         self._gatherBuffer = np.empty(nDof)
 
         # The interface: every (degree of freedom, other process) pair among this process' own.
-        isLocalDof = np.zeros(nDof, dtype=bool)
-        isLocalDof[localDofs] = True
-        shared = isLocalDof[allDofs] & (allRanks != rank)
-        sharedDofs = allDofs[shared]
-        sharedRanks = allRanks[shared]
+        pairDofs, pairRanks = touchingProcessesAt(subdomainDofs)
+        atSubdomain = np.isin(closureDofs, subdomainDofs)
+        sharedDofs, sharedRanks = _uniquePairs(
+            np.concatenate([pairDofs, closureDofs[atSubdomain]]),
+            np.concatenate([pairRanks, closureRanks[atSubdomain]]),
+            size,
+        )
+        other = sharedRanks != rank
+        sharedDofs, sharedRanks = sharedDofs[other], sharedRanks[other]
 
         #: The degrees of freedom this process shares with at least one other, sorted.
         self.interfaceDofs = np.unique(sharedDofs)
         #: The neighbouring processes, ascending.
         self.neighbours = np.unique(sharedRanks).tolist()
 
-        #: The degrees of freedom shared with each neighbour, sorted (allDofs is sorted by DOF first).
+        #: The degrees of freedom shared with each neighbour, sorted (the pairs are sorted by DOF first).
         self._sharedWith = {neighbour: sharedDofs[sharedRanks == neighbour] for neighbour in self.neighbours}
 
     @property
@@ -221,6 +471,64 @@ class SubdomainInterface:
             plain[self._gatheredOrder] = self._gatherBuffer
         else:
             self.communicator.Gatherv(send, None, root=0)
+
+
+def multiPointConstraintGroups(links: tuple[np.ndarray, np.ndarray] | None) -> tuple[np.ndarray, np.ndarray]:
+    """The groups of degrees of freedom linked by multi-point constraints, transitively: a slave with its
+    masters, and every group sharing a degree of freedom with another merged with it. Computed among the
+    linked degrees of freedom only, numbered compactly: a graph of the size of the multi-point
+    constraints, not of the equation system.
+
+    Parameters
+    ----------
+    links
+        The slave and the master of every dependency
+        (:meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.slaveMasterDofPairs`),
+        or None.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        The linked degrees of freedom, sorted, and the group of each.
+    """
+
+    if links is None or not links[0].size:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    slaves, masters = links
+    linked, positions = np.unique(np.concatenate([slaves, masters]).astype(np.int64), return_inverse=True)
+    nLinks = slaves.shape[0]
+    graph = coo_matrix((np.ones(nLinks), (positions[:nLinks], positions[nLinks:])), shape=(linked.shape[0],) * 2)
+    _, group = connected_components(graph, directed=False)
+    return linked, group.astype(np.int64)
+
+
+def _membersWithProcesses(linkedDofs, groupOfLinked, groups, processes) -> tuple[np.ndarray, np.ndarray]:
+    """Every degree of freedom of each given group, paired with the process given with the group.
+
+    Parameters
+    ----------
+    linkedDofs
+        The linked degrees of freedom.
+    groupOfLinked
+        The group of each.
+    groups
+        A group per pair.
+    processes
+        The process of each pair.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Pairs of a degree of freedom and a process.
+    """
+
+    byGroup = np.argsort(groupOfLinked, kind="stable")
+    nGroups = int(groupOfLinked.max()) + 1 if groupOfLinked.size else 0
+    first = np.searchsorted(groupOfLinked[byGroup], np.arange(nGroups + 1))
+    nMembers = np.diff(first)[groups]
+    starts = np.repeat(first[groups], nMembers)
+    within = np.arange(int(nMembers.sum())) - np.repeat(np.cumsum(nMembers) - nMembers, nMembers)
+    return linkedDofs[byGroup[starts + within]], np.repeat(processes, nMembers)
 
 
 class _TaggedContributions:

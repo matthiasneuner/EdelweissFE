@@ -50,8 +50,6 @@ from time import perf_counter
 
 import numpy as np
 from mpi4py import MPI
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.communicator import Communicator
@@ -72,6 +70,7 @@ from edelweissfe.domaindecomposition.statesynchronization import (
 )
 from edelweissfe.domaindecomposition.subdomaininterface import (
     ConstraintForceExchange,
+    ElementProcessesAtDofs,
     InterfaceForceAssembly,
     InterfaceLoadAssembly,
     SubdomainInterface,
@@ -169,6 +168,11 @@ class DomainDecomposition:
         self._constraintOwners = None
 
         self._ownedConstraints = {}
+
+        #: The global numbering of the degrees of freedom the layout was last checked against, and which
+        #: processes' elements touch each degree of freedom under the current partition.
+        self._numbering = None
+        self._elementProcesses = None
 
         self._interface = None
         self._stateSynchronization = None
@@ -348,6 +352,16 @@ class DomainDecomposition:
             if self._constraintOwners[name] == self.rank
         }
 
+        connectivity = model.mesh.connectivity()
+        processOfElements = np.fromiter(
+            (self._elementOwners[number] for number in connectivity.numbers.tolist()),
+            dtype=np.int64,
+            count=connectivity.numbers.shape[0],
+        )
+        self._elementProcesses = ElementProcessesAtDofs.ofMesh(
+            connectivity, self._numbering, processOfElements, self.nProcesses
+        )
+
     def _defineInterface(self, model: FEModel, ownershipChanged: bool):
         """Collective. Determine the subdomain degrees of freedom and the interface from the owned entities;
         with new ownership, also the layout of the state synchronization.
@@ -366,9 +380,13 @@ class DomainDecomposition:
             dofManager.idcsOfConstraintsInDofVector[constraint] for constraint in self._ownedConstraints.values()
         ]
         touched = np.concatenate(touched) if touched else np.empty(0, dtype=np.int64)
-        touched = self._closeOverMultiPointConstraints(touched, dofManager.nDof)
 
-        self._interface = SubdomainInterface(self.communicator, touched, dofManager.nDof)
+        self._interface = SubdomainInterface(
+            self.communicator,
+            self._elementProcesses,
+            touched,
+            None if self._mpcTransformation is None else self._mpcTransformation.slaveMasterDofPairs(),
+        )
 
         if ownershipChanged:
             # The states of the elements other processes compute are kept current only where every
@@ -417,47 +435,6 @@ class DomainDecomposition:
                 )
             )
 
-    def _closeOverMultiPointConstraints(self, touched: np.ndarray, nDof: int) -> np.ndarray:
-        """Add to the touched degrees of freedom every one linked to them by a multi-point
-        constraint, transitively.
-
-        A slave's force is folded onto its masters and its velocity interpolated from theirs, so a
-        process integrating any degree of freedom of such a group must integrate all of them, and
-        hold the complete force at each; see
-        :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.slaveMasterDofPairs`.
-
-        Parameters
-        ----------
-        touched
-            The degrees of freedom this process' elements and constraints touch.
-        nDof
-            The size of the equation system.
-
-        Returns
-        -------
-        np.ndarray
-            The touched degrees of freedom and their multi-point-constraint closure.
-        """
-
-        if self._mpcTransformation is None:
-            return touched
-
-        slaves, masters = self._mpcTransformation.slaveMasterDofPairs()
-        if not slaves.size:
-            return touched
-
-        # The groups among the linked degrees of freedom only, numbered compactly: a graph of the size
-        # of the multi-point constraints, not of the equation system.
-        linked, positions = np.unique(np.concatenate([slaves, masters]), return_inverse=True)
-        nLinks = slaves.shape[0]
-        links = coo_matrix(
-            (np.ones(nLinks), (positions[:nLinks], positions[nLinks:])), shape=(linked.shape[0], linked.shape[0])
-        )
-        _, group = connected_components(links, directed=False)
-
-        groupsTouched = np.unique(group[np.isin(linked, touched)])
-        return np.concatenate([touched, linked[np.isin(group, groupsTouched)]])
-
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
         """Collective. Refuse to continue unless the DofManager numbers the degrees of freedom as the global
         numbering of the mesh does
@@ -485,6 +462,7 @@ class DomainDecomposition:
 
         numbering = GlobalDofNumbering.ofModel(model)
         numbering.requireAgreementWith(dofManager, model.nodeFields, model.scalarVariables)
+        self._numbering = numbering
         fingerprints = self.communicator.allgather(layoutFingerprint(model, numbering, self._mpcTransformation))
         if len(set(fingerprints)) > 1:
             raise RuntimeError(

@@ -170,12 +170,14 @@ def test_no_launcher_means_no_mpi(monkeypatch):
 def test_single_subdomain_owns_and_integrates_everything():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.subdomaininterface import (
+        ElementProcessesAtDofs,
         InterfaceForceAssembly,
         SubdomainInterface,
     )
 
     # Degrees of freedom 3 and 7 are touched by nothing, and still integrated -- by rank 0.
-    interface = SubdomainInterface(MPI.COMM_SELF, np.array([5, 0, 1, 2, 4, 6, 8, 9, 1]), 10)
+    elements = ElementProcessesAtDofs.ofElementDofs(np.array([0, 1, 1, 2]), np.zeros(4, dtype=np.int64), 10, 1)
+    interface = SubdomainInterface(MPI.COMM_SELF, elements, np.array([5, 0, 1, 2, 4, 6, 8, 9, 1]))
 
     assert np.array_equal(interface.subdomainDofs, np.arange(10))
     assert interface.ownedDofMask.all()
@@ -193,13 +195,15 @@ def test_single_subdomain_owns_and_integrates_everything():
 def test_loads_are_added_one_after_another_in_the_order_of_the_loads():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.subdomaininterface import (
+        ElementProcessesAtDofs,
         InterfaceLoadAssembly,
         SubdomainInterface,
     )
 
     rng = np.random.default_rng(7)
     nDof, nEntries = 50, 400
-    interface = SubdomainInterface(MPI.COMM_SELF, np.arange(nDof), nDof)
+    noElements = ElementProcessesAtDofs.ofElementDofs(np.empty(0), np.empty(0), nDof, 1)
+    interface = SubdomainInterface(MPI.COMM_SELF, noElements, np.arange(nDof))
     entryDofs = rng.integers(0, nDof, nEntries)
     # Every entry its own place in the order of the loads, given in scrambled order; values of very
     # different magnitudes and signed zeros, so that any other order of additions, or a sum started
@@ -306,7 +310,9 @@ def test_the_scatter_add_is_a_left_fold_the_same_bits_as_numpy_bincount():
 _INTERFACE_ASSEMBLY_SCRIPT = """
 import numpy as np
 from mpi4py import MPI
-from edelweissfe.domaindecomposition.subdomaininterface import InterfaceForceAssembly, SubdomainInterface
+from edelweissfe.domaindecomposition.subdomaininterface import (
+    ElementProcessesAtDofs, InterfaceForceAssembly, SubdomainInterface
+)
 from edelweissfe.numerics.scatteradd import sumAtPositions
 
 communicator = MPI.COMM_WORLD
@@ -328,14 +334,39 @@ entryDofs = np.concatenate([elementDofs[e] for e in mine])
 entryPositions = np.repeat(mine, 4)
 contributions = values[mine].ravel()
 
-interface = SubdomainInterface(communicator, entryDofs, nDof)
+# Which processes integrate a degree of freedom, derived from the element partition every process
+# knows, and multi-point constraints linking 0-1-2 and 30-31 -- against the processes touching them.
+links = (np.array([1, 2, 31]), np.array([0, 1, 30]))
+elements = ElementProcessesAtDofs.ofElementDofs(np.concatenate(elementDofs), np.repeat(owner, 4), nDof,
+                                                communicator.Get_size())
+interface = SubdomainInterface(communicator, elements, entryDofs, links)
+groups = [{0, 1, 2}, {30, 31}]
+integrating = [set() for _ in range(nDof)]
+for dofs, process in zip(elementDofs, owner):
+    for dof in dofs:
+        integrating[dof].add(int(process))
+for group in groups:
+    union = set().union(*(integrating[dof] for dof in group))
+    for dof in group:
+        integrating[dof] = set(union)
+integrating = [processes or {0} for processes in integrating]
+derived = (
+    np.array_equal(interface.dofOwners, [min(processes) for processes in integrating])
+    and np.array_equal(interface.subdomainDofs, [dof for dof in range(nDof) if rank in integrating[dof]])
+    and interface.neighbours == sorted(set().union(*(integrating[d] for d in interface.subdomainDofs)) - {rank})
+    and all(
+        np.array_equal(interface.sharedDofsWith(n), [d for d in interface.subdomainDofs if n in integrating[d]])
+        for n in interface.neighbours
+    )
+)
 # the own elements, in model order, assembled as the element loop assembles them
 vector = np.zeros(nDof) + sumAtPositions(entryDofs.astype(np.int64), contributions, nDof)
 InterfaceForceAssembly(interface, entryDofs, entryPositions).assemble(contributions, vector)
 
 integrated = interface.subdomainDofs
 same = np.array_equal(vector[integrated].view(np.int64), expected[integrated].view(np.int64))
-print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", interface.nInterfaceDofs > 0, flush=True)
+print("PROCESS", rank, "BITWISE" if same else "DIFFERENT", interface.nInterfaceDofs > 0,
+      "DERIVED" if derived else "MISDERIVED", flush=True)
 """
 
 
@@ -346,7 +377,7 @@ def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path)
         pytest.fail("the interface exchange did not complete")
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
-    assert reports == ["PROCESS {:} BITWISE True".format(rank) for rank in range(3)], output
+    assert reports == ["PROCESS {:} BITWISE True DERIVED".format(rank) for rank in range(3)], output
 
 
 #: Adds adversarial constraint forces over three processes, each owning a random part of the
@@ -356,7 +387,9 @@ def test_interface_forces_are_summed_in_element_order_on_every_process(tmp_path)
 _CONSTRAINT_EXCHANGE_SCRIPT = """
 import numpy as np
 from mpi4py import MPI
-from edelweissfe.domaindecomposition.subdomaininterface import ConstraintForceExchange, SubdomainInterface
+from edelweissfe.domaindecomposition.subdomaininterface import (
+    ConstraintForceExchange, ElementProcessesAtDofs, SubdomainInterface
+)
 from edelweissfe.numerics.assembly import addNodalForces
 
 communicator = MPI.COMM_WORLD
@@ -381,7 +414,9 @@ for name in names:
 
 owned = {name: constraints[name] for name in names if owner[name] == rank}
 touched = np.concatenate([elementDofs[rank]] + [dofs[name] for name in owned])
-interface = SubdomainInterface(communicator, touched, nDof)
+size = communicator.Get_size()
+elements = ElementProcessesAtDofs.ofElementDofs(np.concatenate(elementDofs), np.repeat(np.arange(size), 5), nDof, size)
+interface = SubdomainInterface(communicator, elements, touched)
 exchange = ConstraintForceExchange(interface, constraints, owned, {constraints[name]: dofs[name] for name in names})
 vector = initial.copy()
 exchange.addAllConstraintForces({name: forces[name] for name in owned}, vector)
