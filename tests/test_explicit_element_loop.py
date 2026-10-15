@@ -92,7 +92,7 @@ def bothElementLoops(self, U, dU, P, timeStep):
 
 
 def bothLumpedLoops(self, elementLoop, elementContribution):
-    plain = NED.assembleLumpedDiagonal(self, plainLoop(self, self.partition.elements), elementContribution)
+    plain = NED.assembleLumpedDiagonal(self, plainLoop(self, self.subdomain.elements), elementContribution)
     vector = assembleLumpedDiagonal(self, elementLoop, elementContribution)
     counts["operators"] += 1
     counts["operators differ"] += int(np.asarray(plain).tobytes() != np.asarray(vector).tobytes())

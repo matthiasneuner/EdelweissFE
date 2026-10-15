@@ -548,18 +548,18 @@ def test_element_loop_sums_in_element_order_on_any_number_of_threads():
         planElements(elements, indices, dofs[1:], nDof, 1)
 
 
-def test_the_whole_model_is_a_trivial_partition():
+def test_the_whole_model_is_a_trivial_subdomain():
     from types import SimpleNamespace
 
-    from edelweissfe.solvers.base.modelpartition import ModelPartition
+    from edelweissfe.solvers.base.subdomain import Subdomain
 
     model = SimpleNamespace(elements={1: "element"}, constraints={"c": "constraint"})
-    partition = ModelPartition.wholeModel(model)
+    subdomain = Subdomain.wholeModel(model)
     vector = np.arange(5.0)
 
-    assert partition.elements is model.elements and partition.constraints is model.constraints
+    assert subdomain.elements is model.elements and subdomain.constraints is model.constraints
     # every degree of freedom, as a view: no copy, and writing it back writes it onto itself
-    assert np.shares_memory(vector[partition.dofs], vector) and vector[partition.dofs].shape == vector.shape
+    assert np.shares_memory(vector[subdomain.dofs], vector) and vector[subdomain.dofs].shape == vector.shape
 
 
 def test_a_single_process_agrees_with_itself():
@@ -727,7 +727,7 @@ assembleNetForce = NEDMPI.assembleNetForce
 def poisonedOutsideTheSubdomain(self, U, dU, P, stepActions, timeStep):
     P, psi = assembleNetForce(self, U, dU, P, stepActions, timeStep)
     outside = np.ones(P.shape[0], dtype=bool)
-    outside[self.partition.dofs] = False
+    outside[self.subdomain.dofs] = False
     P.asPlainArray()[outside] = np.nan
     return P, psi
 

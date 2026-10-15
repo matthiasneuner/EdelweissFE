@@ -219,7 +219,7 @@ An increment
 
 An increment is the central-difference increment of ``NED``, unchanged. ``NED`` runs it over the
 elements, constraints and degrees of freedom of its
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` -- three members: the elements
+:class:`~edelweissfe.solvers.base.subdomain.Subdomain` -- three members: the elements
 computed here, the constraints evaluated here, and the degrees of freedom integrated here. For
 ``NED`` that is the whole model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]``
 is the whole vector; for ``NEDMPI`` it is the subdomain of the process, as a
@@ -233,7 +233,7 @@ Everything a process must exchange with the others, ``NEDMPI`` adds in overrides
 ==========================================  =========================================================
 ``NEDMPI`` method                            adds
 ==========================================  =========================================================
-``partitionModel``                          the subdomain, instead of the whole model
+``defineSubdomain``                          the subdomain, instead of the whole model
 ``assembleInternalForces``                  evaluates the own constraints with the elements, and the
                                             interface exchange of the element forces
 ``assembleLumpedDiagonal``                  the same for the lumped inertia and damping, once per mesh

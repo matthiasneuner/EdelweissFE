@@ -166,9 +166,9 @@ class ElementPlan:
     order, is the assembly: the sum at every degree of freedom is formed in element order, as the
     one-element-at-a-time loop forms it, whatever the number of threads or chunks.
 
-    The plan assembles into the degrees of freedom a model partition integrates, never into more:
+    The plan assembles into the degrees of freedom a subdomain integrates, never into more:
     a process computing one part of a model of many would otherwise pay, every increment, for the
-    entities it does not compute. Valid for one equation system and one partition; built afresh
+    entities it does not compute. Valid for one equation system and one subdomain; built afresh
     with either.
 
     Parameters
@@ -393,7 +393,7 @@ def computeElementsForExplicit(
     tuple[float, np.ndarray]
         The summed internal energy, and the contribution buffer the forces were assembled from -- one
         entry per element and degree of freedom, in plan order -- which completing the forces at the
-        interface of a model partition needs.
+        interface of a subdomain needs.
     """
 
     time = timeStep.totalTime

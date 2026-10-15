@@ -122,7 +122,7 @@ over. ``load-balance-costs=elementNumber`` replaces the timings by the element n
 deterministic, uneven cost, for tests.
 
 **What this solver changes.** The increment of ``NED`` runs over the
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of this process' subdomain, which a
+:class:`~edelweissfe.solvers.base.subdomain.Subdomain` of this process, which a
 :class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines. What this solver adds is the
 communication, each in an override of a method of ``NED``:
 
@@ -189,11 +189,11 @@ from edelweissfe.numerics.dofmanager import DofVector
 from edelweissfe.numerics.exactsum import ExactSum
 from edelweissfe.numerics.parallelizationutilities import getNumberOfThreads
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
-from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import (
     ElementPlan,
     computeElementsForExplicit,
 )
+from edelweissfe.solvers.base.subdomain import Subdomain
 from edelweissfe.solvers.nonlinearexplicitdynamic import (
     NED,
     ExplicitSystem,
@@ -520,24 +520,24 @@ class NEDMPI(NEDParallel):
 
     # --- The subdomain ------------------------------------------------------------------------------
 
-    def partitionModel(self, model: FEModel, topologyChanged: bool) -> ModelPartition:
-        """The subdomain of this process; see :meth:`NED.partitionModel`. Collective.
+    def defineSubdomain(self, model: FEModel, topologyChanged: bool) -> Subdomain:
+        """The subdomain of this process; see :meth:`NED.defineSubdomain`. Collective.
 
         Parameters
         ----------
         model
             The model tree.
         topologyChanged
-            As for :meth:`NED.partitionModel`.
+            As for :meth:`NED.defineSubdomain`.
 
         Returns
         -------
-        ModelPartition
-            The partition.
+        Subdomain
+            The subdomain.
         """
 
         self.domainDecomposition.define(model, self.theDofManager, self.mpcTransformation, topologyChanged)
-        return self.domainDecomposition.partition
+        return self.domainDecomposition.subdomain
 
     def planIncrement(self, model: FEModel) -> IncrementPlan:
         """The increment plan of :meth:`NED.planIncrement`, and how its element forces are completed
@@ -555,7 +555,7 @@ class NEDMPI(NEDParallel):
         """
 
         plan = super().planIncrement(model)
-        self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
+        self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.subdomain.dofs)
         # planned again for this subdomain at the next search
         self._forgetReceivePlans()
         self._interfaceAssembly = self.domainDecomposition.interfaceAssemblyFor(plan.elementLoop)
@@ -700,7 +700,7 @@ class NEDMPI(NEDParallel):
             with performancetiming.timeit("evaluate constraints"):
                 self._constraintForcesOfIncrement = {
                     name: self._evaluateConstraintForce(name, constraint, U_np, dU, P, timeStep)
-                    for name, constraint in self.partition.constraints.items()
+                    for name, constraint in self.subdomain.constraints.items()
                 }
             self._elementLoopTime += startOfConstraints - startOfElements
             self._constraintEvaluationTime += perf_counter() - startOfConstraints
@@ -957,7 +957,7 @@ class NEDMPI(NEDParallel):
                 if self.domainDecomposition.elementsMustMove():
                     self._moveElements(model, step)
                 else:
-                    self.partition = self.domainDecomposition.partition
+                    self.subdomain = self.domainDecomposition.subdomain
                     self._incrementPlan = self.planIncrement(model)
                     self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
                 self.domainDecomposition.recordRepartitionCost(perf_counter() - startOfRebalancing)
@@ -982,7 +982,7 @@ class NEDMPI(NEDParallel):
         """
 
         outside = np.ones(self._system.U.shape[0], dtype=bool)
-        outside[self.partition.dofs] = False
+        outside[self.subdomain.dofs] = False
         for vector in self._system.carried.values():
             vector.asPlainArray()[outside] = np.nan
         super().publishNodeFields(model, self._system.carried)
@@ -1041,7 +1041,7 @@ class NEDMPI(NEDParallel):
         """
 
         model.time = time
-        model.acceptStatesOf(self.partition.elements, self.partition.constraints)
+        model.acceptStatesOf(self.subdomain.elements, self.subdomain.constraints)
 
     def _moveElements(self, model: FEModel, step):
         """Move elements between the processes, after a rebalance changed the partition of a
@@ -1141,7 +1141,7 @@ class NEDMPI(NEDParallel):
 
         Everything released is indexed by the elements and constraints the system was built for:
         the DofManager (whose entity indices hold the elements themselves), every vector carrying
-        those indices, the lumped operators, the partition, the increment plan, the interface
+        those indices, the lumped operators, the subdomain, the increment plan, the interface
         assembly and the element timing. Before elements move to another process, so that nothing
         keeps a dropped element alive; the system is then built again, with the returned system as
         ``previous``.
@@ -1159,7 +1159,7 @@ class NEDMPI(NEDParallel):
         self._reusableOperators = None
         self._constraintForces = {}
         self.theDofManager = None
-        self.partition = None
+        self.subdomain = None
         self._incrementPlan = None
         self._integratedNodeFieldSlots = []
         self._interfaceAssembly = None
@@ -1422,7 +1422,7 @@ class NEDMPI(NEDParallel):
         ]
         dofs = np.unique(np.concatenate(dofs)) if dofs else np.empty(0, dtype=np.int64)
         integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
-        integrated[self.partition.dofs] = True
+        integrated[self.subdomain.dofs] = True
         notIntegrated = dofs[~integrated[dofs]]
         return ReceivedSolution(
             self.domainDecomposition.valuesFromOwners(notIntegrated), self._nodeFieldSlotsOf(model, notIntegrated)

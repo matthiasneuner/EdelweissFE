@@ -35,7 +35,7 @@ interface between two subdomains is integrated by both, and its nodal force is c
 the partial forces of every subdomain touching it (:mod:`.subdomaininterface`); the loads acting on
 an element are evaluated where the element is computed, and completed the same way. A
 :class:`~.domaindecomposition.DomainDecomposition` decides the subdomain of a process -- as the
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the explicit increment runs over,
+:class:`~edelweissfe.solvers.base.subdomain.Subdomain` the explicit increment runs over,
 in place of the whole model -- and carries out every exchange between the processes; the processes
 agree through their :class:`~.communicator.Communicator`, which also refuses any communication where
 a failing process would be missing from it.

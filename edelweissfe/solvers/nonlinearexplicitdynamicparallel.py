@@ -118,7 +118,7 @@ class NEDParallel(NED):
         return planElements(
             elements,
             self.theDofManager.idcsOfHigherOrderEntitiesInDofVector,
-            self.partition.dofs,
+            self.subdomain.dofs,
             self.theDofManager.nDof,
             self.elementLoopThreads(),
         )

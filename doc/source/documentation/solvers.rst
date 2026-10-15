@@ -130,18 +130,18 @@ momentum and kinetic energy in that case.
 
 .. pprint:: solver:NED
 
-The part of the model computed in a process
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The subdomain an increment runs over
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The increment of ``NED`` runs over the elements, constraints and degrees of freedom of one small
-object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`: the elements
+object, the solver's :class:`~edelweissfe.solvers.base.subdomain.Subdomain`: the elements
 computed here, the constraints evaluated here, and the degrees of freedom integrated here. ``NED``
 and ``NEDParallel`` compute the whole model, whose degrees of freedom
 are ``slice(None)``; ``NEDMPI`` computes the subdomain a
 :class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines in each process, and adds the
 exchange between the processes in overrides of its own (:doc:`domaindecomposition`).
 
-.. automodule:: edelweissfe.solvers.base.modelpartition
+.. automodule:: edelweissfe.solvers.base.subdomain
    :members:
 
 Rebuilding the equation system during a step

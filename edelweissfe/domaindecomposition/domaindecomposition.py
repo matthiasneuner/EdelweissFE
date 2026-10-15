@@ -31,7 +31,7 @@
 A :class:`DomainDecomposition` decides which part of the model its process computes -- the elements METIS
 assigns to it, the constraints dealt to it, and the degrees of freedom those touch
 (:mod:`.partitioning`) -- and describes it as a
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` (:attr:`DomainDecomposition.partition`). It
+:class:`~edelweissfe.solvers.base.subdomain.Subdomain` (:attr:`DomainDecomposition.subdomain`). It
 also carries out every exchange between the processes the domain-decomposed solver needs: the
 element forces are completed at the interface with the neighbouring subdomains
 (:mod:`.subdomaininterface`), the constraint forces are sent to the processes integrating their
@@ -81,8 +81,8 @@ from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
-from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
+from edelweissfe.solvers.base.subdomain import Subdomain
 from edelweissfe.utils.exceptions import TopologyError
 
 
@@ -192,9 +192,9 @@ class DomainDecomposition:
         #: The loads of the elements computed here, and their assembly, for the loads last asked
         #: for; see loadsOnSubdomain.
         self._loadsOnSubdomain = None
-        #: The elements, constraints and degrees of freedom this process computes, as of the last
-        #: definition.
-        self.partition = None
+        #: The subdomain of this process -- the elements, constraints and degrees of freedom it
+        #: computes --, as of the last definition.
+        self.subdomain = None
         #: The degree-of-freedom layout of the last definition; its entity indices hold the elements.
         self._dofManager = None
 
@@ -208,7 +208,7 @@ class DomainDecomposition:
         topologyChanged: bool,
     ):
         """Partition the model if its elements changed, and determine this process' subdomain
-        degrees of freedom and interface: the :attr:`partition`. Collective.
+        degrees of freedom and interface: the :attr:`subdomain`. Collective.
 
         Called whenever the equation system has been built (``topologyChanged``) or its constraints
         re-located (a contact search moved them). A rebuild with the same elements -- a new step, a
@@ -383,7 +383,7 @@ class DomainDecomposition:
         )
         self._loadsOnSubdomain = None
 
-        self.partition = ModelPartition(self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs)
+        self.subdomain = Subdomain(self._ownedElements, self._ownedConstraints, self._interface.subdomainDofs)
 
     def _refuseElementsWithoutState(self, model: FEModel):
         """Refuse a model with elements that expose no state, on more than one process.
@@ -970,7 +970,7 @@ class DomainDecomposition:
         Returns
         -------
         bool
-            Whether the partition changed; then everything derived from :attr:`partition` must be
+            Whether the partition changed; then everything derived from :attr:`subdomain` must be
             derived again.
         """
 

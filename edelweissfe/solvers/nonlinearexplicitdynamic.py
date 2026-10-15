@@ -136,8 +136,8 @@ second-order degree of freedom, a damping at a first-order one -- since that is 
 step.
 
 **The part of the model computed here.** The increment runs over the elements, constraints and
-degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition`
-(:attr:`NED.partition`). This solver computes the whole model in one process, so its partition is
+degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
+(:attr:`NED.subdomain`). This solver computes the whole model in one process, so its subdomain is
 the whole model: every element and constraint, and every degree of freedom -- the slice
 ``slice(None)``, so that ``V[dofs]`` is the whole vector ``V``. A domain-decomposed solver
 (:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
@@ -174,9 +174,9 @@ from edelweissfe.solvers.base.conservationchecks import (
     formatMomentumAndKineticEnergy,
     linearMomentum,
 )
-from edelweissfe.solvers.base.modelpartition import ModelPartition
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.solvers.base.parallelelementcomputation import ElementPlan
+from edelweissfe.solvers.base.subdomain import Subdomain
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.exceptions import CutbackRequest, StepFailed
 from edelweissfe.utils.fieldoutput import FieldOutputController
@@ -416,7 +416,7 @@ _ELEMENTS_WORTH_THE_PLAN = 5000
 class IncrementPlan:
     """What every increment needs prepared, once per equation system: the element loop, the
     first-order degrees of freedom, and the fold of the multi-point-constraint slave forces. Derived
-    again by :meth:`NED.planIncrement` whenever the equation system or the partition changes.
+    again by :meth:`NED.planIncrement` whenever the equation system or the subdomain changes.
 
     Parameters
     ----------
@@ -574,9 +574,9 @@ class NED(NonlinearSolverBase):
         #: The lumped operators of the current equation system, kept across a rebuild that only a
         #: constraint's connectivity asked for; see :class:`_ReusableExplicitOperators`.
         self._reusableOperators = None
-        #: The elements, constraints and degrees of freedom this process computes; defined with every
-        #: equation system, see :meth:`partitionModel`.
-        self.partition = None
+        #: The subdomain the increment runs over: its elements, constraints and degrees of freedom --
+        #: here the whole model; defined with every equation system, see :meth:`defineSubdomain`.
+        self.subdomain = None
 
     def beginStep(
         self,
@@ -1024,7 +1024,7 @@ class NED(NonlinearSolverBase):
            starts from.
 
         Everything runs over the degrees of freedom integrated in this process
-        (:attr:`partition`): every one, in a model computed whole.
+        (:attr:`subdomain`): every one, in a model computed whole.
 
         Parameters
         ----------
@@ -1201,7 +1201,7 @@ class NED(NonlinearSolverBase):
         #
         # ``dofs`` are the degrees of freedom integrated here: in a model computed whole the slice
         # ``slice(None)``, so that every ``x[dofs]`` below is the whole vector.
-        dofs = self.partition.dofs
+        dofs = self.subdomain.dofs
         firstOrderDofs = self._incrementPlan.firstOrderDofs
         VPlain, PPlain, MinvPlain = V.asPlainArray(), P.asPlainArray(), Minv.asPlainArray()
 
@@ -1255,7 +1255,7 @@ class NED(NonlinearSolverBase):
             The time increment.
         """
 
-        dofs = self.partition.dofs
+        dofs = self.subdomain.dofs
         increment = V.asPlainArray()[dofs] * dT
         dU.asPlainArray()[dofs] = increment
         U.asPlainArray()[dofs] += increment
@@ -1299,7 +1299,7 @@ class NED(NonlinearSolverBase):
             K=None,
             timeStep=timeStep,
         )
-        P = self.assembleConstraintForces(self.partition.constraints, U, dU, P, timeStep)
+        P = self.assembleConstraintForces(self.subdomain.constraints, U, dU, P, timeStep)
 
         # Fold the forces acting on slave DOFs onto their masters (action-reaction through the rigid
         # interpolation link); done here so the Dirichlet handling at the start of the next increment
@@ -1309,7 +1309,7 @@ class NED(NonlinearSolverBase):
         if mpcForceFold is not None:
             with performancetiming.timeit("mpc force fold"):
                 PPlain = P.asPlainArray()
-                dofs = self.partition.dofs
+                dofs = self.subdomain.dofs
                 PPlain[dofs] = mpcForceFold @ PPlain[dofs]
 
         return P, psi
@@ -1749,9 +1749,9 @@ class NED(NonlinearSolverBase):
             and len(model.scalarVariables) == cache.nScalarVariables
         )
 
-    def partitionModel(self, model: FEModel, topologyChanged: bool) -> ModelPartition:
-        """Decide which elements, constraints and degrees of freedom this process computes: the whole
-        model.
+    def defineSubdomain(self, model: FEModel, topologyChanged: bool) -> Subdomain:
+        """The subdomain the increment runs over -- which elements, constraints and degrees of freedom
+        it computes: for this solver, the whole model.
 
         Called with every equation system, once its degree-of-freedom layout and its
         multi-point-constraint transformation are known, and before anything is assembled.
@@ -1766,11 +1766,11 @@ class NED(NonlinearSolverBase):
 
         Returns
         -------
-        ModelPartition
-            The partition.
+        Subdomain
+            The subdomain.
         """
 
-        return ModelPartition.wholeModel(model)
+        return Subdomain.wholeModel(model)
 
     def planElementLoop(self, elements: dict) -> list[tuple]:
         """The element loop over the given elements, as :meth:`assembleInternalForces` and
@@ -1829,7 +1829,7 @@ class NED(NonlinearSolverBase):
             The elements.
         """
 
-        return {number: element for number, element in self.partition.elements.items() if element.hasKernels}
+        return {number: element for number, element in self.subdomain.elements.items() if element.hasKernels}
 
     def reportHowElementsAreComputed(self, model: FEModel):
         """Report how the elements are computed: one at a time. Recommend :class:`~edelweissfe.solvers.nonlinearexplicitdynamicparallel.NEDParallel` for a
@@ -1851,7 +1851,7 @@ class NED(NonlinearSolverBase):
             )
 
     def planIncrement(self, model: FEModel) -> IncrementPlan:
-        """Derive what an increment computes here from the current partition and equation system.
+        """Derive what an increment computes from the current subdomain and equation system.
 
         The element loop leaves out the entities that have no kernels to call -- contact facets --
         once per plan rather than once per increment.
@@ -1867,7 +1867,7 @@ class NED(NonlinearSolverBase):
             The plan.
         """
 
-        dofs = self.partition.dofs
+        dofs = self.subdomain.dofs
         integrated = np.zeros(self.theDofManager.nDof, dtype=bool)
         integrated[dofs] = True
 
@@ -1934,7 +1934,7 @@ class NED(NonlinearSolverBase):
 
         # The lumped operators are assembled over the elements computed here -- contact facets
         # included, which have an inertia but no kernels.
-        operatorLoop = self.planElementLoop(self.partition.elements)
+        operatorLoop = self.planElementLoop(self.subdomain.elements)
         M = self.assembleLumpedDiagonal(operatorLoop, lambda element, Me: element.computeLumpedInertia(Me))
         Minv = self.theDofManager.constructDofVector()  # initialize inverse lumped mass matrix
 
@@ -2138,13 +2138,13 @@ class NED(NonlinearSolverBase):
             M, Minv = self._restoreLumpedOperators()
             # The constraints now couple other degrees of freedom, and so may be integrated
             # elsewhere.
-            self.partition = self.partitionModel(model, topologyChanged=False)
+            self.subdomain = self.defineSubdomain(model, topologyChanged=False)
         else:
             self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
             self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
             # Which elements, constraints and degrees of freedom this process computes; everything
             # from here on that loops over elements loops over those only.
-            self.partition = self.partitionModel(model, topologyChanged=True)
+            self.subdomain = self.defineSubdomain(model, topologyChanged=True)
             M, Minv = self._assembleLumpedOperators(verbosity)
             self._reusableOperators = _ReusableExplicitOperators(
                 elementKeys=frozenset(model.elements.keys()),
@@ -2654,7 +2654,7 @@ class NED(NonlinearSolverBase):
         """
         minTimeStep = np.inf
 
-        for element in self.partition.elements.values():
+        for element in self.subdomain.elements.values():
             elementTimeStep = element.computeCriticalTimeStepForExplicitDynamics(U[element])
             if elementTimeStep < minTimeStep:
                 minTimeStep = elementTimeStep
