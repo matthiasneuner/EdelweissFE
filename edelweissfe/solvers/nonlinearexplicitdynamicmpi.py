@@ -124,8 +124,9 @@ deterministic, uneven cost, for tests.
 
 **What this solver changes.** The increment of ``NED`` runs over the
 :class:`~edelweissfe.solvers.base.subdomain.Subdomain` of this process, which a
-:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines. What this solver adds is the
-communication, each in an override of a method of ``NED``:
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines. What this
+solver adds is the communication, each in an override of a method of ``NED`` (the complete list is
+at the end of the documentation of :mod:`~edelweissfe.solvers.nonlinearexplicitdynamic`):
 
 * :meth:`NEDMPI.assembleInternalForces` completes the element forces at the interface;
 * :meth:`NEDMPI.assembleLumpedDiagonal` completes the lumped inertia and damping the same way, and
@@ -134,8 +135,9 @@ communication, each in an override of a method of ``NED``:
   their degrees of freedom;
 * :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements of the subdomain, and completes
   them at the interface like the forces;
-* :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
-  the minimum and the sums over all processes;
+* :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` forms the minimum over all processes, and
+  :meth:`NEDMPI.kineticEnergy`, :meth:`NEDMPI.momentum` and :meth:`NEDMPI.energyBalanceTerms` the
+  sums;
 * :meth:`NEDMPI.acceptIncrement` synchronizes the model on output increments and rebalances it,
   rebuilding the equation system if elements moved,
   :meth:`NEDMPI.updateConstraintConnectivity` synchronizes it before a contact search,

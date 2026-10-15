@@ -142,13 +142,34 @@ state rather than synthesising it, and the velocity field is checkpointed in its
 implicit solver reconstructs everything it needs from the displacement, a central-difference scheme
 does not.
 
-**What a domain-decomposed solver overrides.** The increment runs over the elements, constraints
-and degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
+**What NEDMPI overrides.** The increment runs over the elements, constraints and degrees of
+freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
 (:attr:`NED.subdomain`). For this solver the subdomain is the whole model: every element and
 constraint, and every degree of freedom -- the slice ``slice(None)``, so that ``V[dofs]`` is the
-whole vector ``V``. A domain-decomposed solver
+whole vector ``V``. The domain-decomposed solver
 (:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
-subdomain per process, and adds the exchange between the subdomains in methods of its own.
+subdomain per process, and adds the exchange between the subdomains by overriding these methods,
+each calling the one it extends -- and no others:
+
+* the subdomain: :meth:`NED.defineSubdomain`, :meth:`NED.planIncrement`,
+  :meth:`NED.buildEquationSystem`;
+* the increment: :meth:`NED.assembleInternalForces`, :meth:`NED.assembleLoads`,
+  :meth:`NED.evaluateConstraintForces`, :meth:`NED.addConstraintForces`, :meth:`NED.addExternalWork`;
+* the lumped operators and the stable time increment: :meth:`NED.assembleLumpedDiagonal`,
+  :meth:`NED.getCriticalTimeStepForExplicitDynamics`;
+* the sums over the whole model: :meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
+  :meth:`NED.energyBalanceTerms`;
+* accepting an increment, and the output: :meth:`NED.acceptIncrement`, :meth:`NED.advanceModelToTime`,
+  :meth:`NED.publishNodeFields`, ``writeIncrementOutput``, ``applyStepActionsAtStepEnd``;
+* contact and topology: :meth:`NED.updateConstraintConnectivity`, ``updateConnectivityOf``,
+  ``updateTopology``;
+* the step: :meth:`NED.beginStep`, :meth:`NED.attemptIncrement`, :meth:`NED.endStep`, ``stepFailed``.
+
+The one rule this places on the code of this module: **a sum over the degrees of freedom of the
+model -- an energy, a momentum, a norm of a vector -- belongs in one of the methods ``NEDMPI``
+overrides** (:meth:`NED.kineticEnergy`, :meth:`NED.momentum`, :meth:`NED.energyBalanceTerms`).
+Written inline, it is in ``NEDMPI`` a sum over the subdomain of one process: a plausible number,
+and a wrong one.
 """
 
 import math
