@@ -155,7 +155,7 @@ a subdomain -- on the shared functions of the element loop and the assembly, whe
 * the subdomain: :meth:`NED.defineSubdomain` *(replaces)*, :meth:`NED.planIncrement`,
   :meth:`NED.buildEquationSystem`;
 * the increment: :meth:`NED.assembleInternalForces` *(replaces)*,
-  :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads` *(replaces)*, :meth:`NED.evaluateConstraintForces`
+  ``assembleLoads`` *(replaces)*, :meth:`NED.evaluateConstraintForces`
   *(replaces)*, :meth:`NED.addConstraintForces` *(replaces)*, :meth:`NED.addExternalWork`
   *(replaces)*;
 * the lumped operators and the stable time increment: :meth:`NED.assembleLumpedDiagonal`
@@ -602,8 +602,8 @@ class NED(NonlinearSolverBase):
         #: The lumped operators of the current equation system, kept across a rebuild that only a
         #: constraint's connectivity asked for; see :class:`_ReusableExplicitOperators`.
         self._reusableOperators = None
-        #: The subdomain the increment runs over: its elements, constraints and degrees of freedom --
-        #: here the whole model; defined with every equation system, see :meth:`defineSubdomain`.
+        #: The subdomain the increment runs over -- its elements, constraints and degrees of freedom,
+        #: here the whole model --, defined with every equation system (:meth:`defineSubdomain`).
         self.subdomain = None
 
     def beginStep(
@@ -2313,7 +2313,7 @@ class NED(NonlinearSolverBase):
         The explicit counterpart of
         :meth:`~edelweissfe.solvers.nonlinearimplicitstatic.NIST.assembleConstraints`, and it shares
         that method's sign convention: a constraint writes what the implicit solver calls ``PExt``,
-        which is why this is called after :meth:`assembleLoads`, on a ``P`` that already holds
+        which is why this is called after ``assembleLoads``, on a ``P`` that already holds
         ``-P_internal``.
 
         Parameters

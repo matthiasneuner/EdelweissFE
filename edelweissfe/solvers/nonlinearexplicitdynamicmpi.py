@@ -725,8 +725,8 @@ class NEDMPI(NEDParallel):
         K: None,
         timeStep: TimeStep,
     ) -> tuple[DofVector, None]:
-        """Collective. Assemble the loads of :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads` in the same order, those acting on
-        elements as the element forces are: each process evaluates the loads of the elements it computes,
+        """Collective. Assemble the loads as ``NED`` does (``assembleLoads``), in the same order, those
+        acting on elements as the element forces are: each process evaluates the loads of the elements it computes,
         failing on all ranks together if it fails on one, and the contributions are completed at the
         interface and added in the order of the loads of the model; see
         :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`.

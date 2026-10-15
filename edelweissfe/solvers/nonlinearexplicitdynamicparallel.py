@@ -100,7 +100,7 @@ class NEDParallel(NED):
         return getNumberOfThreads() if isFreeThreadingSupported() else 1
 
     def planElementLoop(self, elements: dict) -> ElementPlan:
-        """The element loop of :meth:`NED.planElementLoop`, in bulk: the chunks of elements, how they
+        """The element loop of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.planElementLoop`, in bulk: the chunks of elements, how they
         gather their degrees of freedom and how their contributions are assembled
         (:func:`~edelweissfe.solvers.base.parallelelementcomputation.planElements`).
 
@@ -127,7 +127,7 @@ class NEDParallel(NED):
     def assembleInternalForces(
         self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> tuple[DofVector, float]:
-        """The element loop of :meth:`NED.assembleInternalForces`, in bulk: see
+        """The element loop of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.assembleInternalForces`, in bulk: see
         :func:`~edelweissfe.solvers.base.parallelelementcomputation.computeElementsForExplicit`.
 
         Parameters
@@ -152,14 +152,14 @@ class NEDParallel(NED):
         return P, psi
 
     def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
-        """Assemble a lumped operator of :meth:`NED.assembleLumpedDiagonal`, in bulk.
+        """Assemble a lumped operator of :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.assembleLumpedDiagonal`, in bulk.
 
         Parameters
         ----------
         elementLoop
             The plan of the elements of the subdomain, contact facets included (:meth:`planElementLoop`).
         elementContribution
-            As for :meth:`NED.assembleLumpedDiagonal`.
+            As for :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.assembleLumpedDiagonal`.
 
         Returns
         -------
@@ -179,7 +179,7 @@ class NEDParallel(NED):
         elementLoop
             The plan of the elements.
         elementContribution
-            As for :meth:`NED.assembleLumpedDiagonal`.
+            As for :meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.assembleLumpedDiagonal`.
 
         Returns
         -------
