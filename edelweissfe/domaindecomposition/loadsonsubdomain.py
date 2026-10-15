@@ -134,9 +134,9 @@ class LoadsOnSubdomain:
     bodyLoads
         The body loads of the step, as given.
     restrictedDistributedLoads
-        The distributed loads, restricted to the elements computed here.
+        The distributed loads, restricted to the elements of the subdomain.
     restrictedBodyLoads
-        The body loads, restricted to the elements computed here.
+        The body loads, restricted to the elements of the subdomain.
     entryDofs
         The degree of freedom of every entry of their nodal forces, in the order the restricted loads
         are evaluated.
@@ -154,9 +154,9 @@ class LoadsOnSubdomain:
         entryLoadOrder: np.ndarray,
     ):
         self._loads = (distributedLoads, bodyLoads)
-        #: The distributed loads, restricted to the elements computed here.
+        #: The distributed loads, restricted to the elements of the subdomain.
         self.distributedLoads = restrictedDistributedLoads
-        #: The body loads, restricted to the elements computed here.
+        #: The body loads, restricted to the elements of the subdomain.
         self.bodyLoads = restrictedBodyLoads
         #: The degree of freedom of every entry of their nodal forces.
         self.entryDofs = entryDofs

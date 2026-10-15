@@ -184,10 +184,8 @@ class SubdomainInterface:
         return self._sharedWith[neighbour]
 
     def allgatherOwnedValues(self, vector: np.ndarray):
-        """Overwrite every entry of a vector with its owner's value, in place, so that it is the same,
-        complete vector on every process.
-
-        Collective.
+        """Collective. Overwrite every entry of a vector with its owner's value, in place, so that it is the
+        same, complete vector on every process.
 
         Parameters
         ----------
@@ -203,12 +201,10 @@ class SubdomainInterface:
         plain[self._gatheredOrder] = self._gatherBuffer
 
     def gatherOwnedValuesToRoot(self, vector: np.ndarray):
-        """Overwrite every entry of a vector on rank 0 with its owner's value, in place, so that it is
-        the complete vector there -- as :meth:`allgatherOwnedValues` does on every process. The other
-        processes send their owned entries and keep their vector as it was: complete at the degrees
+        """Collective. Overwrite every entry of a vector on rank 0 with its owner's value, in place, so that
+        it is the complete vector there -- as :meth:`allgatherOwnedValues` does on every process. The
+        other processes send their owned entries and keep their vector as it was: complete at the degrees
         of freedom they integrate only.
-
-        Collective.
 
         Parameters
         ----------
@@ -338,8 +334,8 @@ class _TaggedContributions:
         return np.flatnonzero(isInterface[np.asarray(entryDofs, dtype=np.int64)])
 
     def exchange(self, contributions: np.ndarray):
-        """Fill the merged buffer: this process' own entries, and the neighbours' at the degrees of
-        freedom shared with them. Collective among neighbours.
+        """Collective among neighbours. Fill the merged buffer: this process' own entries, and the
+        neighbours' at the degrees of freedom shared with them.
 
         Parameters
         ----------
@@ -399,8 +395,8 @@ class InterfaceForceAssembly:
         self._targets = np.searchsorted(interface.interfaceDofs, self._contributions.tagDofs[self._contributions.order])
 
     def assemble(self, contributions: np.ndarray, vector: np.ndarray):
-        """Overwrite the interface entries of ``vector`` with the complete sums of all element
-        contributions, in the order of the elements in the model. Collective among neighbours.
+        """Collective among neighbours. Overwrite the interface entries of ``vector`` with the complete sums
+        of all element contributions, in the order of the elements in the model.
 
         Parameters
         ----------
@@ -475,8 +471,8 @@ class InterfaceLoadAssembly:
         ]
 
     def assemble(self, contributions: np.ndarray, vector: np.ndarray):
-        """Add the load contributions of all processes at the degrees of freedom integrated here onto
-        ``vector``, in the order of the loads of the model. Collective among neighbours.
+        """Collective among neighbours. Add the load contributions of all processes at the subdomain degrees
+        of freedom onto ``vector``, in the order of the loads of the model.
 
         Parameters
         ----------
@@ -503,8 +499,8 @@ class ConstraintForceExchange:
     else (:class:`_TaggedContributions`); no process receives a constraint it does not integrate.
 
     Every process then adds the forces it holds constraint by constraint, in model order, each as a
-    single process adds it (:func:`~edelweissfe.numerics.assembly.addNodalForces`). At a degree of
-    freedom integrated here those are the forces of every constraint acting there, so they are added in
+    single process adds it (:func:`~edelweissfe.numerics.assembly.addNodalForces`). At a subdomain
+    degree of freedom those are the forces of every constraint acting there, so they are added in
     the order, and onto the same bits, as without decomposition: the sum is the same bits. Each entry is
     tagged with its place in that order: the position of its constraint in the model and its index
     within the constraint.
@@ -513,7 +509,7 @@ class ConstraintForceExchange:
     so the layout -- which entries go to which neighbour, and their tags -- is exchanged once per
     rebuild, here; an increment exchanges the forces alone.
 
-    The net force vector so holds the constraint forces at the degrees of freedom integrated here only.
+    The net force vector so holds the constraint forces at the subdomain degrees of freedom only.
     Elsewhere it holds none, and is not read before it is next gathered from the owners
     (:meth:`SubdomainInterface.allgatherOwnedValues`).
 
@@ -560,7 +556,7 @@ class ConstraintForceExchange:
         tagOrder = self._contributions.tagOrder
         byOrder = np.argsort(tagOrder)
         constraintPositions = tagOrder[byOrder] // _ENTRIES_PER_CONSTRAINT
-        #: Per constraint held here: its merged entries, their degrees of freedom, and whether one of
+        #: Per local constraint: its merged entries, their degrees of freedom, and whether one of
         #: them is named more than once (see addNodalForces).
         self._additions = []
         for entries in np.split(byOrder, np.flatnonzero(np.diff(constraintPositions)) + 1):
@@ -569,18 +565,17 @@ class ConstraintForceExchange:
                 self._additions.append((entries, dofs, np.unique(dofs).shape[0] != dofs.shape[0]))
 
     def addAllConstraintForces(self, ownedForces: dict, vector: np.ndarray):
-        """Send this process' constraint forces to the neighbours integrating their degrees of freedom,
-        and add the forces of every constraint at the degrees of freedom integrated here, in model order.
-
-        Collective among neighbours.
+        """Collective among neighbours. Send this process' constraint forces to the neighbours integrating
+        their degrees of freedom, and add the forces of every constraint at the subdomain degrees of
+        freedom, in model order.
 
         Parameters
         ----------
         ownedForces
             The forces of every owned constraint, by name.
         vector
-            The net nodal force vector to add into; only its entries at the degrees of freedom
-            integrated here are written.
+            The net nodal force vector to add into; only its entries at the subdomain degrees
+            of freedom are written.
         """
 
         for i, name in enumerate(self._ownedNames):
@@ -640,8 +635,8 @@ class ValuesFromOwners:
         return sum(dofs.shape[0] for dofs in self._receiveDofs.values())
 
     def receive(self, vectors: list[np.ndarray]):
-        """Overwrite the needed entries of the vectors with their owners' values, in place, and send
-        the owned entries other processes need. Collective among the processes taking part.
+        """Collective among the processes taking part. Overwrite the needed entries of the vectors with
+        their owners' values, in place, and send the owned entries other processes need.
 
         Parameters
         ----------
@@ -660,8 +655,8 @@ class ValuesFromOwners:
 
 
 def _exchange(communicator, sendBuffers: dict, receiveBuffers: dict, tag: MessageTag):
-    """Send a buffer to each process of ``sendBuffers`` and receive one from each of ``receiveBuffers``,
-    with the message tag of the exchange (:class:`MessageTag`). Collective among those processes."""
+    """Collective among those processes. Send a buffer to each process of ``sendBuffers`` and receive one
+    from each of ``receiveBuffers``, with the message tag of the exchange (:class:`MessageTag`)."""
 
     requests = [
         communicator.Irecv(receiveBuffers[neighbour], source=neighbour, tag=tag) for neighbour in receiveBuffers

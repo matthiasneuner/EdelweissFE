@@ -209,7 +209,7 @@ class DistributedElements(ElementDistribution):
         self.nElementsReceived = 0
 
     def decideLocalElements(self, mesh: Mesh, domainSize: int):
-        """Partition the mesh, and decide which elements this process creates. Collective.
+        """Collective. Partition the mesh, and decide which elements this process creates.
 
         A process creates the elements it owns -- those the partition assigns to it -- and the auxiliary
         elements (see :meth:`placeAuxiliaryElement`). The loads acting on an element
@@ -251,9 +251,9 @@ class DistributedElements(ElementDistribution):
         return own | auxiliary
 
     def moveElementsTo(self, model, owners: dict) -> tuple[int, int, int]:
-        """Adopt a new partition: move every element whose process changes to its new process
-        (migration). Collective; only where every process holds the converged state of the elements
-        it computes, i.e. after an increment was accepted.
+        """Collective. Adopt a new partition: move every element whose process changes to its new
+        process (migration). Only where every process holds the converged state of the elements it
+        computes, i.e. after an increment was accepted.
 
         An element is completely described by the mesh, the replicated definitions -- its sections,
         material and element properties -- and its state. So, in this order:
@@ -270,7 +270,7 @@ class DistributedElements(ElementDistribution):
            process sent.
 
         A migrated element is therefore the element its previous process held, bit for bit, as a
-        resumed restart's element is. What else is derived from the elements held here -- the
+        resumed restart's element is. What else is derived from the local elements -- the
         degree-of-freedom indices of the elements, the subdomain, the increment plan, the result
         views of field outputs -- must be derived again; :attr:`ownershipVersion` says that it
         changed.
@@ -470,7 +470,7 @@ class DistributedElements(ElementDistribution):
         Returns
         -------
         list
-            The elements computed here, in the order given.
+            The elements of the subdomain, in the order given.
         """
 
         return [element for element in elements if self.owners[element.elNumber] == self.rank]
@@ -478,17 +478,16 @@ class DistributedElements(ElementDistribution):
     def resultsOfWholeSet(
         self, elementSet, numbersOwnedHere: list, results: np.ndarray | None, toEveryProcess: bool = True
     ) -> np.ndarray | None:
-        """The results of every element of a set, in the order of the set in the mesh, gathered from
-        the processes computing them -- to every process, so that a field output read in every
-        process is the same there, as without decomposition, or to rank 0 only, which writes the
-        output. Collective.
+        """Collective. The results of every element of a set, in the order of the set in the mesh, gathered
+        from the processes computing them -- to every process, so that a field output read in every
+        process is the same there, as without decomposition, or to rank 0 only, which writes the output.
 
         Parameters
         ----------
         elementSet
             The element set; resolved from the mesh.
         numbersOwnedHere
-            The numbers of the elements of the set computed here, in set order.
+            The numbers of the elements of the set in the subdomain, in set order.
         results
             Their results, one row per element; None if there are none.
         toEveryProcess

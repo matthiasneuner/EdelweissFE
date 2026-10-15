@@ -105,12 +105,12 @@ class FEModel:
         #: The element objects created from :attr:`mesh`, by number, in mesh order. Never assigned
         #: directly: describe an element in :attr:`mesh` and call :meth:`createElementsOfMesh`.
         self.elements = {}
-        #: Which elements of the mesh this process creates (:meth:`createElementsOfMesh` asks it), and
-        #: how results of the whole model are read from the processes that computed them; every
-        #: element, here, unless a domain-decomposed run sets another (see
+        #: Which elements of the mesh are created (:meth:`createElementsOfMesh` asks it): every one.
+        #: In a domain-decomposed run, the elements this process creates, and how results of the whole
+        #: model are read from the processes that computed them (see
         #: :mod:`~edelweissfe.models.elementdistribution`).
         self.elementDistribution = ElementDistribution()
-        #: The node sets of the model, by name: those of the mesh resolved to the nodes held here
+        #: The node sets of the model, by name: those of the mesh resolved to the local nodes
         #: (:class:`~edelweissfe.sets.nodeset.NodeSetOfMesh`), and sets of node objects a model entity
         #: made itself (e.g. the slave nodes a tie tied).
         self.nodeSets = {}
@@ -140,7 +140,7 @@ class FEModel:
         #: How the mesh may change during a run; see :class:`~edelweissfe.models.topologypipeline.TopologyPipeline`.
         self.topology = TopologyPipeline(self)
         #: The state of every element of the mesh, by number, for the restart checkpoint being written,
-        #: where it does not come from the element objects held here; see
+        #: where it does not come from the local element objects; see
         #: :meth:`elementStatesFromElsewhere`. None otherwise.
         self._elementStatesFromElsewhere = None
 
@@ -161,8 +161,8 @@ class FEModel:
         return clone
 
     def moveNodes(self, labels, coordinates):
-        """Change the reference coordinates of nodes: in the mesh and, in place, at the node objects
-        held here -- what a model entity or modifier changing the reference geometry calls (a tie
+        """Change the reference coordinates of nodes: in the mesh and, in place, at the local node
+        objects -- what a model entity or modifier changing the reference geometry calls (a tie
         adjusting its slave nodes onto the master surface, a snap onto a cylinder).
 
         Parameters
@@ -197,8 +197,9 @@ class FEModel:
         Parameters
         ----------
         isHeldHere
-            Whether the node of a label is held in this process; every node if None, as in a serial
-            run. A domain-decomposed run holds every node too (for now).
+            Which nodes of the mesh get an object; None for all of them, as in every run today. The
+            hook a process of a domain-decomposed run holding only the nodes of its subdomain will
+            use.
         """
 
         mesh = self.mesh
@@ -231,14 +232,14 @@ class FEModel:
             self._nodeSetsResolvedFor = resolvedFor
 
     def resolveNodeSetsOfMesh(self):
-        """Make every node set of the mesh hold the nodes held here; sets that already exist are
+        """Make every node set of the mesh hold the local nodes; sets that already exist are
         updated in place, so references held to them stay valid."""
 
         for name in self.mesh.nodeSets:
             self.resolveNodeSetOfMesh(name)
 
     def resolveNodeSetOfMesh(self, name: str) -> NodeSetOfMesh:
-        """Make ``nodeSets[name]`` hold the nodes of the mesh's node set ``name`` held here.
+        """Make ``nodeSets[name]`` hold the local nodes of the mesh's node set ``name``.
 
         Parameters
         ----------
@@ -248,7 +249,7 @@ class FEModel:
         Returns
         -------
         NodeSetOfMesh
-            The nodes of the set held here, in set order; complete if that is all of them.
+            The local nodes of the set, in set order; complete if that is all of them.
         """
 
         nodes = self.nodes
@@ -264,7 +265,7 @@ class FEModel:
         return nodeSet
 
     def defineNodeSetOfMesh(self, name: str, labels) -> NodeSetOfMesh:
-        """Describe (or redefine) a node set in the mesh, and resolve it to the nodes held here: how a
+        """Describe (or redefine) a node set in the mesh, and resolve it to the local nodes: how a
         model entity or a model modifier defines a node set of nodes of the mesh during a run.
 
         Parameters
@@ -303,7 +304,7 @@ class FEModel:
 
     def checkNodesAgreeWithMesh(self):
         """Raise unless :attr:`nodes` holds nodes of the mesh, in mesh order, and every node of the
-        mesh (every process holds every node, for now).
+        mesh (in a domain-decomposed run, too: every process holds every node, for now).
 
         The order matters: the nodes of every field, and so the degrees of freedom, are numbered in
         the order of :attr:`nodes`, and the numbering of the mesh
@@ -312,7 +313,7 @@ class FEModel:
         Raises
         ------
         TopologyError
-            If a node of the model is not described in the mesh, a node of the mesh is not held here,
+            If a node of the model is not described in the mesh, a node of the mesh is not local,
             or the nodes are not in mesh order.
         """
 
@@ -361,9 +362,10 @@ class FEModel:
         makes itself, instead of the input describing it in the mesh; it is added to the mesh as well.
 
         This is the special path. Every other element is described in :attr:`mesh` first and created
-        from there, by :meth:`createElementsOfMesh` (or :meth:`createElementOfMesh`). An auxiliary
-        element is made in every process -- it is surface-sized -- and :attr:`elementDistribution`
-        decides which process computes it
+        from there, by :meth:`createElementsOfMesh` (or :meth:`createElementOfMesh`).
+
+        In a domain-decomposed run, an auxiliary element is made in every process -- it is
+        surface-sized -- and :attr:`elementDistribution` decides which process computes it
         (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeAuxiliaryElement`).
 
         Parameters
@@ -410,9 +412,11 @@ class FEModel:
 
     def createChildElementOfMesh(self, number: int, parentNumber: int):
         """Create the element object of an element a model modifier described in place of another --
-        the child of a refined element --, where its parent is computed: here, unless a
-        domain-decomposed run computes the parent in another process
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`).
+        the child of a refined element.
+
+        In a domain-decomposed run the child is created where its parent is computed
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.placeChildElement`), and
+        the other processes create nothing.
 
         Parameters
         ----------
@@ -440,9 +444,10 @@ class FEModel:
         :class:`~edelweissfe.sets.elementset.ElementSetOfMesh` of the local elements, and each surface
         an :class:`~edelweissfe.surfaces.entitybasedsurface.EntityBasedSurface` of those sets.
 
-        Which elements are created here, :attr:`elementDistribution` decides
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isLocal`): every
-        element in a serial run, only its own in a process of a distributed one.
+        Which elements are created, :attr:`elementDistribution` decides
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.isLocal`): every element
+        in a serial run; in a domain-decomposed run with a distributed model, only the local ones --
+        those a process computes.
 
         Calling it again is harmless: elements already created are kept (the distribution is asked
         again for the others), and sets and surfaces that already exist are updated in place
@@ -935,13 +940,14 @@ class FEModel:
         self.assignSectionsAndPropertiesToElements(self.elements)
 
     def materialPropertiesToExport(self) -> list[tuple]:
-        """The material properties of every element of every section that writes them to a file
-        (``>>writeMaterialPropertiesToFile``): the whole model's, in mesh order, as a serial run holds
-        them. Each element's properties come from the process owning it; in a distributed run they
-        are gathered
+        """Collective in a distributed run. The material properties of every element of every section
+        that writes them to a file (``>>writeMaterialPropertiesToFile``): the whole model's, in mesh
+        order. Who writes the files decides the writer -- the driver.
+
+        In a domain-decomposed run, each element's properties come from the process owning it: in a
+        distributed run they are gathered
         (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`), so
-        this is collective there. Who writes the files decides the writer -- the driver: only one
-        process of a distributed run.
+        every process must call this, and only one of them writes the files.
 
         Returns
         -------
@@ -1136,7 +1142,7 @@ class FEModel:
     @contextmanager
     def elementStatesFromElsewhere(self, states: dict | None):
         """A context in which a restart checkpoint reads the element states from ``states`` instead of
-        the element objects held here (:meth:`elementStatesForCheckpoint`): a process that holds only
+        the local element objects (:meth:`elementStatesForCheckpoint`): a process that holds only
         some of the elements -- in a domain-decomposed run -- writes a checkpoint of the whole model
         from the states gathered from the processes holding the others.
 

@@ -417,7 +417,7 @@ class TopologyPipeline:
         and drop the element objects it needs for the changed mesh
         (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`):
         in a serial run the modifier created every new element itself; in a domain-decomposed run
-        that created only each process' own elements, the modifier created those computed here,
+        that created only each process' own elements, the modifier created those of its subdomain,
         and the elements loading them are created afterwards.
 
         Parameters

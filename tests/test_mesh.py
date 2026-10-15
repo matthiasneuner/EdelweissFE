@@ -296,7 +296,7 @@ def test_an_incomplete_set_of_a_serial_run_says_why_without_naming_processes(tmp
 
 def test_a_checkpoint_reads_every_element_state_or_refuses(tmp_path):
     """A checkpoint holds the state of every element of the mesh: from the element objects, or --
-    where only part of them is held here -- from states given for it; never silently part of them."""
+    where only part of them is local -- from states given for it; never silently part of them."""
 
     whole = _buildModel(tmp_path)
     assert [number for number, _ in whole.elementStatesForCheckpoint()] == list(whole.mesh.elements)
@@ -568,7 +568,7 @@ def test_moving_nodes_changes_the_reference_coordinates_in_the_mesh_and_at_the_n
     coordinatesOfNode3 = model.nodes[3].coordinates
     model.moveNodes([3, 1], [[1.5, 1.5], [-0.5, 0.0]])
     assert model.mesh.nodeCoordinates.tolist() == [[-0.5, 0.0], [1.0, 0.0], [1.5, 1.5], [0.0, 1.0]]
-    # in place, at the nodes held here
+    # in place, at the local nodes
     assert model.nodes[3].coordinates is coordinatesOfNode3 and coordinatesOfNode3.tolist() == [1.5, 1.5]
 
 

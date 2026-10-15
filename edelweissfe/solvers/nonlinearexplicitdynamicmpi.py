@@ -131,7 +131,7 @@ communication, each in an override of a method of ``NED``:
   shares them from the owners;
 * :meth:`NEDMPI.assembleConstraintForces` sends the constraint forces to the processes integrating
   their degrees of freedom;
-* :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements computed here, and completes
+* :meth:`NEDMPI.assembleLoads` evaluates the loads of the elements of the subdomain, and completes
   them at the interface like the forces;
 * :meth:`NEDMPI.getCriticalTimeStepForExplicitDynamics` and :meth:`NEDMPI.energyBalanceTerms` form
   the minimum and the sums over all processes;
@@ -341,16 +341,16 @@ class NEDMPI(NEDParallel):
         #: :meth:`_measuredLoad`.
         self._elementLoopTime = 0.0
         self._constraintEvaluationTime = 0.0
-        #: The forces of the constraints evaluated here, evaluated with the elements of the current
+        #: The forces of the constraints of the subdomain, evaluated with the elements of the current
         #: increment and not yet assembled, by name; None otherwise. See :meth:`assembleInternalForces`.
         self._constraintForcesOfIncrement: dict | None = None
         #: The increments of the step done at the last topology change (or 0, at the start of the
         #: step), for the horizon a migration after a topology change is weighed over.
         self._incrementsDoneAtLastTopologyChange = 0
-        #: Where the degrees of freedom integrated here are published in the node fields; see
+        #: Where the subdomain degrees of freedom are published in the node fields; see
         #: :meth:`publishNodeFields`.
         self._integratedNodeFieldSlots: list[NodeFieldSlot] = []
-        #: The work at the prescribed degrees of freedom owned here of every increment since the
+        #: The work at the prescribed degrees of freedom this process owns of every increment since the
         #: external work was last read, in increment order: per increment the exact sum of the
         #: products, added to the external work by :meth:`gatherExternalWork`.
         self._pendingWorkAtPrescribedDofs: list[ExactSum] = []
@@ -411,8 +411,8 @@ class NEDMPI(NEDParallel):
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     def attemptIncrement(self, step, model: FEModel, timeStep: TimeStep):
-        """Attempt the increment of :meth:`NED.attemptIncrement`; a step failure it raises is raised
-        as having failed on all ranks together. Collective.
+        """Collective. Attempt the increment of :meth:`NED.attemptIncrement`; a step failure it raises is
+        raised as having failed on all ranks together.
 
         Every :class:`~edelweissfe.utils.exceptions.StepFailed` an increment of ``NED`` raises is
         decided from values every process holds alike, so every process raises it in the same
@@ -447,12 +447,12 @@ class NEDMPI(NEDParallel):
             raise StepFailedOnAllRanks(str(failure)) from failure
 
     def endStep(self, step, model: FEModel, failure: BaseException | None = None):
-        """Finish the step; see :meth:`NED.endStep`. A step that failed on every process together --
+        """Collective after a failure on every process. Finish the step; see :meth:`NED.endStep`. A step
+        that failed on every process together --
         a step failure or an error (:class:`~edelweissfe.domaindecomposition.mpienvironment.RaisedOnAllRanks`)
         -- ends as a serial one does, with the model of the last accepted increment
         (:meth:`_synchronizeAcceptedModel`), which the field outputs and the output managers then read
-        a last time. Collective after a failure on every process; any other failure stops every process
-        right after (:meth:`stepFailed`).
+        a last time. Any other failure stops every process right after (:meth:`stepFailed`).
 
         Parameters
         ----------
@@ -493,8 +493,8 @@ class NEDMPI(NEDParallel):
             )
 
     def _synchronizeAcceptedModel(self, model: FEModel):
-        """Make the model of the last accepted increment whole in every process, after an increment
-        failed on every process together. Collective.
+        """Collective. Make the model of the last accepted increment whole in every process, after an
+        increment failed on every process together.
 
         The failed increment changed the solution, the velocity and the net force at the degrees of
         freedom each process integrates, in the vectors; the node fields still hold the last accepted
@@ -521,7 +521,7 @@ class NEDMPI(NEDParallel):
     # --- The subdomain ------------------------------------------------------------------------------
 
     def defineSubdomain(self, model: FEModel, topologyChanged: bool) -> Subdomain:
-        """The subdomain of this process; see :meth:`NED.defineSubdomain`. Collective.
+        """Collective. The subdomain of this process; see :meth:`NED.defineSubdomain`.
 
         Parameters
         ----------
@@ -540,8 +540,8 @@ class NEDMPI(NEDParallel):
         return self.domainDecomposition.subdomain
 
     def planIncrement(self, model: FEModel) -> IncrementPlan:
-        """The increment plan of :meth:`NED.planIncrement`, and how its element forces are completed
-        at the interface. Collective.
+        """Collective. The increment plan of :meth:`NED.planIncrement`, and how its element forces are
+        completed at the interface.
 
         Parameters
         ----------
@@ -630,14 +630,13 @@ class NEDMPI(NEDParallel):
         )
 
     def assembleLumpedDiagonal(self, elementLoop: ElementPlan, elementContribution) -> DofVector:
-        """Assemble a lumped operator of the elements computed here, complete at every degree of
-        freedom of the model: completed at the interface like the forces, and shared from the
-        owners. Collective.
+        """Collective. Assemble a lumped operator of the elements of the subdomain, complete at every degree
+        of freedom of the model: completed at the interface like the forces, and shared from the owners.
 
         Parameters
         ----------
         elementLoop
-            The plan of the elements computed here, contact facets included.
+            The plan of the elements of the subdomain, contact facets included.
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 
@@ -659,11 +658,11 @@ class NEDMPI(NEDParallel):
     def assembleInternalForces(
         self, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements of the subdomain, and the constraints evaluated here, failing on all ranks together if
-        it fails on one, and complete the internal force at the interface; see :meth:`NED.assembleInternalForces`.
-        Collective.
+        """Collective. Evaluate the elements of the subdomain, and the constraints of the subdomain, failing
+        on all ranks together if it fails on one, and complete the internal force at the interface; see
+        :meth:`NED.assembleInternalForces`.
 
-        The constraints are evaluated here, right after the elements, and their forces sent and added
+        The constraints are evaluated in this method, right after the elements, and their forces sent and added
         later, in :meth:`assembleConstraintForces`, where ``NED`` evaluates them: a constraint reads
         the solution and its increment only, which do not change in between, and its forces are added
         in the same order onto the same bits, so the result is the same. A process evaluating a
@@ -724,11 +723,11 @@ class NEDMPI(NEDParallel):
         K: None,
         timeStep: TimeStep,
     ) -> tuple[DofVector, None]:
-        """Assemble the loads of :meth:`NED.assembleLoads` in the same order, those acting on
-        elements as the element forces are: each process evaluates the loads of the elements it
-        computes, failing on all ranks together if it fails on one, and the contributions are completed at the interface
-        and added in the order of the loads of the model; see
-        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`. Collective.
+        """Collective. Assemble the loads of :meth:`NED.assembleLoads` in the same order, those acting on
+        elements as the element forces are: each process evaluates the loads of the elements it computes,
+        failing on all ranks together if it fails on one, and the contributions are completed at the
+        interface and added in the order of the loads of the model; see
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`.
 
         Parameters
         ----------
@@ -778,16 +777,16 @@ class NEDMPI(NEDParallel):
     def assembleConstraintForces(
         self, constraints: dict, U_np: DofVector, dU: DofVector, P: DofVector, timeStep: TimeStep
     ) -> DofVector:
-        """Send the forces of the constraints evaluated here -- with the elements, in
-        :meth:`assembleInternalForces` -- to the processes integrating their degrees of freedom, and
-        add those of every constraint at the degrees of freedom integrated here, in model order; see
+        """Collective. Send the forces of the constraints of the subdomain -- with the elements, in
+        :meth:`assembleInternalForces` -- to the processes integrating their degrees of freedom, and add
+        those of every constraint at the subdomain degrees of freedom, in model order; see
         :meth:`NED.assembleConstraintForces` and
-        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.addConstraintForces`. Collective.
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.addConstraintForces`.
 
         Parameters
         ----------
         constraints
-            The constraints evaluated here, by name, in model order.
+            The constraints of the subdomain, by name, in model order.
         U_np
             The current solution vector.
         dU
@@ -811,15 +810,15 @@ class NEDMPI(NEDParallel):
         forces, self._constraintForcesOfIncrement = self._constraintForcesOfIncrement, None
         if forces is None or forces.keys() != constraints.keys():
             raise RuntimeError(
-                "the constraints evaluated here must be evaluated with the elements of the increment "
+                "the constraints of the subdomain must be evaluated with the elements of the increment "
                 "(NEDMPI.assembleInternalForces) before their forces are assembled"
             )
         self.domainDecomposition.addConstraintForces(forces, P)
         return P
 
     def getCriticalTimeStepForExplicitDynamics(self, model: FEModel, U: DofVector) -> float:
-        """The smallest critical time step of all subdomains; see
-        :meth:`NED.getCriticalTimeStepForExplicitDynamics`. Collective.
+        """Collective. The smallest critical time step of all subdomains; see
+        :meth:`NED.getCriticalTimeStepForExplicitDynamics`.
 
         Parameters
         ----------
@@ -837,7 +836,7 @@ class NEDMPI(NEDParallel):
         return self.communicator.allreduceMin(super().getCriticalTimeStepForExplicitDynamics(model, U))
 
     def addExternalWork(self, dofs: np.ndarray, reactionTimesIncrement: np.ndarray):
-        """Keep the work of this increment at the prescribed degrees of freedom owned here -- a degree
+        """Keep the work of this increment at the prescribed degrees of freedom this process owns -- a degree
         of freedom shared by two subdomains is counted once, by its owner -- until the external work
         is next read (:meth:`gatherExternalWork`), so that nothing is exchanged every increment; see
         :meth:`NED.addExternalWork`. Kept as one number per increment: the exact sum of the products
@@ -857,14 +856,14 @@ class NEDMPI(NEDParallel):
         )
 
     def gatherExternalWork(self):
-        """Add the work of every increment since the last call to the external work, increment by
-        increment, in increment order: the exact sums of the products at the degrees of freedom each
+        """Collective. Add the work of every increment since the last call to the external work, increment
+        by increment, in increment order: the exact sums of the products at the degrees of freedom each
         process owns are gathered to every process -- once for all those increments, one integer per
         increment and process --, added exactly, and rounded once: the bits of :func:`math.fsum` of all
         the products of the increment, which :meth:`NED.addExternalWork` forms in a serial run. So the
-        external work is the same, bit for bit, on any number of processes, and every process holds
-        that of the whole model. Called where it is read: the energy balance, an output increment (and
-        a checkpoint written with it), the end of a step. Collective.
+        external work is the same, bit for bit, on any number of processes, and every process holds that
+        of the whole model. Called where it is read: the energy balance, an output increment (and a
+        checkpoint written with it), the end of a step.
         """
 
         gathered = self.communicator.allgather(self._pendingWorkAtPrescribedDofs)
@@ -873,7 +872,7 @@ class NEDMPI(NEDParallel):
         self._pendingWorkAtPrescribedDofs = []
 
     def halfMassTimesSquaredRate(self, indices: slice | np.ndarray, V: DofVector) -> float:
-        """The sum of :meth:`NED.halfMassTimesSquaredRate` over the degrees of freedom owned here, so
+        """The sum of :meth:`NED.halfMassTimesSquaredRate` over the degrees of freedom this process owns, so
         that the sums of all subdomains add up to that of the model.
 
         Parameters
@@ -886,14 +885,14 @@ class NEDMPI(NEDParallel):
         Returns
         -------
         float
-            The sum over those owned here.
+            The sum over those this process owns.
         """
 
         indices = np.arange(V.shape[0])[indices]
         return super().halfMassTimesSquaredRate(indices[self.domainDecomposition.ownedDofMask[indices]], V)
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
-        """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.
+        """Collective. The terms of :meth:`NED.energyBalanceTerms` of the whole model.
 
         The internal and kinetic energies are formed per subdomain and then added in rank order, so
         they may differ from a serial run's in their last digits; they enter nothing but the energy
@@ -918,13 +917,13 @@ class NEDMPI(NEDParallel):
         return Wint, Wkin, Wext, nonMechanical
 
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
-        """Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then make
-        the whole model current where it is read (:meth:`outputSynchronizationReachesEveryProcess`) -- on rank 0,
-        which writes the output and a checkpoint with it, or, if the topology check at the start of
-        the next increment follows, in every process -- and rebalance the subdomains; if that moved
-        elements between processes, build the equation system again for the elements now held here,
-        and if it changed only the subdomains, complete the vectors at the degrees of freedom a
-        process integrates from now on. Collective.
+        """Collective. Commit the increment; see :meth:`NED.acceptIncrement`. On an output increment, then
+        make the whole model current where it is read (:meth:`outputSynchronizationReachesEveryProcess`)
+        -- on rank 0, which writes the output and a checkpoint with it, or, if the topology check at the
+        start of the next increment follows, in every process -- and rebalance the subdomains; if that
+        moved elements between processes, build the equation system again for the elements now local, and
+        if it changed only the subdomains, complete the vectors at the degrees of freedom a process
+        integrates from now on.
 
         Parameters
         ----------
@@ -938,7 +937,7 @@ class NEDMPI(NEDParallel):
 
         super().acceptIncrement(step, model, timeStep)
         self._incrementsAccepted += 1
-        # the increment changed the solution at the degrees of freedom integrated here only
+        # the increment changed the solution at the subdomain degrees of freedom only
         self._wholeSolutionHere = False
 
         if self.isOutputIncrement(timeStep):
@@ -1044,23 +1043,22 @@ class NEDMPI(NEDParallel):
         model.acceptStatesOf(self.subdomain.elements, self.subdomain.constraints)
 
     def _moveElements(self, model: FEModel, step):
-        """Move elements between the processes, after a rebalance changed the partition of a
-        distributed model, and build the equation system again for the elements now held here.
-        Collective.
+        """Collective. Move elements between the processes, after a rebalance changed the partition of a
+        distributed model, and build the equation system again for the elements now local.
 
         Every process rebuilds its equation system from its copies of the constraints owned elsewhere
         and of the rigid-body surfaces, which must therefore be consistent in every process first
         (:meth:`_copiesConsistentInEveryProcess`): if the last synchronization did not reach every
         process, the model is synchronized to every process before the elements move.
 
-        Everything indexed by the elements held here -- the equation system
+        Everything indexed by the local elements -- the equation system
         (:meth:`releaseEquationSystem`) and the subdomain -- is released before the elements move,
         so that no element a process drops stays alive, and built again afterwards, as after a
         change of the topology. The solution, the velocity and the net force are carried over, and
         each process completes them at the degrees of freedom it integrates from now on, from their
         previous owners (:meth:`buildEquationSystem`).
 
-        The lumped operators are assembled again, from the elements now held here, and must be the
+        The lumped operators are assembled again, from the elements now local, and must be the
         same bits as before (:meth:`_requireSameLumpedOperators`): a serial run keeps them between
         rebuilds of its equation system, and has no rebuild where a migration happens, so a run that
         moves elements is bit-identical to it only if they are.
@@ -1105,7 +1103,7 @@ class NEDMPI(NEDParallel):
         """Refuse to continue unless the lumped operators are the same bits as ``before``.
 
         Elements moved between processes, and the equation system was built again for the elements
-        now held here, which assembles the lumped operators again. A serial run keeps them between
+        now local, which assembles the lumped operators again. A serial run keeps them between
         rebuilds of its equation system, and has none here: the two agree only if an element's lumped inertia and damping do not
         depend on its state. That holds for the elements of this package, and is checked here rather
         than assumed, at every migration. The operators are complete in every process, so every
@@ -1127,7 +1125,7 @@ class NEDMPI(NEDParallel):
         if changed:
             raise RuntimeError(
                 "Elements moved between processes, and the lumped operators assembled again from the elements "
-                "now held here differ from those before: {:}. An element's lumped inertia or damping depends "
+                "now local differ from those before: {:}. An element's lumped inertia or damping depends "
                 "on its state, so a run that moves elements would no longer be the serial run, which keeps "
                 "them between rebuilds of its equation system. Run without load balancing (load-balance-tolerance=0).".format(
                     ", ".join(changed)
@@ -1168,8 +1166,8 @@ class NEDMPI(NEDParallel):
         return carried
 
     def writeIncrementOutput(self, fieldOutputController: FieldOutputController, outputManagers: list):
-        """Write the output of an accepted increment, in three parts, so that no process communicates
-        where another may have failed before. Collective.
+        """Collective. Write the output of an accepted increment, in three parts, so that no process
+        communicates where another may have failed before.
 
         1. Each process reads its part of the output: the results of the elements it owns for the
            field outputs, and -- if a checkpoint is written now, which only rank 0, holding the output
@@ -1221,8 +1219,8 @@ class NEDMPI(NEDParallel):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
 
     def applyStepActionsAtStepEnd(self, model: FEModel, stepActions: dict[str, StepActionBase]):
-        """Make the whole model current in every process -- the end of a step, and the start of the
-        next, read all of it -- then let the step actions finish the step. Collective.
+        """Collective. Make the whole model current in every process -- the end of a step, and the start of
+        the next, read all of it -- then let the step actions finish the step.
 
         Parameters
         ----------
@@ -1240,7 +1238,7 @@ class NEDMPI(NEDParallel):
 
     @performancetiming.timeit("publish node fields")
     def publishNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
-        """Publish the degrees of freedom integrated here; see :meth:`NED.publishNodeFields`. The
+        """Publish the subdomain degrees of freedom; see :meth:`NED.publishNodeFields`. The
         others are current only in the processes integrating them, and are published by
         :meth:`_synchronizeModel` in the processes reading them -- rank 0 on an output increment,
         every process before a topology check -- and by :meth:`_receiveSolutionReadBySearches` at the
@@ -1317,8 +1315,8 @@ class NEDMPI(NEDParallel):
     # --- Searches and topology updates ---------------------------------------------------------------
 
     def updateConstraintConnectivity(self, model: FEModel) -> bool:
-        """Receive the positions the contact searches of this process read, then run the periodic
-        contact search; see :meth:`NED.updateConstraintConnectivity`. Collective.
+        """Collective. Receive the positions the contact searches of this process read, then run the
+        periodic contact search; see :meth:`NED.updateConstraintConnectivity`.
 
         A search runs on the process owning the constraint (:meth:`updateConnectivityOf`), and reads
         the positions of every node it may couple -- the nodes the constraint names
@@ -1343,10 +1341,10 @@ class NEDMPI(NEDParallel):
         return super().updateConstraintConnectivity(model)
 
     def _receiveSolutionReadBySearches(self, model: FEModel):
-        """Receive the solution the periodic contact searches of this process read at the degrees of
-        freedom it does not integrate, from their owners, and publish it into the node fields. The
-        solution is the displacement of the nodes, which is what a search reads; the velocity and the
-        net force there stay as they were. Collective.
+        """Collective. Receive the solution the periodic contact searches of this process read at the
+        degrees of freedom it does not integrate, from their owners, and publish it into the node fields.
+        The solution is the displacement of the nodes, which is what a search reads; the velocity and the
+        net force there stay as they were.
 
         Parameters
         ----------
@@ -1368,10 +1366,10 @@ class NEDMPI(NEDParallel):
             self._publishIntoNodeFields(searched.slots, {"U": self._system.U})
 
     def _planSolutionReadBySearches(self, model: FEModel):
-        """Plan what the periodic contact searches of this process read: the degrees of freedom, at
-        the nodes each searched constraint names, that this process does not integrate; or the whole
+        """Collective. Plan what the periodic contact searches of this process read: the degrees of freedom,
+        at the nodes each searched constraint names, that this process does not integrate; or the whole
         solution, if any constraint of the model whose connectivity is searched names none. The same
-        decision in every process. Collective.
+        decision in every process.
 
         Parameters
         ----------
@@ -1397,8 +1395,8 @@ class NEDMPI(NEDParallel):
         )
 
     def _receivedSolutionAt(self, model: FEModel, nodes: list) -> ReceivedSolution:
-        """How this process receives the solution at the given nodes, at the degrees of freedom of every
-        field there it does not integrate itself. Collective.
+        """Collective. How this process receives the solution at the given nodes, at the degrees of freedom
+        of every field there it does not integrate itself.
 
         Parameters
         ----------
@@ -1438,13 +1436,13 @@ class NEDMPI(NEDParallel):
         self._rigidBodyReferences = None
 
     def _receiveRigidBodyReferences(self, model: FEModel):
-        """Receive the carried vectors -- the solution, the velocity and the net force -- at the
-        reference nodes of the rigid bodies from their owners, and publish them into the node fields: every process moves the
-        surfaces of the rigid bodies with them, which are nodes of the model as well, and so part of
-        what every process must hold alike (the layout fingerprint of
-        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.define` compares their coordinates).
-        A few degrees of freedom per body, on an output increment synchronized to rank 0 only.
-        Collective.
+        """Collective. Receive the carried vectors -- the solution, the velocity and the net force -- at the
+        reference nodes of the rigid bodies from their owners, and publish them into the node fields:
+        every process moves the surfaces of the rigid bodies with them, which are nodes of the model as
+        well, and so part of what every process must hold alike (the layout fingerprint of
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.define` compares
+        their coordinates). A few degrees of freedom per body, on an output increment synchronized to
+        rank 0 only.
 
         Parameters
         ----------
@@ -1461,10 +1459,9 @@ class NEDMPI(NEDParallel):
         self._publishIntoNodeFields(self._rigidBodyReferences.slots, carried)
 
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
-        """Let those of the given constraints update their connectivity whose search runs in this
-        process, failing on all ranks together; whether a constraint of any process changed. See
+        """Collective. Let those of the given constraints update their connectivity whose search runs in
+        this process, failing on all ranks together; whether a constraint of any process changed. See
         :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.constraintsSearchedHere`.
-        Collective.
 
         Parameters
         ----------
@@ -1521,10 +1518,10 @@ class NEDMPI(NEDParallel):
             )
 
     def updateTopology(self, model: FEModel, step, offerModelModifiers: bool) -> tuple[bool, bool]:
-        """Run the model modifiers and the mesh refresh of
-        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopology` in
-        every process, on the same synchronized model, failing on all ranks together if it fails on one; and check that
-        every process arrived at the same outcome. Collective.
+        """Collective. Run the model modifiers and the mesh refresh of
+        :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateTopology` in every
+        process, on the same synchronized model, failing on all ranks together if it fails on one; and
+        check that every process arrived at the same outcome.
 
         If the topology changed, the subdomains are rebalanced for the changed mesh if that pays
         (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalanceAfterTopologyChange`),
@@ -1576,10 +1573,10 @@ class NEDMPI(NEDParallel):
         return changed
 
     def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool, toEveryProcess: bool):
-        """Make the model complete before something reads all of it -- in every process, or on rank 0
-        only: every degree of freedom of the vectors, published into the node fields, and optionally
-        every constraint state -- and, where every process holds every element, every element state,
-        in every process -- as the process computing it last left it. Collective.
+        """Collective. Make the model complete before something reads all of it -- in every process, or on
+        rank 0 only: every degree of freedom of the vectors, published into the node fields, and
+        optionally every constraint state -- and, where every process holds every element, every element
+        state, in every process -- as the process computing it last left it.
 
         A process not receiving the whole model keeps the vectors and the node fields complete at the
         degrees of freedom it integrates only, and its copies of the constraints owned elsewhere in
@@ -1608,7 +1605,7 @@ class NEDMPI(NEDParallel):
                     self.domainDecomposition.gatherOwnedValuesToRoot(vector)
         wholeSolutionHere = toEveryProcess or self.domainDecomposition.rank == 0
         if wholeSolutionHere:
-            # every degree of freedom is current now, not only those integrated here
+            # every degree of freedom is current now, not only the subdomain ones
             super().publishNodeFields(model, carried)
             self._wholeSolutionHere = True
 
@@ -1675,7 +1672,7 @@ class NEDMPI(NEDParallel):
             )
 
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
-        """Build the equation system; see :meth:`NED.buildEquationSystem`. Collective.
+        """Collective. Build the equation system; see :meth:`NED.buildEquationSystem`.
 
         Built afresh, it reads the solution from the node fields, which must therefore be whole here
         (:meth:`requireWholeSolutionHere`). Rebuilt with the vectors carried over -- after a contact
@@ -1708,12 +1705,12 @@ class NEDMPI(NEDParallel):
         return theSystem
 
     def _receiveNewlyIntegratedValues(self, interfaceBefore, carried: dict[str, DofVector]):
-        """Complete the carried vectors -- the solution, the velocity and the net force -- at the
-        degrees of freedom this process integrates from now on, from their previous owners
-        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.receiveNewlyIntegratedValues`), and
-        publish them into the node fields, as an accepted increment publishes what it integrates: the
+        """Collective. Complete the carried vectors -- the solution, the velocity and the net force -- at
+        the degrees of freedom this process integrates from now on, from their previous owners
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.receiveNewlyIntegratedValues`),
+        and publish them into the node fields, as an accepted increment publishes what it integrates: the
         node fields hold the last accepted increment at every degree of freedom a process integrates,
-        which the end of a failed step reads back (:meth:`_synchronizeAcceptedModel`). Collective.
+        which the end of a failed step reads back (:meth:`_synchronizeAcceptedModel`).
 
         Parameters
         ----------

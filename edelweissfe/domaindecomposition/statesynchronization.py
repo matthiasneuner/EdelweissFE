@@ -156,7 +156,7 @@ class ModelStateSynchronization:
         return int(self._counts.sum())
 
     def synchronizeElementStates(self):
-        """Give every element the state of its owner. Collective."""
+        """Collective. Give every element the state of its owner."""
 
         if self._ownedElements:
             send = np.concatenate([element.getStateVars() for element in self._ownedElements])
@@ -176,9 +176,9 @@ class ModelStateSynchronization:
                 element.setStateVars(received[offsets[position] : offsets[position + 1]].copy())
 
     def synchronizeConstraintStates(self, toEveryProcess: bool = True):
-        """Give every constraint the state of its owner, and the results of its owner's last
-        evaluation that an output may read (``getOutputResults``) -- in every process, or on rank 0
-        only, where the output is written. Collective.
+        """Collective. Give every constraint the state of its owner, and the results of its owner's last
+        evaluation that an output may read (``getOutputResults``) -- in every process, or on rank 0 only,
+        where the output is written.
 
         Parameters
         ----------

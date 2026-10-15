@@ -235,8 +235,8 @@ class ConstraintBase(OptionSchemaProvider, ABC, VIJEntityBase):
         return packState(self, self.outputResults)
 
     def setOutputResults(self, data: dict[str, np.ndarray]):
-        """Adopt the results :meth:`getOutputResults` returned -- those of the process that evaluated
-        this constraint.
+        """Adopt the results :meth:`getOutputResults` returned; in a domain-decomposed run, those of
+        the process that evaluated this constraint.
 
         Parameters
         ----------

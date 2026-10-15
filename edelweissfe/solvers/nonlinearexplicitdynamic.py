@@ -135,20 +135,20 @@ smallest coefficient the increment divides by is reported alongside -- an inerti
 second-order degree of freedom, a damping at a first-order one -- since that is what bounds the
 step.
 
-**The part of the model computed here.** The increment runs over the elements, constraints and
-degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
-(:attr:`NED.subdomain`). This solver computes the whole model in one process, so its subdomain is
-the whole model: every element and constraint, and every degree of freedom -- the slice
-``slice(None)``, so that ``V[dofs]`` is the whole vector ``V``. A domain-decomposed solver
-(:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
-subdomain per process, and adds the exchange between the subdomains in methods of its own.
-
 **Restart.** A resumed run must not repeat the half-step that starts a leapfrog: the velocity in
 the checkpoint already carries the half-increment offset, so applying the startup again would apply
 one half-impulse too few. The solver therefore takes the previous time increment from the restart
 state rather than synthesising it, and the velocity field is checkpointed in its own right -- an
 implicit solver reconstructs everything it needs from the displacement, a central-difference scheme
 does not.
+
+**What a domain-decomposed solver overrides.** The increment runs over the elements, constraints
+and degrees of freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
+(:attr:`NED.subdomain`). For this solver the subdomain is the whole model: every element and
+constraint, and every degree of freedom -- the slice ``slice(None)``, so that ``V[dofs]`` is the
+whole vector ``V``. A domain-decomposed solver
+(:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
+subdomain per process, and adds the exchange between the subdomains in methods of its own.
 """
 
 import math
@@ -421,13 +421,13 @@ class IncrementPlan:
     Parameters
     ----------
     elementLoop
-        The element loop over the elements computed here that have kernels, as the solver runs it
+        The element loop over the elements of the subdomain that have kernels, as the solver runs it
         (:meth:`NED.planElementLoop`).
     firstOrderDofs
-        The first-order degrees of freedom integrated here.
+        The first-order subdomain degrees of freedom.
     mpcForceFold
         The fold of the multi-point-constraint slave forces onto their masters, as a matrix on the
-        degrees of freedom integrated here; None without multi-point constraints. See
+        subdomain degrees of freedom; None without multi-point constraints. See
         :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldExplicitForceOperator`.
     """
 
@@ -564,7 +564,7 @@ class NED(NonlinearSolverBase):
         #: starts a leapfrog. A resumed step continues from the checkpointed one instead: the
         #: checkpointed velocity already carries the half-step offset.
         self.prevTimeStep = None
-        #: The force buffer of every constraint evaluated here, by name; see
+        #: The force buffer of every constraint of the subdomain, by name; see
         #: :class:`ConstraintForce`. Cleared whenever the DofManager is rebuilt.
         self._constraintForces = {}
         #: What every increment needs prepared; see :class:`IncrementPlan` and :meth:`planIncrement`.
@@ -1023,8 +1023,8 @@ class NED(NonlinearSolverBase):
         4. :meth:`assembleNetForce` -- :math:`f_{n+1}` at :math:`u_{n+1}`, which the next increment
            starts from.
 
-        Everything runs over the degrees of freedom integrated in this process
-        (:attr:`subdomain`): every one, in a model computed whole.
+        Everything runs over the subdomain degrees of freedom (:attr:`subdomain`): for this solver,
+        every one.
 
         Parameters
         ----------
@@ -1167,7 +1167,7 @@ class NED(NonlinearSolverBase):
         self._externalWork -= math.fsum(reactionTimesIncrement.tolist())
 
     def updateVelocities(self, V: DofVector, P: DofVector, Minv: DofVector, dTAverage: float):
-        """Advance the velocity of every degree of freedom integrated here by the net nodal force.
+        """Advance the velocity of every subdomain degree of freedom by the net nodal force.
 
         Second order (central difference, with mass-proportional damping):
 
@@ -1199,7 +1199,7 @@ class NED(NonlinearSolverBase):
         # the mean. Written on whole vectors: h and the second-order mask are zero off the
         # second-order DOFs, which leaves those velocities unchanged.
         #
-        # ``dofs`` are the degrees of freedom integrated here: in a model computed whole the slice
+        # ``dofs`` are the subdomain degrees of freedom: for this solver the slice
         # ``slice(None)``, so that every ``x[dofs]`` below is the whole vector.
         dofs = self.subdomain.dofs
         firstOrderDofs = self._incrementPlan.firstOrderDofs
@@ -1240,7 +1240,7 @@ class NED(NonlinearSolverBase):
             self.mpcTransformation.applySlaveKinematics(V)
 
     def advanceDisplacements(self, U: DofVector, dU: DofVector, V: DofVector, dT: float):
-        """Advance the solution of every degree of freedom integrated here by its velocity:
+        """Advance the solution of every subdomain degree of freedom by its velocity:
         :math:`\\Delta u = \\Delta t\\, v_{n+1/2}`, :math:`u_{n+1} = u_n + \\Delta u`.
 
         Parameters
@@ -1283,7 +1283,7 @@ class NED(NonlinearSolverBase):
         Returns
         -------
         tuple[DofVector, float]
-            The net nodal force, and the internal energy the elements computed here report.
+            The net nodal force, and the internal energy the elements of the subdomain report.
         """
 
         P, psi = self.assembleInternalForces(U, dU, P, timeStep)
@@ -1323,7 +1323,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         psi
-            The internal energy the elements computed here report.
+            The internal energy the elements of the subdomain report.
         V
             The velocity vector.
         timeStep
@@ -1454,7 +1454,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         psi
-            The internal energy the elements computed here report.
+            The internal energy the elements of the subdomain report.
         V
             The velocity vector.
 
@@ -1498,7 +1498,7 @@ class NED(NonlinearSolverBase):
         P: DofVector,
         timeStep: TimeStep,
     ) -> tuple[DofVector, float]:
-        """Evaluate the elements computed here and assemble their internal force,
+        """Evaluate the elements of the subdomain and assemble their internal force,
         :math:`f^{int} = \\mathop{\\mathsf{A}}_e f^{int}_e`: the element loop of every finite element code.
         Element after element, in element order: gather its solution from the global vector, compute
         its nodal forces, and add them into ``P`` at its degrees of freedom.
@@ -1800,7 +1800,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         elementLoop
-            The element loop over the elements computed here, contact facets included
+            The element loop over the elements of the subdomain, contact facets included
             (:meth:`planElementLoop`).
         elementContribution
             ``elementContribution(element, Ve)`` writes an element's diagonal into the zero ``Ve``.
@@ -1820,7 +1820,7 @@ class NED(NonlinearSolverBase):
         return vector
 
     def elementsWithKernels(self) -> dict:
-        """The elements computed here that have kernels to call -- not the contact facets --, by
+        """The elements of the subdomain that have kernels to call -- not the contact facets --, by
         number, in element order.
 
         Returns
@@ -1932,7 +1932,7 @@ class NED(NonlinearSolverBase):
             The vector the increment divides by, and its inverse.
         """
 
-        # The lumped operators are assembled over the elements computed here -- contact facets
+        # The lumped operators are assembled over the elements of the subdomain -- contact facets
         # included, which have an inertia but no kernels.
         operatorLoop = self.planElementLoop(self.subdomain.elements)
         M = self.assembleLumpedDiagonal(operatorLoop, lambda element, Me: element.computeLumpedInertia(Me))
@@ -2142,8 +2142,8 @@ class NED(NonlinearSolverBase):
         else:
             self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
             self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
-            # Which elements, constraints and degrees of freedom this process computes; everything
-            # from here on that loops over elements loops over those only.
+            # The subdomain the increment runs over; everything from here on that loops over elements
+            # loops over its elements only.
             self.subdomain = self.defineSubdomain(model, topologyChanged=True)
             M, Minv = self._assembleLumpedOperators(verbosity)
             self._reusableOperators = _ReusableExplicitOperators(
@@ -2193,8 +2193,9 @@ class NED(NonlinearSolverBase):
                     "cannot be carried across safely.".format(U.shape[0], previous.U.shape[0])
                 )
 
-            # Carried straight over, not re-read from the node fields: a process holds the node
-            # fields current only where it integrates, and the carried vectors are what it computes.
+            # Carried straight over, not re-read from the node fields: the carried vectors are what the
+            # increments computed. (In a domain-decomposed run the node fields are current only at the
+            # subdomain degrees of freedom.)
             for entry, vector in carried.items():
                 vector[:] = previous.carried[entry]
 
@@ -2248,7 +2249,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         constraints
-            The constraints evaluated here, by name, in model order.
+            The constraints of the subdomain, by name, in model order.
         U_np
             The current solution vector.
         dU
@@ -2638,7 +2639,7 @@ class NED(NonlinearSolverBase):
 
     def getCriticalTimeStepForExplicitDynamics(self, model: FEModel, U: DofVector) -> float:
         """Compute the critical time step for explicit dynamics: the smallest of the elements
-        computed here.
+        of the subdomain.
 
         Parameters
         ----------

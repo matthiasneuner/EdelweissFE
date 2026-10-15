@@ -215,7 +215,7 @@ class _FieldOutputBase:
         self._lastResultHeldElsewhere = False
         self._historyHeldElsewhere = False
         #: Whether the last result was gathered to every process (or read whole here): the same in every
-        #: process, unlike whether it is held here; see :meth:`finalizeStep`.
+        #: process, unlike whether it is local; see :meth:`finalizeStep`.
         self._lastResultReachedEveryProcess = True
 
     def getLastResult(
@@ -493,11 +493,11 @@ class _FieldOutputBase:
         """
 
     def gatherResultsOfWholeSet(self, toEveryProcess: bool = True, storedHere: bool = True):
-        """Complete the part read by :meth:`readResultsHere` to the result of the whole set, from the
-        processes holding the rest -- in every process, or in the process writing the output only --;
-        the next :meth:`finalizeIncrement` stores it, if it is stored here at all. Collective where the
-        elements are distributed over several processes. For a result every process holds whole,
-        nothing is gathered.
+        """Collective where the elements are distributed over several processes. Complete the part read
+        by :meth:`readResultsHere` to the result of the whole set, from the processes holding the rest
+        -- in every process, or in the process writing the output only --; the next
+        :meth:`finalizeIncrement` stores it, if it is stored here at all. For a result every process
+        holds whole, nothing is gathered.
 
         Parameters
         ----------
@@ -772,7 +772,7 @@ class ElementFieldOutput(_FieldOutputBase):
         self.resultName = resultName
         self.quadraturePoints = quadraturePoints
         #: Whether :meth:`readResultsHere` read results that are not yet gathered, and those results
-        #: of the elements of the set owned here (None if none are owned here).
+        #: of the elements of the set this process owns (None if it owns none).
         self._resultsHereRead = False
         self._resultsHere = None
         #: The results of the whole set, gathered by :meth:`gatherResultsOfWholeSet` and not yet
@@ -812,7 +812,7 @@ class ElementFieldOutput(_FieldOutputBase):
             self._collectFromOwnedElements(self.model)
 
     def readResultsHere(self):
-        """Read the results of the elements of the set owned here; see
+        """Read the results of the elements of the set this process owns; see
         :meth:`_FieldOutputBase.readResultsHere`."""
 
         self._rebuildCollectorIfSetChanged()
@@ -820,10 +820,10 @@ class ElementFieldOutput(_FieldOutputBase):
         self._resultsHereRead = True
 
     def gatherResultsOfWholeSet(self, toEveryProcess: bool = True, storedHere: bool = True):
-        """Gather the results of the whole set from those read here and those owned elsewhere
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`);
-        see :meth:`_FieldOutputBase.gatherResultsOfWholeSet`. Collective where the elements are
-        distributed.
+        """Collective where the elements are distributed. Gather the results of the whole set from those
+        read here and those owned elsewhere
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.resultsOfWholeSet`); see
+        :meth:`_FieldOutputBase.gatherResultsOfWholeSet`.
 
         Parameters
         ----------
@@ -850,7 +850,7 @@ class ElementFieldOutput(_FieldOutputBase):
         self._resultsOfWholeSet = resultsOfWholeSet if storedHere else None
 
     def updateResults(self, model: FEModel):
-        """Update the field output: read the results of the elements owned here, gather those of the
+        """Update the field output: read the results of the elements this process owns, gather those of the
         whole set, and store them -- or store the results gathered already, if a domain-decomposed
         solver gathered them apart (:meth:`gatherResultsOfWholeSet`).
 
@@ -1193,10 +1193,9 @@ class FieldOutputController:
             output.readResultsHere()
 
     def gatherResultsOfWholeSet(self, readOnEveryProcess: set[str] | None = None, writesOutput: bool = True):
-        """Let every field output complete the part read by :meth:`readResultsHere` to the result of
-        its whole set, for the next :meth:`finalizeIncrement`. Collective where the elements are
-        distributed over several processes: every process gathers the field outputs in the same
-        order.
+        """Collective where the elements are distributed over several processes. Let every field output
+        complete the part read by :meth:`readResultsHere` to the result of its whole set, for the next
+        :meth:`finalizeIncrement`; every process gathers the field outputs in the same order.
 
         A field output read in every process is gathered to every process and stored everywhere;
         any other is gathered to rank 0 and stored only by the process writing the output. Where it

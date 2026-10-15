@@ -200,8 +200,8 @@ class ImmutableOrderedSet(OrderedSet):
 
 
 class LocalOrderedSet(OrderedSet):
-    """An ordered set of entities of a model -- its elements or its nodes -- of which a process may
-    hold only part.
+    """An ordered set of entities of a model -- its elements or its nodes. In a serial run, an ordered
+    set like any other; in a domain-decomposed run, a process may hold only part of it.
 
     **Local and complete.** In a distributed (domain-decomposed) run each process holds only some
     of the elements and nodes of the model -- its *local* ones, in the terms of deal.II and PETSc. A

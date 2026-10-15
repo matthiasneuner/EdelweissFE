@@ -686,7 +686,7 @@ class ModelModifier(ModelModifierBase):
 
         1. snapshot the converged nodal values, for the warm start;
         2. create the new nodes;
-        3. describe the child elements in the mesh, level by level, and create those computed here
+        3. describe the child elements in the mesh, level by level, and create those of the subdomain
            (with state transfer from their parents), interpolating the nodal values;
         4. remove the refined parents, and check that octree and model agree;
         5. update the surfaces and the node and element sets;

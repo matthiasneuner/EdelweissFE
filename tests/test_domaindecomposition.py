@@ -1185,7 +1185,7 @@ def test_elements_move_only_with_the_lumped_operators_a_serial_run_keeps(tmp_pat
     if output is None:
         pytest.fail("the refused migration left processes waiting")
     assert exitCode != 0, output
-    assert "the lumped operators assembled again from the elements now held here differ" in output, output
+    assert "the lumped operators assembled again from the elements now local differ" in output, output
 
 
 #: A fourth carried vector, the acceleration ``A``, added to the one list of them -- here a copy of
@@ -1566,7 +1566,7 @@ name=top
     for facet in facets:
         hostElement = model.mesh.elements[facet.elNumber].hostElement
         assert distribution.owners[facet.elNumber] == distribution.owners[hostElement]
-    # The facets on the top row (the even numbers) of elements 9-16 are computed here.
+    # The facets on the top row (the even numbers) of elements 9-16 are in the subdomain of this process.
     reported = [element.elNumber for element in distribution.ownedElements(model.elements.values())]
     assert [
         model.mesh.elements[number].hostElement for number in reported if number in model.mesh.elementSets["top_facets"]
@@ -1599,11 +1599,11 @@ def test_a_node_field_output_over_an_element_set_held_nowhere_here_reads_the_who
     for nodeField in model.nodeFields.values():
         nodeField.createFieldValueEntry("U")
 
-    # The elements of the left edge, 1 and 2, are computed by the other process: none is held here.
+    # The elements of the left edge, 1 and 2, are computed by the other process: none is local.
     assert len(model.elementSets["gen_left"].localElements()) == 0
     fieldOutput = createFieldOutputFromInputFile(inputFile, model, Journal(verbose=False)).fieldOutputs["uLeft"]
     # The nodes of the two elements, read from the mesh -- not every node of the model, and not the
-    # nodes of the element objects held here, of which there are none.
+    # nodes of the local element objects, of which there are none.
     assert fieldOutput.associatedSet is model.elementSets["gen_left"]
     nodesOfTheSet = {
         label for number in model.mesh.elementSets["gen_left"] for label in model.mesh.elements[number].nodeLabels

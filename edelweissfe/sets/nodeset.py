@@ -168,7 +168,7 @@ class NodeSetOfMesh(NodeSet):
         return len(self.mesh.nodeSets[self.name])
 
     def nodeLabelsOfWholeSet(self) -> list:
-        """The labels of every node of the set, in set order -- also of those not held here, read
+        """The labels of every node of the set, in set order -- also of those not local, read
         from the mesh.
 
         Returns
@@ -200,7 +200,7 @@ class NodeSetOfMesh(NodeSet):
             )
 
     def _whyIncomplete(self) -> str:
-        """Why nodes of the set are not held here.
+        """Why nodes of the set are not local.
 
         Returns
         -------

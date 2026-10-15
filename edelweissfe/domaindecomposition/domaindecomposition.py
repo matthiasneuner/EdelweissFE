@@ -189,7 +189,7 @@ class DomainDecomposition:
         is kept alive here."""
 
         self._ownedElements = {}
-        #: The loads of the elements computed here, and their assembly, for the loads last asked
+        #: The loads of the elements of the subdomain, and their assembly, for the loads last asked
         #: for; see loadsOnSubdomain.
         self._loadsOnSubdomain = None
         #: The subdomain of this process -- the elements, constraints and degrees of freedom it
@@ -207,8 +207,8 @@ class DomainDecomposition:
         mpcTransformation: MultiPointConstraintTransformation | None,
         topologyChanged: bool,
     ):
-        """Partition the model if its elements changed, and determine this process' subdomain
-        degrees of freedom and interface: the :attr:`subdomain`. Collective.
+        """Collective. Partition the model if its elements changed, and determine this process' subdomain
+        degrees of freedom and interface: the :attr:`subdomain`.
 
         Called whenever the equation system has been built (``topologyChanged``) or its constraints
         re-located (a contact search moved them). A rebuild with the same elements -- a new step, a
@@ -249,7 +249,7 @@ class DomainDecomposition:
         self._reportSubdomains(topologyChanged)
 
     def _partition(self, model: FEModel, measuredCosts: dict | None, byMeasuredCosts: bool):
-        """Partition the elements of the mesh, by estimated or by measured cost. Collective.
+        """Collective. Partition the elements of the mesh, by estimated or by measured cost.
 
         A model whose processes each created only their own elements was partitioned before its
         elements were created (see
@@ -345,8 +345,8 @@ class DomainDecomposition:
         }
 
     def _defineInterface(self, model: FEModel, ownershipChanged: bool):
-        """Determine the subdomain degrees of freedom and the interface from the owned entities; with
-        new ownership, also the layout of the state synchronization. Collective.
+        """Collective. Determine the subdomain degrees of freedom and the interface from the owned entities;
+        with new ownership, also the layout of the state synchronization.
 
         Parameters
         ----------
@@ -453,10 +453,10 @@ class DomainDecomposition:
         return np.concatenate([touched, np.flatnonzero(linked & np.isin(group, groupsTouched))])
 
     def _checkReplicatedLayout(self, model: FEModel, dofManager: DofManager):
-        """Refuse to continue unless the DofManager numbers the degrees of freedom as the global
-        numbering of the mesh does (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`),
-        and every process built the same mesh and degree-of-freedom layout (:func:`layoutFingerprint`).
-        Collective.
+        """Collective. Refuse to continue unless the DofManager numbers the degrees of freedom as the global
+        numbering of the mesh does
+        (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`), and every process built
+        the same mesh and degree-of-freedom layout (:func:`layoutFingerprint`).
 
         The interface exchange addresses degrees of freedom by index, and the load assembly tags a
         load contribution by its place in the element sets and surfaces of the mesh; both are only
@@ -491,7 +491,7 @@ class DomainDecomposition:
             )
 
     def _reportSubdomains(self, topologyChanged: bool):
-        """Report the size of every subdomain and of its interface. Collective.
+        """Collective. Report the size of every subdomain and of its interface.
 
         Parameters
         ----------
@@ -529,10 +529,10 @@ class DomainDecomposition:
             0 if topologyChanged else 2,
         )
 
-    # --- What is computed here ----------------------------------------------------------------
+    # --- The subdomain -------------------------------------------------------------------------
 
     def loadsOnSubdomain(self, distributedLoads, bodyLoads) -> LoadsOnSubdomain:
-        """The given loads, restricted to the elements computed here, with their nodal forces tagged
+        """The given loads, restricted to the elements of the subdomain, with their nodal forces tagged
         for the assembly at the interface (:meth:`loadAssemblyFor`); made again when the loads or the
         subdomain changed. Local: it reads the mesh, which every process holds whole, and so may be
         called where a process can fail alone
@@ -562,7 +562,7 @@ class DomainDecomposition:
         Raises
         ------
         TopologyError
-            If a loaded element held here is not where the mesh describes it in its surface or set.
+            If a loaded local element is not where the mesh describes it in its surface or set.
         """
 
         distributedLoads, bodyLoads = list(distributedLoads), list(bodyLoads)
@@ -575,7 +575,7 @@ class DomainDecomposition:
         loadsBefore = 0
 
         def computedHere(loadedSetName: str, elements, numbersInMesh: list) -> list:
-            """The elements of a loaded set computed here, in set order, with their entries tagged by
+            """The elements of a loaded set in the subdomain, in set order, with their entries tagged by
             their place among all load contributions; advances the count of contributions."""
 
             nonlocal loadsBefore
@@ -631,10 +631,10 @@ class DomainDecomposition:
         return self._loadsOnSubdomain
 
     def loadAssemblyFor(self, loads: LoadsOnSubdomain) -> InterfaceLoadAssembly:
-        """The assembly of the nodal forces of loads restricted to this subdomain at the interface;
-        built the first time it is asked for. Collective among neighbours when built: every process
-        asks for it after the same :meth:`loadsOnSubdomain`, which is made again in every process at
-        the same time.
+        """Collective among neighbours when built. The assembly of the nodal forces of loads restricted
+        to this subdomain at the interface; built the first time it is asked for: every process asks for
+        it after the same :meth:`loadsOnSubdomain`, which is made again in every process at the same
+        time.
 
         Parameters
         ----------
@@ -680,8 +680,8 @@ class DomainDecomposition:
         return {name: constraint for name, constraint in constraints.items() if owners[name] == self.rank}
 
     def requireConstraintCopiesCurrent(self, model: FEModel):
-        """Refuse to change the mesh unless every process' copy of every constraint couples the
-        nodes and fields its owner's couples. Collective.
+        """Collective. Refuse to change the mesh unless every process' copy of every constraint couples the
+        nodes and fields its owner's couples.
 
         A topology change activates fields on nodes for every constraint of the model -- every copy,
         in every process -- and a copy differing from its owner would give its process a different
@@ -710,8 +710,8 @@ class DomainDecomposition:
 
     @property
     def ownedDofMask(self) -> np.ndarray:
-        """Whether each degree of freedom of the model is owned here: True at most at those this
-        process integrates, and at each degree of freedom of the model in exactly one process. A
+        """Whether each degree of freedom of the model is owned by this process: True at most at its
+        subdomain degrees of freedom, and at each degree of freedom of the model in exactly one process. A
         degree of freedom at the interface is integrated by several processes, but a quantity to be
         counted once for the model -- the work done at a prescribed degree of freedom, a kinetic
         energy -- is counted by its owner only.
@@ -727,13 +727,13 @@ class DomainDecomposition:
     # --- Completing the results of the whole model ------------------------------------------------
 
     def interfaceAssemblyFor(self, plan: ElementPlan) -> InterfaceForceAssembly:
-        """The exchange of a plan's element contributions at the interface, summed in model order.
-        Collective among neighbours.
+        """Collective among neighbours. The exchange of a plan's element contributions at the interface,
+        summed in model order.
 
         Parameters
         ----------
         plan
-            A plan of elements computed here.
+            A plan of elements of the subdomain.
 
         Returns
         -------
@@ -748,8 +748,8 @@ class DomainDecomposition:
         return InterfaceForceAssembly(self._interface, plan.entryDofs, entryElementPositions)
 
     def allgatherOwnedValues(self, vector: DofVector):
-        """Make a vector, correct at the degrees of freedom owned here, the same complete vector in
-        every process, in place: every entry from its owner. Collective.
+        """Collective. Make a vector, correct at the degrees of freedom this process owns, the same complete
+        vector in every process, in place: every entry from its owner.
 
         Parameters
         ----------
@@ -760,9 +760,9 @@ class DomainDecomposition:
         self._interface.allgatherOwnedValues(vector)
 
     def gatherOwnedValuesToRoot(self, vector: DofVector):
-        """Make a vector, correct at the degrees of freedom owned here, the complete vector on rank 0,
-        in place: every entry from its owner. The other processes keep theirs, complete at the degrees
-        of freedom they integrate only. Collective.
+        """Collective. Make a vector, correct at the degrees of freedom this process owns, the complete
+        vector on rank 0, in place: every entry from its owner. The other processes keep theirs, complete
+        at the degrees of freedom they integrate only.
 
         Parameters
         ----------
@@ -786,8 +786,8 @@ class DomainDecomposition:
         return self._interface
 
     def valuesFromOwners(self, neededDofs: np.ndarray) -> ValuesFromOwners:
-        """How this process receives the entries of vectors at the given degrees of freedom from their
-        owners, point to point (:class:`~.subdomaininterface.ValuesFromOwners`). Collective.
+        """Collective. How this process receives the entries of vectors at the given degrees of freedom from
+        their owners, point to point (:class:`~.subdomaininterface.ValuesFromOwners`).
 
         Parameters
         ----------
@@ -803,10 +803,10 @@ class DomainDecomposition:
         return ValuesFromOwners(self.communicator, neededDofs, self._interface.dofOwners)
 
     def receiveNewlyIntegratedValues(self, before: SubdomainInterface, vectors: list[DofVector]):
-        """After the subdomain was defined afresh for the same degree-of-freedom layout -- a contact
-        search moved a constraint, or elements moved between the processes -- complete the vectors at
-        the degrees of freedom this process integrates now but did not before, from the processes that
-        owned them before. Collective.
+        """Collective. After the subdomain was defined afresh for the same degree-of-freedom layout -- a
+        contact search moved a constraint, or elements moved between the processes -- complete the
+        vectors at the degrees of freedom this process integrates now but did not before, from the
+        processes that owned them before.
 
         A process holds a vector current at the degrees of freedom it integrates only (between two
         synchronizations of the whole model, see
@@ -827,20 +827,20 @@ class DomainDecomposition:
         ValuesFromOwners(self.communicator, newlyIntegrated, before.dofOwners).receive(vectors)
 
     def addConstraintForces(self, forces: dict, P: DofVector):
-        """Send the forces of the constraints evaluated here to the processes integrating their
-        degrees of freedom, and add those of every constraint acting on a degree of freedom
-        integrated here into ``P``, in model order
-        (:class:`~.subdomaininterface.ConstraintForceExchange`). Collective among neighbours.
+        """Collective among neighbours. Send the forces of the constraints of the subdomain to the processes
+        integrating their degrees of freedom, and add those of every constraint acting on a subdomain
+        degree of freedom into ``P``, in model order
+        (:class:`~.subdomaininterface.ConstraintForceExchange`).
 
         The degrees of freedom are the owner's: another process' copy of a contact constraint
         couples the nodes of its last synchronization. ``P`` holds the constraint forces at the
-        degrees of freedom integrated here only.
+        subdomain degrees of freedom only.
 
         Parameters
         ----------
         forces
             The :class:`~edelweissfe.solvers.nonlinearexplicitdynamic.ConstraintForce` of every
-            constraint evaluated here, by name.
+            constraint of the subdomain, by name.
         P
             The net nodal force vector.
         """
@@ -854,8 +854,8 @@ class DomainDecomposition:
 
     @performancetiming.timeit("subdomain synchronization")
     def synchronizeStates(self, includeElements: bool, toEveryProcess: bool = True):
-        """Give every stateful constraint -- and, if asked, every element -- of this process' model
-        the state the process computing it last left it in. Collective.
+        """Collective. Give every stateful constraint -- and, if asked, every element -- of this process'
+        model the state the process computing it last left it in.
 
         The constraint states are received by every process, or by rank 0 only, where the output is
         written; the copies elsewhere then keep the state of their last synchronization. The element
@@ -893,8 +893,8 @@ class DomainDecomposition:
         return {element.elNumber: element.getStateVars() for element in owned}
 
     def gatherElementStatesToRoot(self, statesHere: dict) -> dict | None:
-        """Gather the element states of every process (:meth:`elementStatesOwnedHere`) to rank 0, for
-        the restart checkpoint rank 0 writes. Collective.
+        """Collective. Gather the element states of every process (:meth:`elementStatesOwnedHere`) to rank
+        0, for the restart checkpoint rank 0 writes.
 
         Parameters
         ----------
@@ -931,11 +931,10 @@ class DomainDecomposition:
         return bool(self.loadBalanceTolerance)
 
     def rebalance(self, plan: ElementPlan, load: MeasuredLoad) -> bool:
-        """Repartition with the measured costs if the busiest process has fallen more than
-        ``loadBalanceTolerance`` behind what a partition can attain, and if that is worth it.
-        Collective; only right after an increment was accepted and, where every process holds the
-        whole model, every element state synchronized, since an element changing process must arrive
-        with its current state.
+        """Collective. Repartition with the measured costs if the busiest process has fallen more than
+        ``loadBalanceTolerance`` behind what a partition can attain, and if that is worth it. Only right
+        after an increment was accepted and, where every process holds the whole model, every element
+        state synchronized, since an element changing process must arrive with its current state.
 
         A process is busy with its elements and with the constraints it evaluates. The constraints
         stay where they are (see :mod:`~edelweissfe.domaindecomposition.partitioning`), so a
@@ -963,7 +962,7 @@ class DomainDecomposition:
         Parameters
         ----------
         plan
-            The plan of the elements whose kernels are computed here.
+            The plan of the elements of the subdomain that have kernels.
         load
             What this process measured.
 
@@ -1074,9 +1073,9 @@ class DomainDecomposition:
         return busiest / attainable, busiest - (1.0 + self.loadBalanceTolerance) * attainable
 
     def recordRepartitionCost(self, seconds: float):
-        """Record what the last repartition cost -- deciding it, partitioning, moving the elements
-        and deriving everything again -- for the next :meth:`rebalance` to weigh against its gain:
-        the longest of all processes, so that every process decides the same. Collective.
+        """Collective. Record what the last repartition cost -- deciding it, partitioning, moving the
+        elements and deriving everything again -- for the next :meth:`rebalance` to weigh against its
+        gain: the longest of all processes, so that every process decides the same.
 
         Parameters
         ----------
@@ -1087,11 +1086,11 @@ class DomainDecomposition:
         self._lastRepartitionCost = self.communicator.allreduce(seconds, op=MPI.MAX)
 
     def rebalanceAfterTopologyChange(self, model: FEModel, horizon: int):
-        """After a model modifier changed the mesh of a distributed model, move elements if the
-        partition it inherited -- the children of a refined element are computed where their parent
-        was -- is out of balance, and if that pays. Collective; right after the topology update,
-        before the equation system is built again, which it is anyway: a migration here costs only
-        the moving of the elements.
+        """Collective. After a model modifier changed the mesh of a distributed model, move elements if the
+        partition it inherited -- the children of a refined element are computed where their parent was
+        -- is out of balance, and if that pays. Right after the topology update, before the equation
+        system is built again, which it is anyway: a migration here costs only the moving of the
+        elements.
 
         No new measurement is needed for the imbalance: it is estimated from the number of elements
         with kernels each process computes, at the mean measured cost of an element, beside the
@@ -1187,9 +1186,9 @@ class DomainDecomposition:
 
     @performancetiming.timeit("element migration")
     def moveElements(self):
-        """Move the elements of a distributed model to their processes under the current partition
-        (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
-        and report the migration. Collective.
+        """Collective. Move the elements of a distributed model to their processes under the current
+        partition (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.moveElementsTo`),
+        and report the migration.
 
         The subdomain forgets the elements it computed first, so that a process holds no reference
         to an element it drops; the solver must have released its own (its degree-of-freedom indices

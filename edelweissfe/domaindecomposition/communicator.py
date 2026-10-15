@@ -229,13 +229,13 @@ class Communicator:
     # --- Collective operations ----------------------------------------------------------------------
 
     def Barrier(self):
-        """Wait for every process; see ``mpi4py``. Collective."""
+        """Collective. Wait for every process; see ``mpi4py``."""
 
         self._requireCommunicationAllowed("Barrier")
         self._mpiCommunicator.Barrier()
 
     def bcast(self, obj, root: int = 0):
-        """Broadcast a Python object from ``root``; see ``mpi4py``. Collective.
+        """Collective. Broadcast a Python object from ``root``; see ``mpi4py``.
 
         Parameters
         ----------
@@ -254,7 +254,7 @@ class Communicator:
         return self._mpiCommunicator.bcast(obj, root=root)
 
     def Bcast(self, buffer, root: int = 0):
-        """Broadcast a buffer from ``root``, in place; see ``mpi4py``. Collective.
+        """Collective. Broadcast a buffer from ``root``, in place; see ``mpi4py``.
 
         Parameters
         ----------
@@ -268,7 +268,7 @@ class Communicator:
         self._mpiCommunicator.Bcast(buffer, root=root)
 
     def gather(self, obj, root: int = 0):
-        """Gather a Python object of every process to ``root``; see ``mpi4py``. Collective.
+        """Collective. Gather a Python object of every process to ``root``; see ``mpi4py``.
 
         Parameters
         ----------
@@ -287,7 +287,7 @@ class Communicator:
         return self._mpiCommunicator.gather(obj, root=root)
 
     def allgather(self, obj) -> list:
-        """Gather a Python object of every process to every process; see ``mpi4py``. Collective.
+        """Collective. Gather a Python object of every process to every process; see ``mpi4py``.
 
         Parameters
         ----------
@@ -304,8 +304,7 @@ class Communicator:
         return self._mpiCommunicator.allgather(obj)
 
     def Allgatherv(self, sendbuf, recvbuf):
-        """Gather buffers of varying size of every process to every process; see ``mpi4py``.
-        Collective.
+        """Collective. Gather buffers of varying size of every process to every process; see ``mpi4py``.
 
         Parameters
         ----------
@@ -319,7 +318,7 @@ class Communicator:
         self._mpiCommunicator.Allgatherv(sendbuf, recvbuf)
 
     def Gatherv(self, sendbuf, recvbuf, root: int = 0):
-        """Gather buffers of varying size of every process to ``root``; see ``mpi4py``. Collective.
+        """Collective. Gather buffers of varying size of every process to ``root``; see ``mpi4py``.
 
         Parameters
         ----------
@@ -335,7 +334,7 @@ class Communicator:
         self._mpiCommunicator.Gatherv(sendbuf, recvbuf, root=root)
 
     def allreduce(self, obj, op=MPI.SUM):
-        """Reduce a Python object over every process; see ``mpi4py``. Collective.
+        """Collective. Reduce a Python object over every process; see ``mpi4py``.
 
         Parameters
         ----------
@@ -354,7 +353,7 @@ class Communicator:
         return self._mpiCommunicator.allreduce(obj, op=op)
 
     def Allreduce(self, sendbuf, recvbuf, op=MPI.SUM):
-        """Reduce a buffer over every process; see ``mpi4py``. Collective.
+        """Collective. Reduce a buffer over every process; see ``mpi4py``.
 
         Parameters
         ----------
@@ -370,8 +369,7 @@ class Communicator:
         self._mpiCommunicator.Allreduce(sendbuf, recvbuf, op=op)
 
     def alltoall(self, objects: list) -> list:
-        """Send a Python object to every process, and receive one from each; see ``mpi4py``.
-        Collective.
+        """Collective. Send a Python object to every process, and receive one from each; see ``mpi4py``.
 
         Parameters
         ----------
@@ -434,8 +432,8 @@ class Communicator:
     # --- Agreeing among the processes ---------------------------------------------------------------
 
     def allreduceSum(self, values: list[float]) -> list[float]:
-        """The sums of values over all processes, added in ascending rank order, so that they are the
-        same bits in every process. Collective.
+        """Collective. The sums of values over all processes, added in ascending rank order, so that they
+        are the same bits in every process.
 
         Parameters
         ----------
@@ -455,7 +453,7 @@ class Communicator:
         return totals
 
     def allreduceMin(self, value: float) -> float:
-        """The minimum of a value over all processes. Collective.
+        """Collective. The minimum of a value over all processes.
 
         Parameters
         ----------
@@ -471,7 +469,7 @@ class Communicator:
         return self.allreduce(value, op=MPI.MIN)
 
     def allreduceAny(self, flag: bool) -> bool:
-        """Whether a flag is set in any process. Collective.
+        """Collective. Whether a flag is set in any process.
 
         Parameters
         ----------
@@ -487,7 +485,7 @@ class Communicator:
         return bool(self.allreduce(bool(flag), op=MPI.LOR))
 
     def requireSameOnAllRanks(self, value, description: str):
-        """Refuse to continue unless every process holds the same value. Collective.
+        """Collective. Refuse to continue unless every process holds the same value.
 
         Parameters
         ----------
@@ -511,8 +509,7 @@ class Communicator:
 
     @contextmanager
     def allRanksFailTogether(self, operation: str):
-        """A context in which an exception raised in one process is raised in every process.
-        Collective.
+        """Collective. A context in which an exception raised in one process is raised in every process.
 
         A process raising alone would leave the others waiting for it in the next exchange forever.
         Every process reports what went wrong in it, and every process raises the most severe: a
@@ -566,9 +563,9 @@ class Communicator:
 
     @contextmanager
     def allRanksFailTogetherWhileCommunicating(self, operation: str):
-        """A context in which an exception raised in one process is raised in every process, as in
-        :meth:`allRanksFailTogether`, but in which the processes may communicate -- through operations
-        every process takes part in. Collective.
+        """Collective. A context in which an exception raised in one process is raised in every process, as
+        in :meth:`allRanksFailTogether`, but in which the processes may communicate -- through operations
+        every process takes part in.
 
         Before every such operation inside the context, the processes agree that none of them has
         failed so far: a process that failed is not at that operation but at the end of its context,
@@ -610,7 +607,7 @@ class Communicator:
         self._raiseAgreedOutcome(operation, agreed, outcome, failure)
 
     def _agreedOutcome(self, outcome: int) -> int:
-        """The most severe outcome of any process. Collective.
+        """Collective. The most severe outcome of any process.
 
         Parameters
         ----------
@@ -628,8 +625,8 @@ class Communicator:
         return int(status[0])
 
     def _raiseAgreedOutcome(self, operation: str, agreed: int, outcome: int, failure: Exception | None):
-        """Raise the outcome the processes agreed on, in every process alike, with what went wrong in
-        each of them. Collective if a process failed.
+        """Collective if a process failed. Raise the outcome the processes agreed on, in every process
+        alike, with what went wrong in each of them.
 
         Parameters
         ----------

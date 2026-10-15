@@ -157,7 +157,7 @@ class NEDParallel(NED):
         Parameters
         ----------
         elementLoop
-            The plan of the elements computed here, contact facets included (:meth:`planElementLoop`).
+            The plan of the elements of the subdomain, contact facets included (:meth:`planElementLoop`).
         elementContribution
             As for :meth:`NED.assembleLumpedDiagonal`.
 

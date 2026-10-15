@@ -118,7 +118,7 @@ class ElementDistribution:
     def placeChildElement(self, childNumber: int, parentNumber: int):
         """Decide where an element a model modifier describes in place of another is computed: the
         child of a refined element is computed by the process that computed its parent, which holds
-        the parent's state to transfer. Here: every element is computed here, so there is nothing to
+        the parent's state to transfer. Here: every element is local, so there is nothing to
         decide.
 
         Parameters
@@ -133,7 +133,7 @@ class ElementDistribution:
         """Decide where an auxiliary element (a contact facet, the point mass of a rigid
         body; see :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`) is computed. Such an
         element is surface-sized and made in every process, by the same code, with the same number.
-        Here: every element is computed here, so there is nothing to decide.
+        Here: every element is local, so there is nothing to decide.
 
         Parameters
         ----------
@@ -197,7 +197,7 @@ class ElementDistribution:
         Returns
         -------
         list
-            The elements owned here, in the order given.
+            The elements this process owns, in the order given.
         """
 
         return list(elements)
@@ -206,14 +206,14 @@ class ElementDistribution:
         self, elementSet, numbersOwnedHere: list, results: np.ndarray | None, toEveryProcess: bool = True
     ) -> np.ndarray | None:
         """The results of every element of a set, in set order, from the results of the elements
-        owned here. Here: the results given, since every element is owned here.
+        this process owns. Here: the results given, since it owns every element.
 
         Parameters
         ----------
         elementSet
             The element set.
         numbersOwnedHere
-            The numbers of the elements of the set owned here (:meth:`ownedElements`), in set
+            The numbers of the elements of the set this process owns (:meth:`ownedElements`), in set
             order.
         results
             Their results, one row per element; None if there are none.
