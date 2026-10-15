@@ -1409,24 +1409,30 @@ class FEModel:
             for entryName, entryValues in record.plan.items():
                 recordGroup.create_dataset(entryName, data=entryValues)
 
-    def _rowsOfNodeFieldsInWholeFields(self) -> dict[str, np.ndarray]:
-        """Per node field, the row of each of its nodes in the node field of the whole model -- among the
-        nodes of the mesh carrying the field, in mesh order (the numbering of
-        :class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) --: where a process holding
-        only some of the nodes finds them in a checkpoint.
+    def rowsOfNodeFieldInWholeField(self, nodeField, numbering: GlobalDofNumbering) -> np.ndarray | None:
+        """The row of each node of a node field of the model in the node field of the whole model -- among
+        the nodes of the mesh carrying the field, in mesh order, as a checkpoint and a vector of the whole
+        model (the global numbering) lay it out: None -- every row, in order -- where this process
+        holds every node (:attr:`~edelweissfe.models.elementdistribution.ElementDistribution.holdsEveryNodeHere`);
+        else the rows of the nodes it holds.
+
+        Parameters
+        ----------
+        nodeField
+            A node field of the model.
+        numbering
+            The global numbering of the degrees of freedom of the model.
 
         Returns
         -------
-        dict[str, np.ndarray]
-            The rows, by field.
+        np.ndarray | None
+            The rows; None for every row, in order.
         """
 
-        numbering = GlobalDofNumbering.ofModel(self)
-        rows = {}
-        for name, nodeField in self.nodeFields.items():
-            meshRows = self.mesh.rowsOfNodes([node.label for node in nodeField.nodes])
-            rows[name] = numbering.rankInField[name][meshRows].astype(np.int64)
-        return rows
+        if self.elementDistribution.holdsEveryNodeHere:
+            return None
+        meshRows = self.mesh.rowsOfNodes([node.label for node in nodeField.nodes])
+        return numbering.rankInField[nodeField.name][meshRows].astype(np.int64)
 
     def readRestart(self, restartFile: h5py.File, journal: Journal = None):
         """Read the state of the model from a restart checkpoint written by :meth:`writeRestart`.
@@ -1477,9 +1483,7 @@ class FEModel:
 
         # A checkpoint holds every node carrying a field, in mesh order; a process holding only some of
         # the nodes reads their rows.
-        rowsInFields = (
-            self._rowsOfNodeFieldsInWholeFields() if self.elementDistribution.holdsNodesOfSubdomainOnly else {}
-        )
+        numbering = None if self.elementDistribution.holdsEveryNodeHere else GlobalDofNumbering.ofModel(self)
         for nf in self.nodeFields.values():
             storedField = f["nodeFields"].get(nf.name)
             if storedField is None:
@@ -1487,11 +1491,11 @@ class FEModel:
 
             # Iterate the checkpoint's entries, not the model's -- entries created only later by a
             # solver (e.g. the explicit solver's 'V') would otherwise never be restored.
-            rows = rowsInFields.get(nf.name)
+            rows = self.rowsOfNodeFieldInWholeField(nf, numbering)
             for entryName, storedValues in storedField.items():
                 if entryName not in nf:
                     nf.createFieldValueEntry(entryName)
-                if rows is None or rows.shape[0] == storedValues.shape[0]:
+                if rows is None:
                     storedValues.read_direct(nf[entryName])
                 else:
                     nf[entryName][:] = storedValues[()][rows]

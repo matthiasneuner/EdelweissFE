@@ -455,8 +455,17 @@ def assembleNodeValues(labels: np.ndarray, pieces: list) -> np.ndarray:
         rows = order[np.minimum(np.searchsorted(labels, pieceLabels, sorter=order), labels.shape[0] - 1)]
         if not np.array_equal(labels[rows], pieceLabels):
             raise TopologyError("values of nodes were contributed that were not asked for")
+        pieceValues = np.asarray(pieceValues)
         if whole is None:
-            whole = np.empty((labels.shape[0],) + np.shape(pieceValues)[1:], dtype=np.asarray(pieceValues).dtype)
+            whole = np.empty((labels.shape[0],) + pieceValues.shape[1:], dtype=pieceValues.dtype)
+        again = filled[rows]
+        if again.any() and whole[rows[again]].tobytes() != pieceValues[again].tobytes():
+            # every process contributing a node integrates it, bit for bit (see NEDMPI)
+            raise TopologyError(
+                "the values of {:} node(s) (e.g. {:}) contributed by several processes differ".format(
+                    int(again.sum()), labels[rows[again]][:5].tolist()
+                )
+            )
         whole[rows] = pieceValues
         filled[rows] = True
     if not filled.all():

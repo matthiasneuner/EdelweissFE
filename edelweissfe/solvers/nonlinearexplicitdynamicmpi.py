@@ -1664,11 +1664,13 @@ class NEDMPI(NEDParallel):
                 nodeField.createFieldValueEntry(entry)
             values = nodeField[entry]
             first = numbering.firstDofOfField[field]
-            if values.size == np.count_nonzero(numbering.nodesCarryingField[field]) * numbering.dimensionOfField[field]:
+            rows = model.rowsOfNodeFieldInWholeField(nodeField, numbering)
+            if rows is None:
                 values[:] = whole[first : first + values.size].reshape(values.shape)
             else:
                 # the nodes of the field held here
-                values[:] = whole[numbering.dofsAtNodes(field, self._meshRowsOfNodeField(model, nodeField))]
+                dimension = nodeField.dimension
+                values[:] = whole[first + rows[:, None] * dimension + np.arange(dimension)]
 
     def _subdomainNodeFieldSlots(self, model: FEModel) -> list[NodeFieldSlot]:
         """Where the degrees of freedom of vectors of the subdomain are published in the node fields of the
