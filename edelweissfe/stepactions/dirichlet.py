@@ -251,8 +251,7 @@ class StepAction(DirichletBase):
 
         return cls(
             name,
-            # read whole -- its prescribed values in every process (a solver acts on the part it holds)
-            model.wholeNodeSet(nSetName, name),
+            model.nodeSets[nSetName],
             configuration.field,
             cls._prescribedComponentsFromDefinition(configuration, getFieldSize(configuration.field, model.domainSize)),
             model,
@@ -351,12 +350,15 @@ class StepAction(DirichletBase):
 
         self._components = sorted(self._prescribedComponents)
 
-        self.delta = np.tile([self._prescribedComponents[i] for i in self._components], (len(self.nSet), 1))
+        # One row per node of the whole set, also where this process holds only part of it: a solver
+        # acts on the rows of the part whose degrees of freedom it holds (constrainedRows).
+        labels = self.nSet.nodeLabelsOfWholeSet()
+        self.delta = np.tile([self._prescribedComponents[i] for i in self._components], (len(labels), 1))
 
         if analyticalField is not None:
             self.analyticalField = analyticalField
-            for i, node in enumerate(self.nSet):
-                self.delta[i, :] *= analyticalField.evaluateAtCoordinates(node.coordinates)[0][0]
+            for i, coordinates in enumerate(self._model.coordinatesOfNodes(labels)):
+                self.delta[i, :] *= analyticalField.evaluateAtCoordinates(coordinates)[0][0]
 
         self.amplitude = f_t if f_t is not None else lambda x: x
 

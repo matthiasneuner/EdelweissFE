@@ -1708,8 +1708,10 @@ class NEDMPI(NEDParallel):
 
     def _partOfNodeSetHere(self, nodeSet, field: str) -> tuple[np.ndarray, np.ndarray]:
         """The part of a node set whose degrees of freedom of a field the vectors of the subdomain hold: its
-        rows -- the positions of its nodes in the set, counting those carrying the field, as a step action
-        on the set lays out its values -- and the positions of their degrees of freedom in the vectors.
+        rows -- the positions of its nodes in the whole set, counting those carrying the field, as a step
+        action on the set lays out its values -- and the positions of their degrees of freedom in the
+        vectors. From what every process holds whole -- the labels of the set, the mesh, the global
+        numbering --, not from node objects, of which a process holds only some.
 
         Parameters
         ----------
@@ -1731,10 +1733,10 @@ class NEDMPI(NEDParallel):
 
         key = (nodeSet, field)
         if key not in self._partsOfNodeSetsHere:
-            carrying = [node.label for node in nodeSet if field in node.fields]
-            globalDofs = self.domainDecomposition.numbering.dofsAtNodes(
-                field, self.domainDecomposition.rowsOfNodes(carrying)
-            )
+            numbering = self.domainDecomposition.numbering
+            meshRows = self.domainDecomposition.rowsOfNodes(nodeSet.nodeLabelsOfWholeSet())
+            carrying = meshRows[numbering.nodesCarryingField[field][meshRows]]
+            globalDofs = numbering.dofsAtNodes(field, carrying)
             subdomainDofs = self.domainDecomposition.interface.subdomainDofs
             positions = np.minimum(np.searchsorted(subdomainDofs, globalDofs), max(subdomainDofs.shape[0] - 1, 0))
             heldComponents = subdomainDofs[positions] == globalDofs if subdomainDofs.shape[0] else globalDofs < 0

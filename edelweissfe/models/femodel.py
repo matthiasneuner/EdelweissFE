@@ -310,11 +310,35 @@ class FEModel:
             # every node: the resize made new arrays, of which the field variables are views
             self._linkFieldVariableObjects(list(self.nodes.values()))
 
+    def coordinatesOfNodes(self, labels) -> list:
+        """The coordinates of nodes of the mesh: those of the node object where this process holds one,
+        else the reference coordinates the mesh describes -- the same, unless something moves the node
+        objects (a rigid body, which every process holds every node for).
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+
+        Returns
+        -------
+        list
+            The coordinates, one array per node.
+        """
+
+        nodes, mesh = self.nodes, self.mesh
+        return [
+            nodes[label].coordinates if label in nodes else mesh.nodeCoordinates[mesh.rowsOfNodes([label])[0]]
+            for label in labels
+        ]
+
     def wholeNodeSet(self, name: str, reader: str) -> NodeSet:
         """A node set of the mesh, held whole in this process: how a model entity reading every node of a
         set in every process -- a constraint whose copy every process holds -- reads it. Where the process
         holds the nodes of its subdomain only, the nodes of the set are held here from now on
-        (:meth:`holdNodes`).
+        (:meth:`holdNodes`). The process evaluating a constraint reads them all; every other process holds
+        them only so that its copy of the constraint is the same object as the evaluating one's, and can
+        be synchronized from it (and evaluated, if the constraint moves there).
 
         Parameters
         ----------

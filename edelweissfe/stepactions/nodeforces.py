@@ -221,11 +221,14 @@ class StepAction(NodalLoadBase):
 
         self._fieldSize = getFieldSize(self._field, model.domainSize)
 
-        shape = (len(self._nSet), self._fieldSize)
+        # One row per node of the whole set, also where this process holds only part of it (a solver acts
+        # on the rows of the part whose degrees of freedom it holds), by label: the loads accumulated
+        # over earlier steps stay with their node wherever elements move.
+        self._nSetNodeOrder = self._nSet.nodeLabelsOfWholeSet()  # node label per row, for the lazy resize below
+        shape = (len(self._nSetNodeOrder), self._fieldSize)
 
         self.nodeForcesStepStart = np.zeros(shape)
         self.nodeForcesDelta = np.zeros(shape)
-        self._nSetNodeOrder = list(self._nSet)  # node identity per row, for the lazy resize below
         self._recordSetVersion(self._nSet)
 
         self.updateStepAction(nodeForces, f_t=f_t)
@@ -246,8 +249,7 @@ class StepAction(NodalLoadBase):
 
         return cls(
             name,
-            # read whole -- its prescribed values in every process (a solver acts on the part it holds)
-            model.wholeNodeSet(nSetName, name),
+            model.nodeSets[nSetName],
             configuration.field,
             cls._nodeForcesFromDefinition(configuration, getFieldSize(configuration.field, model.domainSize)),
             model,
@@ -280,22 +282,22 @@ class StepAction(NodalLoadBase):
     def _reconcileIfSetChanged(self):
         """Re-size the load arrays if the node set was mutated in-place (e.g. AMR adding new
         boundary nodes) since the last check, preserving each retained node's accumulated/pending
-        load by identity; newly added nodes get zero force. Without this, the flat load array
+        load by label; newly added nodes get zero force. Without this, the flat load array
         would no longer match the node set's DOF layout after refinement grows a loaded boundary.
         The node set itself needs no re-fetch: it has stable identity (mutated in place), so
         ``self._nSet`` is already current -- only these derived, pre-sized arrays go stale."""
         if not self._checkSetChanged(self._nSet):
             return
-        oldStart = {node: self.nodeForcesStepStart[i] for i, node in enumerate(self._nSetNodeOrder)}
-        oldDelta = {node: self.nodeForcesDelta[i] for i, node in enumerate(self._nSetNodeOrder)}
-        newNodes = list(self._nSet)
+        oldStart = {label: self.nodeForcesStepStart[i] for i, label in enumerate(self._nSetNodeOrder)}
+        oldDelta = {label: self.nodeForcesDelta[i] for i, label in enumerate(self._nSetNodeOrder)}
+        newNodes = self._nSet.nodeLabelsOfWholeSet()
         shape = (len(newNodes), self._fieldSize)
         self.nodeForcesStepStart = np.zeros(shape)
         self.nodeForcesDelta = np.zeros(shape)
-        for i, node in enumerate(newNodes):
-            if node in oldStart:
-                self.nodeForcesStepStart[i] = oldStart[node]
-                self.nodeForcesDelta[i] = oldDelta[node]
+        for i, label in enumerate(newNodes):
+            if label in oldStart:
+                self.nodeForcesStepStart[i] = oldStart[label]
+                self.nodeForcesDelta[i] = oldDelta[label]
         self._nSetNodeOrder = newNodes
 
     def updateStepAction(self, nodeForces: np.ndarray, f_t: Callable[[float], float] = None):
@@ -323,7 +325,7 @@ class StepAction(NodalLoadBase):
                 f"'{self._field}' has {self._fieldSize} component(s)."
             )
 
-        self.nodeForcesDelta = np.tile(nodeForces, (len(self._nSet), 1))
+        self.nodeForcesDelta = np.tile(nodeForces, (len(self._nSetNodeOrder), 1))
         self.amplitude = f_t if f_t is not None else linearAmplitude
 
     @property
@@ -433,7 +435,7 @@ class StepAction(NodalLoadBase):
         """
 
         return {
-            "rowNodeLabels": np.array([node.label for node in self._nSetNodeOrder], dtype=np.int64),
+            "rowNodeLabels": np.array(self._nSetNodeOrder, dtype=np.int64),
             "nodeForcesStepStart": self.nodeForcesStepStart,
             "nodeForcesDelta": self.nodeForcesDelta,
             "idle": np.array(self._idle),
@@ -454,12 +456,12 @@ class StepAction(NodalLoadBase):
         """
 
         labels = [int(label) for label in data["rowNodeLabels"]]
-        if sorted(labels) != sorted(node.label for node in self._nSet):
+        if sorted(labels) != sorted(self._nSet.nodeLabelsOfWholeSet()):
             raise RestartError(
                 "node forces {:}: the checkpointed rows refer to other nodes than the restored node set "
                 "holds".format(self.name)
             )
-        self._nSetNodeOrder = [self._model.nodes[label] for label in labels]
+        self._nSetNodeOrder = labels
         self.nodeForcesStepStart = np.array(data["nodeForcesStepStart"])
         self.nodeForcesDelta = np.array(data["nodeForcesDelta"])
         self._idle = bool(data["idle"])
