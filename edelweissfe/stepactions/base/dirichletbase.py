@@ -60,6 +60,11 @@ class DirichletBase(StepActionBase):
     #: :meth:`NonlinearSolverBase.locateConstrainedDofs`), because it depends on
     #: the DofManager's layout, which the boundary condition does not know itself.
     constrainedDofIndices: np.ndarray = None
+    #: The rows of :meth:`getPrescribedIncrement` -- the nodes of ``nSet`` -- whose degrees of freedom
+    #: :attr:`constrainedDofIndices` holds: every row (``slice(None)``), unless the solver holds only
+    #: some of the degrees of freedom of the model (a process of a domain-decomposed run). Set with
+    #: :attr:`constrainedDofIndices`.
+    constrainedRows: slice | np.ndarray = slice(None)
 
     @property
     @abstractmethod
@@ -74,3 +79,20 @@ class DirichletBase(StepActionBase):
         prescribed ``components``), so that ``.flatten()`` yields the values in
         the same node-major order as :attr:`constrainedDofIndices`.
         """
+
+    def prescribedIncrementAtConstrainedDofs(self, timeStep: TimeStep) -> np.ndarray:
+        """The prescribed increment at the degrees of freedom :attr:`constrainedDofIndices` holds, in
+        the same order: :meth:`getPrescribedIncrement` at the rows :attr:`constrainedRows`, flattened.
+
+        Parameters
+        ----------
+        timeStep
+            The time step.
+
+        Returns
+        -------
+        np.ndarray
+            One value per entry of :attr:`constrainedDofIndices`.
+        """
+
+        return self.getPrescribedIncrement(timeStep)[self.constrainedRows].flatten()

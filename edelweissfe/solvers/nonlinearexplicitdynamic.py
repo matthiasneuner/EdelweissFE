@@ -1148,7 +1148,7 @@ class NED(NonlinearSolverBase):
         workedDofs = []
         workProducts = []
         for dirichlet in dirichlets:
-            prescribedIncrement = dirichlet.getPrescribedIncrement(timeStep).flatten()
+            prescribedIncrement = dirichlet.prescribedIncrementAtConstrainedDofs(timeStep)
 
             # The work put into the model at a prescribed degree of freedom is the reaction force there
             # times the motion it is dragged through. At this point P holds the carried-over net nodal
@@ -2119,6 +2119,98 @@ class NED(NonlinearSolverBase):
 
         return M, Minv
 
+    def createDofManager(self, model: FEModel) -> DofManager:
+        """The degree-of-freedom layout of a new equation system: every degree of freedom of the node
+        fields and the scalar variables of the model, and where the elements, constraints and node
+        sets of the model find theirs.
+
+        An explicit solver assembles no system matrix, so it never reads the sparsity (VIJ) pattern;
+        and nothing at all reads the index-to-host-object map. Each of them costs a pass over every
+        element to build, and neither is built.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Returns
+        -------
+        DofManager
+            The DofManager.
+        """
+
+        return DofManager(
+            model.nodeFields.values(),
+            model.scalarVariables.values(),
+            model.elements.values(),
+            model.constraints.values(),
+            model.nodeSets.values(),
+            initializeVIJPattern=False,
+            determiningIndexToHostObjectMapping=False,
+        )
+
+    def readCarriedFromNodeFields(self, model: FEModel, carried: dict[str, DofVector]):
+        """Fill the carried vectors of a new equation system from the node fields, and the solution
+        from the scalar variables: what an equation system built afresh starts from.
+
+        Every entry of a carried vector is read back from every node field holding it. The velocity
+        is what this carries across an h-adaptivity event: the modifier interpolated it onto the new
+        nodes with the same operator it used for ``U`` (see
+        ``hadaptivity.WARM_STARTED_NODE_FIELD_ENTRIES``), and there is nowhere else it could come
+        from -- a fresh vector would silently resume from rest. An entry a field does not hold (the
+        velocity of a field without inertia) starts at zero.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        carried
+            The carried vectors, by node field entry (:attr:`ExplicitSystem.carriedEntries`); filled.
+        """
+
+        for field in model.nodeFields.values():
+            for entry, vector in carried.items():
+                if entry in field:
+                    self.theDofManager.writeNodeFieldToDofVector(vector, field, entry)
+
+        U = carried["U"]
+        for variable in model.scalarVariables.values():
+            U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]] = variable.value
+
+    def carryVectorsOver(self, previous: ExplicitSystem, carried: dict[str, DofVector]):
+        """Carry the vectors of the system being replaced over to a rebuilt one, verbatim rather than
+        re-read from the node fields: the carried vectors are what the increments computed. (In a
+        domain-decomposed run the node fields are current only at the subdomain degrees of freedom.)
+
+        A rebuild here is triggered by a constraint's connectivity, which leaves the mesh -- hence the
+        layout of the degrees of freedom -- untouched; that is checked rather than assumed: copying
+        between two different layouts would mis-index every vector silently.
+
+        Parameters
+        ----------
+        previous
+            The system being replaced.
+        carried
+            The carried vectors of the rebuilt system, by node field entry; filled.
+
+        Raises
+        ------
+        RuntimeError
+            If the rebuilt system has another number of degrees of freedom.
+        """
+
+        U = carried["U"]
+        if previous.U.shape != U.shape:
+            raise RuntimeError(
+                "The equation system was rebuilt with {:} degrees of freedom instead of {:}. Only "
+                "a constraint's connectivity is expected to trigger a rebuild here, and that "
+                "cannot add or remove degrees of freedom -- so the solution and the velocity "
+                "cannot be carried across safely.".format(U.shape[0], previous.U.shape[0])
+            )
+
+        for entry, vector in carried.items():
+            vector[:] = previous.carried[entry]
+
     @performancetiming.timeit("build equation system")
     def buildEquationSystem(self, model: FEModel, step, previous: ExplicitSystem = None) -> ExplicitSystem:
         """Build the equation system and everything sized by it.
@@ -2169,18 +2261,7 @@ class NED(NonlinearSolverBase):
             self.theDofManager.refreshConstraintIndices(model.constraints.values())
         else:
             self.journal.message("Creating monolithic equation system", self.identification, verbosity)
-            # An explicit solver assembles no system matrix, so it never reads the sparsity (VIJ)
-            # pattern; and nothing at all reads the index-to-host-object map (see below). Each of
-            # them costs a pass over every element to build.
-            self.theDofManager = DofManager(
-                model.nodeFields.values(),
-                model.scalarVariables.values(),
-                model.elements.values(),
-                model.constraints.values(),
-                model.nodeSets.values(),
-                initializeVIJPattern=False,
-                determiningIndexToHostObjectMapping=False,
-            )
+            self.theDofManager = self.createDofManager(model)
         self.journal.message(
             "total size of eq. system: {:}".format(self.theDofManager.nDof),
             self.identification,
@@ -2237,33 +2318,9 @@ class NED(NonlinearSolverBase):
         U = carried["U"]
 
         if not isRebuild:
-            for field in model.nodeFields.values():
-                for entry, vector in carried.items():
-                    # Read back from every node field holding the entry. The velocity is what this
-                    # carries across an h-adaptivity event: the modifier interpolated it onto the new
-                    # nodes with the same operator it used for U (see
-                    # hadaptivity.WARM_STARTED_NODE_FIELD_ENTRIES), and there is nowhere else it could
-                    # come from -- a fresh vector would silently resume from rest. An entry a field
-                    # does not hold (the velocity of a field without inertia) starts at zero.
-                    if entry in field:
-                        self.theDofManager.writeNodeFieldToDofVector(vector, field, entry)
-
-            for variable in model.scalarVariables.values():
-                U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]] = variable.value
+            self.readCarriedFromNodeFields(model, carried)
         else:
-            if previous.U.shape != U.shape:
-                raise RuntimeError(
-                    "The equation system was rebuilt with {:} degrees of freedom instead of {:}. Only "
-                    "a constraint's connectivity is expected to trigger a rebuild here, and that "
-                    "cannot add or remove degrees of freedom -- so the solution and the velocity "
-                    "cannot be carried across safely.".format(U.shape[0], previous.U.shape[0])
-                )
-
-            # Carried straight over, not re-read from the node fields: the carried vectors are what the
-            # increments computed. (In a domain-decomposed run the node fields are current only at the
-            # subdomain degrees of freedom.)
-            for entry, vector in carried.items():
-                vector[:] = previous.carried[entry]
+            self.carryVectorsOver(previous, carried)
 
         if isRebuild:
             # The mesh is unchanged (the layout check above establishes that), so the stable time
@@ -2585,31 +2642,26 @@ class NED(NonlinearSolverBase):
         firstOrderFields = []
         secondOrderFields = []
 
-        for fieldName, indices in self.theDofManager.idcsOfFieldsInDofVector.items():
-            carriesInertia = np.asarray(inertia[indices]) != 0.0
-            carriesDamping = np.asarray(damping[indices]) != 0.0
-
-            if carriesInertia.all():
+        for fieldName, (nDof, nWithInertia, nWithDamping) in self.coefficientCountsOfFields(inertia, damping).items():
+            if nWithInertia == nDof:
                 secondOrderFields.append(fieldName)
-            elif carriesInertia.any():
+            elif nWithInertia:
                 raise ValueError(
                     "Field {:} was assembled an inertia on {:} of its {:} degrees of freedom and "
                     "none on the rest, so it is neither second order in time nor first order. The "
                     "usual cause is a mesh whose materials disagree: for a non-local field the "
                     "micro-inertia is a material property, so a second material used by some of "
                     "the elements carrying the field and giving no micro-inertia splits it.".format(
-                        fieldName, int(np.count_nonzero(carriesInertia)), carriesInertia.size
+                        fieldName, nWithInertia, nDof
                     )
                 )
-            elif carriesDamping.all():
+            elif nWithDamping == nDof:
                 firstOrderFields.append(fieldName)
-            elif carriesDamping.any():
+            elif nWithDamping:
                 raise ValueError(
                     "Field {:} carries no inertia, so it is integrated by its damping alone -- but "
                     "a damping was assembled on only {:} of its {:} degrees of freedom, and the "
-                    "rest have nothing to divide by.".format(
-                        fieldName, int(np.count_nonzero(carriesDamping)), carriesDamping.size
-                    )
+                    "rest have nothing to divide by.".format(fieldName, nWithDamping, nDof)
                 )
             else:
                 raise ValueError(
@@ -2620,6 +2672,34 @@ class NED(NonlinearSolverBase):
                 )
 
         return firstOrderFields, secondOrderFields
+
+    def coefficientCountsOfFields(self, inertia: DofVector, damping: DofVector) -> dict[str, tuple[int, int, int]]:
+        """Per field, how many degrees of freedom it has, and at how many of them an inertia and a
+        damping were assembled: what :meth:`_classifyFieldsByScheme` decides from.
+
+        Parameters
+        ----------
+        inertia
+            The assembled lumped inertia.
+        damping
+            The assembled lumped damping.
+
+        Returns
+        -------
+        dict[str, tuple[int, int, int]]
+            Per field, in the model's field order: its number of degrees of freedom, of those with an
+            inertia, and of those with a damping.
+        """
+
+        counts = {}
+        for fieldName, indices in self.theDofManager.idcsOfFieldsInDofVector.items():
+            fieldInertia, fieldDamping = np.asarray(inertia[indices]), np.asarray(damping[indices])
+            counts[fieldName] = (
+                fieldInertia.shape[0],
+                int(np.count_nonzero(fieldInertia != 0.0)),
+                int(np.count_nonzero(fieldDamping != 0.0)),
+            )
+        return counts
 
     def reportTopologyChangeConservation(
         self,
