@@ -254,9 +254,9 @@ class FEModel:
         rows = self.mesh.rowsOfNodes(list(self.nodes))
         if np.all(rows[1:] > rows[:-1]):
             return
-        ordered = [list(self.nodes.items())[i] for i in np.argsort(rows, kind="stable")]
+        items = list(self.nodes.items())
         self.nodes.clear()
-        self.nodes.update(ordered)
+        self.nodes.update(items[i] for i in np.argsort(rows, kind="stable").tolist())
 
     def holdNodes(self, labels):
         """Hold nodes of the mesh in this process from now on, whichever elements it holds, and make their
@@ -286,7 +286,7 @@ class FEModel:
         :attr:`nodes` in mesh order; after the nodes held here changed -- elements moved between the
         processes, or a reader holds nodes --, inside a topology change. Once the node fields exist, they
         are resized for the nodes now held (their values kept where a node stays), and the field variables
-        of the new nodes linked.
+        linked to them again.
         """
 
         isHeldHere = self.elementDistribution.isNodeHeldHere
