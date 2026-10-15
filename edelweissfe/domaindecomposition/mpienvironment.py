@@ -66,12 +66,32 @@ def _startedByMPILauncher() -> bool:
     return any(variable in os.environ for variable in _LAUNCHER_VARIABLES)
 
 
-class StepFailedOnAllRanks(StepFailed):
+class RaisedOnAllRanks(Exception):
+    """A failure every process of the job raised together, having agreed on it
+    (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`): no
+    process waits for another, so every process may unwind it alike. Either a failed step
+    (:class:`StepFailedOnAllRanks`) or an error that is no step failure (:class:`ErrorOnAllRanks`)."""
+
+
+class StepFailedOnAllRanks(StepFailed, RaisedOnAllRanks):
     """A step failed, and every process of the job raised this failure together, having agreed on it
     (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`): so every
     process may finish the job as after any failed step. A :class:`StepFailed` raised otherwise may
     have been raised in one process alone, which leaves the others waiting for it in their next
     collective operation; the driver then stops all of them (:func:`abortAllProcesses`)."""
+
+
+class ErrorOnAllRanks(RaisedOnAllRanks):
+    """An error that is no step failure -- a ``KeyError`` of a programming error, an exhausted memory,
+    anything but a :class:`StepFailed`, a cutback request or a conditional stop -- raised in one
+    process or more, and raised by every process together, having agreed on it
+    (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`).
+
+    A serial run ends with such an error, not as after a failed step: the exception leaves the job,
+    and the process exits with a non-zero status. So does every process here: the driver raises it
+    on, and, uncaught, it aborts all processes with a non-zero status
+    (:func:`abortAllProcessesOnUncaughtException`). A caller catching it -- the test runner, which
+    goes on to the next test case -- catches it in every process, so that none is left waiting."""
 
 
 @cache

@@ -49,12 +49,17 @@ import numpy as np
 from mpi4py import MPI
 
 import edelweissfe.utils.performancetiming as performancetiming
-from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
-from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest
+from edelweissfe.domaindecomposition.mpienvironment import (
+    ErrorOnAllRanks,
+    StepFailedOnAllRanks,
+)
+from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
 
 #: How :meth:`Communicator.allRanksFailTogether` ranks what went wrong: the most severe outcome of any
-#: process is the one every process raises.
-_NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _FAILURE = 0, 1, 2, 3
+#: process is the one every process raises. A step failure is what a serial run ends the step with
+#: (:class:`~edelweissfe.utils.exceptions.StepFailed`); an error is any other exception, which ends a
+#: serial run with a non-zero exit status.
+_NO_FAILURE, _CUTBACK, _CONDITIONAL_STOP, _STEP_FAILURE, _ERROR = 0, 1, 2, 3, 4
 
 
 class Communicator:
@@ -450,12 +455,17 @@ class Communicator:
         Every process reports what went wrong in it, and every process raises the most severe: a
         :class:`~edelweissfe.utils.exceptions.ConditionalStop` or a
         :class:`~edelweissfe.utils.exceptions.CutbackRequest` anywhere is raised as such everywhere
-        -- a cutback with the smallest size any process requested -- so that every process takes the
-        same path out of the step. Nothing inside the context may communicate: a process that
-        raised would skip the communication, and leave the others waiting in it. That is enforced,
-        not assumed -- this communicator raises at any communication inside the context
-        (:meth:`withoutCommunication`),
-        which then fails on all ranks like any other failure. A step that needs to communicate is
+        -- a cutback with the smallest size any process requested --, a
+        :class:`~edelweissfe.utils.exceptions.StepFailed` as
+        :class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`, and any other
+        exception -- an error, which a serial run does not end as a failed step, but with a non-zero
+        exit status -- as :class:`~edelweissfe.domaindecomposition.mpienvironment.ErrorOnAllRanks`;
+        so that every process takes the same path out of the step, the path a serial run takes.
+
+        Nothing inside the context may communicate: a process that raised would skip the
+        communication, and leave the others waiting in it. That is enforced, not assumed -- this
+        communicator raises at any communication inside the context (:meth:`withoutCommunication`),
+        which then fails on all ranks like any other error. A step that needs to communicate is
         split: each process does its own part in the context, and communicates after it (see
         :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.writeIncrementOutput`).
 
@@ -482,8 +492,10 @@ class Communicator:
             outcome = _CUTBACK
         elif isinstance(failure, ConditionalStop):
             outcome = _CONDITIONAL_STOP
+        elif isinstance(failure, StepFailed):
+            outcome = _STEP_FAILURE
         else:
-            outcome = _FAILURE
+            outcome = _ERROR
 
         status = np.array([outcome], dtype=np.int32)
         # Where the processes wait for the slowest one: timed on its own, it is the load imbalance.
@@ -509,4 +521,6 @@ class Communicator:
         if status[0] == _CUTBACK:
             cutbackSize = min(report[1] for report in reports if report is not None and report[1] is not None)
             raise CutbackRequest(message, cutbackSize) from failure
+        if status[0] == _ERROR:
+            raise ErrorOnAllRanks("{:} failed in {:}".format(operation, message)) from failure
         raise StepFailedOnAllRanks("{:} failed in {:}".format(operation, message)) from failure

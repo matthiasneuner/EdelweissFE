@@ -802,16 +802,22 @@ the stable step, above all --, in a constraint's connectivity search, in a topol
 marker, the refinement, the mesh refresh), or in finalizing the output (a conditional stop, too) is
 raised on all ranks together
 (:meth:`~edelweissfe.domaindecomposition.communicator.Communicator.allRanksFailTogether`), and every process
-ends the step the same way; a cutback requested anywhere is raised everywhere, with the smallest
-size requested. A failure anywhere else aborts all processes, and so does an interrupt (``Ctrl+C``)
-of any one of them: the others would otherwise wait forever for the one that stopped
+ends the step the same way -- the way a serial run ends it: a cutback requested anywhere is raised
+everywhere, with the smallest size requested; a step failure
+(:class:`~edelweissfe.utils.exceptions.StepFailed`) as a step failure; and any other exception -- an
+error, a ``KeyError`` of a programming error, an exhausted memory, which a serial run does not end as
+a failed step but with a non-zero exit status -- as an error
+(:class:`~edelweissfe.domaindecomposition.mpienvironment.ErrorOnAllRanks`), which leaves the job as
+in a serial run: uncaught, it aborts every process with a non-zero exit status, and a caller catching
+it catches it in every process. A failure anywhere else aborts all processes, and so does an
+interrupt (``Ctrl+C``) of any one of them: the others would otherwise wait forever for the one that stopped
 (:mod:`~edelweissfe.domaindecomposition.mpienvironment`). The driver finishes a job normally after a
 failed step only if every process raised the failure together
 (:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`): a failure of the
 agreement, and the step failures of an increment, which are decided from values every process holds
 alike -- a refused cutback, a diverged energy balance
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Such a step ends as a
-serial one does, with the model of the last accepted increment in every process -- the failed increment
+(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.attemptIncrement`). Such a step -- and a
+step ending with an error raised on all ranks together -- ends as a serial one does, with the model of the last accepted increment in every process -- the failed increment
 changed the vectors of each process at the degrees of freedom it integrates, which are taken back
 from the node fields published when that increment was accepted, and the model is synchronized from
 them before the field outputs and the output managers read it a last time

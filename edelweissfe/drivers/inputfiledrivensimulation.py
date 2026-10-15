@@ -318,6 +318,9 @@ def finiteElementSimulation(
         failedAlone = True
 
     except Exception as e:
+        # An error, not a failed step -- raised by every process together (ErrorOnAllRanks), or by this
+        # one alone -- leaves the job as in a serial run: uncaught, it aborts every process with a
+        # non-zero exit status (abortAllProcessesOnUncaughtException).
         print("")
         journal.errorMessage("Simulation failed due to unhandled exception", identification)
         raise e

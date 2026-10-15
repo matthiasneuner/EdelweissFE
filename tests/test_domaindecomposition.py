@@ -487,6 +487,10 @@ def test_the_whole_model_is_a_trivial_partition():
 def test_a_single_process_agrees_with_itself():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.communicator import Communicator
+    from edelweissfe.domaindecomposition.mpienvironment import (
+        ErrorOnAllRanks,
+        StepFailedOnAllRanks,
+    )
     from edelweissfe.utils.exceptions import ConditionalStop, CutbackRequest, StepFailed
 
     communicator = Communicator(MPI.COMM_SELF)
@@ -507,27 +511,33 @@ def test_a_single_process_agrees_with_itself():
         with communicator.allRanksFailTogether("testing"):
             raise CutbackRequest("x", 0.25)
     assert caught.value.cutbackSize == 0.25
-    with pytest.raises(StepFailed, match="testing failed"):
+    # a step failure is agreed on as one; any other exception as an error, which is no step failure
+    with pytest.raises(StepFailedOnAllRanks, match="testing failed in process 0: StepFailed: a failure"):
         with communicator.allRanksFailTogether("testing"):
-            raise KeyError("a failure")
+            raise StepFailed("a failure")
+    with pytest.raises(ErrorOnAllRanks, match="testing failed in process 0: KeyError") as caught:
+        with communicator.allRanksFailTogether("testing"):
+            raise KeyError("an error")
+    assert not isinstance(caught.value, StepFailed)
 
 
 def test_no_process_communicates_where_the_processes_agree_on_failures():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.communicator import Communicator
-    from edelweissfe.domaindecomposition.mpienvironment import StepFailedOnAllRanks
+    from edelweissfe.domaindecomposition.mpienvironment import ErrorOnAllRanks
 
     communicator = Communicator(MPI.COMM_SELF)
 
-    # A communication inside the context fails, on all ranks together, and names the context.
-    with pytest.raises(StepFailedOnAllRanks, match="allgather was called while gathering inside"):
+    # A communication inside the context fails, on all ranks together, and names the context: an
+    # error, not a step failure.
+    with pytest.raises(ErrorOnAllRanks, match="allgather was called while gathering inside"):
         with communicator.allRanksFailTogether("Gathering inside"):
             communicator.allgather(1.0)
-    with pytest.raises(StepFailedOnAllRanks, match="Isend was called while"):
+    with pytest.raises(ErrorOnAllRanks, match="Isend was called while"):
         with communicator.allRanksFailTogether("Exchanging inside"):
             communicator.Isend(np.zeros(1), dest=0, tag=1)
     # So does one nested deeper, and the communicator is usable again after either context.
-    with pytest.raises(StepFailedOnAllRanks, match="bcast was called while the inner one"):
+    with pytest.raises(ErrorOnAllRanks, match="bcast was called while the inner one"):
         with communicator.allRanksFailTogether("The outer one"):
             with communicator.withoutCommunication("The inner one"):
                 pass
@@ -643,16 +653,17 @@ failures = [line.strip("> <").split("feCore")[0].strip() for line in journal.get
 print("PROCESS", rank, failures, flush=True)
 """
 
-#: A body force kernel failing in process 1.
+#: A body force kernel failing in process 1, as a step failure.
 _FAILING_LOAD_PATCH = """
 from edelweissfe.elements.base.displacementelementbase import DisplacementElementBase
+from edelweissfe.utils.exceptions import StepFailed
 
 computeBodyForce = DisplacementElementBase.computeBodyForce
 
 
 def failingInProcessOne(self, *args):
     if rank == 1:
-        raise RuntimeError("load kernel failed")
+        raise StepFailed("load kernel failed")
     return computeBodyForce(self, *args)
 
 
@@ -670,7 +681,72 @@ def test_a_load_failing_in_one_process_fails_in_every_process(tmp_path):
         pytest.fail("a load failing in one process left the others waiting")
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
-    expected = "['Simulation failed: Evaluating the loads failed in process 1: RuntimeError: load kernel failed']"
+    expected = "['Simulation failed: Evaluating the loads failed in process 1: StepFailed: load kernel failed']"
+    assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
+
+
+#: Runs the deck in this directory with PATCH applied, as a caller catching every exception does --
+#: the test runner, which goes on to the next test case --, and prints, per process, how the job
+#: ended: "returned", or the exception that left it.
+_CATCHING_IN_EVERY_PROCESS_SCRIPT = """
+import contextlib, io
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+PATCH
+journal = io.StringIO()
+try:
+    with contextlib.redirect_stdout(journal):
+        finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+    outcome = "returned"
+except Exception as exception:
+    outcome = "{:}: {:}".format(type(exception).__name__, exception)
+print("PROCESS", rank, outcome, flush=True)
+"""
+
+#: An element kernel failing in process 1 with an error that is no step failure: a programming error.
+_ELEMENT_ERROR_PATCH = """
+from edelweissfe.elements.displacementelement.element import DisplacementElement
+
+computeKernelsExplicit = DisplacementElement.computeKernelsExplicit
+
+
+def failingInProcessOne(self, *args):
+    if rank == 1:
+        raise KeyError("a programming error")
+    return computeKernelsExplicit(self, *args)
+
+
+DisplacementElement.computeKernelsExplicit = failingInProcessOne
+"""
+
+
+def test_an_error_in_one_process_ends_the_job_with_an_error_in_every_process(tmp_path):
+    # A serial run ends with a KeyError of an element, not as after a failed step: the exception leaves
+    # the job, with a non-zero exit status. Agreed on as a failed step, the job would end "normally".
+    (tmp_path / "test.inp").write_text(_FAILING_LOAD_DECK)
+    (tmp_path / "run.py").write_text(_FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _ELEMENT_ERROR_PATCH))
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("an error in one process left the others waiting")
+    assert exitCode != 0, output
+    assert (
+        "ErrorOnAllRanks: Evaluating the elements and the constraints failed in process 1: KeyError: "
+        "'a programming error'" in output
+    ), output
+
+    # Caught -- as the test runner catches it --, every process catches the same error, and none waits.
+    (tmp_path / "run.py").write_text(_CATCHING_IN_EVERY_PROCESS_SCRIPT.replace("PATCH", _ELEMENT_ERROR_PATCH))
+    output, exitCode = _runUnderMPI(tmp_path)
+    if output is None:
+        pytest.fail("an error in one process, caught, left the others waiting")
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    expected = (
+        "ErrorOnAllRanks: Evaluating the elements and the constraints failed in process 1: KeyError: "
+        "'a programming error'"
+    )
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output
 
 
@@ -688,6 +764,7 @@ _FIELD_OUTPUT_DECK = _FAILING_LOAD_DECK.replace(
 #: Reading the element results of an increment fails in process 1, before the results are gathered
 #: (the first reading, at the start of the job, succeeds).
 _FAILING_FIELD_OUTPUT_PATCH = """
+from edelweissfe.utils.exceptions import StepFailed
 from edelweissfe.utils.fieldoutput import ElementFieldOutput
 
 rebuildCollector = ElementFieldOutput._rebuildCollectorIfSetChanged
@@ -697,7 +774,7 @@ readings = []
 def failingInProcessOne(self):
     readings.append(self)
     if rank == 1 and len(readings) > 1:
-        raise RuntimeError("reading the element results failed")
+        raise StepFailed("reading the element results failed")
     return rebuildCollector(self)
 
 
@@ -716,7 +793,7 @@ def test_a_field_output_failing_in_one_process_before_the_gather_fails_in_every_
 
     reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
     expected = (
-        "['Simulation failed: Reading the output failed in process 1: RuntimeError: reading the element "
+        "['Simulation failed: Reading the output failed in process 1: StepFailed: reading the element "
         "results failed']"
     )
     assert reports == ["PROCESS {:} {:}".format(rank, expected) for rank in range(3)], output

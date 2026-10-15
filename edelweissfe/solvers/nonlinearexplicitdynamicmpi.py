@@ -169,6 +169,7 @@ from mpi4py import MPI
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.communicator import Communicator
 from edelweissfe.domaindecomposition.mpienvironment import (
+    RaisedOnAllRanks,
     StepFailedOnAllRanks,
     abortAllProcesses,
     worldCommunicator,
@@ -432,8 +433,9 @@ class NEDMPI(NEDParallel):
             raise StepFailedOnAllRanks(str(failure)) from failure
 
     def endStep(self, step, model: FEModel, failure: BaseException | None = None):
-        """Finish the step; see :meth:`NED.endStep`. A step that failed on every process together ends
-        as a serial one does, with the model of the last accepted increment
+        """Finish the step; see :meth:`NED.endStep`. A step that failed on every process together --
+        a step failure or an error (:class:`~edelweissfe.domaindecomposition.mpienvironment.RaisedOnAllRanks`)
+        -- ends as a serial one does, with the model of the last accepted increment
         (:meth:`_synchronizeAcceptedModel`), which the field outputs and the output managers then read
         a last time. Collective after a failure on every process; any other failure stops every process
         right after (:meth:`stepFailed`).
@@ -449,12 +451,12 @@ class NEDMPI(NEDParallel):
         """
 
         super().endStep(step, model, failure)
-        if isinstance(failure, StepFailedOnAllRanks):
+        if isinstance(failure, RaisedOnAllRanks):
             self._synchronizeAcceptedModel(model)
 
     def stepFailed(self, step, failure: BaseException):
         """Stop every process, unless every process raised the failure together
-        (:class:`~edelweissfe.domaindecomposition.mpienvironment.StepFailedOnAllRanks`). Any other
+        (:class:`~edelweissfe.domaindecomposition.mpienvironment.RaisedOnAllRanks`). Any other
         failure -- wherever in the step, its start and its end included -- may have happened in this
         process alone, while the others wait for it in their next exchange; unwinding further, this
         process would gather the results of the end of the step with processes that never arrive, and
@@ -469,7 +471,7 @@ class NEDMPI(NEDParallel):
             The exception leaving it.
         """
 
-        if not isinstance(failure, StepFailedOnAllRanks):
+        if not isinstance(failure, RaisedOnAllRanks):
             abortAllProcesses(
                 "the step failed without the agreement of the other processes ({:}: {:})".format(
                     type(failure).__name__, failure
