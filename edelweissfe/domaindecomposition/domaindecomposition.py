@@ -180,6 +180,11 @@ class DomainDecomposition:
         #: Whether the solver stated, since the constraints were last assigned, that every copy of every
         #: constraint is its owner's (:meth:`constraintCopiesAreSynchronized`).
         self._constraintCopiesSynchronized = False
+        #: The owners decided for the constraints when the current partition was made for their shares,
+        #: with the mesh and its version (:meth:`_partitionForConstraintsAssignedAfresh`); None if none were.
+        self._decidedConstraintOwners = None
+        #: Whether elements moved between the processes since the constraints were last assigned.
+        self._elementsMovedSinceConstraintsAssigned = False
 
         self._ownedConstraints = {}
 
@@ -302,36 +307,51 @@ class DomainDecomposition:
             )
 
         if distribution.replicatesElements or byMeasuredCosts:
-            with performancetiming.timeit("partition"):
-                owners = partitionElementsOfMesh(
-                    model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts, self._processShares
+            # A repartition of the same elements keeps those that can stay in their process there.
+            previous = self._elementOwners if byMeasuredCosts else None
+            if byMeasuredCosts and distribution.replicatesElements:
+                # no element moves, and so no constraint (_constraintOwnersOf)
+                self._setPartition(
+                    model, self._partitionWithShares(model, measuredCosts, self._processShares, previous)
                 )
-                if byMeasuredCosts:
-                    # A repartition of the same elements: those that can stay in their process do.
-                    owners = keepElementsWhereTheyWere(
-                        owners, self._elementOwners, self.nProcesses, self._processShares
-                    )
-            self._setPartition(model, owners)
-            if not byMeasuredCosts:
-                # A changed mesh: partitioned again for the shares of the processes its constraints are
-                # expected to have, keeping the elements where they were as far as the shares allow.
-                shares = self._sharesForTheChangedMesh(model)
-                if not _sameShares(shares, self._processShares):
-                    self._processShares = shares
-                    with performancetiming.timeit("partition"):
-                        owners = keepElementsWhereTheyWere(
-                            partitionElementsOfMesh(
-                                model.mesh, self.nProcesses, model.domainSize, self.communicator, None, shares
-                            ),
-                            owners,
-                            self.nProcesses,
-                            shares,
-                        )
-                    self._setPartition(model, owners)
+            else:
+                self._partitionForConstraintsAssignedAfresh(model, measuredCosts, previous)
         else:
             # A copy: the distribution changes its own as the mesh changes (see
             # DistributedElements.placeChildElement), and this partition must not change with it.
             self._setPartition(model, dict(distribution.owners))
+
+    def _partitionWithShares(
+        self, model: FEModel, measuredCosts: dict | None, shares: np.ndarray | None, keepFrom: dict | None
+    ) -> dict:
+        """Collective. A partition of the mesh for the given shares, by estimated or measured costs.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        measuredCosts
+            The measured cost per increment of elements, by number, on rank 0; None elsewhere, and for
+            the estimate.
+        shares
+            The shares of the processes; None for equal shares.
+        keepFrom
+            A partition whose elements are kept in their process as far as the shares allow
+            (:func:`~edelweissfe.domaindecomposition.partitioning.keepElementsWhereTheyWere`), or None.
+
+        Returns
+        -------
+        dict
+            The rank of every element, by number.
+        """
+
+        with performancetiming.timeit("partition"):
+            owners = partitionElementsOfMesh(
+                model.mesh, self.nProcesses, model.domainSize, self.communicator, measuredCosts, shares
+            )
+            if keepFrom is not None:
+                owners = keepElementsWhereTheyWere(owners, keepFrom, self.nProcesses, shares)
+        return owners
 
     def _setPartition(self, model: FEModel, owners: dict):
         """Adopt a partition of the mesh, and derive from it, once, what is read per mesh node: the process
@@ -390,8 +410,10 @@ class DomainDecomposition:
         partitioned is partitioned first.
 
         This is the one place that decides when the constraints are assigned afresh: where the mesh or
-        the set of constraints changed. Assigning them afresh after a migration, too, would be decided
-        here.
+        the set of constraints changed, and after elements moved between the processes (:meth:`moveElements`:
+        after a repartition for load balancing, and after a topology change) -- the constraints follow
+        the elements holding their nodes. Either is preceded by a synchronization of the whole model to
+        every process, which the solver states (:meth:`constraintCopiesAreSynchronized`).
 
         A connectivity update right after a topology change, before the subdomain is defined afresh,
         searches on the process that is going to evaluate a constraint because of this.
@@ -413,6 +435,7 @@ class DomainDecomposition:
             self._isFor(self._constraintOwnersMesh, model)
             and self._constraintOwners is not None
             and model.constraints.keys() == self._constraintOwners.keys()
+            and not self._elementsMovedSinceConstraintsAssigned
         ):
             self._assignConstraints(model)
         return self._constraintOwners
@@ -426,9 +449,11 @@ class DomainDecomposition:
         self._constraintCopiesSynchronized = True
 
     def _assignConstraints(self, model: FEModel):
-        """Collective. Assign every constraint to the process holding most of its nodes under the current
-        partition (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the
-        nodes its search may couple, or, for a constraint without a search, those it couples.
+        """Collective. Assign every constraint to the process holding most of its nodes
+        (:func:`~edelweissfe.domaindecomposition.partitioning.assignConstraintsByMajority`): the nodes its
+        search may couple, or, for a constraint without a search, those it couples -- as decided when the
+        current partition was made (:meth:`_partitionForConstraintsAssignedAfresh`), or else under the
+        current partition.
 
         Made from what every process holds alike -- the mesh, the partition, the nodes of the copies of
         the constraints --, and checked to be the same in every process. A constraint whose process
@@ -438,9 +463,8 @@ class DomainDecomposition:
         follows a synchronization of the whole model to every process.
 
         The shares of the element work follow the constraints, from the measured cost of each by name:
-        the partition of a changed mesh is made with the shares of the owners the constraints are
-        expected to have (:meth:`_sharesForTheChangedMesh`), and the next repartition with those of the
-        owners assigned here.
+        a partition after which the constraints are assigned afresh is made for the shares of the owners
+        assigned here (:meth:`_partitionForConstraintsAssignedAfresh`).
 
         Parameters
         ----------
@@ -462,10 +486,20 @@ class DomainDecomposition:
             )
         self._constraintCopiesSynchronized = False
 
-        owners = self._majorityOwners(model)
+        # the owners the partition was made for, if decided for this mesh (_partitionForConstraintsAssignedAfresh)
+        decided, self._decidedConstraintOwners = self._decidedConstraintOwners, None
+        if (
+            decided is not None
+            and decided[0] == (model.mesh, model.mesh.elementsVersion)
+            and decided[1].keys() == model.constraints.keys()
+        ):
+            owners = decided[1]
+        else:
+            owners = self._majorityOwners(model)
         self.communicator.requireSameOnAllRanks(tuple(owners.items()), "the processes the constraints are assigned to")
         self._constraintOwners = owners
         self._constraintOwnersMesh = (model.mesh, model.mesh.elementsVersion)
+        self._elementsMovedSinceConstraintsAssigned = False
         # the shares of the next repartition: for these owners
         self._processShares = self._sharesFor(owners, model)
 
@@ -493,26 +527,38 @@ class DomainDecomposition:
             nodeRows[name] = mesh.rowsOfNodes([node.label for node in nodes])
         return assignConstraintsByMajority(nodeRows, self._elementsAtNodes.lowestProcessAtNodes(), self.nProcesses)
 
-    def _sharesForTheChangedMesh(self, model: FEModel) -> np.ndarray | None:
-        """The shares of the element work for a partition of a changed mesh: for the processes the
-        constraints are expected to have -- the majority under the partition at hand (the one the mesh
-        inherited, or one made for the previous shares) --, since the constraints are assigned afresh on
-        the partition made with them.
+    def _partitionForConstraintsAssignedAfresh(self, model: FEModel, measuredCosts: dict | None, keepFrom: dict | None):
+        """Collective. Partition the mesh where the constraints are assigned afresh afterwards -- a changed
+        mesh, elements about to move -- so that every process' share of the element work is the one for
+        the constraints it is going to evaluate.
+
+        The elements are partitioned for the current shares; the constraints are decided on that
+        partition (each on the process holding most of its nodes) and kept for the assignment that follows
+        (:meth:`_assignConstraints`); if their shares differ from those the partition was made for, the
+        elements are partitioned again for them, keeping the elements where they were on the first
+        partition as far as the shares allow. The owners are decided once, so the shares are made for
+        exactly them -- deciding the owners on the second partition could send a constraint to another
+        process than its share was made for, and back at the next repartition.
 
         Parameters
         ----------
         model
-            The model tree, partitioned (:meth:`_setPartition`) for its current mesh.
-
-        Returns
-        -------
-        np.ndarray | None
-            The shares, by rank; None for equal shares.
+            The model tree.
+        measuredCosts
+            The measured cost per increment of elements, by number, on rank 0; None elsewhere, and for
+            the estimate.
+        keepFrom
+            A partition whose elements the first partition keeps in their process as far as the shares
+            allow, or None.
         """
 
-        if self._elementTime is None:
-            return None
-        return self._sharesFor(self._majorityOwners(model), model)
+        self._setPartition(model, self._partitionWithShares(model, measuredCosts, self._processShares, keepFrom))
+        owners = self._majorityOwners(model)
+        shares = self._sharesFor(owners, model)
+        if not _sameShares(shares, self._processShares):
+            self._processShares = shares
+            self._setPartition(model, self._partitionWithShares(model, measuredCosts, shares, self._elementOwners))
+        self._decidedConstraintOwners = ((model.mesh, model.mesh.elementsVersion), owners)
 
     def _constraintCostsOfProcesses(self, owners: dict) -> np.ndarray:
         """The measured cost per increment of the constraints each process evaluates under an assignment,
@@ -1159,9 +1205,9 @@ class DomainDecomposition:
         after an increment was accepted and, where every process holds the whole model, every element
         state synchronized, since an element changing process must arrive with its current state.
 
-        A process is busy with its elements and with the constraints it evaluates. The constraints
-        stay where they are (see :mod:`~edelweissfe.domaindecomposition.partitioning`), so a
-        partition can attain at best that every process is as busy as the mean -- or, if one
+        A process is busy with its elements and with the constraints it evaluates. A constraint is not
+        divided (see :mod:`~edelweissfe.domaindecomposition.partitioning`), so a partition can attain at
+        best that every process is as busy as the mean -- or, if one
         process' constraints alone cost more, as busy as that process. The new partition gives each
         process the share of the elements that comes closest to it
         (:func:`~edelweissfe.domaindecomposition.partitioning.elementSharesBesideConstraints`): the
@@ -1340,13 +1386,10 @@ class DomainDecomposition:
         if distribution.replicatesElements or not tolerance or self.nProcesses == 1:
             return
 
-        # The shares of the element work are those of the processes the constraints are expected to have
-        # -- the majority under the partition the mesh inherited --; they are assigned afresh on the
-        # partition made with them.
+        # The imbalance of the inherited partition, with the constraints where they would go on it.
         self._model = model
         if not self._isFor(self._partitionedMesh, model):
             self._partition(model, measuredCosts=None, byMeasuredCosts=False)
-        self._processShares = self._sharesForTheChangedMesh(model)
         expectedConstraintCosts = self._constraintCostsOfProcesses(self._majorityOwners(model))
         mesh = model.mesh
         inherited = self._elementOwners
@@ -1390,12 +1433,7 @@ class DomainDecomposition:
             self.identification,
             2,
         )
-        with performancetiming.timeit("partition"):
-            owners = partitionElementsOfMesh(
-                mesh, self.nProcesses, model.domainSize, self.communicator, processShares=self._processShares
-            )
-            owners = keepElementsWhereTheyWere(owners, inherited, self.nProcesses, self._processShares)
-        self._setPartition(model, owners)
+        self._partitionForConstraintsAssignedAfresh(model, None, inherited)
         self.moveElements()
 
     def elementsMustMove(self) -> bool:
@@ -1427,6 +1465,8 @@ class DomainDecomposition:
 
         startOfMoving = perf_counter()
         self._forgetElements()
+        # the constraints follow the elements (_constraintOwnersOf)
+        self._elementsMovedSinceConstraintsAssigned = True
 
         model = self._model
         counts = model.elementDistribution.moveElementsTo(model, dict(self._elementOwners))

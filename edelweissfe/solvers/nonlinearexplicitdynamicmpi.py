@@ -1110,6 +1110,9 @@ class NEDMPI(NEDParallel):
             # The output synchronization reached rank 0 only: the copies of the constraints owned
             # elsewhere hold their last synchronized state, from which every process would rebuild.
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
+        # The constraints are assigned afresh after the elements moved, and evaluated by their new
+        # processes from these copies: current, as just made sure.
+        self.domainDecomposition.constraintCopiesAreSynchronized()
         before = self._lumpedOperators()
         carried = self.releaseEquationSystem()
         self.domainDecomposition.moveElements()

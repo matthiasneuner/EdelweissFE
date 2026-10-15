@@ -279,25 +279,29 @@ candidates, from the highest rank down, so that they do not all fall to rank 0, 
 integrates the degrees of freedom nothing touches and writes the output. The constraint then adds few
 degrees of freedom to its process' interface, and sends its forces to few neighbours. The assignment is
 made from what every process holds alike -- the mesh, the partition, the nodes of the copies of the
-constraints --, checked to be the same in every process, and made again only where the mesh or the set
-of constraints changes: at the start and after a topology change, before the contact search that
-follows it. A repartition for load balancing keeps every constraint where it is.
+constraints --, checked to be the same in every process, and made again where the mesh or the set of
+constraints changes (at the start and after a topology change, before the contact search that follows
+it), and after elements moved between the processes: the constraints follow the elements holding their
+nodes. A repartition of a model whose every process holds every element, which moves no element, keeps
+every constraint where it is.
 
 A constraint that changes process is evaluated from then on from the new process' copy, which must be
-its owner's. That holds after a topology change because a topology update follows a synchronization of
-the whole model -- the constraint states included -- to every process; ``NEDMPI.updateTopology`` checks
-that synchronization and states it to the decomposition
+its owner's. That holds because both points follow a synchronization of the whole model -- the
+constraint states included -- to every process: a topology update follows one, which
+``NEDMPI.updateTopology`` checks, and elements move only after one (``NEDMPI._moveElements`` makes it if
+the output synchronization reached rank 0 only). The solver states it to the decomposition
 (``DomainDecomposition.constraintCopiesAreSynchronized``), and assigning the constraints afresh without
 that statement stops the run.
 
 Part *p* of the partition is computed by process *p*, and once the constraints' costs have been
 measured, the process evaluating a costly one is given a correspondingly smaller part (see `Load
 balancing`_). The cost of every constraint is measured by name, so the shares follow a constraint to
-its new process: after a topology change, the partition is made with the shares of the processes the
-constraints are expected to have -- their majority on the partition the changed mesh inherited, or,
-where every process holds every element, on a partition made for the previous shares --, and the
-constraints are then assigned on that partition. Where that moves a constraint after all, the shares
-are those of its new process from the next repartition on.
+its new process: after a topology change, and for a repartition that moves elements, the elements are
+partitioned for the current shares, the constraints are decided on that partition, and, if their shares
+differ, the elements are partitioned again for those shares, kept where they were on the first
+partition as far as the shares allow. The owners are decided once and the shares made for exactly
+them, so that a constraint does not leave the process its share was made for and come back at the
+next repartition.
 
 A process *integrates* every degree of freedom its elements and constraints touch -- its subdomain
 degrees of freedom. A degree of freedom touched by several processes lies on their *interface*. Each
@@ -749,7 +753,7 @@ to every process, so that every process takes the same decision
 (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance`). Everything is measured
 afresh after every such check: a check weighs the increments since the previous one.
 
-A constraint is evaluated whole, by one process, and stays where it is. What a partition of the
+A constraint is evaluated whole, by one process; it follows its elements when they move. What a partition of the
 elements can attain is therefore that every process is as busy as the mean -- or, if the constraints
 of one process alone cost more, as busy as that process. The model is repartitioned whenever the
 busiest process has fallen more than ``load-balance-tolerance`` (default 0.1) behind that attainable
