@@ -419,16 +419,15 @@ def _tinyMeshModel(elementNumbers=(1, 2), shiftCoordinate=0.0):
     """Two CPE4s sharing an edge, numbered as asked -- enough to exercise numbering, connectivity
     and coordinates without a solver."""
 
-    from edelweissfe.points.node import Node
-
     model = FEModel(2)
     coords = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (0.0, 1.0), (1.0, 1.0), (2.0, 1.0)]
-    for label, (x, y) in enumerate(coords, start=1):
-        model.nodes[label] = Node(label, np.array([x + shiftCoordinate, y]))
+    # the nodes described in the mesh, which the fingerprint reads, and made from it
+    model.mesh.addNodes(range(1, len(coords) + 1), [(x + shiftCoordinate, y) for x, y in coords])
 
     for elNumber, conn in zip(elementNumbers, [(1, 2, 5, 4), (2, 3, 6, 5)]):
         model.mesh.addElement(elNumber, "CPE4", "edelweiss", conn)
     with model.topology.changes():
+        model.createNodesOfMesh()
         model.createElementsOfMesh()
     return model
 

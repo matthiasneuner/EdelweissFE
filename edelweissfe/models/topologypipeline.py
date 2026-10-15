@@ -470,7 +470,7 @@ class TopologyPipeline:
 
         Covers exactly what a replay must get right and nothing else: every element's number, type
         and connectivity as described in the mesh (so the digest is the same in every process) (in order -- a rotated connectivity is a real difference), and every node's
-        label and reference coordinates. The surface nodes of a discrete rigid body hold its current
+        label and reference coordinates, as the mesh describes them. The surface nodes of a discrete rigid body hold its current
         position instead; the body reports their reference coordinates
         (:meth:`~edelweissfe.rigidbodies.rigidbody.RigidBody.referenceCoordinatesOfMovedNodes`), so that
         the motion of a rigid body is not mistaken for a change of the mesh. A resumed run replays the
@@ -505,9 +505,15 @@ class TopologyPipeline:
             record = meshElements[elNumber]
             digest.update(b"E|%d|%s|" % (elNumber, record.elType.encode()))
             digest.update(b",".join(b"%d" % label for label in record.nodeLabels))
-        for label in sorted(self._model.nodes):
+        # the nodes of the mesh, which every process holds whole, not the node objects, of which a process
+        # may hold only some
+        mesh = self._model.mesh
+        labels = mesh.nodeLabels
+        coordinates = mesh.nodeCoordinates
+        for row in np.argsort(labels, kind="stable").tolist():
+            label = int(labels[row])
             digest.update(b"N|%d|" % label)
-            referenceCoordinates = referenceCoordinatesOfMovedNodes.get(label, self._model.nodes[label].coordinates)
+            referenceCoordinates = referenceCoordinatesOfMovedNodes.get(label, coordinates[row])
             digest.update(np.asarray(referenceCoordinates, dtype=float).tobytes())
         return digest.hexdigest()
 
