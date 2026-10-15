@@ -29,7 +29,7 @@
 """The loads of a model restricted to the elements one subdomain computes.
 
 A distributed load or a body force acting on an element is evaluated by the process computing the
-element (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`). The classes
+element (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`). The classes
 here describe a load of the model restricted to those elements -- what the shared load assembly of
 the solvers reads of a load, with a smaller surface or element set -- and the loads of a subdomain
 together, for as long as the loads of the model are the same.
@@ -125,7 +125,7 @@ class BodyLoadOnSubdomain:
 class LoadsOnSubdomain:
     """The distributed and body loads of a step, restricted to the elements computed in a subdomain,
     and the tags of their nodal forces for the assembly completing them at the interface; see
-    :meth:`Subdomain.loadsOnSubdomain` and :meth:`Subdomain.loadAssemblyFor`.
+    :meth:`DomainDecomposition.loadsOnSubdomain` and :meth:`DomainDecomposition.loadAssemblyFor`.
 
     Parameters
     ----------
@@ -162,7 +162,7 @@ class LoadsOnSubdomain:
         self.entryDofs = entryDofs
         #: The place of every entry in the order of all load contributions of the model.
         self.entryLoadOrder = entryLoadOrder
-        #: The assembly of their nodal forces, once built (:meth:`Subdomain.loadAssemblyFor`).
+        #: The assembly of their nodal forces, once built (:meth:`DomainDecomposition.loadAssemblyFor`).
         self.assembly = None
 
     def isFor(self, distributedLoads: list, bodyLoads: list) -> bool:

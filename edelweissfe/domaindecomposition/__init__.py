@@ -34,7 +34,7 @@ constraints assigned to it, and the degrees of freedom those touch. A degree of 
 interface between two subdomains is integrated by both, and its nodal force is completed by summing
 the partial forces of every subdomain touching it (:mod:`.subdomaininterface`); the loads acting on
 an element are evaluated where the element is computed, and completed the same way. A
-:class:`~.subdomain.Subdomain` decides the subdomain of a process -- as the
+:class:`~.domaindecomposition.DomainDecomposition` decides the subdomain of a process -- as the
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` the explicit increment runs over,
 in place of the whole model -- and carries out every exchange between the processes; the processes
 agree through their :class:`~.communicator.Communicator`, which also refuses any communication where

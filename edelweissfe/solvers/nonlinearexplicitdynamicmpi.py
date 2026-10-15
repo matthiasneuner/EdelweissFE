@@ -123,7 +123,7 @@ deterministic, uneven cost, for tests.
 
 **What this solver changes.** The increment of ``NED`` runs over the
 :class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` of this process' subdomain, which a
-:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines. What this solver adds is the
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines. What this solver adds is the
 communication, each in an override of a method of ``NED``:
 
 * :meth:`NEDMPI.assembleInternalForces` completes the element forces at the interface;
@@ -168,13 +168,16 @@ from mpi4py import MPI
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.domaindecomposition.communicator import Communicator
+from edelweissfe.domaindecomposition.domaindecomposition import (
+    DomainDecomposition,
+    MeasuredLoad,
+)
 from edelweissfe.domaindecomposition.mpienvironment import (
     RaisedOnAllRanks,
     StepFailedOnAllRanks,
     abortAllProcesses,
     worldCommunicator,
 )
-from edelweissfe.domaindecomposition.subdomain import MeasuredLoad, Subdomain
 from edelweissfe.domaindecomposition.subdomaininterface import (
     InterfaceForceAssembly,
     ValuesFromOwners,
@@ -315,8 +318,9 @@ class NEDMPI(NEDParallel):
         #: process alone: the same code path, with every exchange a copy. The processes agree through
         #: it, e.g. on a failure in any of them (:meth:`Communicator.allRanksFailTogether`).
         self.communicator = Communicator(MPI.COMM_SELF) if communicator is None else communicator
-        #: The subdomain this process computes.
-        self.subdomain = Subdomain(
+        #: The decomposition of the model over the processes: the subdomain this process computes,
+        #: and every exchange with the others.
+        self.domainDecomposition = DomainDecomposition(
             self.communicator,
             journal,
             self.identification,
@@ -397,7 +401,7 @@ class NEDMPI(NEDParallel):
 
         self.journal.message(
             "Domain decomposition over {:} MPI process(es), {:} thread(s) each".format(
-                self.subdomain.nProcesses, getNumberOfThreads()
+                self.domainDecomposition.nProcesses, getNumberOfThreads()
             ),
             self.identification,
             0,
@@ -532,8 +536,8 @@ class NEDMPI(NEDParallel):
             The partition.
         """
 
-        self.subdomain.define(model, self.theDofManager, self.mpcTransformation, topologyChanged)
-        return self.subdomain.partition
+        self.domainDecomposition.define(model, self.theDofManager, self.mpcTransformation, topologyChanged)
+        return self.domainDecomposition.partition
 
     def planIncrement(self, model: FEModel) -> IncrementPlan:
         """The increment plan of :meth:`NED.planIncrement`, and how its element forces are completed
@@ -554,8 +558,8 @@ class NEDMPI(NEDParallel):
         self._integratedNodeFieldSlots = self._nodeFieldSlotsOf(model, self.partition.dofs)
         # planned again for this subdomain at the next search
         self._forgetReceivePlans()
-        self._interfaceAssembly = self.subdomain.interfaceAssemblyFor(plan.elementLoop)
-        timesKernels = self.subdomain.measuresElementCosts() and self._loadBalanceCosts() == "measured"
+        self._interfaceAssembly = self.domainDecomposition.interfaceAssemblyFor(plan.elementLoop)
+        timesKernels = self.domainDecomposition.measuresElementCosts() and self._loadBalanceCosts() == "measured"
         self._startMeasuring(len(plan.elementLoop.elements) if timesKernels else None)
         return plan
 
@@ -595,7 +599,7 @@ class NEDMPI(NEDParallel):
         return costs
 
     def _measuredLoad(self) -> MeasuredLoad:
-        """What :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance` weighs: the cost
+        """What :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance` weighs: the cost
         of every element of the increment plan per increment, in plan order -- the least kernel time
         measured, or the element number (``load-balance-costs``) -- the number of increments measured, the
         increments until the next check, to weigh a repartition's gain against its cost (None for
@@ -614,7 +618,7 @@ class NEDMPI(NEDParallel):
         """
 
         nIncrements = self._nMeasuredIncrements
-        if self._loadBalanceCosts() == "elementNumber" and self.subdomain.measuresElementCosts():
+        if self._loadBalanceCosts() == "elementNumber" and self.domainDecomposition.measuresElementCosts():
             numbers = np.array(list(self._incrementPlan.elementLoop.elements.keys()), dtype=float)
             return MeasuredLoad(numbers, nIncrements, None, float(numbers.sum()), 0.0)
         return MeasuredLoad(
@@ -645,8 +649,8 @@ class NEDMPI(NEDParallel):
 
         vector, contributions = self.lumpedDiagonalAndContributions(elementLoop, elementContribution)
         with performancetiming.timeit("interface forces"):
-            self.subdomain.interfaceAssemblyFor(elementLoop).assemble(contributions, vector)
-            self.subdomain.allgatherOwnedValues(vector)
+            self.domainDecomposition.interfaceAssemblyFor(elementLoop).assemble(contributions, vector)
+            self.domainDecomposition.allgatherOwnedValues(vector)
         return vector
 
     # --- The increment ------------------------------------------------------------------------------
@@ -665,7 +669,7 @@ class NEDMPI(NEDParallel):
         in the same order onto the same bits, so the result is the same. A process evaluating a
         costly constraint -- a large contact -- does so before the exchange at the interface, while
         the others are still computing the elements the load balancing gave them in its place
-        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`), instead of every
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance`), instead of every
         process waiting for it after the exchange.
 
         Parameters
@@ -724,7 +728,7 @@ class NEDMPI(NEDParallel):
         elements as the element forces are: each process evaluates the loads of the elements it
         computes, failing on all ranks together if it fails on one, and the contributions are completed at the interface
         and added in the order of the loads of the model; see
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`. Collective.
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`. Collective.
 
         Parameters
         ----------
@@ -758,14 +762,16 @@ class NEDMPI(NEDParallel):
         # A load kernel -- or a load not where the mesh describes it -- may fail in one process alone,
         # which would leave its neighbours waiting in the exchange below.
         with self.communicator.allRanksFailTogether("Evaluating the loads"):
-            loads = self.subdomain.loadsOnSubdomain(distributedLoads, bodyForces)
+            loads = self.domainDecomposition.loadsOnSubdomain(distributedLoads, bodyForces)
             with performancetiming.timeit("distributed loads"):
                 forces = [Pe for _, Pe in self.distributedLoadsOfElements(loads.distributedLoads, U_np, K, timeStep)]
             with performancetiming.timeit("body forces"):
                 forces += [Pe for _, Pe in self.bodyForcesOfElements(loads.bodyLoads, U_np, K, timeStep)]
 
         with performancetiming.timeit("interface loads"):
-            self.subdomain.loadAssemblyFor(loads).assemble(np.concatenate(forces) if forces else np.empty(0), PExt)
+            self.domainDecomposition.loadAssemblyFor(loads).assemble(
+                np.concatenate(forces) if forces else np.empty(0), PExt
+            )
         return PExt, K
 
     @performancetiming.timeit("assemble constraints")
@@ -776,7 +782,7 @@ class NEDMPI(NEDParallel):
         :meth:`assembleInternalForces` -- to the processes integrating their degrees of freedom, and
         add those of every constraint at the degrees of freedom integrated here, in model order; see
         :meth:`NED.assembleConstraintForces` and
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.addConstraintForces`. Collective.
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.addConstraintForces`. Collective.
 
         Parameters
         ----------
@@ -808,7 +814,7 @@ class NEDMPI(NEDParallel):
                 "the constraints evaluated here must be evaluated with the elements of the increment "
                 "(NEDMPI.assembleInternalForces) before their forces are assembled"
             )
-        self.subdomain.addConstraintForces(forces, P)
+        self.domainDecomposition.addConstraintForces(forces, P)
         return P
 
     def getCriticalTimeStepForExplicitDynamics(self, model: FEModel, U: DofVector) -> float:
@@ -846,7 +852,9 @@ class NEDMPI(NEDParallel):
             Per degree of freedom, the net nodal force times the prescribed increment.
         """
 
-        self._pendingWorkAtPrescribedDofs.append(ExactSum.of(reactionTimesIncrement[self.subdomain.ownedDofMask[dofs]]))
+        self._pendingWorkAtPrescribedDofs.append(
+            ExactSum.of(reactionTimesIncrement[self.domainDecomposition.ownedDofMask[dofs]])
+        )
 
     def gatherExternalWork(self):
         """Add the work of every increment since the last call to the external work, increment by
@@ -882,7 +890,7 @@ class NEDMPI(NEDParallel):
         """
 
         indices = np.arange(V.shape[0])[indices]
-        return super().halfMassTimesSquaredRate(indices[self.subdomain.ownedDofMask[indices]], V)
+        return super().halfMassTimesSquaredRate(indices[self.domainDecomposition.ownedDofMask[indices]], V)
 
     def energyBalanceTerms(self, psi: float, V: DofVector) -> tuple[float, float, float, list[float]]:
         """The terms of :meth:`NED.energyBalanceTerms` of the whole model. Collective.
@@ -944,15 +952,15 @@ class NEDMPI(NEDParallel):
             # only its own elements, accepted by the process computing it -- because an element
             # computed by another process from now on must arrive there with its current state.
             startOfRebalancing = perf_counter()
-            interfaceBefore = self.subdomain.interface
-            if self.subdomain.rebalance(self._incrementPlan.elementLoop, self._measuredLoad()):
-                if self.subdomain.elementsMustMove():
+            interfaceBefore = self.domainDecomposition.interface
+            if self.domainDecomposition.rebalance(self._incrementPlan.elementLoop, self._measuredLoad()):
+                if self.domainDecomposition.elementsMustMove():
                     self._moveElements(model, step)
                 else:
-                    self.partition = self.subdomain.partition
+                    self.partition = self.domainDecomposition.partition
                     self._incrementPlan = self.planIncrement(model)
                     self._receiveNewlyIntegratedValues(interfaceBefore, self._system.carried)
-                self.subdomain.recordRepartitionCost(perf_counter() - startOfRebalancing)
+                self.domainDecomposition.recordRepartitionCost(perf_counter() - startOfRebalancing)
             else:
                 # the next check weighs what was measured from now on (a new plan starts afresh itself)
                 self._startMeasuring(None if self._elementCosts is None else self._elementCosts.shape[0])
@@ -989,7 +997,7 @@ class NEDMPI(NEDParallel):
         of the next increment (:meth:`NED.topologyCheckDueAfter`): the refinement is replicated, and
         every process interpolates the node fields onto the refined mesh and builds its equation
         system from them, and checks that every copy of a constraint is its owner's
-        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.requireConstraintCopiesCurrent`).
 
         Returns
         -------
@@ -1071,7 +1079,7 @@ class NEDMPI(NEDParallel):
             self._synchronizeModel(model, self.prevTimeStep, includeStates=True, toEveryProcess=True)
         before = self._lumpedOperators()
         carried = self.releaseEquationSystem()
-        self.subdomain.moveElements()
+        self.domainDecomposition.moveElements()
         self._buildSystem(self.buildEquationSystem(model, step, previous=carried))
         self._requireSameLumpedOperators(before)
 
@@ -1200,13 +1208,14 @@ class NEDMPI(NEDParallel):
 
             with self.communicator.allRanksFailTogether("Reading the output"):
                 fieldOutputController.readResultsHere()
-                statesHere = self.subdomain.elementStatesOwnedHere(model) if gathersStates else None
+                statesHere = self.domainDecomposition.elementStatesOwnedHere(model) if gathersStates else None
 
             fieldOutputController.gatherResultsOfWholeSet(
-                readOnEveryProcess=self.fieldOutputsGatheredToEveryProcess(), writesOutput=self.subdomain.rank == 0
+                readOnEveryProcess=self.fieldOutputsGatheredToEveryProcess(),
+                writesOutput=self.domainDecomposition.rank == 0,
             )
             with performancetiming.timeit("gather states"):
-                states = self.subdomain.gatherElementStatesToRoot(statesHere) if gathersStates else None
+                states = self.domainDecomposition.gatherElementStatesToRoot(statesHere) if gathersStates else None
 
             with model.elementStatesFromElsewhere(states), self.communicator.allRanksFailTogether("Writing the output"):
                 super().writeIncrementOutput(fieldOutputController, outputManagers)
@@ -1382,7 +1391,7 @@ class NEDMPI(NEDParallel):
             self._solutionReadBySearches = None
             return
 
-        searchedHere = self.subdomain.constraintsSearchedHere(model, searchable)
+        searchedHere = self.domainDecomposition.constraintsSearchedHere(model, searchable)
         self._solutionReadBySearches = self._receivedSolutionAt(
             model, [node for name in searchedHere for node in nodesRead[name]]
         )
@@ -1416,7 +1425,7 @@ class NEDMPI(NEDParallel):
         integrated[self.partition.dofs] = True
         notIntegrated = dofs[~integrated[dofs]]
         return ReceivedSolution(
-            self.subdomain.valuesFromOwners(notIntegrated), self._nodeFieldSlotsOf(model, notIntegrated)
+            self.domainDecomposition.valuesFromOwners(notIntegrated), self._nodeFieldSlotsOf(model, notIntegrated)
         )
 
     def _forgetReceivePlans(self):
@@ -1433,7 +1442,7 @@ class NEDMPI(NEDParallel):
         reference nodes of the rigid bodies from their owners, and publish them into the node fields: every process moves the
         surfaces of the rigid bodies with them, which are nodes of the model as well, and so part of
         what every process must hold alike (the layout fingerprint of
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.define` compares their coordinates).
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.define` compares their coordinates).
         A few degrees of freedom per body, on an output increment synchronized to rank 0 only.
         Collective.
 
@@ -1454,7 +1463,7 @@ class NEDMPI(NEDParallel):
     def updateConnectivityOf(self, model: FEModel, constraints: dict) -> bool:
         """Let those of the given constraints update their connectivity whose search runs in this
         process, failing on all ranks together; whether a constraint of any process changed. See
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.constraintsSearchedHere`.
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.constraintsSearchedHere`.
         Collective.
 
         Parameters
@@ -1470,7 +1479,7 @@ class NEDMPI(NEDParallel):
             Whether any constraint's DOF footprint changed.
         """
 
-        searched = self.subdomain.constraintsSearchedHere(model, constraints)
+        searched = self.domainDecomposition.constraintsSearchedHere(model, constraints)
         with self.communicator.allRanksFailTogether("Updating the constraint connectivity"):
             changed = super().updateConnectivityOf(model, searched)
             for name, constraint in searched.items():
@@ -1518,7 +1527,7 @@ class NEDMPI(NEDParallel):
         every process arrived at the same outcome. Collective.
 
         If the topology changed, the subdomains are rebalanced for the changed mesh if that pays
-        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalanceAfterTopologyChange`),
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalanceAfterTopologyChange`),
         over the increments until the end of the step or since the previous topology change,
         whichever are fewer (the latter alone if the time stepper cannot estimate the former).
 
@@ -1537,7 +1546,7 @@ class NEDMPI(NEDParallel):
             Whether the topology changed, and whether a mesh-dependent consumer was refreshed.
         """
 
-        self.subdomain.requireConstraintCopiesCurrent(model)
+        self.domainDecomposition.requireConstraintCopiesCurrent(model)
         with self.communicator.allRanksFailTogether("Updating the topology"):
             # the modifiers and the refresh of the mesh read the node fields at every node
             self.requireWholeSolutionHere("A topology update")
@@ -1563,7 +1572,7 @@ class NEDMPI(NEDParallel):
                     "from the copies of the constraints and rigid-body surfaces every process holds; they "
                     "were not synchronized to every process since the last increment was accepted."
                 )
-            self.subdomain.rebalanceAfterTopologyChange(model, horizon)
+            self.domainDecomposition.rebalanceAfterTopologyChange(model, horizon)
         return changed
 
     def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool, toEveryProcess: bool):
@@ -1575,7 +1584,7 @@ class NEDMPI(NEDParallel):
         A process not receiving the whole model keeps the vectors and the node fields complete at the
         degrees of freedom it integrates only, and its copies of the constraints owned elsewhere in
         the state of their last synchronization; :meth:`requireWholeSolutionHere` and
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.requireConstraintCopiesCurrent`
         refuse to read them as whole.
 
         Parameters
@@ -1594,17 +1603,17 @@ class NEDMPI(NEDParallel):
         with performancetiming.timeit("gather solution"):
             for vector in carried.values():
                 if toEveryProcess:
-                    self.subdomain.allgatherOwnedValues(vector)
+                    self.domainDecomposition.allgatherOwnedValues(vector)
                 else:
-                    self.subdomain.gatherOwnedValuesToRoot(vector)
-        wholeSolutionHere = toEveryProcess or self.subdomain.rank == 0
+                    self.domainDecomposition.gatherOwnedValuesToRoot(vector)
+        wholeSolutionHere = toEveryProcess or self.domainDecomposition.rank == 0
         if wholeSolutionHere:
             # every degree of freedom is current now, not only those integrated here
             super().publishNodeFields(model, carried)
             self._wholeSolutionHere = True
 
         if includeStates:
-            self.subdomain.synchronizeStates(includeElements=True, toEveryProcess=toEveryProcess)
+            self.domainDecomposition.synchronizeStates(includeElements=True, toEveryProcess=toEveryProcess)
 
         # A rigid body's surface follows its reference node, which only some processes integrated:
         # it was moved in acceptIncrement from what this process integrates, and is moved again now
@@ -1661,7 +1670,7 @@ class NEDMPI(NEDParallel):
                 "{:} reads the whole solution, but process {:} holds it only at the degrees of freedom it "
                 "integrates: the last output synchronization gathered it to rank 0 only. A reader on every "
                 "process must be known to NEDMPI.outputSynchronizationReachesEveryProcess.".format(
-                    reader, self.subdomain.rank
+                    reader, self.domainDecomposition.rank
                 )
             )
 
@@ -1672,7 +1681,7 @@ class NEDMPI(NEDParallel):
         (:meth:`requireWholeSolutionHere`). Rebuilt with the vectors carried over -- after a contact
         search moved a constraint, or elements moved between processes -- the subdomain is defined
         afresh, and the vectors are completed at the degrees of freedom this process integrates from
-        now on (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.receiveNewlyIntegratedValues`).
+        now on (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.receiveNewlyIntegratedValues`).
 
         Parameters
         ----------
@@ -1693,7 +1702,7 @@ class NEDMPI(NEDParallel):
             self.requireWholeSolutionHere("Building the equation system from the node fields")
             return super().buildEquationSystem(model, step)
 
-        interfaceBefore = self.subdomain.interface
+        interfaceBefore = self.domainDecomposition.interface
         theSystem = super().buildEquationSystem(model, step, previous)
         self._receiveNewlyIntegratedValues(interfaceBefore, theSystem.carried)
         return theSystem
@@ -1701,7 +1710,7 @@ class NEDMPI(NEDParallel):
     def _receiveNewlyIntegratedValues(self, interfaceBefore, carried: dict[str, DofVector]):
         """Complete the carried vectors -- the solution, the velocity and the net force -- at the
         degrees of freedom this process integrates from now on, from their previous owners
-        (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.receiveNewlyIntegratedValues`), and
+        (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.receiveNewlyIntegratedValues`), and
         publish them into the node fields, as an accepted increment publishes what it integrates: the
         node fields hold the last accepted increment at every degree of freedom a process integrates,
         which the end of a failed step reads back (:meth:`_synchronizeAcceptedModel`). Collective.
@@ -1714,5 +1723,5 @@ class NEDMPI(NEDParallel):
             The carried vectors, by node field entry (:attr:`ExplicitSystem.carriedEntries`).
         """
 
-        self.subdomain.receiveNewlyIntegratedValues(interfaceBefore, list(carried.values()))
+        self.domainDecomposition.receiveNewlyIntegratedValues(interfaceBefore, list(carried.values()))
         self._publishIntoNodeFields(self._integratedNodeFieldSlots, carried)

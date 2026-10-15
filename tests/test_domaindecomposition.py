@@ -1300,14 +1300,14 @@ _CONSISTENT_COPIES_SCRIPT = """
 import contextlib, hashlib, io
 import numpy as np
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
-from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposition
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
 from edelweissfe.utils.inputfileparser import parseInputFile
 
 rank = worldCommunicator().Get_rank()
 verdicts = []
-moveElements = Subdomain.moveElements
+moveElements = DomainDecomposition.moveElements
 
 
 def checkedBeforeMoving(self):
@@ -1319,7 +1319,7 @@ def checkedBeforeMoving(self):
     return moveElements(self)
 
 
-Subdomain.moveElements = checkedBeforeMoving
+DomainDecomposition.moveElements = checkedBeforeMoving
 
 acceptIncrement = NEDMPI.acceptIncrement
 
@@ -1766,7 +1766,7 @@ _COSTS_GROWING_SCRIPT = """
 import contextlib, io, time
 import numpy as np
 from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
-from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposition
 from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.elements.displacementelement.element import DisplacementElement
 from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
@@ -1804,7 +1804,7 @@ def recording(self, plan, load):
     return False
 
 
-Subdomain.rebalance = recording
+DomainDecomposition.rebalance = recording
 
 with contextlib.redirect_stdout(io.StringIO()):
     finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
@@ -1854,15 +1854,15 @@ def test_a_process_evaluating_costly_constraints_is_given_fewer_elements():
 def test_the_balance_is_measured_against_what_a_partition_can_attain():
     MPI = pytest.importorskip("mpi4py.MPI")
     from edelweissfe.domaindecomposition.communicator import Communicator
-    from edelweissfe.domaindecomposition.subdomain import Subdomain
+    from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposition
 
-    subdomain = Subdomain(Communicator(MPI.COMM_SELF), None, "test", 0.1)
+    decomposition = DomainDecomposition(Communicator(MPI.COMM_SELF), None, "test", 0.1)
     # Busy with elements and constraints: the mean, 9, is attainable; the busiest takes 12.
-    imbalance, beyond = subdomain._imbalance(np.array([8.0, 8.0, 8.0, 12.0]), np.array([0.0, 0.0, 0.0, 4.0]))
+    imbalance, beyond = decomposition._imbalance(np.array([8.0, 8.0, 8.0, 12.0]), np.array([0.0, 0.0, 0.0, 4.0]))
     assert imbalance == pytest.approx(12.0 / 9.0) and beyond == pytest.approx(12.0 - 1.1 * 9.0)
     # One process' constraints alone cost more than the mean: no partition of the elements does better
     # than that process' constraints, so it is within the tolerance, and not repartitioned again and again.
-    imbalance, beyond = subdomain._imbalance(np.array([6.0, 6.0, 6.0, 16.5]), np.array([0.0, 0.0, 0.0, 16.0]))
+    imbalance, beyond = decomposition._imbalance(np.array([6.0, 6.0, 6.0, 16.5]), np.array([0.0, 0.0, 0.0, 16.0]))
     assert imbalance == pytest.approx(16.5 / 16.0) and beyond < 0.0
 
 
@@ -2225,9 +2225,9 @@ def test_the_end_of_a_step_on_an_output_increment_leaves_its_result_in_every_pro
 #: On process 1 only, the first element set of the mesh is moved behind the others: the same sets,
 #: in another order -- which changes the place of a load contribution in the order of all of them.
 _ELEMENT_SET_ORDER_PATCH = """
-from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.domaindecomposition.domaindecomposition import DomainDecomposition
 
-define = Subdomain.define
+define = DomainDecomposition.define
 
 
 def reorderedInProcessOne(self, model, *args):
@@ -2238,7 +2238,7 @@ def reorderedInProcessOne(self, model, *args):
     return define(self, model, *args)
 
 
-Subdomain.define = reorderedInProcessOne
+DomainDecomposition.define = reorderedInProcessOne
 """
 
 #: On process 1 only, the first surface of the mesh is moved behind the others.

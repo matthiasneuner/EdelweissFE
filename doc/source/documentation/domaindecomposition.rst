@@ -223,9 +223,9 @@ elements, constraints and degrees of freedom of its
 computed here, the constraints evaluated here, and the degrees of freedom integrated here. For
 ``NED`` that is the whole model, and the degrees of freedom are ``slice(None)``, so that ``V[dofs]``
 is the whole vector; for ``NEDMPI`` it is the subdomain of the process, as a
-:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines it, and the degrees of freedom
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines it, and the degrees of freedom
 are a sorted index array. Which of them a process owns -- counts once for the model, e.g. in the
-external work -- is the subdomain's (``Subdomain.ownedDofMask``).
+external work -- is the subdomain's (``DomainDecomposition.ownedDofMask``).
 
 Everything a process must exchange with the others, ``NEDMPI`` adds in overrides of a few methods of
 ``NED``, each calling the ``NED`` method or the shared function it extends:
@@ -305,7 +305,7 @@ documenting it; the test still compares the two, bit for bit.)
 
 **Loads.** A distributed load or a body force acting on an element is a contribution of that element,
 and is assembled like its forces
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`): the process
+(:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`): the process
 computing the element evaluates its load, with its own solution -- current at every degree of
 freedom of the element, since the process integrates all of them -- and sends the contributions at
 the degrees of freedom a neighbour integrates too, tagged with their place in the order a single
@@ -391,7 +391,7 @@ not at all. None of this is read as if it were whole:
   result or its history in another process raises, until a result is stored there again
   (:meth:`~edelweissfe.utils.fieldoutput.FieldOutputController.gatherResultsOfWholeSet`);
 * before a topology update, the constraint copies are compared with their owners
-  (:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`);
+  (:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.requireConstraintCopiesCurrent`);
 * after every connectivity update, a constraint that names the nodes its search reads must couple no
   other node -- else the search read a position it may not have received -- and the run stops
   naming the constraint.
@@ -453,7 +453,7 @@ monitor, conditional stop               read field outputs
 restart checkpoint                      on an increment rank 0 writes one
                                         (``writesCheckpointAtNextIncrement``, broadcast), every process
                                         reads the states of the elements it computes and they are
-                                        gathered to rank 0 (``Subdomain.gatherElementStatesToRoot``);
+                                        gathered to rank 0 (``DomainDecomposition.gatherElementStatesToRoot``);
                                         rank 0 writes them in the format of a serial checkpoint
                                         (``FEModel.elementStatesFromElsewhere``) and releases them,
                                         however the output ended
@@ -483,7 +483,7 @@ copy. That is harmless because a topology update always follows a synchronizatio
 -- a topology check is due only on an output increment, whose synchronization then reaches every
 process, the start of a step follows the end of the last one or a checkpoint -- and it is asserted rather than assumed: before every topology update the nodes and
 fields every constraint couples are compared across processes
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.requireConstraintCopiesCurrent`).
+(:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.requireConstraintCopiesCurrent`).
 
 Contact, ties and rigid bodies
 ------------------------------
@@ -611,7 +611,7 @@ markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
 
 Every process therefore refines the same mesh, and numbers it the same way. That is verified, not
 assumed: after every build of the equation system, a fingerprint
-(:func:`~edelweissfe.domaindecomposition.subdomain.layoutFingerprint`) of the mesh (element numbers and
+(:func:`~edelweissfe.domaindecomposition.domaindecomposition.layoutFingerprint`) of the mesh (element numbers and
 connectivity), its element sets and surfaces with their elements, all in order -- the order the loads
 are added in follows from them --, the global numbering of the degrees of freedom of the mesh
 (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`, which every process first checks
@@ -654,12 +654,12 @@ Load balancing
 The first partition weighs an element by its number of degrees of freedom. A softening material
 costs more where it softens -- a return mapping needs more iterations -- so a partition balanced at
 the start drifts out of balance as damage localizes. Every element kernel is therefore timed, and
-every process measures how long per increment it is *busy* (:class:`~edelweissfe.domaindecomposition.subdomain.MeasuredLoad`):
+every process measures how long per increment it is *busy* (:class:`~edelweissfe.domaindecomposition.domaindecomposition.MeasuredLoad`):
 with its element loop, on all its threads, and with evaluating the constraints it evaluates -- wall
 times, as the time of an increment is. On an output increment, as a step of the increment loop of
 its own right after the synchronization of the output, the busy times of all processes are gathered
 to every process, so that every process takes the same decision
-(:meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.rebalance`). Everything is measured
+(:meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.rebalance`). Everything is measured
 afresh after every such check: a check weighs the increments since the previous one.
 
 A constraint is evaluated whole, by one process, and stays where it is. What a partition of the
@@ -1005,7 +1005,7 @@ Package reference
 .. automodule:: edelweissfe.domaindecomposition.communicator
    :members:
 
-.. automodule:: edelweissfe.domaindecomposition.subdomain
+.. automodule:: edelweissfe.domaindecomposition.domaindecomposition
    :members:
 
 .. automodule:: edelweissfe.domaindecomposition.loadsonsubdomain

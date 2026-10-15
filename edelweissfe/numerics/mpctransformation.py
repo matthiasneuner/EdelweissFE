@@ -239,7 +239,7 @@ class MultiPointConstraintTransformation:
         After chained records are flattened, so a master is always an independent DOF. The order
         does not depend on the order the constraints were given in, so that two processes holding
         the same constraints describe them identically (see
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.define`).
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.define`).
 
         Returns
         -------

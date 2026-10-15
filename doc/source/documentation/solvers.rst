@@ -138,7 +138,7 @@ object, the solver's :class:`~edelweissfe.solvers.base.modelpartition.ModelParti
 computed here, the constraints evaluated here, and the degrees of freedom integrated here. ``NED``
 and ``NEDParallel`` compute the whole model, whose degrees of freedom
 are ``slice(None)``; ``NEDMPI`` computes the subdomain a
-:class:`~edelweissfe.domaindecomposition.subdomain.Subdomain` defines in each process, and adds the
+:class:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition` defines in each process, and adds the
 exchange between the processes in overrides of its own (:doc:`domaindecomposition`).
 
 .. automodule:: edelweissfe.solvers.base.modelpartition

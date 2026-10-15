@@ -214,7 +214,7 @@ class DistributedElements(ElementDistribution):
         A process creates the elements it owns -- those the partition assigns to it -- and the auxiliary
         elements (see :meth:`placeAuxiliaryElement`). The loads acting on an element
         are evaluated where the element is computed, and exchanged like its forces (see
-        :meth:`~edelweissfe.domaindecomposition.subdomain.Subdomain.loadsOnSubdomain`), so no
+        :meth:`~edelweissfe.domaindecomposition.domaindecomposition.DomainDecomposition.loadsOnSubdomain`), so no
         process needs an element of another one for its loads.
 
         Parameters

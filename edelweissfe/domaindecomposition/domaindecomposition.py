@@ -26,12 +26,12 @@
 #  The full text of the license can be found in the file LICENSE.md at
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
-"""The subdomain one MPI process computes, and what it exchanges with the others.
+"""The decomposition of a model over MPI processes: the subdomain each computes, and what they exchange.
 
-A :class:`Subdomain` decides which part of the model its process computes -- the elements METIS
+A :class:`DomainDecomposition` decides which part of the model its process computes -- the elements METIS
 assigns to it, the constraints dealt to it, and the degrees of freedom those touch
 (:mod:`.partitioning`) -- and describes it as a
-:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` (:attr:`Subdomain.partition`). It
+:class:`~edelweissfe.solvers.base.modelpartition.ModelPartition` (:attr:`DomainDecomposition.partition`). It
 also carries out every exchange between the processes the domain-decomposed solver needs: the
 element forces are completed at the interface with the neighbouring subdomains
 (:mod:`.subdomaininterface`), the constraint forces are sent to the processes integrating their
@@ -89,7 +89,7 @@ from edelweissfe.utils.exceptions import TopologyError
 @dataclass(frozen=True)
 class MeasuredLoad:
     """What one process measured of its load since its increment plan was made, for
-    :meth:`Subdomain.rebalance`.
+    :meth:`DomainDecomposition.rebalance`.
 
     Parameters
     ----------
@@ -120,9 +120,9 @@ class MeasuredLoad:
     constraintTime: float
 
 
-class Subdomain:
-    """The subdomain this MPI process computes, and its exchanges with the others; see the module
-    documentation.
+class DomainDecomposition:
+    """The decomposition of the model over the MPI processes: the subdomain this process computes,
+    and its exchanges with the others; see the module documentation.
 
     Parameters
     ----------

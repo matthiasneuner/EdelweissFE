@@ -29,7 +29,7 @@
 (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`), is the DofManager's.
 
 A domain-decomposed run (``NEDMPI``) checks it against the DofManager whenever the equation system is
-built (``Subdomain._checkReplicatedLayout``); these decks, run with ``NEDMPI`` on one process, build it
+built (``DomainDecomposition._checkReplicatedLayout``); these decks, run with ``NEDMPI`` on one process, build it
 again after adaptive refinements and contact or tie surfaces regenerated, and every check must pass.
 The model the run ends with is checked once more here, against a DofManager built afresh.
 """
