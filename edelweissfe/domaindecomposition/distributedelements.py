@@ -265,12 +265,12 @@ class DistributedElements(ElementDistribution):
         The communicator of the processes sharing the model.
     reasonsForWholeModel
         Why each process holds every node and vectors of the whole model (:func:`reasonsForWholeModel`);
-        empty if it holds those of its subdomain only.
+        empty if it holds those of its subdomain only. A distribution made without them holds every node.
     """
 
     replicatesElements = False
 
-    def __init__(self, communicator, reasonsForWholeModel):
+    def __init__(self, communicator, reasonsForWholeModel=("the reasons were not read from an input file",)):
         self.communicator = communicator
         self.rank = communicator.Get_rank()
         #: Why each process holds every node and vectors of the whole model; see :func:`reasonsForWholeModel`.
@@ -641,7 +641,10 @@ class DistributedElements(ElementDistribution):
         integrates, so that its node fields hold them current --: the nodes whose values it contributes
         when the values of nodes are gathered; see
         :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodesProvidingValuesHere`. A
-        node of the mesh carrying a field is a node of an element computed by some process.
+        node of the mesh carrying a field is a node of an element computed by some process. Where every
+        process holds every node, every node, as in a serial run: a process reading the whole model holds
+        it whole, synchronized to it (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.outputSynchronizationReachesEveryProcess`).
 
         Parameters
         ----------
@@ -654,6 +657,8 @@ class DistributedElements(ElementDistribution):
             The node labels.
         """
 
+        if self.holdsEveryNodeHere:
+            return super().nodesProvidingValuesHere(model)
         key = (model.mesh, model.mesh.elementsVersion, self.ownershipVersion)
         if self._nodesProvidingValues is None or self._nodesProvidingValues[0] != key:
             records = model.mesh.elements
@@ -688,9 +693,12 @@ class DistributedElements(ElementDistribution):
         -------
         np.ndarray | None
             The values, one row per node of ``labels``; None on a process other than rank 0, if
-            gathered to rank 0 only.
+            gathered to rank 0 only. Where every process holds every node, the values read here, with no
+            exchange, as in a serial run.
         """
 
+        if self.holdsEveryNodeHere:
+            return super().nodeValuesOfWholeSet(labels, labelsHere, valuesHere, toEveryProcess)
         piece = (np.asarray(labelsHere, dtype=np.int64), valuesHere)
         pieces = self.communicator.allgather(piece) if toEveryProcess else self.communicator.gather(piece, root=0)
         if pieces is None:

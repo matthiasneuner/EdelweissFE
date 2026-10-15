@@ -2198,6 +2198,7 @@ def test_a_field_output_gathered_elsewhere_refuses_to_be_read_here(tmp_path):
     assert fieldOutput.getLastResult().shape == (6, 2)
 
     # gathered to the process writing the output, not here: the time is recorded, the result is not
+    fieldOutput.readResultsHere()
     fieldOutput.gatherResultsOfWholeSet(toEveryProcess=False, storedHere=False)
     model.time = 1.0
     fieldOutput.finalizeIncrement()
