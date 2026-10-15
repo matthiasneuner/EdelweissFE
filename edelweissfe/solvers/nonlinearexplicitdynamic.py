@@ -148,28 +148,35 @@ freedom of one object, a :class:`~edelweissfe.solvers.base.subdomain.Subdomain`
 constraint, and every degree of freedom -- the slice ``slice(None)``, so that ``V[dofs]`` is the
 whole vector ``V``. The domain-decomposed solver
 (:class:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI`) runs the same increment over one
-subdomain per process, and adds the exchange between the subdomains by overriding these methods,
-each calling the one it extends -- and no others:
+subdomain per process, and adds the exchange between the subdomains by overriding exactly these
+methods. Most extend the method of ``NED``, calling it; those marked *(replaces)* re-implement it for
+a subdomain -- on the shared functions of the element loop and the assembly, where there are any:
 
-* the subdomain: :meth:`NED.defineSubdomain`, :meth:`NED.planIncrement`,
+* the subdomain: :meth:`NED.defineSubdomain` *(replaces)*, :meth:`NED.planIncrement`,
   :meth:`NED.buildEquationSystem`;
-* the increment: :meth:`NED.assembleInternalForces`, :meth:`NED.assembleLoads`,
-  :meth:`NED.evaluateConstraintForces`, :meth:`NED.addConstraintForces`, :meth:`NED.addExternalWork`;
-* the lumped operators and the stable time increment: :meth:`NED.assembleLumpedDiagonal`,
-  :meth:`NED.getCriticalTimeStepForExplicitDynamics`;
+* the increment: :meth:`NED.assembleInternalForces` *(replaces)*,
+  :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.assembleLoads` *(replaces)*, :meth:`NED.evaluateConstraintForces`
+  *(replaces)*, :meth:`NED.addConstraintForces` *(replaces)*, :meth:`NED.addExternalWork`
+  *(replaces)*;
+* the lumped operators and the stable time increment: :meth:`NED.assembleLumpedDiagonal`
+  *(replaces)*, :meth:`NED.getCriticalTimeStepForExplicitDynamics`;
 * the sums over the whole model: :meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
   :meth:`NED.energyBalanceTerms`;
-* accepting an increment, and the output: :meth:`NED.acceptIncrement`, :meth:`NED.advanceModelToTime`,
-  :meth:`NED.publishNodeFields`, ``writeIncrementOutput``, ``applyStepActionsAtStepEnd``;
+* accepting an increment, and the output: :meth:`NED.acceptIncrement`, :meth:`NED.advanceModelToTime`
+  *(replaces)*, :meth:`NED.publishNodeFields` *(replaces)*, ``writeIncrementOutput``,
+  ``applyStepActionsAtStepEnd``;
 * contact and topology: :meth:`NED.updateConstraintConnectivity`, ``updateConnectivityOf``,
   ``updateTopology``;
-* the step: :meth:`NED.beginStep`, :meth:`NED.attemptIncrement`, :meth:`NED.endStep`, ``stepFailed``.
+* the step: :meth:`NED.beginStep`, :meth:`NED.attemptIncrement`, :meth:`NED.endStep`, ``stepFailed``
+  *(replaces)*.
 
-The one rule this places on the code of this module: **a sum over the degrees of freedom of the
-model -- an energy, a momentum, a norm of a vector -- belongs in one of the methods ``NEDMPI``
-overrides** (:meth:`NED.kineticEnergy`, :meth:`NED.momentum`, :meth:`NED.energyBalanceTerms`).
-Written inline, it is in ``NEDMPI`` a sum over the subdomain of one process: a plausible number,
-and a wrong one.
+The one rule this places on the code of this module: **a sum over the carried vectors -- the
+solution, its increment, the velocity, the net force (``U``, ``dU``, ``V``, ``P``) -- belongs in
+one of the methods ``NEDMPI`` overrides** (:meth:`NED.kineticEnergy`, :meth:`NED.momentum`,
+:meth:`NED.energyBalanceTerms`). In ``NEDMPI`` those vectors are current only at the subdomain
+degrees of freedom, so a sum over them written inline is a sum over the subdomain of one process: a
+plausible number, and a wrong one. A sum over the lumped operators -- the inertia, the damping --
+may be written inline: they are complete in every process.
 """
 
 import math
@@ -2262,7 +2269,10 @@ class NED(NonlinearSolverBase):
         net force by :meth:`addConstraintForces`.
 
         Evaluated right after the elements, and added after the loads: a constraint reads the solution
-        and its increment only, which do not change in between.
+        and its increment only, which do not change in between. Evaluated with the elements so that a
+        domain-decomposed solver can evaluate them before its exchange at the interface, while the
+        other processes still compute their elements (see
+        :meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.assembleInternalForces`).
 
         No tangent is requested. An explicit increment solves no linear system, so a constraint's
         stiffness enters nothing, and
@@ -2367,7 +2377,7 @@ class NED(NonlinearSolverBase):
 
         return constraintForce
 
-    def momentum(self, V: DofVector, model: FEModel) -> np.ndarray:
+    def momentum(self, V: DofVector | np.ndarray, model: FEModel) -> np.ndarray:
         """The linear momentum of the model -- of the fields whose inertia is a mass --, per spatial
         component; see :func:`~edelweissfe.solvers.base.conservationchecks.linearMomentum`.
 
@@ -2378,7 +2388,7 @@ class NED(NonlinearSolverBase):
         Parameters
         ----------
         V
-            The velocity vector.
+            The velocity vector, or its values as a plain array.
         model
             The model tree, for the fields' spatial dimension.
 

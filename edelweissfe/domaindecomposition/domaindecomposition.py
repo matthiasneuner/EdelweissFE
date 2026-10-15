@@ -181,6 +181,11 @@ class DomainDecomposition:
         self._model = None
         self._mpcTransformation = None
 
+        #: The subdomain of this process -- the elements, constraints and degrees of freedom it
+        #: computes --, as of the last definition (:meth:`define`); None before the first, and while
+        #: elements move between the processes.
+        self.subdomain: Subdomain | None = None
+
         self._forgetElements()
 
     def _forgetElements(self):
@@ -192,8 +197,7 @@ class DomainDecomposition:
         #: The loads of the elements of the subdomain, and their assembly, for the loads last asked
         #: for; see loadsOnSubdomain.
         self._loadsOnSubdomain = None
-        #: The subdomain of this process -- the elements, constraints and degrees of freedom it
-        #: computes --, as of the last definition.
+        # forgotten with the elements (see __init__)
         self.subdomain = None
         #: The degree-of-freedom layout of the last definition; its entity indices hold the elements.
         self._dofManager = None

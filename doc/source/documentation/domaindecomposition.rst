@@ -34,8 +34,9 @@ interface degree of freedom
     A subdomain degree of freedom of more than one process; a *ghost* in every one but its owner.
 owned degree of freedom
     Each degree of freedom is owned by exactly one process, the lowest-ranked one integrating it
-    (one no element or constraint touches is integrated and owned by rank 0). The owner counts what must be counted once -- a
-    kinetic energy, the external work -- and its value is the one every gather takes.
+    (one no element or constraint touches is integrated and owned by rank 0). The owner counts what
+    must be counted once -- a kinetic energy, the external work -- and its value is the one every
+    gather takes.
 local element, local node
     One that has an object in this process. A **distributed** model creates only the elements of a
     process' subdomain there (and the surface-sized auxiliary elements everywhere); under the
@@ -66,11 +67,14 @@ Invariants
 2. **One owner per degree of freedom,** and the owner's value is authoritative in every gather
    (:class:`~edelweissfe.domaindecomposition.subdomaininterface.SubdomainInterface`).
 3. **The same model everywhere.** Every process builds, refines and numbers the model identically;
-   checked by a fingerprint of the layout after every build.
-4. **Read only what you received.** Between synchronizations a process reads vectors at its
-   subdomain degrees of freedom only; the readers of the whole model are listed under `Where the
-   whole model is read`_ and refuse to read otherwise. A sum over all degrees of freedom belongs in a
-   method ``NEDMPI`` overrides; written inline in ``NED``, it is a sum over one process.
+   checked by a fingerprint of the layout whenever the equation system is built afresh (at the
+   start, after a topology change or a migration).
+4. **Read only what you received.** Between synchronizations a process reads the carried vectors
+   (``U``, ``dU``, ``V``, ``P``) at its subdomain degrees of freedom only; the readers of the
+   whole model are listed under `Where the whole model is read`_ and refuse to read otherwise. A
+   sum over a carried vector belongs in a method ``NEDMPI`` overrides; written inline in ``NED``,
+   it is a sum over one process. (The lumped operators are complete in every process, and may be
+   summed inline.)
 5. **No communication inside an agreement,** enforced by the
    :class:`~edelweissfe.domaindecomposition.communicator.Communicator`.
 
@@ -649,7 +653,9 @@ markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
   needs no gather of its own.
 
 Every process therefore refines the same mesh, and numbers it the same way. That is verified, not
-assumed: after every build of the equation system, a fingerprint
+assumed: whenever the equation system is built afresh -- at the start, after a topology change or a
+migration; not when a contact search only re-locates the constraints, which keeps the layout --, a
+fingerprint
 (:func:`~edelweissfe.domaindecomposition.domaindecomposition.layoutFingerprint`) of the mesh (element numbers and
 connectivity), its element sets and surfaces with their elements, all in order -- the order the loads
 are added in follows from them --, the global numbering of the degrees of freedom of the mesh
@@ -796,7 +802,7 @@ integrates from now on, from their previous owners --, and with it the degree-of
 interface, the loads of the elements of the subdomain, the lumped inertia and damping (assembled from the
 elements now in the subdomain, completed at the interface in model order, so the same bits as before)
 and the increment plan with its element timing. The field outputs set up their views of the
-element results again for the elements now owned here. All of these are released *before* the
+element results again for the elements this process now owns. All of these are released *before* the
 elements move -- the solver keeps only plain copies of the three vectors it carries over, the field
 outputs keep element numbers, not elements -- so that a dropped element is freed before the new ones
 are created, and a migration does not raise the memory of a process beyond what its elements need: (see `Performance notes`_). A
