@@ -732,13 +732,17 @@ the increment was accepted, in every process:
    (:meth:`~edelweissfe.models.femodel.FEModel.assignSectionsAndPropertiesToElements`), and every
    element arriving from another process the state that process sent (``setStateVars``).
 
-A migration happens right after the synchronization of an output increment, and must: every process
-then rebuilds its equation system from its copies of the constraints owned elsewhere and of the
-rigid-body surfaces, which are consistent between the processes only right after a synchronization --
-each process moves the surfaces in every increment from the reference node as it holds it, current
-only where it integrates it. That order (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamicmpi.NEDMPI.acceptIncrement`) is
-asserted, not only followed: a migration after an increment accepted since the last synchronization
-is refused, in every process.
+Every process then rebuilds its equation system from its copies of the constraints owned elsewhere and
+of the rigid-body surfaces, which must be the same in every process. They are only right after the
+model was synchronized to every process: the synchronization of an output increment reaches rank 0
+only, unless a topology check follows, and leaves the constraints elsewhere in the state of their last
+synchronization -- a contact searched since on its own process, say --; and each process moves the
+rigid-body surfaces in every increment from the reference node as it holds it, current only where it
+integrates it. So before elements move after an increment, the model is synchronized to every process
+unless it already was since that increment was accepted (rare: once per migration, one gather of the
+vectors and the constraint states). Elements moved after a topology change follow the synchronization
+to every process that the topology check needs; that it took place since the last accepted increment is
+checked, loudly.
 
 Everything indexed by the elements a process holds is then built again, as after a change of the
 topology: the solver rebuilds the equation system for the elements now held, carrying the solution,

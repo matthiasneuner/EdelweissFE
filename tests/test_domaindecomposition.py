@@ -1266,10 +1266,33 @@ def test_a_vector_added_to_the_carried_vectors_reaches_every_path(tmp_path):
     assert exitCode == 0 and reports == ["PROCESS {:} SAME".format(rank) for rank in range(3)], output
 
 
-#: Elements moved between the processes on increment 3, which is no output increment: the model was
-#: last synchronized after increment 2.
-_MIGRATION_WITHOUT_SYNCHRONIZATION_PATCH = """
+#: Before elements move, every process' copies of the constraints -- here a contact against a rigid
+#: body, searched on its process only -- must be the same: checked at every migration, and the deck run
+#: on, so that it also reaches a migration on increment 3, which follows no synchronization at all.
+_CONSISTENT_COPIES_SCRIPT = """
+import contextlib, hashlib, io
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.domaindecomposition.subdomain import Subdomain
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
 from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+verdicts = []
+moveElements = Subdomain.moveElements
+
+
+def checkedBeforeMoving(self):
+    digest = hashlib.sha1()
+    for name, constraint in self._model.constraints.items():
+        for entry, values in sorted(constraint.getRestartData().items()):
+            digest.update(name.encode() + entry.encode() + np.ascontiguousarray(values).tobytes())
+    verdicts.append(len(set(self.communicator.allgather(digest.hexdigest()))) == 1)
+    return moveElements(self)
+
+
+Subdomain.moveElements = checkedBeforeMoving
 
 acceptIncrement = NEDMPI.acceptIncrement
 
@@ -1281,26 +1304,33 @@ def movingElementsAfterIncrementThree(self, step, model, timeStep):
 
 
 NEDMPI.acceptIncrement = movingElementsAfterIncrementThree
+
+with contextlib.redirect_stdout(io.StringIO()):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+print("PROCESS", rank, len(verdicts) > 1 and all(verdicts), verdicts, flush=True)
 """
 
 
-def test_elements_move_only_right_after_a_synchronization(tmp_path):
-    # The copies of the constraints and of the rigid-body surfaces every process holds are consistent
-    # only right after a synchronization of the model, from which a migration rebuilds every process'
-    # system; a migration anywhere else is refused, loudly, in every process.
-    (tmp_path / "test.inp").write_text(_MIGRATING_DECK)
-    (tmp_path / "run.py").write_text(
-        _FAILING_IN_PROCESS_ONE_SCRIPT.replace("PATCH", _MIGRATION_WITHOUT_SYNCHRONIZATION_PATCH)
+def test_elements_move_only_with_the_same_copies_of_the_constraints_in_every_process(tmp_path):
+    # A migration rebuilds every process' system from its copies of the constraints owned elsewhere. The
+    # output synchronization reaches rank 0 only, and a contact search runs on its constraint's process
+    # only: the copies elsewhere are stale until the model is synchronized to every process, which a
+    # migration does first.
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    shutil.copytree(
+        os.path.join(testfiles, "edelweiss-only", "NEDSurfaceToDiscreteRigidBodyContact"), tmp_path / "deck"
     )
+    deck = (tmp_path / "deck" / "test.inp").read_text()
+    deck = deck.replace("output-frequency=50", "output-frequency=50\nload-balance-costs=elementNumber")
+    deck = deck.replace("maxNumInc=2000", "maxNumInc=160")
+    (tmp_path / "deck" / "test.inp").write_text(deck)
+    tmp_path = tmp_path / "deck"
+    (tmp_path / "run.py").write_text(_CONSISTENT_COPIES_SCRIPT)
     output, exitCode = _runUnderMPI(tmp_path)
     if output is None:
-        pytest.fail("the refused migration left processes waiting")
-    assert exitCode != 0, output
-    assert (
-        "Moving elements between the processes reads the copies of the constraints and the rigid-body surfaces "
-        "every process holds, which are consistent only right after a synchronization of the model: it was last "
-        "synchronized after accepted increment 3, and 4 increment(s) have been accepted." in output
-    ), output
+        pytest.fail("the run left processes waiting")
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert exitCode == 0 and len(reports) == 3 and all(" True " in report for report in reports), output
 
 
 _MATERIAL_PROPERTIES_DECK = """
