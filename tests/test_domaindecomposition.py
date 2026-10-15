@@ -814,6 +814,83 @@ def test_the_net_force_outside_the_subdomain_is_never_read(tmp_path):
     assert reports == sorted("PROCESS {:} {:} SAME".format(rank, deck) for rank in range(3) for deck in decks), output
 
 
+#: Runs the decks given, with vectors of the subdomain and with vectors of the whole model, and prints,
+#: per process and deck, whether the final node fields are the same bits, and how many degrees of
+#: freedom the DofManager of the subdomain numbered of how many of the model.
+_VECTORS_OF_SUBDOMAIN_SCRIPT = """
+import contextlib, io, os, sys
+import numpy as np
+from edelweissfe.domaindecomposition.mpienvironment import worldCommunicator
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.solvers.nonlinearexplicitdynamicmpi import NEDMPI
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+rank = worldCommunicator().Get_rank()
+reasons = NEDMPI.__dict__["reasonsForVectorsOfWholeModel"]
+sizes = []
+createDofManager = NEDMPI.createDofManager
+
+
+def recordingSize(self, model):
+    dofManager = createDofManager(self, model)
+    sizes.append(dofManager.nDof)
+    return dofManager
+
+
+NEDMPI.createDofManager = recordingSize
+
+
+def finalFields(directory):
+    os.chdir(directory)
+    with contextlib.redirect_stdout(io.StringIO()):
+        model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+    return np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+
+
+for directory in sys.argv[1:]:
+    sizes.clear()
+    ofSubdomain = finalFields(directory)
+    sizeOfSubdomain = sizes[0]
+    NEDMPI.reasonsForVectorsOfWholeModel = staticmethod(lambda model: ["a test"])
+    sizes.clear()
+    ofWholeModel = finalFields(directory)
+    NEDMPI.reasonsForVectorsOfWholeModel = reasons
+    same = np.array_equal(ofSubdomain.view(np.int64), ofWholeModel.view(np.int64))
+    print("PROCESS", rank, os.path.basename(directory), "SAME" if same else "DIFFERENT", sizeOfSubdomain < sizes[0], flush=True)
+"""
+
+
+def test_vectors_of_the_subdomain_give_the_bits_of_vectors_of_the_whole_model(tmp_path):
+    # A process numbering only the degrees of freedom of its subdomain -- the global numbering,
+    # compressed -- computes the same bits as one holding vectors of the whole model: the elements,
+    # a constraint force, Dirichlet conditions on node sets split between the processes, the output.
+    decks = ["NED", "NEDEqualValuePenalty"]
+    testfiles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "testfiles", "mpi")
+    for deck in decks:
+        shutil.copytree(os.path.join(testfiles, "edelweiss-only", deck), tmp_path / deck)
+    (tmp_path / "run.py").write_text(_VECTORS_OF_SUBDOMAIN_SCRIPT)
+
+    pytest.importorskip("mpi4py.MPI")
+    mpirun = shutil.which("mpirun")
+    if mpirun is None:
+        pytest.skip("no MPI launcher")
+    environment = dict(
+        os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(edelweissfe.__file__)), OMP_NUM_THREADS="1"
+    )
+    output = subprocess.run(
+        [mpirun, "--bind-to", "none", "-n", "3", sys.executable, "run.py"] + [str(tmp_path / deck) for deck in decks],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    ).stdout
+    reports = sorted(line for line in output.splitlines() if line.startswith("PROCESS"))
+    assert reports == sorted(
+        "PROCESS {:} {:} SAME True".format(rank, deck) for rank in range(3) for deck in decks
+    ), output
+
+
 _FAILING_LOAD_DECK = """
 *material, name=LinearElastic, id=linearelastic, provider=edelweiss
 30000.0, 0.15, 1.0
