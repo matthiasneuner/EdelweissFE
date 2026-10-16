@@ -503,15 +503,17 @@ holds (`Nodes of the subdomain`_), its subdomain's and those its model entities 
 What still reads or changes degrees of freedom outside a subdomain during a run keeps vectors of the
 whole model in every process, decided once per job and reported on rank 0 (``Vectors of the whole model
 on every process because: ...``; :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`):
-a model holding every element on every process, a model modifier changing the mesh (adaptive
-refinement), a constraint searching its connectivity (contact), a rigid body, and scalar variables. Until those read only what they receive, they run as described in the
+a model holding every element on every process, a model modifier changing the mesh that reads every
+node (:attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.changesMeshWithNodesOfSubdomain`
+False; adaptive refinement is not one, see `Adaptive refinement`_), a constraint searching its
+connectivity (contact), a rigid body, and scalar variables. Until those read only what they receive, they run as described in the
 rest of this page, with vectors of the whole model current at the subdomain degrees of freedom.
 
 Nodes of the subdomain
 ~~~~~~~~~~~~~~~~~~~~~~
 
-A distributed model whose processes compute their subdomains only -- no contact search, no adaptive
-refinement, no rigid body: the reasons of
+A distributed model whose processes compute their subdomains only -- no contact search, no rigid body,
+no model modifier reading every node: the reasons of
 :func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`, read from the input
 file, the reasons for vectors of the whole model as far as the input names them -- holds in each
 process the node objects, and the node fields, of the nodes of its subdomain only. Decided once per
@@ -527,7 +529,12 @@ the input rule missed. The element distribution says which nodes a process holds
   (:meth:`~edelweissfe.models.femodel.FEModel.wholeNodeSet`) -- the process evaluating it reads it, the
   others hold it so that their copies of the constraint can be synchronized from it --, and the nodes of
   the elements a contact facet (of a tie) is cut from, which every process makes. These are
-  surface-sized.
+  surface-sized;
+* the nodes of the hanging-node constraints of an adaptive refinement, slaves and masters
+  (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfMultiPointConstraints`),
+  in every process: a process integrating one degree of freedom of a group of them integrates all of
+  it, and every process records each of them by global degree of freedom. These are of the size of the
+  refined interface, and replaced at every refinement.
 
 Every other node set holds the part of its set held here, and refuses to be read as a whole, like an
 element set. A Dirichlet condition and a concentrated load lay out their values one row per node of
@@ -552,8 +559,18 @@ contributed by several processes holds the same bits in each:
 When elements move between the
 processes, the nodes follow them: a process makes the node objects of its new elements and drops
 those no element or reader needs any more, its node fields resized -- the values of the nodes it keeps
-kept -- and filled with the carried vectors when the equation system is built again
+kept --, the values of its new nodes sent with the elements by the process they come from, and filled
+with the carried vectors when the equation system is built again
 (:meth:`~edelweissfe.models.femodel.FEModel.holdNodesOfDistribution`).
+
+A node made during a run starts without its values (:meth:`~edelweissfe.models.femodel.FEModel.nodesAwaitingValues`)
+until something writes them: a refinement interpolating it, the process an element moved from sending
+them. After a topology update, before the equation system is built from the node fields, every node a
+process made in the update whose values it could not write -- a new node interpolated from nodes it
+does not hold, a node held from now on for a reader or a hanging node -- receives them from the
+processes holding them
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.completeNodesAwaitingValues`), which
+must send the same bits; a node no process holds the values of stops the run.
 
 Where the whole model is read
 -----------------------------
@@ -578,9 +595,11 @@ output increment                   to **rank 0**, which writes the output and th
                                    process** the solution at the reference nodes of the rigid bodies,
                                    whose surfaces every process moves (they are nodes of the model)
 output increment the topology      to **every process**: all of the above but the element states, and
-check follows (every               of the element field outputs those the markers read; every process
-``topology-check-frequency``-th)   refines the same mesh, interpolates its node fields onto the refined
-                                   mesh, and builds its equation system from them
+check follows (every               of the element field outputs those the markers read, and of the node
+``topology-check-frequency``-th)   fields the markers read at every node those (the recovery-error
+                                   marker's); every process refines the same mesh, interpolates its
+                                   node fields onto the refined mesh, and builds its equation system
+                                   from them
 end of a step                      to **every process**, as before a topology check: the next step
                                    starts with a topology update and an equation system built from the
                                    node fields; a field output whose last result went to rank 0 only is
@@ -795,24 +814,29 @@ What the constraint exchange costs, and what balancing with the constraints buys
 Adaptive refinement
 -------------------
 
-Adaptive refinement (``hAdaptivity``) runs on a distributed model. What it decides is split by
-what it reads:
+Adaptive refinement (``hAdaptivity``) runs on a distributed model, each process holding the nodes of
+its subdomain only (`Nodes of the subdomain`_). What it decides is split by what it reads:
 
 **Replicated, the same in every process: the topology.** The octree mirror, the marking, the 2:1
 balance, the hanging nodes and the conformity check, and the numbers of the new nodes and elements,
-are derived from the mesh, the nodes and the node fields -- which every process holds whole -- and
-never from an element object (:mod:`~edelweissfe.modelmodifiers.adaptivity.hadaptivity`). The
-markers (:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
+are derived from the mesh -- which every process holds whole -- and from results gathered to every
+process, never from an element or node object
+(:mod:`~edelweissfe.modelmodifiers.adaptivity.hadaptivity`). The markers
+(:mod:`~edelweissfe.adaptivity.marking`) mark element *numbers*:
 
 * a field-output marker thresholds the result of an element field output, row by row in the set
   order of the mesh; it names that field output
   (:meth:`~edelweissfe.adaptivity.marking.MarkerBase.fieldOutputsRead`), which is therefore gathered
   to every process on the output increment a topology check follows (``resultsOfWholeSet``);
-* the element-set, node-set and surface markers read the sets and surfaces of the mesh;
-* the recovery-error marker reads the node coordinates and a node field at the nodes of the
-  refineable elements of the mesh -- global data only, current in every process after the output
-  synchronization a topology check follows -- so it, too, marks the same elements everywhere and
-  needs no gather of its own.
+* the element-set, node-set and surface markers read the sets and surfaces of the mesh, whole;
+* the recovery-error marker reads the coordinates of the nodes of the refineable elements in the mesh,
+  and an entry of a node field at every node carrying it, which it names
+  (:meth:`~edelweissfe.adaptivity.marking.MarkerBase.nodeFieldEntriesRead`): where each process holds
+  the nodes of its subdomain only, that entry is gathered to every process right before the topology
+  update, which may not communicate
+  (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.gatherNodeFieldEntries`) -- of
+  the size of the field, transient, at a topology check only. (An interim: a recovery from the element
+  owners, per element, would need no gather.)
 
 Every process therefore refines the same mesh, and numbers it the same way. That is verified, not
 assumed: whenever the equation system is built afresh -- at the start, after a topology change or a
@@ -840,7 +864,23 @@ process that computed its parent
 (:meth:`~edelweissfe.domaindecomposition.distributedelements.DistributedElements.placeChildElement`).
 Only that process creates it from the mesh, assigns it its parent's section and element properties,
 and transfers its parent's state to it; the parent is then dropped. Every process updates the mesh,
-the nodes, the element and node sets, the surfaces and the node fields identically. After the
+the element and node sets and the surfaces identically.
+
+**Owner-local, too: the nodes and their values.** The process computing a refined element holds the
+nodes of its children (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfChildren`),
+made before the children, and every process the hanging nodes and their masters; each process resizes
+its own node fields. A new node takes its values from the parent it is first met in (the new cells in
+the order of their octree ids, level by level) whose nodes all carry them -- decided from the mesh and
+the global numbering, the same in every process --, interpolated by the parent's shape functions at the
+node (:class:`~edelweissfe.modelmodifiers.adaptivity.hadaptivity.NewNodeValues`). A node of the parent
+whose weight is zero there enters the sum as an exact zero, so only the nodes of the parent's face or
+edge the new node lies on are read: a process interpolates a new node wherever it holds those -- every
+new node of the elements it computes, and a new node on a face shared with an element of another
+process from the same nodes, in the same order, with the same bits as that process (the "fields
+resize & restore" of the topology update is local). The few it cannot interpolate -- a new node held
+for a reader, a hanging node far from its elements -- it receives after the update (`Nodes of the
+subdomain`_). A serial run interpolates in the same way: its zero-weight terms, ``0 * value`` before,
+are exact zeros now, which changes no bit but the sign of a zero. After the
 modifier, the topology pipeline lets the distribution create and drop the elements of the changed
 mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`): a
 process drops the elements no longer in the mesh. The equation
