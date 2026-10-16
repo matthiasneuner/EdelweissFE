@@ -417,10 +417,11 @@ cdef class PyAMGCLEquilibratedSystem:
         EquilibratedSystem.absoluteDiagonal(n, &indptr_[0], &indices_[0], &data_[0], &out_[0])
         return out
 
-    def build(self, object A, object dinv, object fieldBounds):
+    def build(self, object A, object dinv, object fieldBounds, bint keepUnscaled=False):
         """
         A: scipy.sparse csr_matrix (square); dinv: the equilibration, length n; fieldBounds: a
-        sequence of ``(start, stop)`` DOF ranges, one per field, disjoint.
+        sequence of ``(start, stop)`` DOF ranges, one per field, disjoint. keepUnscaled: also keep A
+        itself, for :meth:`unscaledMatvec`/:meth:`unscaledResidual` and an outer solve on it.
         """
         if not scipy.sparse.isspmatrix_csr(A):
             A = A.tocsr()
@@ -441,7 +442,7 @@ cdef class PyAMGCLEquilibratedSystem:
         cdef int[:, ::1] bounds_ = bounds
         cdef int nFields = bounds.shape[0]
         self.system.build(n, &indptr_[0], &indices_[0], &data_[0], &dinv_[0], nFields,
-                          &bounds_[0, 0] if nFields > 0 else NULL)
+                          &bounds_[0, 0] if nFields > 0 else NULL, keepUnscaled)
         self.n = n
 
     def diagonalBlock(self, int field):
@@ -465,6 +466,26 @@ cdef class PyAMGCLEquilibratedSystem:
         cdef double[::1] y_ = y
         self.system.matvec(&x_[0], &y_[0])
         return y
+
+    def unscaledMatvec(self, object x):
+        """Returns ``A @ x`` on the unscaled operator (``build(..., keepUnscaled=True)``)."""
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] x_arr = np.ascontiguousarray(x, dtype=np.float64)
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] y = np.empty(self.n, dtype=np.float64)
+        cdef double[::1] x_ = x_arr
+        cdef double[::1] y_ = y
+        self.system.unscaledMatvec(&x_[0], &y_[0])
+        return y
+
+    def unscaledResidual(self, object rhs, object x):
+        """Returns ``rhs - A @ x`` on the unscaled operator."""
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] rhs_arr = np.ascontiguousarray(rhs, dtype=np.float64)
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] x_arr = np.ascontiguousarray(x, dtype=np.float64)
+        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] r = np.empty(self.n, dtype=np.float64)
+        cdef double[::1] rhs_ = rhs_arr
+        cdef double[::1] x_ = x_arr
+        cdef double[::1] r_ = r
+        self.system.unscaledResidual(&rhs_[0], &x_[0], &r_[0])
+        return r
 
     def residual(self, object rhs, object x):
         """Returns ``rhs - As @ x`` as a new float64 array."""
@@ -627,10 +648,11 @@ cdef class PyAMGCLLGMRESSolver:
             del self.solver
 
     def solve(self, PyAMGCLEquilibratedSystem system, object rhs, object applyPreconditioner, double tol,
-              int maxiter, object x0=None):
+              int maxiter, object x0=None, bint onUnscaledOperator=False):
         """
         system
-            This solve's equilibrated full coupled operator.
+            This solve's equilibrated full coupled operator -- or, with ``onUnscaledOperator``, the
+            unscaled one it kept (``build(..., keepUnscaled=True)``).
         rhs
             array-like, converted to 1D float64 (C-contiguous).
         applyPreconditioner
@@ -679,7 +701,7 @@ cdef class PyAMGCLLGMRESSolver:
         try:
             self.solver.solve(
                 system.system[0], &rhs_[0], &x_[0],
-                tol, maxiter, _lgmresPrecondApplyTrampoline, ctx, iters, error
+                tol, maxiter, _lgmresPrecondApplyTrampoline, ctx, iters, error, onUnscaledOperator
             )
         finally:
             self._precondCallable = None

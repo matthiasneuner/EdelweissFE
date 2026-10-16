@@ -655,6 +655,12 @@ Adaptive tolerance and true-residual enforcement
       - ``2``
       - How many warm-restart continuations may be spent enforcing the requested tolerance on the
         true residual. ``0`` disables enforcement.
+    * - ``krylovOnScaledSystem``
+      - ``true``
+      - **Experimental.** ``false`` runs the outer Krylov solve on the unscaled system, right-
+        preconditioned by :math:`x = D M^{-1} (D r)` with the same block preconditioner on
+        :math:`D A D`: its convergence norm is then the true residual, and the gap compensation and
+        continuations are bypassed. At the same requested tolerance it does not over-solve.
     * - ``gapCompensatedTolerance``
       - ``false``
       - **Opt-in.** Pre-compensate the first pass for the scaled-to-true residual gap so that it

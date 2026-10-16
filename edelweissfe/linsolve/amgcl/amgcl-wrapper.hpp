@@ -380,7 +380,11 @@ class EquilibratedSystemT {
 public:
   typedef amgcl::backend::crs< double, int, int > Matrix;
 
-  std::shared_ptr< Matrix >                operator_;
+  std::shared_ptr< Matrix > operator_;
+  /// the unscaled operator A, kept only on request (build()'s keepUnscaled): operator_'s pattern (its
+  /// ptr/col arrays, shared, not copied) with A's own values
+  std::shared_ptr< Matrix >                unscaled_;
+  std::vector< double >                    unscaledValues_;
   std::vector< std::shared_ptr< Matrix > > couplings_;   // nFields x nFields, row-major; null on the diagonal
   std::vector< int >                       fieldStart_, fieldStop_;
   std::vector< signed char >               fieldOfDof_;  // -1 for a DOF in no field
@@ -406,13 +410,16 @@ public:
   /// @param dinv the equilibration, D = diag(dinv).
   /// @param nFields, fieldBounds the fields' DOF ranges, [fieldBounds[2k], fieldBounds[2k+1]),
   /// disjoint.
+  /// @param keepUnscaled also keep A itself (without its stored zeros), for an outer Krylov solve on
+  /// the unscaled system: unscaledMatvec(), unscaledResidual(), LGMRESOuterSolverT::solve().
   void build( int           n,
               const int*    ptr,
               const int*    col,
               const double* val,
               const double* dinv,
               int           nFields,
-              const int*    fieldBounds )
+              const int*    fieldBounds,
+              bool          keepUnscaled = false )
   {
     n_       = n;
     nFields_ = nFields;
@@ -463,6 +470,27 @@ public:
     }
     const int* const filteredPtr = operator_->ptr;
     const int* const filteredCol = operator_->col;
+
+    unscaled_.reset();
+    unscaledValues_.clear();
+    if ( keepUnscaled ) {
+      unscaledValues_.resize( operator_->nnz );
+#pragma omp parallel for
+      for ( ptrdiff_t i = 0; i < n; ++i ) {
+        int head = operator_->ptr[i];
+        for ( int j = ptr[i]; j < ptr[i + 1]; ++j )
+          if ( val[j] != 0.0 )
+            unscaledValues_[head++] = val[j];
+      }
+      unscaled_           = std::make_shared< Matrix >();
+      unscaled_->nrows    = n;
+      unscaled_->ncols    = n;
+      unscaled_->nnz      = operator_->nnz;
+      unscaled_->ptr      = operator_->ptr;
+      unscaled_->col      = operator_->col;
+      unscaled_->val      = unscaledValues_.data();
+      unscaled_->own_data = false;
+    }
 
     // per row, the number of entries in each field's columns: row pointers of the diagonal blocks
     // (kept) and of the coupling blocks (consumed below)
@@ -574,6 +602,33 @@ public:
     auto xRange = amgcl::make_iterator_range( x, x + n_ );
     auto yRange = amgcl::make_iterator_range( y, y + n_ );
     amgcl::backend::spmv( 1.0, *operator_, xRange, 0.0, yRange );
+  }
+
+  void checkUnscaled() const
+  {
+    if ( !unscaled_ ) {
+      throw std::runtime_error(
+        "EquilibratedSystemT: the unscaled operator was not kept -- build( ..., keepUnscaled )" );
+    }
+  }
+
+  /// @brief y <- A x, on the unscaled operator (see build()'s keepUnscaled)
+  void unscaledMatvec( const double* x, double* y ) const
+  {
+    checkUnscaled();
+    auto xRange = amgcl::make_iterator_range( x, x + n_ );
+    auto yRange = amgcl::make_iterator_range( y, y + n_ );
+    amgcl::backend::spmv( 1.0, *unscaled_, xRange, 0.0, yRange );
+  }
+
+  /// @brief r <- rhs - A x, on the unscaled operator
+  void unscaledResidual( const double* rhs, const double* x, double* r ) const
+  {
+    checkUnscaled();
+    auto rhsRange = amgcl::make_iterator_range( rhs, rhs + n_ );
+    auto xRange   = amgcl::make_iterator_range( x, x + n_ );
+    auto rRange   = amgcl::make_iterator_range( r, r + n_ );
+    amgcl::backend::residual( rhsRange, *unscaled_, xRange, rRange );
   }
 
   /// @brief r <- rhs - As x
@@ -821,7 +876,9 @@ public:
 
   /// @brief x <- A^-1 rhs, right-preconditioned by the callback (applyFn/ctx). x holds the initial
   /// guess on input (blockamg's warm-started continuation retry pre-fills it) and the solution on
-  /// output; iters/error return lgmres's iteration count and its own scaled relative residual.
+  /// output; iters/error return lgmres's iteration count and its own relative residual -- of the
+  /// equilibrated system As, or, onUnscaledOperator, of A itself (the right preconditioner then has
+  /// to map an A-residual to an A-correction).
   void solve( const EquilibratedSystemT& system,
               const double*              rhs,
               double*                    x,
@@ -830,9 +887,12 @@ public:
               PyPrecondApplyFn           applyFn,
               void*                      ctx,
               int&                       iters,
-              double&                    error )
+              double&                    error,
+              bool                       onUnscaledOperator = false )
   {
     system.checkBuilt();
+    if ( onUnscaledOperator )
+      system.checkUnscaled();
     const int n = system.n_;
     if ( n != n_ ) {
       throw std::runtime_error( "LGMRESOuterSolverT::solve(): n=" + std::to_string( n ) + " does not match the size " +
@@ -849,9 +909,12 @@ public:
 
     size_t itersOut;
     double errorOut;
-    std::tie( itersOut, errorOut ) = ( *solver_ )( *system.operator_, precond, rhs_rng, x_rng );
-    iters                          = static_cast< int >( itersOut );
-    error                          = errorOut;
+    if ( onUnscaledOperator )
+      std::tie( itersOut, errorOut ) = ( *solver_ )( *system.unscaled_, precond, rhs_rng, x_rng );
+    else
+      std::tie( itersOut, errorOut ) = ( *solver_ )( *system.operator_, precond, rhs_rng, x_rng );
+    iters = static_cast< int >( itersOut );
+    error = errorOut;
   }
 };
 

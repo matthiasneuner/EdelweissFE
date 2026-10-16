@@ -120,12 +120,14 @@ cdef extern from "amgcl-wrapper.hpp":
         @staticmethod
         void absoluteDiagonal(int n, const int* ptr, const int* col, const double* val, double* out) except +
         void build(int n, const int* ptr, const int* col, const double* val, const double* dinv,
-                   int nFields, const int* fieldBounds) except +
+                   int nFields, const int* fieldBounds, bint keepUnscaled) except +
         int diagonalBlockSize(int f) except +
         int diagonalBlockNnz(int f) except +
         void fillDiagonalBlock(int f, int* ptr, int* col, double* val) except +
         void matvec(const double* x, double* y) except +
         void residual(const double* rhs, const double* x, double* r) except +
+        void unscaledMatvec(const double* x, double* y) except +
+        void unscaledResidual(const double* rhs, const double* x, double* r) except +
         void couplingMatvec(int f, int g, const double* x, double* y) except +
         void diagonalBlockMatvec(int f, const double* x, double* y) except +
 
@@ -147,7 +149,8 @@ cdef extern from "amgcl-wrapper.hpp":
                    PyPrecondApplyFn applyFn,
                    void* ctx,
                    int& iters,
-                   double& error) except +
+                   double& error,
+                   bint onUnscaledOperator) except +
 
     # OpenMP-threaded sparse-matrix product/sum, wired into
     # edelweissfe/numerics/mpctransformation.py's T^T K T + C condensation as an opt-in alternative

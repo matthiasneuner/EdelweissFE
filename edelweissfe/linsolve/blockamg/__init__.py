@@ -64,6 +64,9 @@ def createSolver(opts) -> Callable:
         ``lgmresAlwaysReset``, ``lgmresResetOnNewIncrement``
             Deprecated: LGMRES recycling across solves was removed. ``true`` / ``false`` respectively
             are still accepted, with a deprecation note; a value asking for recycling raises.
+        ``krylovOnScaledSystem``
+            Experimental: ``false`` runs the outer solve on the unscaled system, so that its convergence
+            norm is the true residual -- see :class:`~edelweissfe.linsolve.blockamg.blockamg.BlockAMGSolver`.
         ``etaMin``, ``etaMax``, ``ewGamma``, ``ewAlpha``, ``residualGrowthFactor``,
         ``hierarchyStalenessFactor``, ``refreshOnNewIncrement``
             Knobs for the adaptive outer tolerance and the per-field AMG hierarchy reuse across Newton
