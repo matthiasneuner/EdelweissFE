@@ -58,6 +58,7 @@ from edelweissfe.modelmodifiers.base.modelmodifierbase import (
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange, coalesce
 from edelweissfe.models.modelchangeobserver import ModelChangeType
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.utils.exceptions import TopologyError
 from edelweissfe.utils.performancetiming import timeit
 from edelweissfe.utils.schema import (
@@ -286,6 +287,10 @@ class ModelModifier(ModelModifierBase):
     #: See ModelModifierBase.nodeFieldEntriesOfNewNodes.
     nodeFieldEntriesOfNewNodes = WARM_STARTED_NODE_FIELD_ENTRIES
 
+    #: It decides the refinement from the mesh, and interpolates a new node from the nodes of its parent
+    #: held here; see ModelModifierBase.changesMeshWithNodesOfSubdomain and :class:`NewNodeValues`.
+    changesMeshWithNodesOfSubdomain = True
+
     #: Whether the step-start markers are still to be evaluated: they act on the first decision only.
     checkpointedState = {"_isFirstCall": bool}
 
@@ -424,12 +429,14 @@ class ModelModifier(ModelModifierBase):
 
         # all-encompassing sets (contain every node, e.g. 'all', 'ALLNODES') are not boundary BCs --
         # they just gain every new node; rebuild them wholesale, don't guard/track them
-        allLabels = set(model.nodes.keys())
-        self._allLikeSets = {name for name, ns in model.nodeSets.items() if {n.label for n in ns.nodes} == allLabels}
+        # (read as whole sets, from their labels: a process may hold only part of a set)
+        allLabels = set(mesh.nodeLabels.tolist())
+        labelsOfSet = {name: nodeSet.nodeLabelsOfWholeSet() for name, nodeSet in model.nodeSets.items()}
+        self._allLikeSets = {name for name, labels in labelsOfSet.items() if set(labels) == allLabels}
         # track the remaining (boundary) node sets so real BCs gain new boundary nodes on refinement
-        for setName, nodeSet in model.nodeSets.items():
+        for setName, labels in labelsOfSet.items():
             if setName not in self._allLikeSets:
-                self._octree.define_node_set(setName, [n.label for n in nodeSet])
+                self._octree.define_node_set(setName, labels)
 
         # track element sets so user element sets propagate child elements on refinement
         numberToEid = {number: eid for eid, number in self._eidToNumber.items()}
@@ -512,6 +519,18 @@ class ModelModifier(ModelModifierBase):
         """
 
         return fieldOutputsReadByAll(self.markers)
+
+    def nodeFieldEntriesRead(self) -> set[tuple[str, str]]:
+        """Those the markers read; see
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.nodeFieldEntriesRead`.
+
+        Returns
+        -------
+        set[tuple[str, str]]
+            The (field, entry) pairs.
+        """
+
+        return {key for marker in self.markers for key in marker.nodeFieldEntriesRead()}
 
     @timeit("AMR")
     def plan(self, model: FEModel, change, step) -> "RefinementPlan | None":
@@ -623,6 +642,14 @@ class ModelModifier(ModelModifierBase):
             # of its nodes nor a hanging-node slave, i.e. if the refined interface is not conforming.
             self._octree.check_conformity(records)
 
+        # every process records every hanging node by global degree of freedom: their nodes are held in
+        # every process (surface-sized), in place of those of the hanging nodes before
+        model.elementDistribution.holdNodesOfMultiPointConstraints(
+            dict.fromkeys(
+                label for slave, masters in records.items() for label in (slave, *(master for master, _ in masters))
+            )
+        )
+
         with timeit("materialize"):
             change = self._materialize(model, records)
 
@@ -674,18 +701,17 @@ class ModelModifier(ModelModifierBase):
         octree = self._octree
         # the active elements are about to change; so does the adjacency a marker's halo grows over
         self._refineableElements.invalidateNodeAdjacency()
-        oldValues = self._snapshotNodalValues(model)
-        newNodes = self._createNewNodes(model)
-
         active = set(octree.active())
-        newValues = {key: {} for key in oldValues}  # interpolated values for new nodes, per (field, entry)
-        levelChanges, newChildEids = self._createChildElements(model, active, newNodes, oldValues, newValues)
+        newNodeValues = NewNodeValues(model, WARM_STARTED_NODE_FIELD_ENTRIES, self._topology)
+        newLabels = self._createNewNodes(model, active)
+
+        levelChanges, newChildEids = self._createChildElements(model, active, newLabels, newNodeValues)
 
         # The new nodes and the removals ride on the LAST level's changeset: nothing created there
         # is transient (only intermediates are, and they always have a level below them), so the
         # coalesce below cannot drop them.
         change = levelChanges[-1] if levelChanges else ModelChange(kind=ModelChangeType.REFINEMENT)
-        change.addedNodes |= set(newNodes.keys())
+        change.addedNodes |= set(newLabels)
         self._removeRefinedParents(model, active, change)
         if len(levelChanges) > 1:
             change = coalesce(levelChanges)
@@ -693,53 +719,49 @@ class ModelModifier(ModelModifierBase):
 
         self._updateSurfaces(model, newChildEids, change)
         with timeit("sets & fields sync"):
-            self._updateSets(model, records, newNodes, newChildEids, change)
+            self._updateSets(model, records, newLabels, newChildEids, change)
 
         with timeit("fields resize & restore"):
-            self._resizeNodeFieldsAndWarmStart(model, oldValues, newValues)
+            self._resizeNodeFieldsAndWarmStart(model, newNodeValues)
 
         # Separately timed: this relinks EVERY node's field variables, so its cost scales with the
         # whole mesh rather than with what this refinement actually changed.
         with timeit("relink field variables"):
-            model._linkFieldVariableObjects(model.nodeSets["all"])
+            model._linkFieldVariableObjects(list(model.nodes.values()))
         return change
 
-    def _snapshotNodalValues(self, model: FEModel) -> dict:
-        """Copy the converged values of every warm-started node field entry, before the mesh changes.
-
-        On the replay path this is dead work -- readRestart overwrites every node field right
-        afterwards -- but a "skip this on replay" branch is exactly the kind of live/replay
-        divergence that made a resumed run rebuild a different mesh.
-
-        Returns
-        -------
-        dict
-            ``{(fieldName, entryName): {node: value}}``.
-        """
-
-        oldValues = {}
-        for fieldName, nodeField in model.nodeFields.items():
-            for entryName in WARM_STARTED_NODE_FIELD_ENTRIES:
-                if entryName in nodeField:
-                    entryValues = np.asarray(nodeField[entryName])
-                    oldValues[(fieldName, entryName)] = {
-                        node: entryValues[nodeField._indicesOfNodesInArray[node]].copy() for node in nodeField.nodes
-                    }
-        return oldValues
-
-    def _createNewNodes(self, model: FEModel) -> dict:
+    def _createNewNodes(self, model: FEModel, active: set) -> list:
         """Describe in the mesh the nodes this refinement created (the octree does,
-        :meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.describe_new_nodes`), and create them.
+        :meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.describe_new_nodes`), and create those held
+        here: where a process holds the nodes of its subdomain only, the nodes of the children of the
+        elements it computes (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfChildren`),
+        and the hanging nodes and their masters.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        active
+            The active octree cells.
 
         Returns
         -------
-        dict
-            The new nodes, by label.
+        list
+            The labels of the new nodes, held here or not.
         """
 
-        newLabels = self._octree.describe_new_nodes()
+        octree = self._octree
+        newLabels = octree.describe_new_nodes()
+        distribution = model.elementDistribution
+        for eid in self._cellsToCreate(active):
+            ancestor = octree.parent(eid)
+            while ancestor is not None and ancestor not in self._eidToNumber:
+                ancestor = octree.parent(ancestor)
+            # (a cell without a materialised ancestor is refused when the children are created)
+            if ancestor is not None:
+                distribution.holdNodesOfChildren(self._eidToNumber[ancestor], octree.connectivity(eid))
         model.createNodesOfMesh()
-        return {label: model.nodes[label] for label in newLabels}
+        return newLabels
 
     def _cellsToCreate(self, active: set) -> set:
         """Every octree cell that must become a model element but is not one yet.
@@ -762,7 +784,7 @@ class ModelModifier(ModelModifierBase):
         return pending
 
     def _createChildElements(
-        self, model: FEModel, active: set, newNodes: dict, oldValues: dict, newValues: dict
+        self, model: FEModel, active: set, newLabels: list, newNodeValues: "NewNodeValues"
     ) -> tuple[list, set]:
         """Create the child elements of every refined parent, one octree level at a time.
 
@@ -777,12 +799,10 @@ class ModelModifier(ModelModifierBase):
             The model tree.
         active
             The active octree cells.
-        newNodes
-            The nodes created in this refinement, by label.
-        oldValues
-            The snapshot of the converged nodal values, see :meth:`_snapshotNodalValues`.
-        newValues
-            Filled with the values interpolated at the new nodes, keyed like ``oldValues``.
+        newLabels
+            The labels of the nodes created in this refinement.
+        newNodeValues
+            Interpolates the values at the new nodes.
 
         Returns
         -------
@@ -792,6 +812,7 @@ class ModelModifier(ModelModifierBase):
 
         octree = self._octree
         pending = self._cellsToCreate(active)
+        newLabels = set(newLabels)
         levelChanges = []
         newChildEids = set()
         while pending:
@@ -810,7 +831,7 @@ class ModelModifier(ModelModifierBase):
             childNumbers = model.topology.reserveElementNumbers(len(levelEids))
             with timeit("elements & state transfer"):
                 for eid, elNumber in zip(levelEids, childNumbers):
-                    self._createChildElement(model, eid, elNumber, newNodes, oldValues, newValues, change)
+                    self._createChildElement(model, eid, elNumber, newLabels, newNodeValues, change)
             self._recordFaceMap(levelEids, change)
 
             levelChanges.append(change)
@@ -823,9 +844,8 @@ class ModelModifier(ModelModifierBase):
         model: FEModel,
         eid: int,
         elNumber: int,
-        newNodes: dict,
-        oldValues: dict,
-        newValues: dict,
+        newLabels: set,
+        newNodeValues: "NewNodeValues",
         change: ModelChange,
     ):
         """Describe the element of one octree child cell in the mesh; create it where its parent is
@@ -851,19 +871,9 @@ class ModelModifier(ModelModifierBase):
         # isoparametric map, so the increment restarts from a consistent state, not zero
         octant = octree.children(parentEid).index(eid)
         childParams = self._octantParams[octant]
-        parentNodes = [model.nodes[label] for label in parentRecord.nodeLabels]
         for i, label in enumerate(connectivity):
-            node = model.nodes[label]
-            if label in newNodes and any(node not in newValues[f] for f in oldValues):
-                N = self._topology.shape_functions(*childParams[i])
-                for key, vals in oldValues.items():
-                    # An intermediate parent's own nodes are new, so they are not in the
-                    # pre-mutation snapshot -- the level above interpolated them, and the next
-                    # level down interpolates from that in turn.
-                    interpolated = newValues[key]
-                    parentVals = [vals[pn] if pn in vals else interpolated.get(pn) for pn in parentNodes]
-                    if all(v is not None for v in parentVals):
-                        newValues[key][node] = N @ np.array(parentVals)
+            if label in newLabels and not newNodeValues.isComplete(label):
+                newNodeValues.interpolate(label, childParams[i], parentRecord.nodeLabels)
 
         self._eidToNumber[eid] = elNumber
         self._sectionOf[elNumber] = self._sectionOf[parentNumber]
@@ -931,7 +941,7 @@ class ModelModifier(ModelModifierBase):
                 model.mesh.setSurfaceElements(surfaceName, byFace)
                 model.resolveSurfaceOfMesh(surfaceName)
 
-    def _updateSets(self, model: FEModel, records: dict, newNodes: dict, newChildEids: set, change: ModelChange):
+    def _updateSets(self, model: FEModel, records: dict, newLabels: list, newChildEids: set, change: ModelChange):
         """Add the new nodes and elements to the node and element sets they belong to."""
 
         octree = self._octree
@@ -944,7 +954,7 @@ class ModelModifier(ModelModifierBase):
                 model.redefineNodeSet(setName, [label for label in sorted(labels) if label not in slaves])
                 change.changedNodeSets.add(setName)
 
-        if newNodes:
+        if newLabels:
             for setName in self._allLikeSets | {"all"}:
                 model.redefineNodeSet(setName, model.mesh.nodeLabels.tolist())
                 change.changedNodeSets.add(setName)
@@ -965,7 +975,7 @@ class ModelModifier(ModelModifierBase):
         model.resolveElementSetOfMesh("all")
         change.changedElementSets.add("all")
 
-    def _resizeNodeFieldsAndWarmStart(self, model: FEModel, oldValues: dict, newValues: dict):
+    def _resizeNodeFieldsAndWarmStart(self, model: FEModel, newNodeValues: "NewNodeValues"):
         """Resize the node fields to the new nodes, then write the warm-start values: the
         converged value on a retained node, the interpolated value on a new one.
 
@@ -973,6 +983,9 @@ class ModelModifier(ModelModifierBase):
         iteration after refinement sees a normal residual rather than a spurious ``dU = U - P = U``
         on every node. The other warm-started entries (``V``, ``A``, present only for the dynamic
         solvers) get just their own value.
+
+        A new node held here whose values could not be interpolated here (:class:`NewNodeValues`) awaits
+        them from another process (:meth:`~edelweissfe.models.femodel.FEModel.nodesAwaitingValues`).
 
         On the replay path the model postpones the resize to the end of the replay window -- see
         :meth:`TopologyPipeline.changes` -- so the writes below are then dead work, overwritten by
@@ -989,15 +1002,14 @@ class ModelModifier(ModelModifierBase):
                 if entryName not in nodeField:
                     continue
                 targets = [nodeField["U"], nodeField["P"]] if entryName == "U" else [nodeField[entryName]]
-                old = oldValues.get((fieldName, entryName), {})
-                new = newValues.get((fieldName, entryName), {})
                 for node in nodeField.nodes:
-                    value = old[node] if node in old else new.get(node)
+                    value = newNodeValues.valueAt(fieldName, entryName, node.label)
                     if value is None:
                         continue
                     idx = nodeField._indicesOfNodesInArray[node]
                     for target in targets:
                         target[idx] = value
+        model.nodeValuesWritten(newNodeValues.labelsInterpolatedHere())
 
     def encodePlan(self, plan: "RefinementPlan") -> dict:
         """Serialize a :class:`RefinementPlan` -- just the octree eids it names."""
@@ -1008,3 +1020,174 @@ class ModelModifier(ModelModifierBase):
         """Inverse of :meth:`encodePlan`."""
 
         return RefinementPlan(eids=[int(eid) for eid in data["eids"]])
+
+
+class NewNodeValues:
+    """The values of the nodes a refinement creates, interpolated from their parents' nodes, as the refinement
+    goes through the new cells, level by level and in the order of their octree ids.
+
+    A new node takes each value -- an entry of a node field, e.g. the solution ``U`` of the displacement
+    -- from the first parent it is met in whose nodes all hold that value, where they are nodes the
+    mesh had before (carrying the field) or new nodes interpolated before; a node still lacking a value
+    of some entry takes all of them again from the next parent it is met in. Which parent that is, is
+    decided from what every process holds whole -- the mesh and its global numbering of the degrees of
+    freedom (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) --, so every process
+    decides alike.
+
+    The value itself is the sum of the parent's nodal values weighted by its shape functions at the new
+    node. A node whose weight is zero contributes nothing, and is summed as an exact zero, so that only
+    the nodes of the parent with a weight need to be held: on a face or an edge of the parent, those of
+    that face or edge. A process holding only the nodes of its subdomain therefore interpolates a new node
+    wherever it holds those nodes -- every new node of the elements it computes, and a new node on the
+    face shared with an element of another process from the same nodes, with the same bits, as that
+    process does. A process holding no node of some field (a process without elements, say) cannot tell
+    which parent a serial run takes which value from, and interpolates nothing. A new node held here
+    that could not be interpolated here (none in a serial run) awaits its values from another process
+    (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.completeNodesAwaitingValues`).
+
+    Parameters
+    ----------
+    model
+        The model tree, before the new nodes are described in its mesh.
+    entries
+        The node field entries interpolated.
+    topology
+        The topology of the elements, which evaluates their shape functions.
+    """
+
+    def __init__(self, model: FEModel, entries: tuple, topology):
+        self._model = model
+        self._topology = topology
+        numbering = GlobalDofNumbering.ofModel(model)
+        #: Per field, which nodes of the mesh before the refinement carry it, by row.
+        self._carrying = numbering.nodesCarryingField
+        #: The number of nodes of the mesh before the refinement: the new nodes follow them.
+        self._nNodesBefore = model.mesh.nNodes
+        #: The (field, entry) pairs of the node fields held here: of every field, the entries it holds.
+        heldKeys = [
+            (field, entry) for field, nodeField in model.nodeFields.items() for entry in entries if entry in nodeField
+        ]
+        #: Whether this process interpolates: whether it holds a node of every field of the model, and so
+        #: knows the interpolated pairs of the whole model, which decide the parents.
+        self.interpolatesHere = all(field in model.nodeFields for field in numbering.fields)
+        #: The interpolated (field, entry) pairs, the same in every process interpolating.
+        self.keys = heldKeys if self.interpolatesHere else []
+        #: Per (field, entry), the converged values at the nodes held here, by label, before the refinement.
+        self._before = {}
+        awaiting = model.nodesAwaitingValues()
+        for field, entry in heldKeys:
+            nodeField = model.nodeFields[field]
+            values = np.asarray(nodeField[entry])
+            self._before[(field, entry)] = {
+                node.label: values[nodeField.indexOfNode(node)].copy()
+                for node in nodeField.nodes
+                if node.label not in awaiting
+            }
+        #: Per (field, entry), a zero value, summed for the nodes of a parent without weight.
+        self._zero = {key: np.zeros(model.nodeFields[key[0]].dimension) for key in self.keys}
+        #: Per (field, entry), the new nodes given that value, by label -- the same in every process.
+        self._assigned = {key: set() for key in self.keys}
+        #: Per (field, entry), the values interpolated here, by label.
+        self._interpolated = {key: {} for key in self.keys}
+        #: The labels of the new nodes met so far.
+        self._met = set()
+
+    def isComplete(self, label: int) -> bool:
+        """Whether a new node was given every value.
+
+        Parameters
+        ----------
+        label
+            The node label.
+
+        Returns
+        -------
+        bool
+            Whether it was.
+        """
+
+        return not self.interpolatesHere or all(label in self._assigned[key] for key in self.keys)
+
+    def interpolate(self, label: int, parameters, parentLabels):
+        """Give a new node, met in a child of a parent, the values of its parent at it: each value every
+        node of the parent holds.
+
+        Parameters
+        ----------
+        label
+            The label of the new node.
+        parameters
+            Its coordinates in the reference element of the parent.
+        parentLabels
+            The labels of the nodes of the parent.
+        """
+
+        self._met.add(label)
+        N = self._topology.shape_functions(*parameters)
+        weighted = (N != 0.0).tolist()
+        rows = self._model.mesh.rowsOfNodes(parentLabels).tolist()
+        for key in self.keys:
+            carrying, assigned = self._carrying[key[0]], self._assigned[key]
+            if not all(
+                carrying[row] if row < self._nNodesBefore else parentLabel in assigned
+                for parentLabel, row in zip(parentLabels, rows)
+            ):
+                continue
+            assigned.add(label)
+            before, interpolated = self._before[key], self._interpolated[key]
+            parentValues = []
+            for parentLabel, isWeighted in zip(parentLabels, weighted):
+                value = before.get(parentLabel)
+                if value is None:
+                    value = interpolated.get(parentLabel)
+                if not isWeighted:
+                    value = self._zero[key]
+                elif value is None:
+                    # a node of the parent with a weight is not held here: another process interpolates it
+                    interpolated.pop(label, None)
+                    break
+                parentValues.append(value)
+            else:
+                interpolated[label] = N @ np.array(parentValues)
+
+    def valueAt(self, field: str, entry: str, label: int) -> np.ndarray | None:
+        """The value of a node held here after the refinement: its converged value if it was there before,
+        else its interpolated one.
+
+        Parameters
+        ----------
+        field
+            The field.
+        entry
+            The entry of the node field.
+        label
+            The node label.
+
+        Returns
+        -------
+        np.ndarray | None
+            The value; None if the node has none here.
+        """
+
+        key = (field, entry)
+        if key not in self._before:
+            return None
+        value = self._before[key].get(label)
+        return self._interpolated[key].get(label) if value is None and key in self._interpolated else value
+
+    def labelsInterpolatedHere(self) -> set:
+        """The labels of the new nodes held here that were given every value they were given anywhere.
+
+        Returns
+        -------
+        set
+            The node labels.
+        """
+
+        nodes = self._model.nodes
+        return {
+            label
+            for label in self._met
+            if label in nodes
+            and all(label in self._interpolated[key] for key in self.keys if label in self._assigned[key])
+        }

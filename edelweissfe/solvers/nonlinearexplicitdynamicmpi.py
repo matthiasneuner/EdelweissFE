@@ -512,8 +512,10 @@ class NEDMPI(NEDParallel):
 
         What still reads, or changes, degrees of freedom outside a subdomain during a run, until each
         receives what it reads: a model whose every process holds every element (and so the states to
-        synchronize); a model modifier changing the mesh, whose refinement interpolates the node fields
-        of the whole model; a constraint searching its connectivity (contact), which may couple degrees
+        synchronize); a model modifier changing the mesh that reads every node (not adaptive refinement,
+        which interpolates the nodes it creates from those a process holds,
+        :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.changesMeshWithNodesOfSubdomain`);
+        a constraint searching its connectivity (contact), which may couple degrees
         of freedom of another subdomain at its next search; a rigid body, whose reference node every
         process reads; and scalar variables. (A multi-point constraint is not among them: its groups
         are integrated whole, and its transformation is that of the subdomain, see
@@ -533,9 +535,13 @@ class NEDMPI(NEDParallel):
         reasons = []
         if model.elementDistribution.replicatesElements:
             reasons.append("every process holds every element")
-        modifiers = [name for name, modifier in model.modelModifiers.items() if modifier.initiatesTopologyChanges]
+        modifiers = [
+            name
+            for name, modifier in model.modelModifiers.items()
+            if modifier.initiatesTopologyChanges and not modifier.changesMeshWithNodesOfSubdomain
+        ]
         if modifiers:
-            reasons.append("model modifier(s) {:} change the mesh".format(", ".join(modifiers)))
+            reasons.append("model modifier(s) {:} change the mesh reading every node".format(", ".join(modifiers)))
         searched = [name for name, constraint in model.constraints.items() if constraint.searchesConnectivity]
         if searched:
             reasons.append("constraint(s) {:} search their connectivity (contact)".format(", ".join(searched)))
@@ -2081,10 +2087,17 @@ class NEDMPI(NEDParallel):
         """
 
         self.domainDecomposition.requireConstraintCopiesCurrent(model)
+        distribution = model.elementDistribution
+        if offerModelModifiers:
+            # what the modifiers read at every node, gathered now: nothing may communicate in the update
+            distribution.gatherNodeFieldEntries(
+                model, set().union(*(modifier.nodeFieldEntriesRead() for modifier in model.modelModifiers.values()))
+            )
         with self.communicator.allRanksFailTogether("Updating the topology"):
-            # the modifiers and the refresh of the mesh read the node fields at every node
+            # the modifiers and the refresh of the mesh read the node fields at every node held here
             self.requireWholeSolutionHere("A topology update")
             changed = super().updateTopology(model, step, offerModelModifiers)
+        distribution.forgetGatheredNodeFieldEntries()
         self.communicator.requireSameOnAllRanks(
             tuple(bool(flag) for flag in changed), "whether the topology update changed the mesh"
         )
@@ -2110,6 +2123,12 @@ class NEDMPI(NEDParallel):
             # evaluate them from their copies: current, as just checked.
             self.domainDecomposition.constraintCopiesAreSynchronized()
             self.domainDecomposition.rebalanceAfterTopologyChange(model, horizon)
+        if changed[0] or changed[1]:
+            # Where each process holds the nodes of its subdomain only, a node made here in the update whose
+            # values this process could not write -- a new node on the face of an element of another
+            # process, a node held from now on for a reader or a hanging node -- receives them from a
+            # process holding them, before the equation system is built from the node fields.
+            model.elementDistribution.completeNodesAwaitingValues(model)
         return changed
 
     def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool, toEveryProcess: bool):

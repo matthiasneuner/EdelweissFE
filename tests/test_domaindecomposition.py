@@ -1998,15 +1998,16 @@ def test_the_balance_is_measured_against_what_a_partition_can_attain():
 
 class _SecondOfTwoProcessesExchanging(_SecondOfTwoProcesses):
     """Rank 1 of 2, as in :class:`_SecondOfTwoProcesses`, exchanging element states with rank 0: what
-    rank 0 sends is the state given."""
+    rank 0 sends is the state given (and no values of nodes: every node is held here)."""
 
     def __init__(self, receivedFromRankZero: dict):
         self.receivedFromRankZero = receivedFromRankZero
         self.sentToRankZero = None
 
     def alltoall(self, outgoing):
-        self.sentToRankZero = outgoing[0]
-        return [self.receivedFromRankZero, outgoing[1]]
+        # per process, the states of the elements and the values of their nodes
+        self.sentToRankZero = outgoing[0][0]
+        return [(self.receivedFromRankZero, None), outgoing[1]]
 
 
 def test_an_element_moves_with_its_state_and_its_section(tmp_path):

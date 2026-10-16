@@ -121,6 +121,12 @@ class FEModel:
         #: The mesh, its node sets' version and the number of nodes when the node sets were last
         #: resolved (:meth:`createNodesOfMesh`).
         self._nodeSetsResolvedFor = None
+        #: Where the process holds the nodes of its subdomain only: the labels of the nodes made here during
+        #: the run whose node field values were not written here yet (:meth:`nodesAwaitingValues`).
+        self._nodesAwaitingValues = set()
+        #: Whether the node fields were made (:meth:`_prepareVariablesAndFields`) -- in a process holding no
+        #: node of the mesh then, none.
+        self._nodeFieldsPrepared = False
         self.nodeFields = {}  #: NodeFields in the model.
         self.elementSets = {}  #: ElementSets in the model.
         self.sections = {}  #: Sections in the model.
@@ -222,6 +228,8 @@ class FEModel:
         labels = mesh.nodeLabels[firstRow:].tolist()
         coordinates = mesh.nodeCoordinates[firstRow:]
         firstNotHeld = len(labels)
+        # a node made during a run, where only some nodes are held, has no values until they are written
+        awaitsValues = self._nodeFieldsPrepared and self.elementDistribution.holdsNodesOfSubdomainOnly
         for offset, label in enumerate(labels):
             if label in nodes:
                 continue
@@ -232,6 +240,8 @@ class FEModel:
                         "or delete nodes, inside TopologyPipeline.changes()".format(label)
                     )
                 nodes[label] = Node(label, coordinates[offset].copy())
+                if awaitsValues:
+                    self._nodesAwaitingValues.add(label)
             else:
                 firstNotHeld = min(firstNotHeld, offset)
         self._rowsWithNodeObjects = (mesh, firstRow + firstNotHeld)
@@ -298,6 +308,7 @@ class FEModel:
             )
         for label in dropped:
             del self.nodes[label]
+            self._nodesAwaitingValues.discard(label)
         nodesBefore = set(self.nodes)
         # created afresh from the first row: a node skipped before may be held now
         self._rowsWithNodeObjects = (None, 0)
@@ -305,11 +316,38 @@ class FEModel:
         if dropped:
             self._nodeSetsResolvedFor = None
             self.resolveNodeSetsOfMesh()
-        if self.nodeFields and (dropped or len(self.nodes) != len(nodesBefore)):
+        if self._nodeFieldsPrepared and (dropped or len(self.nodes) != len(nodesBefore)):
             newNodes = [node for label, node in self.nodes.items() if label not in nodesBefore]
             self._resizeNodeFieldsForNodes(Journal(verbose=False), newNodes)
             # every node: the resize made new arrays, of which the field variables are views
             self._linkFieldVariableObjects(list(self.nodes.values()))
+
+    def nodesAwaitingValues(self) -> set:
+        """The labels of the nodes made here during the run whose node field values nothing here wrote:
+        where the process holds the nodes of its subdomain only, a node made during a run starts with
+        zeros until the values are written -- a refinement interpolating them, the process an element moved
+        from sending them, or the processes holding them sending them after a topology update
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.completeNodesAwaitingValues`).
+        Empty where every node is held.
+
+        Returns
+        -------
+        set
+            The node labels.
+        """
+
+        return self._nodesAwaitingValues
+
+    def nodeValuesWritten(self, labels):
+        """Note that the node field values of nodes were written here (:meth:`nodesAwaitingValues`).
+
+        Parameters
+        ----------
+        labels
+            The node labels.
+        """
+
+        self._nodesAwaitingValues.difference_update(labels)
 
     def coordinatesOfNodes(self, labels) -> list:
         """The coordinates of nodes of the mesh: those of the node object where this process holds one,
@@ -1021,6 +1059,7 @@ class FEModel:
         journal.message("Bundling fields on nodes to NodeFields", self.identification)
         # of the nodes held here (NodeField reads the local part of a node set)
         self.nodeFields = self._createNodeFieldsFromNodes(self.nodeSets["all"], self.nodeFields.values())
+        self._nodeFieldsPrepared = True
 
         journal.message("Assembling ScalarVariables", self.identification)
         self.scalarVariables = dict()
@@ -1077,6 +1116,9 @@ class FEModel:
             if field not in self.nodeFields:
                 newNodeField = NodeField(field, getFieldSize(field, self.domainSize), nodes)
                 if newNodeField.nodes:
+                    # with the entries every node field has from the start (see the driver)
+                    newNodeField.createFieldValueEntry("U")
+                    newNodeField.createFieldValueEntry("P")
                     self.nodeFields[field] = newNodeField
         inPhenomenaOrder = [(field, self.nodeFields[field]) for field in phenomena if field in self.nodeFields]
         if list(self.nodeFields) != [field for field, _ in inPhenomenaOrder]:
@@ -1527,6 +1569,8 @@ class FEModel:
                     storedValues.read_direct(nf[entryName])
                 else:
                     nf[entryName][:] = storedValues[()][rows]
+        # every node held here holds the values of the checkpoint now
+        self._nodesAwaitingValues.clear()
 
         for name, scalarVariable in self.scalarVariables.items():
             scalarVariable.value = f["scalarVariables"].attrs[name]

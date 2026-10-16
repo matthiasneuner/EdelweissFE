@@ -85,6 +85,14 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
     #: carried entry cannot silently start from zero on a refined mesh.
     nodeFieldEntriesOfNewNodes: tuple[str, ...] | None = None
 
+    #: Whether a process of a domain-decomposed run holding the nodes of its subdomain only may run this
+    #: modifier: it decides a change of the mesh from what every process holds whole -- the mesh, the sets,
+    #: gathered results -- and gives the nodes it creates their values from the nodes the process holds,
+    #: the other processes completing them where it cannot. False, the safe default, for a modifier
+    #: changing the mesh: every process then holds every node
+    #: (:func:`~edelweissfe.domaindecomposition.distributedelements.reasonsForWholeModel`).
+    changesMeshWithNodesOfSubdomain: bool = False
+
     @property
     def actsOnlyAtSimulationStart(self) -> bool:
         """Whether every topology change this modifier can plan happens on the very first topology
@@ -124,6 +132,20 @@ class ModelModifierBase(OptionSchemaProvider, ABC):
         """
 
         return None
+
+    def nodeFieldEntriesRead(self) -> set[tuple[str, str]]:
+        """The entries of node fields this modifier reads at every node carrying the field when it plans
+        a topology change (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldEntryOfWholeModel`):
+        where each process holds the nodes of its subdomain only, they are gathered to every process
+        before the topology update -- of the size of the field, transient. The default reads none.
+
+        Returns
+        -------
+        set[tuple[str, str]]
+            The (field, entry) pairs.
+        """
+
+        return set()
 
     def __init__(self, name: str, model: FEModel, journal: Journal, **kwargs):
         self._name = name

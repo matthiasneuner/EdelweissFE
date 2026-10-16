@@ -219,6 +219,22 @@ class MarkerBase(OptionSchemaProvider):
 
         return None
 
+    def nodeFieldEntriesRead(self) -> tuple[tuple[str, str], ...]:
+        """The entries of node fields :meth:`mark` reads at every node carrying the field -- through
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldEntryOfWholeModel`,
+        which a process holding the nodes of its subdomain only answers from the entries gathered to it
+        before the topology update (see
+        :meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.nodeFieldEntriesRead`).
+        The default reads none.
+
+        Returns
+        -------
+        tuple[tuple[str, str], ...]
+            The (field, entry) pairs.
+        """
+
+        return ()
+
     def mark(self, model, refineElements: RefineableElements, mesh):
         """Decide which elements to refine.
 
@@ -488,7 +504,8 @@ class NodeSetMarker(MarkerReadingNoFieldOutput):
     def mark(self, model, refineElements, mesh):
         if self.nSetName not in model.nodeSets:
             return set()
-        labelsInSet = {node.label for node in model.nodeSets[self.nSetName].nodes}
+        # the whole set, which a process may hold only part of
+        labelsInSet = set(model.nodeSets[self.nSetName].nodeLabelsOfWholeSet())
         return {number for number in refineElements if not labelsInSet.isdisjoint(refineElements.nodeLabelsOf(number))}
 
 
@@ -912,6 +929,17 @@ class RecoveryErrorMarker(MarkerReadingNoFieldOutput):
         self.recovery = recovery
         self.entry = entry
 
+    def nodeFieldEntriesRead(self) -> tuple[tuple[str, str], ...]:
+        """The one entry of the node field it recovers; see :meth:`MarkerBase.nodeFieldEntriesRead`.
+
+        Returns
+        -------
+        tuple[tuple[str, str], ...]
+            The (field, entry) pair.
+        """
+
+        return ((self.nodeFieldName, self.entry),)
+
     def mark(self, model, refineElements, mesh):
         if model.nodeFields is None or self.nodeFieldName not in model.nodeFields:
             raise KeyError(
@@ -921,9 +949,14 @@ class RecoveryErrorMarker(MarkerReadingNoFieldOutput):
         nodeField = model.nodeFields[self.nodeFieldName]
         if self.entry not in nodeField:
             return set()
-        values = nodeField[self.entry]
-        indexOf = nodeField._indicesOfNodesInArray
-        nodes = model.nodes
+        # the field at every node carrying it -- gathered to every process where a process holds the
+        # nodes of its subdomain only (of the size of the field, at a topology check only) --, and the
+        # coordinates of the nodes, from the mesh
+        labelsOfField, values = model.elementDistribution.nodeFieldEntryOfWholeModel(
+            model, self.nodeFieldName, self.entry
+        )
+        rowOfLabel = dict(zip(labelsOfField.tolist(), range(len(labelsOfField))))
+        meshOfModel = model.mesh
 
         # gather, for every eligible element, its node coordinates and field values plus a compact
         # global node index (so shared nodes accumulate into the same recovery slot). Elements with a
@@ -937,19 +970,18 @@ class RecoveryErrorMarker(MarkerReadingNoFieldOutput):
             labels = refineElements.nodeLabelsOf(number)
             if len(labels) != N_NODES:
                 continue
-            elementNodes = [nodes[label] for label in labels]
-            rows = [indexOf.get(node, -1) for node in elementNodes]
+            rows = [rowOfLabel.get(label, -1) for label in labels]
             if -1 in rows:
                 continue
             localConnectivity = []
-            for node in elementNodes:
-                globalIndex = nodeToIndex.get(node)
+            for label in labels:
+                globalIndex = nodeToIndex.get(label)
                 if globalIndex is None:
                     globalIndex = len(nodeToIndex)
-                    nodeToIndex[node] = globalIndex
+                    nodeToIndex[label] = globalIndex
                 localConnectivity.append(globalIndex)
             elements.append(number)
-            coordsList.append([node.coordinates for node in elementNodes])
+            coordsList.append(meshOfModel.nodeCoordinates[meshOfModel.rowsOfNodes(labels)])
             valuesList.append(values[rows])
             connectivity.append(localConnectivity)
 

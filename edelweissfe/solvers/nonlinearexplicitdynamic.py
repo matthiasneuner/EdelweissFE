@@ -2542,11 +2542,13 @@ class NED(NonlinearSolverBase):
             that field's own coefficient is.
         """
 
-        totals = {}
-        for fieldName in self.firstOrderFields + self.secondOrderFields:
-            indices = self.theDofManager.idcsOfFieldsInDofVector[fieldName]
-            totals[fieldName] = float(np.sum(self._rawLumpedMass[indices]))
-        return totals
+        fieldNames = self.firstOrderFields + self.secondOrderFields
+        indicesOfFields = [self.theDofManager.idcsOfFieldsInDofVector[fieldName] for fieldName in fieldNames]
+        # over the whole model, exact (sumsOverModel)
+        totals = self.sumsOverModel(
+            [(indices, np.asarray(self._rawLumpedMass)[indices]) for indices in indicesOfFields]
+        )
+        return dict(zip(fieldNames, totals))
 
     def _dofIndicesOfFields(self, fieldNames: list[str]) -> np.ndarray:
         """The degrees of freedom of the named fields, concatenated in the order given.

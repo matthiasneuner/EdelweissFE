@@ -63,8 +63,11 @@ from edelweissfe.models.elementdistribution import (
     ElementDistribution,
     assembleNodeFields,
     assembleNodeValues,
+    nodeFieldValuesAt,
+    writeNodeFieldValues,
 )
 from edelweissfe.models.mesh import Mesh, MeshElement
+from edelweissfe.numerics.globaldofnumbering import GlobalDofNumbering
 from edelweissfe.utils.exceptions import TopologyError
 
 
@@ -157,9 +160,11 @@ def reasonsForWholeModel(inputfile: dict) -> list[str]:
 
     * **every process holds every element** (:func:`reasonsToReplicateElements`), and so synchronizes their
       states;
-    * **a model modifier changing the mesh**
-      (:attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.initiatesTopologyChanges`,
-      e.g. ``hAdaptivity``): its refinement reads the node fields of the whole model;
+    * **a model modifier changing the mesh** that needs every node
+      (:attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.initiatesTopologyChanges`
+      and not
+      :attr:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.changesMeshWithNodesOfSubdomain`;
+      adaptive refinement, ``hAdaptivity``, does not);
     * **a constraint searching its connectivity** (contact,
       :attr:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.searchesConnectivity`): a search
       may couple nodes of another subdomain;
@@ -185,8 +190,13 @@ def reasonsForWholeModel(inputfile: dict) -> list[str]:
     if reasonsToReplicateElements(inputfile):
         reasons.append("every process holds every element")
     for definition in inputfile["modelModifier"]:
-        if getModelModifierClass(definition["type"]).initiatesTopologyChanges:
-            reasons.append("model modifier {:} ({:}) changes the mesh".format(definition["name"], definition["type"]))
+        modifierClass = getModelModifierClass(definition["type"])
+        if modifierClass.initiatesTopologyChanges and not modifierClass.changesMeshWithNodesOfSubdomain:
+            reasons.append(
+                "model modifier {:} ({:}) changes the mesh reading every node".format(
+                    definition["name"], definition["type"]
+                )
+            )
     for definition in inputfile["constraint"]:
         constraintClass = getConstraintClass(definition["type"])
         if constraintClass.searchesConnectivity:
@@ -284,6 +294,12 @@ class DistributedElements(ElementDistribution):
         #: The labels of the nodes held here whatever the elements, because a model entity reads them
         #: whole (:meth:`holdNodes`).
         self._nodesHeldForReaders = set()
+        #: The labels of the nodes linked by the multi-point constraints a model modifier describes, held in
+        #: every process (:meth:`holdNodesOfMultiPointConstraints`).
+        self._nodesOfMultiPointConstraints = set()
+        #: The entries of node fields gathered to every process for the next topology update, by (field,
+        #: entry): the labels and the values (:meth:`gatherNodeFieldEntries`).
+        self._gatheredNodeFieldEntries = {}
         #: The nodes this process contributes the values of (:meth:`nodesProvidingValuesHere`), with the
         #: mesh and ownership they were derived for; None before.
         self._nodesProvidingValues = None
@@ -365,7 +381,12 @@ class DistributedElements(ElementDistribution):
         """
 
         nodesOfElements = self._nodesOfLocalElements
-        return nodesOfElements is None or label in nodesOfElements or label in self._nodesHeldForReaders
+        return (
+            nodesOfElements is None
+            or label in nodesOfElements
+            or label in self._nodesHeldForReaders
+            or label in self._nodesOfMultiPointConstraints
+        )
 
     def holdNodes(self, labels):
         """Hold the given nodes here from now on, whichever elements this process creates; see
@@ -378,6 +399,153 @@ class DistributedElements(ElementDistribution):
         """
 
         self._nodesHeldForReaders.update(int(label) for label in labels)
+
+    def holdNodesOfChildren(self, parentNumber: int, labels):
+        """Where this process holds the nodes of its subdomain only and computes the element the children
+        replace, hold their nodes; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfChildren`.
+
+        Parameters
+        ----------
+        parentNumber
+            The number of the element of the mesh the children replace, or replace an ancestor of.
+        labels
+            The labels of the nodes of the children.
+        """
+
+        if self._nodesOfLocalElements is not None and self.owners[parentNumber] == self.rank:
+            self._nodesOfLocalElements.update(int(label) for label in labels)
+
+    def holdNodesOfMultiPointConstraints(self, labels):
+        """Where this process holds the nodes of its subdomain only, hold the nodes linked by the
+        multi-point constraints of a model modifier, in place of those held for them before; see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfMultiPointConstraints`.
+
+        Parameters
+        ----------
+        labels
+            The labels of the linked nodes.
+        """
+
+        if self._nodesOfLocalElements is not None:
+            self._nodesOfMultiPointConstraints = {int(label) for label in labels}
+
+    def completeNodesAwaitingValues(self, model):
+        """Collective. Give the nodes made here during a run whose values this process could not write
+        (:meth:`~edelweissfe.models.femodel.FEModel.nodesAwaitingValues`) -- a node a refinement made where
+        the nodes it is interpolated from are not held, a node held for a reader or for a multi-point
+        constraint from now on -- the values of a process holding them with their values, every such process
+        sending the same bits (checked); see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.completeNodesAwaitingValues`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+
+        Raises
+        ------
+        TopologyError
+            If no process holds the values of a node awaiting them.
+        """
+
+        if self._nodesOfLocalElements is None:
+            return
+        communicator = self.communicator
+        awaiting = model.nodesAwaitingValues()
+        requested = communicator.allgather(np.array(sorted(awaiting), dtype=np.int64))
+        if not any(labels.shape[0] for labels in requested):
+            return
+        nodes = model.nodes
+        outgoing = []
+        for rank, labels in enumerate(requested):
+            valuedHere = {label for label in labels.tolist() if label in nodes and label not in awaiting}
+            outgoing.append(nodeFieldValuesAt(model, valuedHere) if rank != self.rank and valuedHere else None)
+        incoming = [piece for piece in communicator.alltoall(outgoing) if piece is not None]
+        try:
+            written = writeNodeFieldValues(model, incoming, awaiting)
+            model.nodeValuesWritten(written)
+            missing = sorted(awaiting - written)
+            problem = (
+                "{:} node(s) (e.g. {:}) made in process {:} during the run await their values, but no process "
+                "holds them".format(len(missing), missing[:5], self.rank)
+                if missing
+                else ""
+            )
+        except TopologyError as error:
+            problem = str(error)
+        # raised in every process alike, which all communicate before
+        problems = [problem for problem in communicator.allgather(problem) if problem]
+        if problems:
+            raise TopologyError("; ".join(problems))
+
+    def gatherNodeFieldEntries(self, model, keys):
+        """Collective. Where this process holds the nodes of its subdomain only, gather entries of node
+        fields at every node carrying the field to every process, from the processes computing the nodes
+        (:meth:`nodeValuesOfWholeSet`); see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.gatherNodeFieldEntries`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        keys
+            The (field, entry) pairs, the same in every process.
+        """
+
+        if self.holdsEveryNodeHere or not keys:
+            return
+        numbering = GlobalDofNumbering.ofModel(model)
+        provided = self.nodesProvidingValuesHere(model)
+        for field, entry in sorted(keys):
+            nodeField = model.nodeFields[field]
+            rows = [row for row, node in enumerate(nodeField.nodes) if node.label in provided]
+            labelsHere = np.asarray([nodeField.nodes[row].label for row in rows], dtype=np.int64)
+            labels = numbering.nodeLabels[numbering.nodesCarryingField[field]]
+            self._gatheredNodeFieldEntries[(field, entry)] = (
+                labels,
+                self.nodeValuesOfWholeSet(labels, labelsHere, nodeField[entry][rows], toEveryProcess=True),
+            )
+
+    def forgetGatheredNodeFieldEntries(self):
+        """Release the entries :meth:`gatherNodeFieldEntries` gathered."""
+
+        self._gatheredNodeFieldEntries = {}
+
+    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray]:
+        """An entry of a node field at every node carrying the field: as held, where this process holds
+        every node, else as gathered before the topology update (:meth:`gatherNodeFieldEntries`); see
+        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldEntryOfWholeModel`.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        field
+            The field.
+        entry
+            The entry of the node field.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            The labels of the nodes, and the values, one row per node.
+
+        Raises
+        ------
+        TopologyError
+            If it was not gathered: its reader does not name it.
+        """
+
+        if self.holdsEveryNodeHere:
+            return super().nodeFieldEntryOfWholeModel(model, field, entry)
+        if (field, entry) not in self._gatheredNodeFieldEntries:
+            raise TopologyError(
+                "entry {:} of node field {:} is read at every node, but this process holds the nodes of its "
+                "subdomain only and it was not gathered: its reader must name it "
+                "(ModelModifierBase.nodeFieldEntriesRead)".format(entry, field)
+            )
+        return self._gatheredNodeFieldEntries[(field, entry)]
 
     def _localElementsFor(self, mesh: Mesh, owners: dict) -> set:
         """The numbers of the elements this process creates under a partition: its own, and every
@@ -441,22 +609,35 @@ class DistributedElements(ElementDistribution):
         rank = self.rank
         previousOwners = self.owners
 
-        outgoing = [{} for _ in range(self.communicator.Get_size())]
+        size = self.communicator.Get_size()
+        outgoing = [{} for _ in range(size)]
+        nodesSent = [set() for _ in range(size)]
+        records = model.mesh.elements
         for number, owner in owners.items():
             if previousOwners[number] == rank and owner != rank:
                 outgoing[owner][number] = model.elements[number].getStateVars()
-        incoming = self.communicator.alltoall(outgoing)
-        del outgoing
+                nodesSent[owner].update(records[number].nodeLabels)
+        # Where the nodes follow the elements, the values of their nodes travel with them: a node the new
+        # process does not hold yet gets the values of the process that computed it.
+        nodeValues = [None] * size
+        if self._nodesOfLocalElements is not None:
+            awaiting = model.nodesAwaitingValues()
+            nodeValues = [nodeFieldValuesAt(model, labels - awaiting) if labels else None for labels in nodesSent]
+        incoming = self.communicator.alltoall(list(zip(outgoing, nodeValues)))
+        del outgoing, nodeValues
 
         # Element objects change process; the mesh does not change.
         self.owners = owners
         created, dropped = self._createAndDropLocalElements(model)
 
         nReceived = 0
-        for states in incoming:
+        for states, _ in incoming:
             for number, state in states.items():
                 model.elements[number].setStateVars(state)
                 nReceived += 1
+        if self._nodesOfLocalElements is not None:
+            pieces = [piece for _, piece in incoming if piece is not None]
+            model.nodeValuesWritten(writeNodeFieldValues(model, pieces, model.nodesAwaitingValues()))
 
         self.ownershipVersion += 1
         self.nElementsReceived += nReceived
@@ -518,12 +699,8 @@ class DistributedElements(ElementDistribution):
         owner = self.owners[parentNumber]
         self.owners[childNumber] = owner
         if owner == self.rank:
+            # its nodes are held here already (holdNodesOfChildren)
             self._localElements.add(childNumber)
-            if self._nodesOfLocalElements is not None:
-                raise TopologyError(
-                    "a process holding the nodes of its subdomain only cannot refine: a model modifier changing "
-                    "the mesh requires every node on every process (reasonsForWholeModel)"
-                )
 
     def placeAuxiliaryElement(self, record: MeshElement):
         """An auxiliary element -- a contact facet, the point mass of a rigid body -- is

@@ -150,6 +150,84 @@ class ElementDistribution:
             The number of the element it replaces (in part), still described in the mesh.
         """
 
+    def holdNodesOfChildren(self, parentNumber: int, labels):
+        """Hold the nodes of the children a model modifier is about to describe in place of an element,
+        where that element is computed (:meth:`placeChildElement`), so that their node objects are made with
+        the other new nodes, before the children are created. Here: every node is held already.
+
+        Parameters
+        ----------
+        parentNumber
+            The number of the element of the mesh the children replace, or replace an ancestor of.
+        labels
+            The labels of the nodes of the children.
+        """
+
+    def holdNodesOfMultiPointConstraints(self, labels):
+        """Hold, in every process, the nodes linked by the multi-point constraints a model modifier
+        describes -- the hanging nodes of a refinement and their masters --, in place of those held for
+        them before: a process integrating one degree of freedom of a group of them integrates all of it,
+        and every process records every one of them by global degree of freedom. Surface-sized. Here: every
+        node is held already.
+
+        Parameters
+        ----------
+        labels
+            The labels of the linked nodes.
+        """
+
+    def completeNodesAwaitingValues(self, model):
+        """Collective in a domain-decomposed run. Give the nodes made here during a run whose values this
+        process could not write (:meth:`~edelweissfe.models.femodel.FEModel.nodesAwaitingValues`) the values
+        another process holds for them. Here: every node is held, and a model modifier making nodes gives
+        each its values where it makes it, so nothing awaits them.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        """
+
+    def gatherNodeFieldEntries(self, model, keys):
+        """Collective in a domain-decomposed run. Gather entries of node fields at every node carrying the
+        field to every process, for the readers of the next topology update
+        (:meth:`~edelweissfe.modelmodifiers.base.modelmodifierbase.ModelModifierBase.nodeFieldEntriesRead`),
+        which may not communicate; :meth:`nodeFieldEntryOfWholeModel` answers from them until
+        :meth:`forgetGatheredNodeFieldEntries`. Here: every node is held, so nothing is gathered.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        keys
+            The (field, entry) pairs.
+        """
+
+    def forgetGatheredNodeFieldEntries(self):
+        """Release the entries :meth:`gatherNodeFieldEntries` gathered. Here: none were."""
+
+    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray]:
+        """An entry of a node field at every node carrying the field. Here: as held, every node being
+        held.
+
+        Parameters
+        ----------
+        model
+            The model tree.
+        field
+            The field.
+        entry
+            The entry of the node field.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            The labels of the nodes, and the values, one row per node.
+        """
+
+        nodeField = model.nodeFields[field]
+        return np.array([node.label for node in nodeField.nodes], dtype=np.int64), np.asarray(nodeField[entry])
+
     def placeAuxiliaryElement(self, record: MeshElement):
         """Decide where an auxiliary element (a contact facet, the point mass of a rigid
         body; see :meth:`~edelweissfe.models.femodel.FEModel.createAuxiliaryElement`) is computed. Such an
@@ -377,13 +455,82 @@ def nodeFieldValuesHere(model) -> dict:
         Per field, the labels and a dict of the entries' values, one row per label.
     """
 
-    provided = model.elementDistribution.nodesProvidingValuesHere(model)
+    return nodeFieldValuesAt(model, model.elementDistribution.nodesProvidingValuesHere(model))
+
+
+def nodeFieldValuesAt(model, labels: set) -> dict:
+    """The values of the node fields of a model at given nodes held here, per field: the labels of those
+    of them the field holds, in its order, and every entry at them.
+
+    Parameters
+    ----------
+    model
+        The model tree.
+    labels
+        The node labels.
+
+    Returns
+    -------
+    dict
+        Per field, the labels and a dict of the entries' values, one row per label.
+    """
+
     piece = {}
     for name, nodeField in model.nodeFields.items():
-        rows = [row for row, node in enumerate(nodeField.nodes) if node.label in provided]
-        labels = np.asarray([nodeField.nodes[row].label for row in rows], dtype=np.int64)
-        piece[name] = (labels, {entry: nodeField[entry][rows] for entry in nodeField.entries()})
+        rows = [row for row, node in enumerate(nodeField.nodes) if node.label in labels]
+        fieldLabels = np.asarray([nodeField.nodes[row].label for row in rows], dtype=np.int64)
+        piece[name] = (fieldLabels, {entry: nodeField[entry][rows] for entry in nodeField.entries()})
     return piece
+
+
+def writeNodeFieldValues(model, pieces: list, labels: set) -> set:
+    """Write values of nodes received from other processes (pieces of :func:`nodeFieldValuesAt`) into the
+    node fields here, at the given nodes; a node several pieces hold must hold the same bits in each.
+
+    Parameters
+    ----------
+    model
+        The model tree.
+    pieces
+        The pieces received.
+    labels
+        The labels of the nodes to write.
+
+    Returns
+    -------
+    set
+        The labels of the nodes written, in every field holding them.
+
+    Raises
+    ------
+    TopologyError
+        If two pieces hold different values for a node.
+    """
+
+    written = {}
+    for piece in pieces:
+        for name, (pieceLabels, entries) in piece.items():
+            nodeField = model.nodeFields.get(name)
+            if nodeField is None:
+                continue
+            nodes = model.nodes
+            for i, label in enumerate(pieceLabels.tolist()):
+                if label not in labels or label not in nodes:
+                    continue
+                row = nodeField.indexOfNode(nodes[label])
+                for entry, values in entries.items():
+                    if entry not in nodeField:
+                        nodeField.createFieldValueEntry(entry)
+                    key = (name, entry, label)
+                    if key in written:
+                        if written[key] != values[i].tobytes():
+                            raise TopologyError(
+                                "the values of node {:} received from several processes differ".format(label)
+                            )
+                        continue
+                    nodeField[entry][row] = values[i]
+                    written[key] = values[i].tobytes()
+    return {label for _, _, label in written}
 
 
 def assembleNodeFields(model, pieces: list) -> dict:
