@@ -2089,10 +2089,14 @@ class NEDMPI(NEDParallel):
         self.domainDecomposition.requireConstraintCopiesCurrent(model)
         distribution = model.elementDistribution
         if offerModelModifiers:
-            # what the modifiers read at every node, gathered now: nothing may communicate in the update
-            distribution.gatherNodeFieldEntries(
-                model, set().union(*(modifier.nodeFieldEntriesRead() for modifier in model.modelModifiers.values()))
-            )
+            # what the modifiers read at every node, gathered now from the node fields (whole here, as
+            # checked first): nothing may communicate in the update
+            with self.communicator.allRanksFailTogetherWhileCommunicating("Gathering what the modifiers read"):
+                self.requireWholeSolutionHere("Gathering what the model modifiers read")
+                distribution.gatherNodeFieldEntries(
+                    model,
+                    set().union(*(modifier.nodeFieldEntriesRead() for modifier in model.modelModifiers.values())),
+                )
         with self.communicator.allRanksFailTogether("Updating the topology"):
             # the modifiers and the refresh of the mesh read the node fields at every node held here
             self.requireWholeSolutionHere("A topology update")
@@ -2128,7 +2132,8 @@ class NEDMPI(NEDParallel):
             # values this process could not write -- a new node on the face of an element of another
             # process, a node held from now on for a reader or a hanging node -- receives them from a
             # process holding them, before the equation system is built from the node fields.
-            model.elementDistribution.completeNodesAwaitingValues(model)
+            with self.communicator.allRanksFailTogetherWhileCommunicating("Completing the values of new nodes"):
+                distribution.completeNodesAwaitingValues(model)
         return changed
 
     def _synchronizeModel(self, model: FEModel, timeStep: TimeStep | None, includeStates: bool, toEveryProcess: bool):
@@ -2173,6 +2178,9 @@ class NEDMPI(NEDParallel):
                     self.domainDecomposition.allgatherOwnedValues(vector)
                 else:
                     self.domainDecomposition.gatherOwnedValuesToRoot(vector)
+        if toEveryProcess and self.vectorsOfSubdomain:
+            # every node held here holds the values of the whole solution now
+            model.nodeValuesWritten(set(model.nodesAwaitingValues()))
         wholeSolutionHere = toEveryProcess or (self.domainDecomposition.rank == 0 and carried)
         if wholeSolutionHere:
             # every degree of freedom is current now, not only the subdomain ones

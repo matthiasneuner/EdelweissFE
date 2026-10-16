@@ -941,20 +941,13 @@ class RecoveryErrorMarker(MarkerReadingNoFieldOutput):
         return ((self.nodeFieldName, self.entry),)
 
     def mark(self, model, refineElements, mesh):
-        if model.nodeFields is None or self.nodeFieldName not in model.nodeFields:
-            raise KeyError(
-                f"hAdaptivity recoveryError marker references nodeField {self.nodeFieldName!r}, "
-                "which is not defined on the model. Use the exact field name (e.g. 'nonlocal damage')."
-            )
-        nodeField = model.nodeFields[self.nodeFieldName]
-        if self.entry not in nodeField:
-            return set()
         # the field at every node carrying it -- gathered to every process where a process holds the
         # nodes of its subdomain only (of the size of the field, at a topology check only) --, and the
         # coordinates of the nodes, from the mesh
-        labelsOfField, values = model.elementDistribution.nodeFieldEntryOfWholeModel(
-            model, self.nodeFieldName, self.entry
-        )
+        wholeEntry = model.elementDistribution.nodeFieldEntryOfWholeModel(model, self.nodeFieldName, self.entry)
+        if wholeEntry is None:
+            return set()
+        labelsOfField, values = wholeEntry
         rowOfLabel = dict(zip(labelsOfField.tolist(), range(len(labelsOfField))))
         meshOfModel = model.mesh
 

@@ -425,7 +425,8 @@ def buildContactFacets(
     model.holdNodes(
         dict.fromkeys(
             label for numbers in numbersOfFace.values() for number in numbers for label in records[number].nodeLabels
-        )
+        ),
+        "contact facets of surface {:}".format(surfaceName),
     )
     sourceElementsOfFace = {
         faceNumber: [_SourceElement.ofMeshElement(model, number) for number in numbers]

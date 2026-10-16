@@ -642,12 +642,14 @@ class ModelModifier(ModelModifierBase):
             # of its nodes nor a hanging-node slave, i.e. if the refined interface is not conforming.
             self._octree.check_conformity(records)
 
-        # every process records every hanging node by global degree of freedom: their nodes are held in
-        # every process (surface-sized), in place of those of the hanging nodes before
-        model.elementDistribution.holdNodesOfMultiPointConstraints(
+        # the hanging-node constraint keeps its records as node objects (HangingNodeConstraint.updateRecords),
+        # which every process resolves to global degrees of freedom: their nodes are held in every process
+        # (of the size of the refined interface), in place of those of the hanging nodes before
+        model.elementDistribution.holdNodes(
             dict.fromkeys(
                 label for slave, masters in records.items() for label in (slave, *(master for master, _ in masters))
-            )
+            ),
+            "hanging nodes of {:}".format(self._name),
         )
 
         with timeit("materialize"):
@@ -703,9 +705,10 @@ class ModelModifier(ModelModifierBase):
         self._refineableElements.invalidateNodeAdjacency()
         active = set(octree.active())
         newNodeValues = NewNodeValues(model, WARM_STARTED_NODE_FIELD_ENTRIES, self._topology)
-        newLabels = self._createNewNodes(model, active)
+        cellsToCreate = self._cellsToCreate(active)
+        newLabels = self._createNewNodes(model, cellsToCreate)
 
-        levelChanges, newChildEids = self._createChildElements(model, active, newLabels, newNodeValues)
+        levelChanges, newChildEids = self._createChildElements(model, cellsToCreate, newLabels, newNodeValues)
 
         # The new nodes and the removals ride on the LAST level's changeset: nothing created there
         # is transient (only intermediates are, and they always have a level below them), so the
@@ -730,7 +733,7 @@ class ModelModifier(ModelModifierBase):
             model._linkFieldVariableObjects(list(model.nodes.values()))
         return change
 
-    def _createNewNodes(self, model: FEModel, active: set) -> list:
+    def _createNewNodes(self, model: FEModel, cellsToCreate: set) -> list:
         """Describe in the mesh the nodes this refinement created (the octree does,
         :meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.describe_new_nodes`), and create those held
         here: where a process holds the nodes of its subdomain only, the nodes of the children of the
@@ -741,8 +744,8 @@ class ModelModifier(ModelModifierBase):
         ----------
         model
             The model tree.
-        active
-            The active octree cells.
+        cellsToCreate
+            The octree cells to become elements (:meth:`_cellsToCreate`).
 
         Returns
         -------
@@ -753,7 +756,7 @@ class ModelModifier(ModelModifierBase):
         octree = self._octree
         newLabels = octree.describe_new_nodes()
         distribution = model.elementDistribution
-        for eid in self._cellsToCreate(active):
+        for eid in cellsToCreate:
             ancestor = octree.parent(eid)
             while ancestor is not None and ancestor not in self._eidToNumber:
                 ancestor = octree.parent(ancestor)
@@ -784,7 +787,7 @@ class ModelModifier(ModelModifierBase):
         return pending
 
     def _createChildElements(
-        self, model: FEModel, active: set, newLabels: list, newNodeValues: "NewNodeValues"
+        self, model: FEModel, cellsToCreate: set, newLabels: list, newNodeValues: "NewNodeValues"
     ) -> tuple[list, set]:
         """Create the child elements of every refined parent, one octree level at a time.
 
@@ -797,8 +800,8 @@ class ModelModifier(ModelModifierBase):
         ----------
         model
             The model tree.
-        active
-            The active octree cells.
+        cellsToCreate
+            The octree cells to become elements (:meth:`_cellsToCreate`).
         newLabels
             The labels of the nodes created in this refinement.
         newNodeValues
@@ -811,7 +814,7 @@ class ModelModifier(ModelModifierBase):
         """
 
         octree = self._octree
-        pending = self._cellsToCreate(active)
+        pending = set(cellsToCreate)
         newLabels = set(newLabels)
         levelChanges = []
         newChildEids = set()
@@ -1026,13 +1029,13 @@ class NewNodeValues:
     """The values of the nodes a refinement creates, interpolated from their parents' nodes, as the refinement
     goes through the new cells, level by level and in the order of their octree ids.
 
-    A new node takes each value -- an entry of a node field, e.g. the solution ``U`` of the displacement
-    -- from the first parent it is met in whose nodes all hold that value, where they are nodes the
-    mesh had before (carrying the field) or new nodes interpolated before; a node still lacking a value
-    of some entry takes all of them again from the next parent it is met in. Which parent that is, is
-    decided from what every process holds whole -- the mesh and its global numbering of the degrees of
-    freedom (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) --, so every process
-    decides alike.
+    A new node takes the values of each field -- its entries, e.g. the solution ``U`` of the displacement
+    -- from the first parent it is met in whose nodes all carry the field, where they are nodes the
+    mesh had before or new nodes given the field before; a node still lacking some field takes all of
+    them again from the next parent it is met in. Which parent that is, is decided for every field of
+    the model from what every process holds whole -- the mesh and its global numbering of the degrees
+    of freedom (:class:`~edelweissfe.numerics.globaldofnumbering.GlobalDofNumbering`) --, so every process
+    decides alike, also one holding no node of some field.
 
     The value itself is the sum of the parent's nodal values weighted by its shape functions at the new
     node. A node whose weight is zero contributes nothing, and is summed as an exact zero, so that only
@@ -1040,9 +1043,7 @@ class NewNodeValues:
     that face or edge. A process holding only the nodes of its subdomain therefore interpolates a new node
     wherever it holds those nodes -- every new node of the elements it computes, and a new node on the
     face shared with an element of another process from the same nodes, with the same bits, as that
-    process does. A process holding no node of some field (a process without elements, say) cannot tell
-    which parent a serial run takes which value from, and interpolates nothing. A new node held here
-    that could not be interpolated here (none in a serial run) awaits its values from another process
+    process does. A new node held here that could not be interpolated here (none in a serial run) awaits its values from another process
     (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.completeNodesAwaitingValues`).
 
     Parameters
@@ -1063,19 +1064,19 @@ class NewNodeValues:
         self._carrying = numbering.nodesCarryingField
         #: The number of nodes of the mesh before the refinement: the new nodes follow them.
         self._nNodesBefore = model.mesh.nNodes
-        #: The (field, entry) pairs of the node fields held here: of every field, the entries it holds.
-        heldKeys = [
+        #: The fields of the model, whose parents are decided in every process alike.
+        self.fields = list(numbering.fields)
+        #: The interpolated (field, entry) pairs of the node fields held here: of every field, the entries
+        #: it holds.
+        self.keys = [
             (field, entry) for field, nodeField in model.nodeFields.items() for entry in entries if entry in nodeField
         ]
-        #: Whether this process interpolates: whether it holds a node of every field of the model, and so
-        #: knows the interpolated pairs of the whole model, which decide the parents.
-        self.interpolatesHere = all(field in model.nodeFields for field in numbering.fields)
-        #: The interpolated (field, entry) pairs, the same in every process interpolating.
-        self.keys = heldKeys if self.interpolatesHere else []
+        #: Per field, the interpolated pairs of it held here.
+        self._keysOfField = {field: [key for key in self.keys if key[0] == field] for field in self.fields}
         #: Per (field, entry), the converged values at the nodes held here, by label, before the refinement.
         self._before = {}
         awaiting = model.nodesAwaitingValues()
-        for field, entry in heldKeys:
+        for field, entry in self.keys:
             nodeField = model.nodeFields[field]
             values = np.asarray(nodeField[entry])
             self._before[(field, entry)] = {
@@ -1085,8 +1086,8 @@ class NewNodeValues:
             }
         #: Per (field, entry), a zero value, summed for the nodes of a parent without weight.
         self._zero = {key: np.zeros(model.nodeFields[key[0]].dimension) for key in self.keys}
-        #: Per (field, entry), the new nodes given that value, by label -- the same in every process.
-        self._assigned = {key: set() for key in self.keys}
+        #: Per field, the new nodes given its values, by label -- the same in every process.
+        self._assigned = {field: set() for field in self.fields}
         #: Per (field, entry), the values interpolated here, by label.
         self._interpolated = {key: {} for key in self.keys}
         #: The labels of the new nodes met so far.
@@ -1106,7 +1107,7 @@ class NewNodeValues:
             Whether it was.
         """
 
-        return not self.interpolatesHere or all(label in self._assigned[key] for key in self.keys)
+        return all(label in self._assigned[field] for field in self.fields)
 
     def interpolate(self, label: int, parameters, parentLabels):
         """Give a new node, met in a child of a parent, the values of its parent at it: each value every
@@ -1126,29 +1127,51 @@ class NewNodeValues:
         N = self._topology.shape_functions(*parameters)
         weighted = (N != 0.0).tolist()
         rows = self._model.mesh.rowsOfNodes(parentLabels).tolist()
-        for key in self.keys:
-            carrying, assigned = self._carrying[key[0]], self._assigned[key]
+        for field in self.fields:
+            carrying, assigned = self._carrying[field], self._assigned[field]
             if not all(
                 carrying[row] if row < self._nNodesBefore else parentLabel in assigned
                 for parentLabel, row in zip(parentLabels, rows)
             ):
                 continue
             assigned.add(label)
-            before, interpolated = self._before[key], self._interpolated[key]
-            parentValues = []
-            for parentLabel, isWeighted in zip(parentLabels, weighted):
-                value = before.get(parentLabel)
-                if value is None:
-                    value = interpolated.get(parentLabel)
-                if not isWeighted:
-                    value = self._zero[key]
-                elif value is None:
-                    # a node of the parent with a weight is not held here: another process interpolates it
-                    interpolated.pop(label, None)
-                    break
-                parentValues.append(value)
-            else:
-                interpolated[label] = N @ np.array(parentValues)
+            # the values are computed for the entries held here
+            for key in self._keysOfField[field]:
+                self._interpolateEntry(key, label, N, weighted, parentLabels)
+
+    def _interpolateEntry(self, key: tuple, label: int, N: np.ndarray, weighted: list, parentLabels):
+        """Interpolate one entry of a field at a new node, if the nodes of the parent with a weight hold it
+        here; else forget what was interpolated for it before.
+
+        Parameters
+        ----------
+        key
+            The (field, entry) pair.
+        label
+            The label of the new node.
+        N
+            The shape functions of the parent at the node.
+        weighted
+            Per node of the parent, whether its shape function is not zero there.
+        parentLabels
+            The labels of the nodes of the parent.
+        """
+
+        before, interpolated = self._before[key], self._interpolated[key]
+        parentValues = []
+        for parentLabel, isWeighted in zip(parentLabels, weighted):
+            value = before.get(parentLabel)
+            if value is None:
+                value = interpolated.get(parentLabel)
+            if not isWeighted:
+                value = self._zero[key]
+            elif value is None:
+                # a node of the parent with a weight is not held here: another process interpolates it
+                interpolated.pop(label, None)
+                break
+            parentValues.append(value)
+        else:
+            interpolated[label] = N @ np.array(parentValues)
 
     def valueAt(self, field: str, entry: str, label: int) -> np.ndarray | None:
         """The value of a node held here after the refinement: its converged value if it was there before,
@@ -1173,7 +1196,7 @@ class NewNodeValues:
         if key not in self._before:
             return None
         value = self._before[key].get(label)
-        return self._interpolated[key].get(label) if value is None and key in self._interpolated else value
+        return self._interpolated[key].get(label) if value is None else value
 
     def labelsInterpolatedHere(self) -> set:
         """The labels of the new nodes held here that were given every value they were given anywhere.
@@ -1189,5 +1212,9 @@ class NewNodeValues:
             label
             for label in self._met
             if label in nodes
-            and all(label in self._interpolated[key] for key in self.keys if label in self._assigned[key])
+            and all(
+                self._keysOfField[field] and all(label in self._interpolated[key] for key in self._keysOfField[field])
+                for field in self.fields
+                if label in self._assigned[field]
+            )
         }

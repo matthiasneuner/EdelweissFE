@@ -163,19 +163,6 @@ class ElementDistribution:
             The labels of the nodes of the children.
         """
 
-    def holdNodesOfMultiPointConstraints(self, labels):
-        """Hold, in every process, the nodes linked by the multi-point constraints a model modifier
-        describes -- the hanging nodes of a refinement and their masters --, in place of those held for
-        them before: a process integrating one degree of freedom of a group of them integrates all of it,
-        and every process records every one of them by global degree of freedom. Surface-sized. Here: every
-        node is held already.
-
-        Parameters
-        ----------
-        labels
-            The labels of the linked nodes.
-        """
-
     def completeNodesAwaitingValues(self, model):
         """Collective in a domain-decomposed run. Give the nodes made here during a run whose values this
         process could not write (:meth:`~edelweissfe.models.femodel.FEModel.nodesAwaitingValues`) the values
@@ -206,7 +193,7 @@ class ElementDistribution:
     def forgetGatheredNodeFieldEntries(self):
         """Release the entries :meth:`gatherNodeFieldEntries` gathered. Here: none were."""
 
-    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray]:
+    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray] | None:
         """An entry of a node field at every node carrying the field. Here: as held, every node being
         held.
 
@@ -221,11 +208,21 @@ class ElementDistribution:
 
         Returns
         -------
-        tuple[np.ndarray, np.ndarray]
-            The labels of the nodes, and the values, one row per node.
+        tuple[np.ndarray, np.ndarray] | None
+            The labels of the nodes, and the values, one row per node; None if the node field has no such
+            entry.
+
+        Raises
+        ------
+        KeyError
+            If no node of the model carries the field.
         """
 
+        if field not in model.nodeFields:
+            raise KeyError("node field {!r} is not defined on the model".format(field))
         nodeField = model.nodeFields[field]
+        if entry not in nodeField:
+            return None
         return np.array([node.label for node in nodeField.nodes], dtype=np.int64), np.asarray(nodeField[entry])
 
     def placeAuxiliaryElement(self, record: MeshElement):
@@ -314,15 +311,18 @@ class ElementDistribution:
 
         return True
 
-    def holdNodes(self, labels):
-        """Hold the given nodes of the mesh here from now on, whichever elements this process holds: the
-        nodes a model entity reads whole in every process (a node set of a constraint, the nodes of the
-        contact facets). Here: every node is held already.
+    def holdNodes(self, labels, reader: str):
+        """Hold the given nodes of the mesh here from now on, whichever elements this process holds, in
+        place of those held for the same reader before: the nodes a model entity reads whole in every
+        process (a node set of a constraint, the nodes of the contact facets, the hanging nodes of a
+        refinement with their masters). Here: every node is held already.
 
         Parameters
         ----------
         labels
             The node labels.
+        reader
+            What reads them; its previous nodes are released.
         """
 
     def ownedElements(self, elements) -> list:
@@ -483,6 +483,33 @@ def nodeFieldValuesAt(model, labels: set) -> dict:
     return piece
 
 
+def requireSameBitsFromProcesses(held: np.ndarray, received: np.ndarray, labels):
+    """Raise unless values of nodes received from another process hold the same bits as those received
+    for the same nodes before: every process sending the values of a node computed them alike.
+
+    Parameters
+    ----------
+    held
+        The values received before, one row per node.
+    received
+        The values received now, one row per node.
+    labels
+        The labels of the nodes, for the message.
+
+    Raises
+    ------
+    TopologyError
+        If they differ.
+    """
+
+    if np.asarray(held).tobytes() != np.asarray(received).tobytes():
+        raise TopologyError(
+            "the values of {:} node(s) (e.g. {:}) received from several processes differ".format(
+                len(labels), list(labels)[:5]
+            )
+        )
+
+
 def writeNodeFieldValues(model, pieces: list, labels: set) -> set:
     """Write values of nodes received from other processes (pieces of :func:`nodeFieldValuesAt`) into the
     node fields here, at the given nodes; a node several pieces hold must hold the same bits in each.
@@ -499,7 +526,7 @@ def writeNodeFieldValues(model, pieces: list, labels: set) -> set:
     Returns
     -------
     set
-        The labels of the nodes written, in every field holding them.
+        The labels of the nodes written, in any field.
 
     Raises
     ------
@@ -523,13 +550,10 @@ def writeNodeFieldValues(model, pieces: list, labels: set) -> set:
                         nodeField.createFieldValueEntry(entry)
                     key = (name, entry, label)
                     if key in written:
-                        if written[key] != values[i].tobytes():
-                            raise TopologyError(
-                                "the values of node {:} received from several processes differ".format(label)
-                            )
+                        requireSameBitsFromProcesses(written[key], values[i], [label])
                         continue
                     nodeField[entry][row] = values[i]
-                    written[key] = values[i].tobytes()
+                    written[key] = values[i]
     return {label for _, _, label in written}
 
 
@@ -606,13 +630,9 @@ def assembleNodeValues(labels: np.ndarray, pieces: list) -> np.ndarray:
         if whole is None:
             whole = np.empty((labels.shape[0],) + pieceValues.shape[1:], dtype=pieceValues.dtype)
         again = filled[rows]
-        if again.any() and whole[rows[again]].tobytes() != pieceValues[again].tobytes():
+        if again.any():
             # every process contributing a node integrates it, bit for bit (see NEDMPI)
-            raise TopologyError(
-                "the values of {:} node(s) (e.g. {:}) contributed by several processes differ".format(
-                    int(again.sum()), labels[rows[again]][:5].tolist()
-                )
-            )
+            requireSameBitsFromProcesses(whole[rows[again]], pieceValues[again], labels[rows[again]])
         whole[rows] = pieceValues
         filled[rows] = True
     if not filled.all():

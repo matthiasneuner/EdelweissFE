@@ -268,21 +268,26 @@ class FEModel:
         self.nodes.clear()
         self.nodes.update(items[i] for i in np.argsort(rows, kind="stable").tolist())
 
-    def holdNodes(self, labels):
-        """Hold nodes of the mesh in this process from now on, whichever elements it holds, and make their
-        node objects: how a model entity that reads nodes whole in every process -- a constraint's node set,
-        the nodes of contact facets -- gets them where the process holds the nodes of its subdomain only
-        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`). In a serial run,
-        and wherever every node is held, it changes nothing.
+    def holdNodes(self, labels, reader: str):
+        """Hold nodes of the mesh in this process from now on, whichever elements it holds, in place of
+        those held for the same reader before, and make their node objects: how a model entity that reads
+        nodes whole in every process -- a constraint's node set, the nodes of contact facets -- gets them
+        where the process holds the nodes of its subdomain only
+        (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`). The nodes it held
+        before for the reader and no longer holds are dropped at the next change of the nodes held here
+        (:meth:`holdNodesOfDistribution`). In a serial run, and wherever every node is held, it changes
+        nothing.
 
         Parameters
         ----------
         labels
             The node labels.
+        reader
+            What reads them, a name unique in the model.
         """
 
         labels = [int(label) for label in labels]
-        self.elementDistribution.holdNodes(labels)
+        self.elementDistribution.holdNodes(labels, reader)
         nodes = self.nodes
         if any(label not in nodes for label in labels):
             # making node objects is a change of the topology, also where a reader holds nodes after the
@@ -396,7 +401,7 @@ class FEModel:
             # a set of node objects a model entity made (e.g. the slave nodes a tie tied): held whole
             nodeSet = self.nodeSets[name]
         else:
-            self.holdNodes(self.mesh.nodeSets[name].tolist())
+            self.holdNodes(self.mesh.nodeSets[name].tolist(), "node set {:} of {:}".format(name, reader))
             nodeSet = self.resolveNodeSetOfMesh(name)
         nodeSet.requireComplete(reader)
         return nodeSet

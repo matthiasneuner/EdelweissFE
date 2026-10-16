@@ -50,6 +50,7 @@ import numpy as np
 from edelweissfe.config.constraints import getConstraintClass
 from edelweissfe.config.generators import getGeneratorClass
 from edelweissfe.config.modelmodifiers import getModelModifierClass
+from edelweissfe.config.phenomena import getFieldSize
 from edelweissfe.domaindecomposition.mpienvironment import (
     numberOfProcesses,
     worldCommunicator,
@@ -292,11 +293,10 @@ class DistributedElements(ElementDistribution):
         #: (:meth:`holdNodes`) --; None where it holds every node.
         self._nodesOfLocalElements = set() if self.holdsNodesOfSubdomainOnly else None
         #: The labels of the nodes held here whatever the elements, because a model entity reads them
-        #: whole (:meth:`holdNodes`).
-        self._nodesHeldForReaders = set()
-        #: The labels of the nodes linked by the multi-point constraints a model modifier describes, held in
-        #: every process (:meth:`holdNodesOfMultiPointConstraints`).
-        self._nodesOfMultiPointConstraints = set()
+        #: whole, by the name of the reader (:meth:`holdNodes`).
+        self._nodesHeldForReaders = {}
+        #: All of them.
+        self._nodesHeldForAnyReader = set()
         #: The entries of node fields gathered to every process for the next topology update, by (field,
         #: entry): the labels and the values (:meth:`gatherNodeFieldEntries`).
         self._gatheredNodeFieldEntries = {}
@@ -381,24 +381,23 @@ class DistributedElements(ElementDistribution):
         """
 
         nodesOfElements = self._nodesOfLocalElements
-        return (
-            nodesOfElements is None
-            or label in nodesOfElements
-            or label in self._nodesHeldForReaders
-            or label in self._nodesOfMultiPointConstraints
-        )
+        return nodesOfElements is None or label in nodesOfElements or label in self._nodesHeldForAnyReader
 
-    def holdNodes(self, labels):
-        """Hold the given nodes here from now on, whichever elements this process creates; see
+    def holdNodes(self, labels, reader: str):
+        """Hold the given nodes here from now on, whichever elements this process creates, in place of
+        those held for the same reader before; see
         :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`.
 
         Parameters
         ----------
         labels
             The node labels.
+        reader
+            What reads them.
         """
 
-        self._nodesHeldForReaders.update(int(label) for label in labels)
+        self._nodesHeldForReaders[reader] = {int(label) for label in labels}
+        self._nodesHeldForAnyReader = set().union(*self._nodesHeldForReaders.values())
 
     def holdNodesOfChildren(self, parentNumber: int, labels):
         """Where this process holds the nodes of its subdomain only and computes the element the children
@@ -415,20 +414,6 @@ class DistributedElements(ElementDistribution):
 
         if self._nodesOfLocalElements is not None and self.owners[parentNumber] == self.rank:
             self._nodesOfLocalElements.update(int(label) for label in labels)
-
-    def holdNodesOfMultiPointConstraints(self, labels):
-        """Where this process holds the nodes of its subdomain only, hold the nodes linked by the
-        multi-point constraints of a model modifier, in place of those held for them before; see
-        :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfMultiPointConstraints`.
-
-        Parameters
-        ----------
-        labels
-            The labels of the linked nodes.
-        """
-
-        if self._nodesOfLocalElements is not None:
-            self._nodesOfMultiPointConstraints = {int(label) for label in labels}
 
     def completeNodesAwaitingValues(self, model):
         """Collective. Give the nodes made here during a run whose values this process could not write
@@ -462,22 +447,14 @@ class DistributedElements(ElementDistribution):
             valuedHere = {label for label in labels.tolist() if label in nodes and label not in awaiting}
             outgoing.append(nodeFieldValuesAt(model, valuedHere) if rank != self.rank and valuedHere else None)
         incoming = [piece for piece in communicator.alltoall(outgoing) if piece is not None]
-        try:
-            written = writeNodeFieldValues(model, incoming, awaiting)
-            model.nodeValuesWritten(written)
-            missing = sorted(awaiting - written)
-            problem = (
+        written = writeNodeFieldValues(model, incoming, awaiting)
+        model.nodeValuesWritten(written)
+        missing = sorted(awaiting - written)
+        if missing:
+            raise TopologyError(
                 "{:} node(s) (e.g. {:}) made in process {:} during the run await their values, but no process "
                 "holds them".format(len(missing), missing[:5], self.rank)
-                if missing
-                else ""
             )
-        except TopologyError as error:
-            problem = str(error)
-        # raised in every process alike, which all communicate before
-        problems = [problem for problem in communicator.allgather(problem) if problem]
-        if problems:
-            raise TopologyError("; ".join(problems))
 
     def gatherNodeFieldEntries(self, model, keys):
         """Collective. Where this process holds the nodes of its subdomain only, gather entries of node
@@ -497,14 +474,33 @@ class DistributedElements(ElementDistribution):
             return
         numbering = GlobalDofNumbering.ofModel(model)
         provided = self.nodesProvidingValuesHere(model)
-        for field, entry in sorted(keys):
-            nodeField = model.nodeFields[field]
-            rows = [row for row, node in enumerate(nodeField.nodes) if node.label in provided]
-            labelsHere = np.asarray([nodeField.nodes[row].label for row in rows], dtype=np.int64)
+        keys = sorted(keys)
+        for field, _ in keys:
+            if field not in numbering.fields:
+                raise KeyError("node field {!r} is not defined on the model".format(field))
+        # which entries some process holds (the others are absent from the model)
+        heldSomewhere = np.array(
+            self.communicator.allgather(
+                [field in model.nodeFields and entry in model.nodeFields[field] for field, entry in keys]
+            )
+        ).any(axis=0)
+        for (field, entry), isHeld in zip(keys, heldSomewhere.tolist()):
+            if not isHeld:
+                self._gatheredNodeFieldEntries[(field, entry)] = None
+                continue
+            nodeField = model.nodeFields.get(field)
+            if nodeField is None or entry not in nodeField:
+                # a process holding no node of the field contributes none, and takes part all the same
+                labelsHere = np.empty(0, dtype=np.int64)
+                valuesHere = np.empty((0, getFieldSize(field, model.domainSize)))
+            else:
+                rows = [row for row, node in enumerate(nodeField.nodes) if node.label in provided]
+                labelsHere = np.asarray([nodeField.nodes[row].label for row in rows], dtype=np.int64)
+                valuesHere = nodeField[entry][rows]
             labels = numbering.nodeLabels[numbering.nodesCarryingField[field]]
             self._gatheredNodeFieldEntries[(field, entry)] = (
                 labels,
-                self.nodeValuesOfWholeSet(labels, labelsHere, nodeField[entry][rows], toEveryProcess=True),
+                self.nodeValuesOfWholeSet(labels, labelsHere, valuesHere, toEveryProcess=True),
             )
 
     def forgetGatheredNodeFieldEntries(self):
@@ -512,7 +508,7 @@ class DistributedElements(ElementDistribution):
 
         self._gatheredNodeFieldEntries = {}
 
-    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray]:
+    def nodeFieldEntryOfWholeModel(self, model, field: str, entry: str) -> tuple[np.ndarray, np.ndarray] | None:
         """An entry of a node field at every node carrying the field: as held, where this process holds
         every node, else as gathered before the topology update (:meth:`gatherNodeFieldEntries`); see
         :meth:`~edelweissfe.models.elementdistribution.ElementDistribution.nodeFieldEntryOfWholeModel`.
@@ -528,8 +524,9 @@ class DistributedElements(ElementDistribution):
 
         Returns
         -------
-        tuple[np.ndarray, np.ndarray]
-            The labels of the nodes, and the values, one row per node.
+        tuple[np.ndarray, np.ndarray] | None
+            The labels of the nodes, and the values, one row per node; None if the node field has no such
+            entry in any process.
 
         Raises
         ------
