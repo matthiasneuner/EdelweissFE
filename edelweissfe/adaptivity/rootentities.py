@@ -49,9 +49,47 @@ Node key
 This is the mechanism established AMR libraries use (deal.II, p4est, MFEM): whether two points
 coincide and whether a point lies on a face are questions of topology and exact arithmetic, so no
 tolerance can make them wrong on a curved or warped mesh.
+
+Storage
+-------
+The table is held as arrays, not as one Python object per root, vertex or face: the corner labels and
+the body of every root element, one row per root, and an index from each vertex of the root mesh to
+the roots sharing it, built once all roots are known (:meth:`RootEntityTable.check_manifold`). The
+edges and faces need no table of their own: the roots sharing an edge or a face are the roots sharing
+all of its corners that have it as an edge or a face. A :class:`NodeKey` can be packed into one
+integer (:meth:`RootEntityTable.pack`), which is how the octree stores the keys of its nodes.
 """
 
 from typing import NamedTuple
+
+import numpy as np
+
+#: The integer type of node labels in the arrays of the refinement: a node label must stay below
+#: ``2**31``. The exact positions on the reference lattice are 64-bit integers.
+LABEL_DTYPE = np.int32
+
+
+def requireLabelsFitTheirArrays(labels):
+    """Raise unless every node label fits :data:`LABEL_DTYPE`.
+
+    Parameters
+    ----------
+    labels
+        The node labels.
+
+    Raises
+    ------
+    ValueError
+        For a label outside the range of :data:`LABEL_DTYPE`.
+    """
+
+    labels = np.asarray(labels)
+    if labels.size and (labels.min() < 0 or labels.max() > np.iinfo(LABEL_DTYPE).max):
+        raise ValueError(
+            "node labels must lie in [0, {:d}] for adaptive refinement, found {:d}..{:d}".format(
+                np.iinfo(LABEL_DTYPE).max, int(labels.min()), int(labels.max())
+            )
+        )
 
 
 class NodeKey(NamedTuple):
@@ -83,6 +121,27 @@ class RootFace(NamedTuple):
     cornerLabels: tuple
 
 
+#: The kinds of node keys, in the order of their code in a packed key (:meth:`RootEntityTable.pack`).
+_KINDS = ("vertex", "edge", "face", "interior")
+#: Per kind: how many labels (or ids) name its entity, and how many integers its position has.
+_ENTITY_LENGTH = {"vertex": 1, "edge": 2, "face": 4, "interior": 1}
+_POSITION_LENGTH = {"vertex": 0, "edge": 1, "face": 2, "interior": 3}
+#: The radix of a label, an element id or a body in a packed key.
+_LABEL_RADIX = 2**32
+
+
+class _VertexIndex(NamedTuple):
+    """The roots sharing each vertex of the root mesh, in compressed rows.
+
+    A vertex is named by ``component * 2**32 + label``; ``vertices`` holds the names in ascending order,
+    and the roots of ``vertices[i]`` are ``roots[first[i]:first[i + 1]]``, ascending.
+    """
+
+    vertices: np.ndarray
+    first: np.ndarray
+    roots: np.ndarray
+
+
 class RootEntityTable:
     """The vertices, edges and faces of the root mesh, keyed by root corner labels.
 
@@ -108,11 +167,15 @@ class RootEntityTable:
         #: per face: its corner slots in loop order; per edge: its two corner slots
         self._faceCorners = [[slot for slot in face if slot in cornerSet] for face in topology.faces]
         self._edgeCorners = [[slot for slot in edge if slot in cornerSet] for edge in topology.edges]
-        self._rootCorners = {}  # rootEid -> {corner slot: node label}
-        self._rootComponent = {}  # rootEid -> componentId
-        self._rootsOfFace = {}  # RootFace -> [rootEid, ...]
-        self._rootsOfCorner = {}  # (componentId, corner label) -> [rootEid, ...]
-        self._keyOfPoint = {}  # (rootEid, lattice point) -> NodeKey; a node is shared by many elements
+        #: per root element, in the row of its id: the labels of its corner nodes, in the order of
+        #: ``corner_slots``, and its body; rows of ids that are not roots stay unused
+        self._cornerLabels = np.zeros((0, len(self._cornerSlots)), dtype=LABEL_DTYPE)
+        self._component = np.zeros(0, dtype=np.int64)
+        self._isRoot = np.zeros(0, dtype=bool)
+        #: built on first use, once all roots are known; reset by adding a root
+        self._vertexIndex = None
+        #: positions on the reference lattice range over [0, 2M]
+        self._positionRadix = 2 * latticeUnits + 1
 
     def add_root(self, rootEid: int, connectivity, componentId: int = 0):
         """Register a root element by its node labels (in the topology's local node order).
@@ -121,69 +184,142 @@ class RootEntityTable:
         ------
         ValueError
             For a collapsed root element (a corner label repeated), whose faces and edges cannot be
-            named by their corners, and for a face owned by more than two roots (a non-manifold mesh).
+            named by their corners. A non-manifold root mesh is detected once all roots are known, by
+            :meth:`check_manifold`.
         """
-        corners = {slot: connectivity[slot] for slot in self._cornerSlots}
-        if len(set(corners.values())) != len(corners):
+
+        self.add_roots([rootEid], [connectivity], [componentId])
+
+    def add_roots(self, rootEids, connectivities, componentIds):
+        """Register root elements by their node labels; see :meth:`add_root`.
+
+        Parameters
+        ----------
+        rootEids
+            The ids of the root elements.
+        connectivities
+            Per root, its node labels in the topology's local node order.
+        componentIds
+            Per root, its body.
+        """
+
+        rootEids = np.asarray(rootEids, dtype=np.int64).reshape(-1)
+        if rootEids.shape[0] == 0:
+            return
+        connectivities = np.asarray(connectivities, dtype=np.int64).reshape(rootEids.shape[0], -1)
+        requireLabelsFitTheirArrays(connectivities)
+        corners = connectivities[:, self._cornerSlots]
+        sortedCorners = np.sort(corners, axis=1)
+        collapsed = np.flatnonzero((sortedCorners[:, 1:] == sortedCorners[:, :-1]).any(axis=1))
+        if collapsed.shape[0]:
             raise ValueError(
-                f"root element {rootEid} repeats a corner node label (a collapsed element); its faces "
-                "and edges cannot be named by their corner labels"
+                f"root element {int(rootEids[collapsed[0]])} repeats a corner node label (a collapsed element); "
+                "its faces and edges cannot be named by their corner labels"
             )
-        self._rootCorners[rootEid] = corners
-        self._rootComponent[rootEid] = componentId
-        for label in corners.values():
-            self._rootsOfCorner.setdefault((componentId, label), []).append(rootEid)
-        for faceCorners in self._faceCorners:
-            face = RootFace(componentId, tuple(sorted(corners[s] for s in faceCorners)))
-            owners = self._rootsOfFace.setdefault(face, [])
-            owners.append(rootEid)
-            if len(owners) > 2:
-                raise ValueError(
-                    f"the face with corner labels {list(face.cornerLabels)} is shared by more than two root "
-                    f"elements ({owners}); the root mesh is not a manifold"
-                )
+        end = int(rootEids.max()) + 1
+        if end > self._isRoot.shape[0]:
+            capacity = max(end, 2 * self._isRoot.shape[0])
+            self._cornerLabels = grownToCapacity(self._cornerLabels, capacity)
+            self._component = grownToCapacity(self._component, capacity)
+            self._isRoot = grownToCapacity(self._isRoot, capacity)
+        self._cornerLabels[rootEids] = corners
+        self._component[rootEids] = np.asarray(componentIds, dtype=np.int64).reshape(-1)
+        self._isRoot[rootEids] = True
+        self._vertexIndex = None
+
+    def check_manifold(self):
+        """Raise unless the root mesh is a manifold: no face shared by more than two roots.
+
+        Builds the index from the vertices to the roots sharing them, which every query needs; a query
+        runs this check itself, so calling it once all roots are added only makes a defective root mesh
+        fail at setup.
+
+        Raises
+        ------
+        ValueError
+            For a face owned by more than two roots, naming it.
+        """
+
+        self._vertices()
 
     def key(self, rootEid: int, point) -> NodeKey:
         """The :class:`NodeKey` of a lattice point (three integers in [0, 2M]) of root ``rootEid``."""
-        cached = self._keyOfPoint.get((rootEid, point))
-        if cached is None:
-            cached = self._keyOfPoint[(rootEid, point)] = self._computeKey(rootEid, point)
-        return cached
+        return self.keys(rootEid, [point])[0]
+
+    def keys(self, rootEid: int, points) -> list:
+        """The :class:`NodeKey` of each of several lattice points of root ``rootEid``; see :meth:`key`."""
+        corners = self._corners(rootEid)
+        component = int(self._component[rootEid])
+        return [self._computeKey(rootEid, corners, component, tuple(point)) for point in points]
+
+    def pack(self, key: NodeKey) -> int:
+        """One integer naming a :class:`NodeKey`, so that two keys are equal iff their integers are.
+
+        The digits of the integer are, from the most significant one: the body, the labels (or the root
+        id) naming the entity, the position on the entity, each digit in a radix it cannot reach, and
+        the kind. :meth:`unpack` is its inverse.
+        """
+
+        value = key.component
+        for label in (key.entity,) if key.kind in ("vertex", "interior") else key.entity:
+            value = value * _LABEL_RADIX + label
+        for coordinate in key.position:
+            value = value * self._positionRadix + coordinate
+        return value * len(_KINDS) + _KINDS.index(key.kind)
+
+    def unpack(self, value: int) -> NodeKey:
+        """The :class:`NodeKey` an integer from :meth:`pack` names."""
+        value, kindCode = divmod(value, len(_KINDS))
+        kind = _KINDS[kindCode]
+        position = []
+        for _ in range(_POSITION_LENGTH[kind]):
+            value, coordinate = divmod(value, self._positionRadix)
+            position.append(coordinate)
+        entity = []
+        for _ in range(_ENTITY_LENGTH[kind]):
+            value, label = divmod(value, _LABEL_RADIX)
+            entity.append(label)
+        entity.reverse()
+        position.reverse()
+        return NodeKey(kind, value, entity[0] if kind in ("vertex", "interior") else tuple(entity), tuple(position))
 
     def roots_sharing(self, key: NodeKey) -> list:
         """The root elements whose closure contains the entity of ``key``."""
         if key.kind == "interior":
             return [key.entity]
-        if key.kind == "face":
-            return list(self._rootsOfFace[RootFace(key.component, key.entity)])
         if key.kind == "vertex":
-            return list(self._rootsOfCorner[(key.component, key.entity)])
-        a, b = key.entity
-        withBoth = set(self._rootsOfCorner[(key.component, a)]) & set(self._rootsOfCorner[(key.component, b)])
-        return sorted(root for root in withBoth if self._isEdgeOf(root, key.entity))
+            return self._rootsOfVertex(key.component, key.entity).tolist()
+        corners = key.entity
+        withAll = set(self._rootsOfVertex(key.component, corners[0]).tolist())
+        for label in corners[1:]:
+            withAll &= set(self._rootsOfVertex(key.component, label).tolist())
+        isEntityOf = self._isEdgeOf if key.kind == "edge" else self._isFaceOf
+        return sorted(root for root in withAll if isEntityOf(root, corners))
 
     def roots_touching(self, rootEid: int) -> set:
         """The root elements sharing at least one vertex (hence possibly an edge or a face) with
         ``rootEid``, including itself."""
-        component = self._rootComponent[rootEid]
+        component = int(self._component[rootEid])
         return {
-            root for label in self._rootCorners[rootEid].values() for root in self._rootsOfCorner[(component, label)]
+            root
+            for label in self._cornerLabels[rootEid].tolist()
+            for root in self._rootsOfVertex(component, label).tolist()
         }
 
     def root_face_position(self, rootEid: int, faceIndex: int, point) -> tuple:
         """The root face ``faceIndex`` (into ``topology.faces``) of ``rootEid`` as a :class:`RootFace`,
         and the position of ``point`` (a lattice point on it, possibly on its boundary) in the face's
         canonical frame -- identical from either root sharing the face."""
-        corners = self._rootCorners[rootEid]
+        corners = self._corners(rootEid)
         faceCorners = self._faceCorners[faceIndex]
         origin, first, second = self._canonicalFaceFrame(faceCorners, corners)
-        face = RootFace(self._rootComponent[rootEid], tuple(sorted(corners[s] for s in faceCorners)))
+        face = RootFace(int(self._component[rootEid]), tuple(sorted(corners[s] for s in faceCorners)))
         return face, self._faceCoordinates(point, origin, first, second)
 
     def local_point(self, rootEid: int, key: NodeKey) -> tuple:
         """The lattice point, in root element ``rootEid``, of a key whose entity lies in that root's
         closure (see :meth:`roots_sharing`)."""
-        corners = self._rootCorners[rootEid]
+        corners = self._corners(rootEid)
         slotOf = {label: slot for slot, label in corners.items()}
         if key.kind == "interior":
             return key.position
@@ -200,9 +336,52 @@ class RootEntityTable:
         return tuple(origin[k] + (u * (first[k] - origin[k]) + v * (second[k] - origin[k])) // twoM for k in range(3))
 
     # ---- internals ----
-    def _computeKey(self, rootEid: int, point) -> NodeKey:
-        corners = self._rootCorners[rootEid]
-        component = self._rootComponent[rootEid]
+    def _corners(self, rootEid: int) -> dict:
+        """The corner labels of a root element, by corner slot."""
+        return dict(zip(self._cornerSlots, self._cornerLabels[rootEid].tolist()))
+
+    def _vertices(self) -> _VertexIndex:
+        """The index from the vertices of the root mesh to the roots sharing them, built once all roots
+        are known; checks that the root mesh is a manifold when it is built (see :meth:`check_manifold`)."""
+        if self._vertexIndex is None:
+            rootEids = np.flatnonzero(self._isRoot)
+            names = (self._component[rootEids, None] * _LABEL_RADIX + self._cornerLabels[rootEids]).reshape(-1)
+            roots = np.repeat(rootEids, len(self._cornerSlots))
+            order = np.lexsort((roots, names))
+            names, roots = names[order], roots[order]
+            vertices, first = np.unique(names, return_index=True)
+            self._vertexIndex = _VertexIndex(vertices, np.append(first, names.shape[0]), roots)
+            self._requireManifold(rootEids)
+        return self._vertexIndex
+
+    def _requireManifold(self, rootEids: np.ndarray):
+        """Raise if a face of the root mesh, named by its body and its four corner labels, belongs to more
+        than two roots."""
+        cornerColumn = {slot: column for column, slot in enumerate(self._cornerSlots)}
+        faces = []
+        for faceCorners in self._faceCorners:
+            labels = np.sort(self._cornerLabels[np.ix_(rootEids, [cornerColumn[s] for s in faceCorners])], axis=1)
+            faces.append(np.column_stack([self._component[rootEids], labels]))
+        faces = np.concatenate(faces)
+        unique, counts = np.unique(faces, axis=0, return_counts=True)
+        if (counts > 2).any():
+            face = unique[np.flatnonzero(counts > 2)[0]]
+            owners = np.tile(rootEids, len(self._faceCorners))[np.flatnonzero((faces == face).all(axis=1))]
+            raise ValueError(
+                f"the face with corner labels {face[1:].tolist()} is shared by more than two root "
+                f"elements ({sorted(owners.tolist())}); the root mesh is not a manifold"
+            )
+
+    def _rootsOfVertex(self, component: int, label: int) -> np.ndarray:
+        """The roots sharing a vertex, ascending."""
+        index = self._vertices()
+        name = component * _LABEL_RADIX + label
+        i = int(np.searchsorted(index.vertices, name))
+        if i == index.vertices.shape[0] or index.vertices[i] != name:
+            return index.roots[:0]
+        return index.roots[index.first[i] : index.first[i + 1]]
+
+    def _computeKey(self, rootEid: int, corners: dict, component: int, point) -> NodeKey:
         kind, entity = self._topology.lowest_entity_containing(point, 2 * self._latticeUnits)
         if kind == "vertex":
             return NodeKey("vertex", component, corners[entity], ())
@@ -219,8 +398,12 @@ class RootEntityTable:
         return NodeKey("interior", component, rootEid, tuple(point))
 
     def _isEdgeOf(self, rootEid, labels) -> bool:
-        corners = self._rootCorners[rootEid]
+        corners = self._corners(rootEid)
         return any({corners[a], corners[b]} == set(labels) for a, b in self._edgeCorners)
+
+    def _isFaceOf(self, rootEid, labels) -> bool:
+        corners = self._corners(rootEid)
+        return any({corners[s] for s in faceCorners} == set(labels) for faceCorners in self._faceCorners)
 
     def _edgeParameter(self, point, a, b) -> int:
         """Position along the root edge from corner ``a`` (0) to corner ``b`` (2M)."""
@@ -249,3 +432,10 @@ class RootEntityTable:
         axisU = next(k for k in range(3) if e1[k] != o[k])
         axisV = next(k for k in range(3) if e2[k] != o[k])
         return (abs(point[axisU] - o[axisU]), abs(point[axisV] - o[axisV]))
+
+
+def grownToCapacity(array: np.ndarray, capacity: int) -> np.ndarray:
+    """A copy of ``array`` with ``capacity`` rows: its rows, then zeros."""
+    grown = np.zeros((capacity,) + array.shape[1:], dtype=array.dtype)
+    grown[: array.shape[0]] = array
+    return grown

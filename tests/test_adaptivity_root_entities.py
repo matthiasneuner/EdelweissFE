@@ -101,5 +101,6 @@ def test_collapsedAndNonManifoldRootsAreRejected():
     table.add_root(1, list(range(1, 21)))
     face = TOPOLOGY.faces[0]
     table.add_root(2, [slot + 1 if slot in face else 200 + slot for slot in range(20)])
+    table.add_root(3, [slot + 1 if slot in face else 300 + slot for slot in range(20)])
     with pytest.raises(ValueError, match="manifold"):
-        table.add_root(3, [slot + 1 if slot in face else 300 + slot for slot in range(20)])
+        table.check_manifold()
