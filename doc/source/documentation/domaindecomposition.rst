@@ -530,11 +530,16 @@ the input rule missed. The element distribution says which nodes a process holds
   others hold it so that their copies of the constraint can be synchronized from it --, and the nodes of
   the elements a contact facet (of a tie) is cut from, which every process makes. These are
   surface-sized;
-* the nodes of the hanging-node constraints of an adaptive refinement, slaves and masters
-  (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodesOfMultiPointConstraints`),
-  in every process: a process integrating one degree of freedom of a group of them integrates all of
-  it, and every process records each of them by global degree of freedom. These are of the size of the
-  refined interface, and replaced at every refinement.
+* the nodes of the hanging-node constraints of an adaptive refinement, slaves and masters, in every
+  process: the constraint keeps its records as node objects
+  (:meth:`~edelweissfe.constraints.hangingnode.Constraint.updateRecords`), which every process resolves
+  to global degrees of freedom. These are of the size of the refined interface, and replaced at every
+  refinement. (Records by label, resolved by the global numbering as a tie's are, would let a process
+  hold only the groups its elements touch.)
+
+A model entity holds such nodes under its name
+(:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.holdNodes`); holding them again under
+the same name replaces those held before, and the nodes no element or reader needs any more are dropped.
 
 Every other node set holds the part of its set held here, and refuses to be read as a whole, like an
 element set. A Dirichlet condition and a concentrated load lay out their values one row per node of
@@ -880,7 +885,9 @@ process from the same nodes, in the same order, with the same bits as that proce
 resize & restore" of the topology update is local). The few it cannot interpolate -- a new node held
 for a reader, a hanging node far from its elements -- it receives after the update (`Nodes of the
 subdomain`_). A serial run interpolates in the same way: its zero-weight terms, ``0 * value`` before,
-are exact zeros now, which changes no bit but the sign of a zero. After the
+are exact zeros now. That is the one change of bits accepted with it: an interpolated value that is
+exactly zero may have the other sign than in a run, or a checkpoint, made before; no other bit changes.
+After the
 modifier, the topology pipeline lets the distribution create and drop the elements of the changed
 mesh (:meth:`~edelweissfe.models.elementdistribution.ElementDistribution.updateLocalElements`): a
 process drops the elements no longer in the mesh. The equation
