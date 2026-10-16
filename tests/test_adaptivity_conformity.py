@@ -167,6 +167,55 @@ def test_aCellIsSubdividedFromTheMeshAsItIsWhenRefined():
     np.testing.assert_array_equal(builder.mesh.element_coordinates(childAtCorner), expected[kids.index(childAtCorner)])
 
 
+def _warped(point):
+    x, y, z = point
+    return np.array(
+        [x + 0.07 * np.sin(1.3 * y + 0.4 * z), y + 0.05 * np.cos(0.9 * x) * z, z + 0.03 * x * y + 0.011 * x * x]
+    )
+
+
+def _warpedRoot(origin, axes):
+    """The 20 node coordinates of a unit cube at ``origin``, its local axes along ``axes``, warped."""
+    reference = np.asarray(TOPOLOGY.reference_node_lattice, dtype=float)  # 0, 1, 2 per axis
+    return np.array(
+        [
+            _warped(np.asarray(origin, dtype=float) + 0.5 * sum(p[k] * np.asarray(axes[k]) for k in range(3)))
+            for p in reference
+        ]
+    )
+
+
+def test_aChildIsPlacedFromTheMeshCoordinatesOfANodeAnotherRootCreated():
+    """Two warped roots share a face with differently oriented local axes, and both are refined: the
+    nodes on the shared face are created by the first root's children, and the second root's own map
+    places some of them a few ulps away. A child of the second root refined again is placed from the
+    mesh's coordinates of its nodes -- those the first root created -- not from its own parent's map,
+    so the refined mesh is the one the model computes on."""
+    builder = AdaptiveMeshBuilder(2)
+    mesh = builder.mesh
+    a = builder.addRoot(_warpedRoot((0, 0, 0), ((1, 0, 0), (0, 1, 0), (0, 0, 1))))
+    b = builder.addRoot(_warpedRoot((1, 0, 1), ((0, 0, -1), (0, 1, 0), (1, 0, 0))))
+    mesh.refine(a)
+    kidsOfB = mesh.refine(b)
+    ownMapOfB = TOPOLOGY.subdivide(mesh.element_coordinates(b), 2)
+    differs = [
+        (kid, own) for kid, own in zip(kidsOfB, ownMapOfB) if not np.array_equal(mesh.element_coordinates(kid), own)
+    ]
+    assert differs, "the fixture must have a child whose nodes another root placed differently"
+    kid, own = max(differs, key=lambda pair: int((mesh.element_coordinates(pair[0]) != pair[1]).sum()))
+    fromMesh = TOPOLOGY.subdivide(mesh.element_coordinates(kid), 2)
+    grandchildren = mesh.refine(kid)
+    mesh.balance_2to1()
+    mesh.check_conformity(mesh.hanging_mpc_records())
+    for grandchild, expected in zip(grandchildren, fromMesh):
+        np.testing.assert_array_equal(mesh.element_coordinates(grandchild), expected)
+    fromOwnMap = TOPOLOGY.subdivide(own, 2)
+    assert any(
+        not np.array_equal(mesh.element_coordinates(grandchild), old)
+        for grandchild, old in zip(grandchildren, fromOwnMap)
+    ), "subdividing the child's own map would place the grandchildren elsewhere"
+
+
 def test_aSplitNodeIsCaught():
     """Two labels at one point (here: one child node deliberately renamed) are two unconnected nodes;
     the check reports it instead of letting the mesh tear."""

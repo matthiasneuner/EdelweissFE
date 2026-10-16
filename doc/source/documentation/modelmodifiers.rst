@@ -161,13 +161,24 @@ instead of producing a silently non-conforming mesh:
 whole octree, so it is stored compactly: the cells as a struct of arrays, one row per cell
 (:class:`~edelweissfe.adaptivity.refinement.OctreeCells`: connectivity, level, parent, first child, root,
 body, active flag and the exact reference box), the root mesh as arrays of corner labels with an index
-from each vertex to the roots sharing it, and the node keys of the cells' nodes packed into integers --
-about 300 bytes per element instead of about 2 kilobytes of Python objects. The algorithms read the cells
+from each vertex to the roots sharing it, and the node keys of the cells' nodes packed into (Python,
+arbitrary-size) integers, numbered and stored per cell as 32-bit numbers. On the 131,000-root c1_150
+edge-breakout mesh the mirror takes 54 MB instead of 277 MB of Python objects (measured after the
+initial refinement), in every process. The algorithms read the cells
 through named accessors (:meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.level`,
 :meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.children`, ...). The coordinates of the nodes are
 the mesh's (:class:`~edelweissfe.models.mesh.Mesh`): an element is subdivided from the coordinates its
 nodes have there when it is refined, and the nodes a refinement creates are described there, once per
 refinement.
+
+*Compatibility.* Before this arrangement, a cell was subdivided from the coordinates its own parent's
+map had given its nodes, not from the mesh. Where a node of a cell at level 1 or deeper was created by
+a *different* parent -- a neighbour across a face whose local axes run differently -- the two can differ
+in the last bits on a general (warped, non-dyadic) mesh, and so do the nodes refining that cell creates.
+A checkpoint written by an earlier version with refinement to level 2 or deeper on such a mesh can
+therefore fail to resume: the replayed topology's fingerprint does not match the recorded one, and the
+resume stops with that error rather than continuing on a different mesh. Level-1 refinement, and
+meshes whose node coordinates are reproduced exactly by every parent map, are unaffected.
 
 .. autoclass:: edelweissfe.adaptivity.rootentities.RootEntityTable
     :members: add_root, add_roots, check_manifold, key, keys, pack, unpack, roots_sharing, roots_touching,
