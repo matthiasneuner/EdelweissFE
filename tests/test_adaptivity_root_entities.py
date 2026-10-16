@@ -119,3 +119,19 @@ def test_collapsedAndNonManifoldRootsAreRejected():
     table.add_root(3, [slot + 1 if slot in face else 300 + slot for slot in range(20)])
     with pytest.raises(ValueError, match="manifold"):
         table.check_manifold()
+
+
+def test_aQueryOfANonRootRaises():
+    """The table names the entities of root elements only; asking about any other element is an error,
+    never the corners of an empty row."""
+    table = RootEntityTable(TOPOLOGY, M)
+    table.add_root(2, list(range(1, 21)))
+    for notARoot in (0, 1, 3, 99):
+        with pytest.raises(KeyError, match="not a root element"):
+            table.roots_touching(notARoot)
+        with pytest.raises(KeyError, match="not a root element"):
+            table.key(notARoot, (0, 0, 0))
+        with pytest.raises(KeyError, match="not a root element"):
+            table.root_face_position(notARoot, 0, (0, 0, 0))
+        with pytest.raises(KeyError, match="not a root element"):
+            table.local_point(notARoot, table.key(2, (0, 0, 0)))

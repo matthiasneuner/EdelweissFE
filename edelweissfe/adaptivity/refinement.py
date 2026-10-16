@@ -215,6 +215,21 @@ class OctreeCells:
         self.boxEdgeLength = np.zeros(0, dtype=np.int64)
         self.nodeKeyIds = np.zeros((0, nodesPerCell), dtype=np.int32)
 
+    def _arrays(self) -> tuple:
+        """Every per-cell array, in the order of the table above."""
+        return (
+            self.connectivity,
+            self.level,
+            self.parent,
+            self.firstChild,
+            self.root,
+            self.component,
+            self.isActive,
+            self.boxOrigin,
+            self.boxEdgeLength,
+            self.nodeKeyIds,
+        )
+
     def append(self, number: int) -> range:
         """Make rows for ``number`` new cells (all values zero; the caller fills them in) and return
         their ids."""
@@ -223,16 +238,18 @@ class OctreeCells:
             # grown by a quarter, not doubled: a mirror of a hundred thousand roots refined in a few
             # places would otherwise carry a hundred thousand empty rows
             capacity = max(end, self.level.shape[0] + self.level.shape[0] // 4)
-            self.connectivity = grownToCapacity(self.connectivity, capacity)
-            self.level = grownToCapacity(self.level, capacity)
-            self.parent = grownToCapacity(self.parent, capacity)
-            self.firstChild = grownToCapacity(self.firstChild, capacity)
-            self.root = grownToCapacity(self.root, capacity)
-            self.component = grownToCapacity(self.component, capacity)
-            self.isActive = grownToCapacity(self.isActive, capacity)
-            self.boxOrigin = grownToCapacity(self.boxOrigin, capacity)
-            self.boxEdgeLength = grownToCapacity(self.boxEdgeLength, capacity)
-            self.nodeKeyIds = grownToCapacity(self.nodeKeyIds, capacity)
+            (
+                self.connectivity,
+                self.level,
+                self.parent,
+                self.firstChild,
+                self.root,
+                self.component,
+                self.isActive,
+                self.boxOrigin,
+                self.boxEdgeLength,
+                self.nodeKeyIds,
+            ) = (grownToCapacity(array, capacity) for array in self._arrays())
         self.count = end
         return range(first, end)
 

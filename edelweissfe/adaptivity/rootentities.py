@@ -57,7 +57,8 @@ the body of every root element, one row per root, and an index from each vertex 
 the roots sharing it, built once all roots are known (:meth:`RootEntityTable.check_manifold`). The
 edges and faces need no table of their own: the roots sharing an edge or a face are the roots sharing
 all of its corners that have it as an edge or a face. A :class:`NodeKey` can be packed into one
-integer (:meth:`RootEntityTable.pack`), which is how the octree stores the keys of its nodes.
+(Python, arbitrary-size) integer (:meth:`RootEntityTable.pack`), which is how the octree stores the
+keys of its nodes.
 """
 
 from typing import NamedTuple
@@ -128,6 +129,8 @@ _ENTITY_LENGTH = {"vertex": 1, "edge": 2, "face": 4, "interior": 1}
 _POSITION_LENGTH = {"vertex": 0, "edge": 1, "face": 2, "interior": 3}
 #: The radix of a label, an element id or a body in a packed key.
 _LABEL_RADIX = 2**32
+#: How many roots' corner labels :meth:`RootEntityTable._corners` keeps at most.
+_CORNER_CACHE_SIZE = 4096
 
 
 class _VertexIndex(NamedTuple):
@@ -174,6 +177,8 @@ class RootEntityTable:
         self._isRoot = np.zeros(0, dtype=bool)
         #: built on first use, once all roots are known; reset by adding a root
         self._vertexIndex = None
+        #: the corner labels of recently queried roots, by corner slot (see _corners)
+        self._cornersOfRecentRoots = {}
         #: positions on the reference lattice range over [0, 2M]
         self._positionRadix = 2 * latticeUnits + 1
 
@@ -226,6 +231,7 @@ class RootEntityTable:
         self._component[rootEids] = np.asarray(componentIds, dtype=np.int64).reshape(-1)
         self._isRoot[rootEids] = True
         self._vertexIndex = None
+        self._cornersOfRecentRoots = {}
 
     def check_manifold(self):
         """Raise unless the root mesh is a manifold: no face shared by more than two roots.
@@ -258,6 +264,11 @@ class RootEntityTable:
         The digits of the integer are, from the most significant one: the body, the labels (or the root
         id) naming the entity, the position on the entity, each digit in a radix it cannot reach, and
         the kind. :meth:`unpack` is its inverse.
+
+        The integer is a Python integer of some 100 to 200 bits, not an int64: with positions on a
+        lattice of twice 2**20 units per axis and labels of 32 bits, a face or an interior key
+        does not fit 64 bits. The octree therefore numbers the packed keys it meets and stores the
+        numbers (int32) per cell.
         """
 
         value = key.component
@@ -299,12 +310,9 @@ class RootEntityTable:
     def roots_touching(self, rootEid: int) -> set:
         """The root elements sharing at least one vertex (hence possibly an edge or a face) with
         ``rootEid``, including itself."""
+        labels = self._corners(rootEid).values()
         component = int(self._component[rootEid])
-        return {
-            root
-            for label in self._cornerLabels[rootEid].tolist()
-            for root in self._rootsOfVertex(component, label).tolist()
-        }
+        return {root for label in labels for root in self._rootsOfVertex(component, label).tolist()}
 
     def root_face_position(self, rootEid: int, faceIndex: int, point) -> tuple:
         """The root face ``faceIndex`` (into ``topology.faces``) of ``rootEid`` as a :class:`RootFace`,
@@ -337,8 +345,26 @@ class RootEntityTable:
 
     # ---- internals ----
     def _corners(self, rootEid: int) -> dict:
-        """The corner labels of a root element, by corner slot."""
-        return dict(zip(self._cornerSlots, self._cornerLabels[rootEid].tolist()))
+        """The corner labels of a root element, by corner slot.
+
+        Kept for the roots asked for recently (queries come in runs over neighbouring roots), up to
+        :data:`_CORNER_CACHE_SIZE` of them.
+
+        Raises
+        ------
+        KeyError
+            If ``rootEid`` is not a root element.
+        """
+        corners = self._cornersOfRecentRoots.get(rootEid)
+        if corners is None:
+            if not (0 <= rootEid < self._isRoot.shape[0] and self._isRoot[rootEid]):
+                raise KeyError(f"element {rootEid} is not a root element of the root entity table")
+            if len(self._cornersOfRecentRoots) >= _CORNER_CACHE_SIZE:
+                self._cornersOfRecentRoots.clear()
+            corners = self._cornersOfRecentRoots[rootEid] = dict(
+                zip(self._cornerSlots, self._cornerLabels[rootEid].tolist())
+            )
+        return corners
 
     def _vertices(self) -> _VertexIndex:
         """The index from the vertices of the root mesh to the roots sharing them, built once all roots
