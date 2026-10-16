@@ -779,46 +779,22 @@ private:
   int              n_;
 };
 
-// Wraps amgcl::solver::lgmres<builtin<double>> as blockamg.py's outer Krylov solve, in place of
-// scipy.sparse.linalg.gmres, at both of that path's call sites (the main solve and the true-residual
-// continuation retry -- see blockamg.py's __call__).
-//
-// One instance is meant to be constructed once per BlockAMGSolver and reused for that solver's entire
-// lifetime, not rebuilt per solve like the per-field AMG hierarchies (see blockamg.py's own
-// mustRefresh bookkeeping for those). This persistence is independent of `always_reset`: it is what
-// lets tol/maxiter be mutated per call onto the same underlying object (see below) without paying
-// construction cost every solve, and it is what `always_reset=false` would use *if* enabled -- but an
-// attribution ablation found cross-call
-// recycling (`outer_v` surviving across separate operator() calls, AMGCL's own doc comment on `K`
-// naming "solving multiple similar problems" as the intended use) contributes nothing measurable on
-// 9 representative systems and, on a live pryout trajectory, actively compounds a struggling solve's
-// poorly-conditioned subspace into a much more expensive (and once, NaN) subsequent one. `blockamg.py`
-// now defaults `always_reset=True` (AMGCL's own upstream default) accordingly -- this class still
-// earns its keep over plain scipy GMRES from threading and lgmres's own intra-call restart-cycle
-// augmentation alone (independent of `always_reset`, see the ablation), not from cross-call memory.
-//
-// The system matrix itself is *not* cached across calls the way the AMG hierarchies are -- every
-// solve() call iterates on the EquilibratedSystemT it is given, built fresh for that solve (the
-// pattern churns every solve regardless on a model with contact/tie constraints, so there is
-// nothing to amortize). lgmres's
-// own header comment explicitly names this usage pattern too: "The system matrix may differ from the
-// matrix used during initialization[...] used for the solution of non-stationary problems with
-// slowly changing coefficients."
-//
-// tol/maxiter are *not* baked into the params this instance was constructed with -- they are set on
-// every solve() call by mutating the underlying amgcl::solver::lgmres object's own public `prm`
-// member directly (see solve() below). This is what lets a single persistent instance still honour a
-// different Eisenstat--Walker forcing tolerance and true-residual-continuation tolerance on every
-// call (blockamg.py's `eta`/`continuationEta`) without reconstructing the object and losing the
-// recycled Krylov vectors `always_reset=false` exists to keep -- rebuild-per-call and reuse-across-
-// calls are mutually exclusive if tol/maxiter could only be set at construction, so mutating `prm` in
-// place is what reconciles them.
-//
-// The problem size n is fixed at construction (lgmres preallocates every scratch vector -- Arnoldi
-// basis, augmentation vectors -- for a fixed n in its own constructor); a field-structure or dof-count
-// change (AMR, a new increment with a resized system) needs a fresh instance. blockamg.py's Python
-// side already tracks exactly this condition for the AMG hierarchies (mustRefresh's `n != self._n`)
-// and reuses that same signal to decide when to rebuild this object too.
+/// Wraps amgcl::solver::lgmres<builtin<double>> as blockamg.py's outer Krylov solve, in place of
+/// scipy.sparse.linalg.gmres, at both of that path's call sites (the main solve and the true-residual
+/// continuation retry -- see blockamg.py's __call__).
+///
+/// One instance lives as long as the system size does: lgmres preallocates every scratch vector
+/// (Arnoldi basis, augmentation vectors) for a fixed n in its own constructor, so a size change (AMR)
+/// needs a fresh instance, and blockamg.py rebuilds it then -- and when its own settings change. Every
+/// call starts from an empty augmentation subspace (lgmres's always_reset, forced here): carrying the
+/// augmentation vectors across calls ("recycling") was measured to buy nothing on 9 representative
+/// systems and, on a live trajectory, to compound a struggling solve's subspace into much more
+/// expensive and once NaN subsequent ones, so it is not offered. The intra-call restart-cycle
+/// augmentation (K) is unaffected.
+///
+/// tol/maxiter are set on every call on the solver's own public prm member -- blockamg's forcing and
+/// continuation tolerances change per call -- and every call iterates on the EquilibratedSystemT it is
+/// given, built fresh for that solve.
 class LGMRESOuterSolverT {
 public:
   typedef amgcl::backend::builtin< double > Backend;
@@ -827,13 +803,9 @@ public:
   std::unique_ptr< Solver > solver_;
   int                       n_;
 
-  // Constructed once for a fixed problem size n. json_params is lgmres::params' own sub-tree, e.g.
-  // {"M": 30, "K": 3, "always_reset": true} -- forwarded 1:1 to amgcl::solver::lgmres::params'
-  // ptree constructor with no translation layer, matching every field name AMGCL itself uses (M, K,
-  // always_reset, pside, maxiter, tol, abstol, ns_search, verbose). tol/maxiter passed here only set
-  // the *initial* defaults; solve() overrides both on every call (see the class comment above) --
-  // included anyway so a caller that never overrides them still gets sane, explicit values rather
-  // than silently depending on AMGCL's own defaults.
+  /// @brief Construct for a fixed problem size n.
+  /// @param json_params lgmres::params' own sub-tree, e.g. {"M": 30, "K": 3}, forwarded verbatim;
+  /// always_reset is forced to true (see the class comment).
   LGMRESOuterSolverT( int n, const char* json_params ) : n_( n )
   {
     boost::property_tree::ptree prm;
@@ -842,19 +814,14 @@ public:
       std::stringstream ss( json_str );
       boost::property_tree::read_json( ss, prm );
     }
+    prm.put( "always_reset", true );
     Solver::params p( prm );
     solver_.reset( new Solver( static_cast< size_t >( n ), p ) );
   }
 
-  // x <- A^-1 rhs, right-preconditioned by the callback (applyFn/ctx), continuing this instance's own
-  // recycled/augmented Krylov vectors from any previous solve() call unless always_reset was
-  // requested at construction. x provides the initial guess on input (matching amgcl::solver::
-  // lgmres::operator()'s own x0-in/solution-out contract -- callers doing a warm-started continuation
-  // retry, as blockamg.py's true-residual continuation loop does, must pre-fill x themselves) and
-  // holds the solution on output. tol/maxiter are applied to this call (and every subsequent one,
-  // until next changed) by mutating the underlying solver's own public `prm` member in place -- see
-  // the class comment above for why this, rather than reconstructing the object, is required to keep
-  // both per-call tolerances and cross-call Krylov-vector recycling at the same time.
+  /// @brief x <- A^-1 rhs, right-preconditioned by the callback (applyFn/ctx). x holds the initial
+  /// guess on input (blockamg's warm-started continuation retry pre-fills it) and the solution on
+  /// output; iters/error return lgmres's iteration count and its own scaled relative residual.
   void solve( const EquilibratedSystemT& system,
               const double*              rhs,
               double*                    x,
@@ -863,50 +830,17 @@ public:
               PyPrecondApplyFn           applyFn,
               void*                      ctx,
               int&                       iters,
-              double&                    error,
-              bool                       resetOnce = false )
+              double&                    error )
   {
     system.checkBuilt();
     const int n = system.n_;
     if ( n != n_ ) {
       throw std::runtime_error( "LGMRESOuterSolverT::solve(): n=" + std::to_string( n ) + " does not match the size " +
-                                std::to_string( n_ ) +
-                                " this instance was constructed for -- construct a fresh instance on "
-                                "any field-structure/size change (blockamg.py's own mustRefresh "
-                                "condition already detects this for the AMG hierarchies; the same "
-                                "signal is reused here)." );
+                                std::to_string( n_ ) + " this instance was constructed for." );
     }
 
     solver_->prm.tol     = tol;
     solver_->prm.maxiter = static_cast< size_t >( maxiter );
-
-    // A caller-requested one-shot reset
-    // of the recycled/augmented Krylov vectors (`outer_v`), without discarding the persistent solver_
-    // object or reconstructing it. AMGCL's own operator() clears outer_v itself, unconditionally,
-    // whenever prm.always_reset is true (verified directly in lgmres.hpp: the very first statement in
-    // operator()) -- so flipping it true for exactly this one call and restoring it immediately after
-    // reuses that already-correct mechanism instead of reaching into outer_v/outer_v_data directly.
-    // blockamg.py wires this to its own `newIncrement` signal: reset across increment/cutback
-    // boundaries (where a stale recycled subspace is hypothesized to cost pure overhead), keep
-    // recycling within an increment's own Newton sequence (AMGCL's own
-    // intended use for K, and where every other ord showed recycling helping, not hurting).
-    // RAII, not a plain save/mutate/restore: `(*solver_)(...)` below can throw (AMGCL internals,
-    // e.g. an allocation failure -- not a Python exception from the preconditioner callback, which
-    // never becomes a C++ exception here, see PyLGMRESPrecondT/the trampoline). A bare save-then-
-    // restore-at-the-end would leave `always_reset` permanently flipped on the persistent, reused
-    // `solver_` object if that call threw, silently changing every subsequent solve()'s recycling
-    // behaviour. This guard restores unconditionally, on every exit path.
-    struct AlwaysResetGuard {
-      Solver::params& prm_;
-      bool            saved_;
-      AlwaysResetGuard( Solver::params& prm, bool resetOnce ) : prm_( prm ), saved_( prm.always_reset )
-      {
-        if ( resetOnce ) {
-          prm_.always_reset = true;
-        }
-      }
-      ~AlwaysResetGuard() { prm_.always_reset = saved_; }
-    } alwaysResetGuard( solver_->prm, resetOnce );
 
     PyLGMRESPrecondT precond( applyFn, ctx, n );
 
@@ -951,7 +885,7 @@ public:
 // tests/test_ptwogrid.py).
 //
 // The fine Chebyshev smoother reimplements amgcl::relaxation::chebyshev's polynomial (same degree,
-// lower/higher conventions, same recurrence, optional Jacobi scaling) rather than wrapping it,
+// lower/higher conventions, same recurrence; no Jacobi scaling) rather than wrapping it,
 // because AMGCL estimates the spectral radius inside its constructor and offers no way to supply
 // one. Here the estimate is either computed by power iteration -- from a deterministic, thread-count
 // independent start vector -- or handed in, e.g. the value of a previous build on the same field,
@@ -1033,34 +967,25 @@ inline void ptwogridFineResidual( const amgcl::backend::crs< amgcl::static_matri
 // type, with the Chebyshev smoother acting on it. ValueType is the double entry type (double, or a
 // double 3x3 block); MatrixValueType is how the operator is stored for the smoother and the residual:
 // ValueType itself, or its float counterpart -- half the bytes per entry, the dominant traffic of
-// the cycle. The spectral-radius estimate and the Jacobi scaling (inverse diagonal) only ever run on,
-// and come from, a double operator: a float level is made from a double one (makeFloatCopy()), which
-// has estimated or re-checked the radius before.
+// the cycle. The spectral-radius estimate only ever runs on a double operator: a float level is made
+// from a double one (makeFloatCopy()), which has estimated or re-checked the radius before.
 template < typename ValueType, typename MatrixValueType = ValueType >
 class PTwoGridFineLevelT : public PTwoGridFineSmoother {
 public:
   typedef amgcl::backend::crs< MatrixValueType, int, int >   Matrix;
-  typedef amgcl::backend::numa_vector< ValueType >           Diagonal;
   typedef typename amgcl::math::rhs_of< ValueType >::type    RhsType;
   typedef typename amgcl::math::scalar_of< ValueType >::type ScalarType;
   static const int                                           BlockSize = amgcl::math::static_rows< ValueType >::value;
 
-  std::shared_ptr< Matrix >   A_;
-  std::shared_ptr< Diagonal > inverseDiagonal_;
-  std::vector< double >       r_, p_;
-  unsigned                    degree_ = 0;
-  bool                        scale_  = false;
-  double                      d_ = 0.0, c_ = 0.0;
+  std::shared_ptr< Matrix > A_;
+  std::vector< double >     r_, p_;
+  unsigned                  degree_ = 0;
+  double                    d_ = 0.0, c_ = 0.0;
 
-  // @brief Take over the operator A (already in this storage format); with scale, Jacobi-scale the
-  // smoother (and the spectral-radius estimate) by its inverse diagonal.
-  void setOperator( std::shared_ptr< Matrix > A, bool scale )
+  /// @brief Take over the operator A (already in this storage format).
+  void setOperator( std::shared_ptr< Matrix > A )
   {
-    A_     = A;
-    scale_ = scale;
-    if ( scale_ ) {
-      inverseDiagonal_ = amgcl::backend::diagonal( *A_, /*invert=*/true );
-    }
+    A_ = A;
     r_.assign( A_->nrows * BlockSize, 0.0 );
     p_.assign( A_->nrows * BlockSize, 0.0 );
   }
@@ -1087,12 +1012,10 @@ public:
     }
     std::unique_ptr< PTwoGridFineLevelT< ValueType, FloatValueType > > level(
       new PTwoGridFineLevelT< ValueType, FloatValueType >() );
-    level->A_               = Afloat;
-    level->inverseDiagonal_ = inverseDiagonal_;
-    level->scale_           = scale_;
-    level->degree_          = degree_;
-    level->d_               = d_;
-    level->c_               = c_;
+    level->A_      = Afloat;
+    level->degree_ = degree_;
+    level->d_      = d_;
+    level->c_      = c_;
     level->r_.assign( r_.size(), 0.0 );
     level->p_.assign( p_.size(), 0.0 );
     return level;
@@ -1111,7 +1034,7 @@ public:
     c_ = 0.5 * ( hi - lo );
   }
 
-  // @brief Power iteration for the spectral radius of A (of D^-1 A if scaled): the loop of
+  // @brief Power iteration for the spectral radius of A: the loop of
   // amgcl::backend::spectral_radius (estimate sum_i |(A b)_i b_i| per scalar component, b normalized),
   // with two differences that make the estimate a deterministic function of the matrix alone: the
   // start vector is the caller's instead of per-thread random numbers, and the reductions run over a
@@ -1145,17 +1068,11 @@ public:
     for ( int iter = 0; iter < powerIters; ) {
 #pragma omp parallel for schedule( static )
       for ( ptrdiff_t k = 0; k < nChunks; ++k ) {
-        double    localNorm = 0.0, localRadius = 0.0;
-        ValueType diagonalValue = amgcl::math::identity< ValueType >();
+        double localNorm = 0.0, localRadius = 0.0;
         for ( ptrdiff_t i = k * chunk, e = std::min( n, ( k + 1 ) * chunk ); i < e; ++i ) {
           RhsType s = amgcl::math::zero< RhsType >();
-          for ( int j = A.ptr[i], end = A.ptr[i + 1]; j < end; ++j ) {
-            if ( scale_ && A.col[j] == i )
-              diagonalValue = A.val[j];
+          for ( int j = A.ptr[i], end = A.ptr[i + 1]; j < end; ++j )
             s += A.val[j] * b0[A.col[j]];
-          }
-          if ( scale_ )
-            s = amgcl::math::inverse( diagonalValue ) * s;
           const double* sScalar  = reinterpret_cast< const double* >( &s );
           const double* b0Scalar = reinterpret_cast< const double* >( &b0[i] );
           for ( int component = 0; component < BlockSize; ++component ) {
@@ -1200,12 +1117,6 @@ public:
       const double* residual = fromZero ? b : r_.data();
       if ( !fromZero )
         ptwogridFineResidual( *A_, b, x, r_.data() );
-      if ( scale_ ) {
-        auto residualRange = amgcl::make_iterator_range( residual, residual + n );
-        auto rRange        = amgcl::make_iterator_range( r_.data(), r_.data() + n );
-        amgcl::backend::vmul( 1.0, *inverseDiagonal_, residualRange, 0.0, rRange );
-        residual = r_.data();
-      }
       if ( k == 0 ) {
         alpha = 1.0 / d_;
         beta  = 0.0;
@@ -1295,8 +1206,9 @@ public:
          setupFineOperatorSeconds_ = 0.0, setupSpectralRadiusSeconds_ = 0.0;
   double applyFineSeconds_ = 0.0, applyCoarseSeconds_ = 0.0;
 
-  // @brief Parse the flat parameter tree: nu, fineDegree, fineLower, fineHigher, finePowerIters,
-  // fineScale, fineBlockSize, and the coarse level's AMGCL preconditioner tree under "coarse".
+  // @brief Parse the flat parameter tree: nuPre, nuPost, fineDegree, fineLower, fineHigher,
+  // finePowerIters, fineRecheckIters, fineRecheckTolerance, fineBlockSize, fineValueType,
+  // coarseValueType, and the coarse level's AMGCL preconditioner tree under "coarse".
   PTwoGridPreconditionerT( const char* json_params )
   {
     std::string json_str( json_params );
@@ -1424,7 +1336,6 @@ public:
     const unsigned degree        = prm.get( "fineDegree", 5u );
     const float    lower         = prm.get( "fineLower", 0.01f );
     const float    higher        = prm.get( "fineHigher", 1.1f );
-    const bool     scale         = prm.get( "fineScale", false );
     fineScalar_.reset();
     fineBlock3_.reset();
     fineFloat_.reset();
@@ -1451,11 +1362,11 @@ public:
     start = Clock::now();
     if ( Ablock ) {
       fineBlock3_.reset( new PTwoGridFineLevelT< Block3 >() );
-      fineBlock3_->setOperator( Ablock, scale );
+      fineBlock3_->setOperator( Ablock );
     }
     else {
       fineScalar_.reset( new PTwoGridFineLevelT< double >() );
-      fineScalar_->setOperator( Afine, scale );
+      fineScalar_->setOperator( Afine );
     }
     fineSpectralRadius_ = chooseFineSpectralRadius( spectralRadius, dominantVector, dominantVectorSize, higher );
     if ( fineBlock3_ )

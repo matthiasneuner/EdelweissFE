@@ -135,10 +135,8 @@ cdef extern from "amgcl-wrapper.hpp":
     # Cython-overridden C++ virtual method.
     ctypedef void (*PyPrecondApplyFn)(void* ctx, int n, const double* rhs, double* x)
 
-    # AMGCL's own native outer Krylov solve, in place of scipy.sparse.linalg.gmres. Persists
-    # its recycled/augmented Krylov vectors across solve() calls on the same instance whenever
-    # always_reset is set to false in the constructor's params -- see LGMRESOuterSolverT's own
-    # comment for why this class is meant to be built once per BlockAMGSolver, not once per solve.
+    # AMGCL's own native outer Krylov solve, in place of scipy.sparse.linalg.gmres; one instance per
+    # system size, no augmentation vectors carried across calls -- see LGMRESOuterSolverT.
     cdef cppclass LGMRESOuterSolver:
         LGMRESOuterSolver(int n, const char* json_params) except +
         void solve(const EquilibratedSystem& system,
@@ -149,8 +147,7 @@ cdef extern from "amgcl-wrapper.hpp":
                    PyPrecondApplyFn applyFn,
                    void* ctx,
                    int& iters,
-                   double& error,
-                   bint resetOnce) except +
+                   double& error) except +
 
     # OpenMP-threaded sparse-matrix product/sum, wired into
     # edelweissfe/numerics/mpctransformation.py's T^T K T + C condensation as an opt-in alternative
