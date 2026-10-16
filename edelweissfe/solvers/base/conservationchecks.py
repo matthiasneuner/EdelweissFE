@@ -52,6 +52,7 @@ them to the functions here.
 
 import numpy as np
 
+from edelweissfe.config.phenomena import getFieldSize
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager
 from edelweissfe.numerics.exactsum import ExactSum
@@ -105,7 +106,8 @@ def momentumComponentDofs(dofManager: DofManager, fieldNames: list[str], model: 
         indices = dofManager.idcsOfFieldsInDofVector[fieldName]
         if isinstance(indices, slice):
             indices = np.arange(indices.start, indices.stop)
-        perNode = np.asarray(indices).reshape((-1, model.nodeFields[fieldName].dimension))
+        # (of the field, not of a node field here: a process may hold no node of it)
+        perNode = np.asarray(indices).reshape((-1, getFieldSize(fieldName, model.domainSize)))
         if components is not None and perNode.shape[1] != len(components):
             raise ValueError(
                 "Field {:} has dimension {:} against {:} for the fields before it, so their momenta "

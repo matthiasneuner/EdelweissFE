@@ -53,24 +53,25 @@ def _fixture(dimensions: dict):
         idcs[name] = slice(start, start + dimension * nNodes)
         start += dimension * nNodes
     dofManager = SimpleNamespace(idcsOfFieldsInDofVector=idcs)
-    model = SimpleNamespace(nodeFields={name: SimpleNamespace(dimension=d) for name, (d, _) in dimensions.items()})
+    # the spatial dimension decides the dimension of a field (a process may hold no node of it)
+    model = SimpleNamespace(domainSize=3)
     return dofManager, model, start
 
 
 def test_momentum_is_summed_per_component_and_across_fields():
-    dofManager, model, nDof = _fixture({"a": (3, 2), "b": (3, 1)})
+    dofManager, model, nDof = _fixture({"displacement": (3, 2), "rotation": (3, 1)})
     massTimesVelocity = np.arange(1.0, nDof + 1.0)  # node-major: a0=(1,2,3), a1=(4,5,6), b0=(7,8,9)
 
-    momentum = linearMomentum(massTimesVelocity, dofManager, ["a", "b"], model)
+    momentum = linearMomentum(massTimesVelocity, dofManager, ["displacement", "rotation"], model)
 
     np.testing.assert_array_equal(momentum, [1 + 4 + 7, 2 + 5 + 8, 3 + 6 + 9])
     assert linearMomentum(massTimesVelocity, dofManager, [], model).size == 0
 
 
 def test_momenta_of_different_dimension_are_not_added():
-    dofManager, model, nDof = _fixture({"a": (3, 1), "b": (1, 3)})
+    dofManager, model, nDof = _fixture({"displacement": (3, 1), "nonlocal damage": (1, 3)})
     with pytest.raises(ValueError, match="no common components"):
-        linearMomentum(np.ones(nDof), dofManager, ["a", "b"], model)
+        linearMomentum(np.ones(nDof), dofManager, ["displacement", "nonlocal damage"], model)
 
 
 def test_a_violated_total_raises():
