@@ -103,7 +103,7 @@ def _buildModel(tmp_path: Path) -> FEModel:
 def _childTowards(mesh, eid, x):
     """The child of ``eid`` whose cell reaches furthest towards the plane ``x``."""
 
-    return min(mesh.elements[eid]["children"], key=lambda k: abs(mesh.elements[k]["coords"][:, 0].min() - x))
+    return min(mesh.children(eid), key=lambda k: abs(mesh.element_coordinates(k)[:, 0].min() - x))
 
 
 def _driveMirrorAhead(model, modifier, levels: int):
@@ -116,8 +116,8 @@ def _driveMirrorAhead(model, modifier, levels: int):
     """
 
     mesh = modifier._octree
-    deepest = max(mesh.active(), key=lambda e: mesh.elements[e]["coords"][:, 0].min())
-    interface = mesh.elements[deepest]["coords"][:, 0].min()
+    deepest = max(mesh.active(), key=lambda e: mesh.element_coordinates(e)[:, 0].min())
+    interface = mesh.element_coordinates(deepest)[:, 0].min()
     with model.topology.changes():
         for _ in range(levels):
             mesh.refine(deepest)
@@ -134,14 +134,14 @@ def test_a_cascade_materialises_every_level_it_produced(tmp_path):
     mesh = amr._octree
 
     _driveMirrorAhead(model, amr, 3)
-    createdBefore = set(mesh.elements)
+    createdBefore = set(mesh.cell_ids())
 
     with model.topology.changes():
         change = amr.apply(model, RefinementPlan(eids=[]))
 
     # 2:1 balancing had to cascade: it refined at least one cell that did not exist when apply()
     # started -- the case a single-level materialisation cannot express.
-    cascaded = [e for e in set(mesh.elements) - createdBefore if not mesh.elements[e]["active"]]
+    cascaded = [e for e in set(mesh.cell_ids()) - createdBefore if not mesh.is_active(e)]
     assert cascaded, "expected balancing to split a cell it created in this same call"
 
     # the model and the mirror must describe the same mesh
@@ -172,12 +172,12 @@ def test_a_fully_resplit_parent_leaves_nothing_behind(tmp_path):
     amr = model.modelModifiers["amr"]
     mesh = amr._octree
 
-    root = max(mesh.active(), key=lambda e: mesh.elements[e]["coords"][:, 0].min())
+    root = max(mesh.active(), key=lambda e: mesh.element_coordinates(e)[:, 0].min())
     with model.topology.changes():  # the mirror mints its node labels from the model's allocator
         mesh.refine(root)
-        for child in list(mesh.elements[root]["children"]):
+        for child in mesh.children(root):
             mesh.refine(child)
-    assert not any(mesh.elements[c]["active"] for c in mesh.elements[root]["children"])
+    assert not any(mesh.is_active(c) for c in mesh.children(root))
 
     with model.topology.changes():
         amr.apply(model, RefinementPlan(eids=[]))

@@ -391,35 +391,36 @@ class ModelModifier(ModelModifierBase):
         componentOfElement = _connectedComponents(refineElements, mesh)
 
         # build the AdaptiveMesh mirror, sharing node labels with the live model: the roots are the
-        # refineable elements with the model's own connectivity. Only their nodes are seeded -- with
-        # their coordinates and body -- since only octree-owned nodes can be seeded with a body.
+        # refineable elements with the model's own connectivity, each in its body. The mirror reads the
+        # coordinates of the nodes from the mesh when it refines, and describes the nodes it creates
+        # there; it keeps none of its own.
         self._topology = Hex20Topology()
         # The mirror mints its new node labels from the model's own allocator, so octree and
         # model share one monotonic node counter instead of each keeping their own.
         #: The octree of the refineable elements (an AdaptiveMesh): what is refined. Not the model's
         #: mesh (``model.mesh``), which _materialize updates from it.
         self._octree = AdaptiveMesh(
-            splitFactor=self.splitFactor, topology=self._topology, reserve_labels=model.topology.reserveNodeNumbers
+            modelMesh=mesh,
+            splitFactor=self.splitFactor,
+            topology=self._topology,
+            reserve_labels=model.topology.reserveNodeNumbers,
         )
-        #: octree element id -> the number of its element in the mesh, for every active cell
-        self._eidToNumber = {}
         #: Diagnostics only, parallel to _committedOccasions; see there.
         self._committedOccasionEids = []
-        nodes = model.nodes
-        for number in refineElements:
-            componentId = componentOfElement[number]
-            labels = mesh.elements[number].nodeLabels
-            for label in labels:
-                self._octree.registry.seed(label, nodes[label].coordinates, componentId)
-            coords = np.array([nodes[label].coordinates for label in labels])
-            eid = self._octree.add_root(coords, list(labels), componentId)
-            self._eidToNumber[eid] = number
+        rootEids = self._octree.add_roots(
+            [mesh.elements[number].nodeLabels for number in refineElements],
+            [componentOfElement[number] for number in refineElements],
+        )
+        # a non-manifold root mesh stops the analysis here, at setup
+        self._octree.check_root_mesh()
+        #: octree element id -> the number of its element in the mesh, for every active cell
+        self._eidToNumber = dict(zip(rootEids, refineElements))
         # what the markers see: a live view of the active elements, whose node adjacency (for a
         # marker's halo) is kept across planning passes until _materialize changes the mesh
         self._refineableElements = RefineableElements(self._eidToNumber.values(), mesh)
-        # nodes outside the refineable mesh are not seeded, but their labels are taken:
+        # nodes outside the refineable mesh are not roots' nodes, but their labels are taken:
         # keep the registry's high-water mark above them so new nodes never collide with them
-        self._octree.registry.reserve_labels_up_to(max(model.nodes.keys(), default=0))
+        self._octree.registry.reserve_labels_up_to(int(mesh.nodeLabels.max(initial=0)))
 
         # all-encompassing sets (contain every node, e.g. 'all', 'ALLNODES') are not boundary BCs --
         # they just gain every new node; rebuild them wholesale, don't guard/track them
@@ -482,46 +483,6 @@ class ModelModifier(ModelModifierBase):
         ``>>marker`` lines instead -- including ``initialOnly`` ones."""
 
         return self._refineElementNumbers
-
-    def syncNodeCoordinates(self, coordinatesByLabel: dict) -> None:
-        """Update this instance's own :class:`~edelweissfe.adaptivity.refinement.AdaptiveMesh`
-        mirror's cached node coordinates after an EXTERNAL mutation of ``model.nodes`` -- e.g. a
-        geometry-snap modifier (``edelweissfe.modelmodifiers.geometry.surfacesnap``) reprojecting
-        AMR-created boundary nodes onto an analytical surface.
-
-        Without this, the mirror silently keeps subdividing from its own pre-mutation coordinates:
-        ``AdaptiveMesh.refine`` calls ``Hex20Topology.subdivide(e["coords"], ...)``, where
-        ``e["coords"]`` was captured once, at the moment that element's own parent was refined --
-        never re-read from ``model.nodes`` afterward. A LATER refinement of an already-corrected
-        element would therefore generate its children from the geometry as it stood before the
-        correction, silently discarding it. This is a reactive fix, called from the correcting
-        modifier's own ``apply()`` (it has no way to reach into this mirror on its own); it does
-        nothing for a label this mirror does not track.
-
-        Parameters
-        ----------
-        coordinatesByLabel
-            Mapping of node label to its new coordinate. Only labels this mirror actually knows
-            about (its own registry, or the connectivity of one of its active elements) are
-            touched.
-        """
-
-        reg = self._octree.registry
-        touched = set()
-        for label, coord in coordinatesByLabel.items():
-            if label in reg.coordinates:
-                reg.coordinates[label] = np.asarray(coord, dtype=float)
-                touched.add(label)
-        if not touched:
-            return
-        # `e["coords"]` is what `AdaptiveMesh.refine` actually subdivides from (see docstring
-        # above) -- resync every active leaf that owns one of the touched labels, not just the
-        # registry dict, or a later refine() would still use the stale per-element array.
-        for eid in self._octree.active():
-            e = self._octree.elements[eid]
-            if touched.isdisjoint(e["conn"]):
-                continue
-            e["coords"] = np.array([reg.coordinates[label] for label in e["conn"]])
 
     @property
     def actsOnlyAtSimulationStart(self) -> bool:
@@ -599,7 +560,7 @@ class ModelModifier(ModelModifierBase):
             eligible = [
                 number
                 for number in sorted(marked_elements)
-                if number in eidOfNumber and self._octree.elements[eidOfNumber[number]]["level"] < self.maxLevel
+                if number in eidOfNumber and self._octree.level(eidOfNumber[number]) < self.maxLevel
             ]
 
         if len(eligible) < self.minMarkedElements:
@@ -650,7 +611,7 @@ class ModelModifier(ModelModifierBase):
         nBefore = len(self._octree.active())
         with timeit("refine & balance"):
             for eid in markedEids:
-                if self._octree.elements[eid]["active"]:
+                if self._octree.is_active(eid):
                     self._octree.refine(eid)
             self._octree.balance_2to1()
 
@@ -767,7 +728,8 @@ class ModelModifier(ModelModifierBase):
         return oldValues
 
     def _createNewNodes(self, model: FEModel) -> dict:
-        """Describe in the mesh, and create, a model node for every octree node the mesh does not have yet.
+        """Describe in the mesh the nodes this refinement created (the octree does,
+        :meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.describe_new_nodes`), and create them.
 
         Returns
         -------
@@ -775,9 +737,7 @@ class ModelModifier(ModelModifierBase):
             The new nodes, by label.
         """
 
-        labels = list(self._octree.registry.coordinates)
-        newLabels = [label for label, known in zip(labels, model.mesh.hasNodes(labels)) if not known]
-        model.mesh.addNodes(newLabels, [self._octree.registry.coordinates[label] for label in newLabels])
+        newLabels = self._octree.describe_new_nodes()
         model.createNodesOfMesh()
         return {label: model.nodes[label] for label in newLabels}
 
@@ -798,7 +758,7 @@ class ModelModifier(ModelModifierBase):
             ancestor = eid
             while ancestor is not None and ancestor not in self._eidToNumber and ancestor not in pending:
                 pending.add(ancestor)
-                ancestor = octree.elements[ancestor]["parent"]
+                ancestor = octree.parent(ancestor)
         return pending
 
     def _createChildElements(
@@ -839,7 +799,7 @@ class ModelModifier(ModelModifierBase):
             # which element number is then a pure function of this sorted list of eids -- not of the
             # order an unordered set happened to iterate in, and not of what else claimed a number
             # partway through the loop.
-            levelEids = sorted(eid for eid in pending if octree.elements[eid]["parent"] in self._eidToNumber)
+            levelEids = sorted(eid for eid in pending if octree.parent(eid) in self._eidToNumber)
             if not levelEids:
                 raise TopologyError(
                     "AMR: {:} active octree cell(s) (e.g. {:}) have no materialised ancestor, so "
@@ -874,12 +834,12 @@ class ModelModifier(ModelModifierBase):
         nodes."""
 
         octree = self._octree
-        e = octree.elements[eid]
-        parentEid = e["parent"]
+        connectivity = octree.connectivity(eid)
+        parentEid = octree.parent(eid)
         parentNumber = self._eidToNumber[parentEid]
         parentRecord = model.mesh.elements[parentNumber]
         # the child is described in the mesh and created from it, as every element of the model is
-        model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, e["conn"])
+        model.mesh.addElement(elNumber, self._elementType or parentRecord.elType, self._provider, connectivity)
         child = model.createChildElementOfMesh(elNumber, parentNumber)
         if child is not None:
             self._sectionOf[parentNumber].assignSectionToElement(child, model)
@@ -889,10 +849,10 @@ class ModelModifier(ModelModifierBase):
 
         # warm start: interpolate each NEW node's field values from the parent via the HEX20
         # isoparametric map, so the increment restarts from a consistent state, not zero
-        octant = octree.elements[parentEid]["children"].index(eid)
+        octant = octree.children(parentEid).index(eid)
         childParams = self._octantParams[octant]
         parentNodes = [model.nodes[label] for label in parentRecord.nodeLabels]
-        for i, label in enumerate(e["conn"]):
+        for i, label in enumerate(connectivity):
             node = model.nodes[label]
             if label in newNodes and any(node not in newValues[f] for f in oldValues):
                 N = self._topology.shape_functions(*childParams[i])
@@ -917,9 +877,9 @@ class ModelModifier(ModelModifierBase):
         """Record which child faces tile each parent face, while the parents still exist."""
 
         octree = self._octree
-        for parentEid in {octree.elements[eid]["parent"] for eid in levelEids}:
+        for parentEid in {octree.parent(eid) for eid in levelEids}:
             parentLabel = self._eidToNumber[parentEid]
-            childEids = octree.elements[parentEid]["children"]
+            childEids = octree.children(parentEid)
             for faceID, faceIndex in self._topology.faceid_to_face.items():
                 childLabels = [
                     self._eidToNumber[childEids[j]]

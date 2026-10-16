@@ -186,9 +186,7 @@ def _innermostChild(mesh, eid: int) -> int:
     coarse neighbours, so that refining it makes 2:1 balancing cascade."""
 
     centre = np.array([0.5, 0.5, 0.5])
-    return min(
-        mesh.elements[eid]["children"], key=lambda c: np.linalg.norm(mesh.elements[c]["coords"].mean(0) - centre)
-    )
+    return min(mesh.children(eid), key=lambda c: np.linalg.norm(mesh.element_coordinates(c).mean(0) - centre))
 
 
 def _rounds(mesh):
@@ -250,9 +248,9 @@ def test_multi_round_replay_matches_the_live_run_exactly(tmp_path):
     assert len(modelA.topology.history) == 3
     assert modelA.topology.history[-1].nElementsAdded > 8, "the last round should have cascaded"
 
-    # the octree mirror's active-set cache agrees with a scan of the hierarchy
+    # the octree mirror's active cells agree with a scan of the hierarchy
     mesh = modelA.modelModifiers["amr"]._octree
-    assert mesh.active() == [eid for eid, e in mesh.elements.items() if e["active"]]
+    assert mesh.active() == [eid for eid in mesh.cell_ids() if mesh.is_active(eid)]
 
     # give every field value something to be restored to, so a wrong layout cannot hide behind zeros
     rng = np.random.default_rng(7)

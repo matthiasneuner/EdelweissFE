@@ -71,9 +71,6 @@ import numpy as np
 from edelweissfe.adaptivity.hex20topology import Hex20Topology
 from edelweissfe.constraints.hangingnode import Constraint as HangingNodeConstraint
 from edelweissfe.journal.journal import Journal
-from edelweissfe.modelmodifiers.adaptivity.hadaptivity import (
-    ModelModifier as HAdaptivityModelModifier,
-)
 from edelweissfe.modelmodifiers.base.modelmodifierbase import ModelModifierBase
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
@@ -452,18 +449,10 @@ class ModelModifier(ModelModifierBase):
         """
 
         if plan.labels:
-            # the snap changes the reference geometry: in the mesh and at the node objects
+            # the snap changes the reference geometry: in the mesh and at the node objects. An
+            # hAdaptivity mirror reads the coordinates from the mesh when it refines, so a later
+            # refinement of a snapped element subdivides the snapped geometry.
             model.moveNodes(plan.labels, plan.coords)
-
-        if plan.labels:
-            # Every hAdaptivity instance keeps its own AdaptiveMesh mirror with node coordinates
-            # cached at refine time (see HAdaptivityModelModifier.syncNodeCoordinates's own
-            # docstring for why). Without this, a LATER refinement of an already-snapped element
-            # would silently subdivide from the pre-snap geometry, discarding this correction.
-            coordByLabel = dict(zip(plan.labels, plan.coords))
-            for modifier in model.modelModifiers.values():
-                if isinstance(modifier, HAdaptivityModelModifier):
-                    modifier.syncNodeCoordinates(coordByLabel)
 
         change = ModelChange(kind=ModelChangeType.GEOMETRY_CHANGE)
         change.movedNodes = set(plan.labels)

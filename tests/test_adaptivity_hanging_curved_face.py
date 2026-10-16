@@ -72,7 +72,7 @@ def _refinedNeighbourMesh():
     mesh = builder.mesh
     coarse = builder.addRoot(A)
     fine = builder.addRoot(B)
-    sharedFace = [lab for lab, x in zip(mesh.elements[fine]["conn"], B) if abs(x[0]) < 0.1]
+    sharedFace = [lab for lab, x in zip(mesh.connectivity(fine), B) if abs(x[0]) < 0.1]
     mesh.define_node_set("sharedFaceOfB", sharedFace)
     mesh.refine(fine)
     return mesh, coarse, fine, A
@@ -82,13 +82,13 @@ def _newNodesOnSharedFace(mesh, coarse, A):
     """Nodes of B's children on the shared face that are not nodes of A -- found exactly, from the
     topological node keys: on the root face whose corners are A's (and B's) shared corners, or on one
     of its edges."""
-    nodesOfA = mesh.elements[coarse]["conn"]
+    nodesOfA = mesh.connectivity(coarse)
     sharedCorners = {nodesOfA[i] for i in range(20) if abs(A[i][0]) < 0.1 and i in _CORNER_SLOTS}
     onFace = set()
     for eid in mesh.active():
         if eid == coarse:
             continue
-        for label, key in zip(mesh.elements[eid]["conn"], mesh.node_keys(eid)):
+        for label, key in zip(mesh.connectivity(eid), mesh.node_keys(eid)):
             labels = {key.entity} if key.kind == "vertex" else set(key.entity) if key.kind != "interior" else set()
             if label not in nodesOfA and labels and labels <= sharedCorners:
                 onFace.add(label)
@@ -110,7 +110,8 @@ def test_weightsReproduceTheSlavesOnTheCurvedCoarseTrace():
     """The weights are the coarse element's own shape functions at the slave: they reproduce its
     position on the curved face exactly (and hence any displacement field of the coarse element)."""
     mesh, coarse, _, A = _refinedNeighbourMesh()
-    coords = mesh.registry.coordinates
+    mesh.describe_new_nodes()
+    coords = dict(zip(mesh.modelMesh.nodeLabels.tolist(), mesh.modelMesh.nodeCoordinates))
     records = mesh.hanging_mpc_records()
     assert records
     for slave, masters in records.items():
@@ -119,7 +120,7 @@ def test_weightsReproduceTheSlavesOnTheCurvedCoarseTrace():
         assert sum(w for _, w in masters) == pytest.approx(1.0, abs=1e-12)
     # and a quadratic displacement field of the coarse element is carried over exactly
     u = np.array([[1e-3 * x[1] ** 2 - 2e-3 * x[2], 5e-4 * x[1] * x[2], -1e-3 * x[0] * x[2]] for x in A])
-    labelIndex = {lab: i for i, lab in enumerate(mesh.elements[coarse]["conn"])}
+    labelIndex = {lab: i for i, lab in enumerate(mesh.connectivity(coarse))}
     for slave, masters in records.items():
         xi = TOPOLOGY.inverse_map(coords[slave], A)
         np.testing.assert_allclose(sum(w * u[labelIndex[m]] for m, w in masters), hex20_shape(*xi) @ u, atol=1e-14)

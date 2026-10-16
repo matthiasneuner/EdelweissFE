@@ -124,7 +124,8 @@ integer arithmetic, the way established AMR libraries do it (deal.II, p4est, MFE
 
 No tolerance enters any of these decisions, so curved, warped and arbitrarily oriented unstructured
 meshes (e.g. from Cubit) behave exactly like axis-aligned ones. The requirements are a *conforming* root
-mesh and a refinement depth of at most 20 levels (the depth of the exact lattice). A collapsed root
+mesh, a refinement depth of at most 20 levels (the depth of the exact lattice), a split factor of at
+most 8 (so that the lattice fits 64-bit integers) and node labels below :math:`2^{31}`. A collapsed root
 element -- one that repeats a corner node, e.g. a degenerated wedge -- or a non-manifold root mesh stops
 the analysis at setup with an error naming the element.
 
@@ -156,12 +157,29 @@ instead of producing a silently non-conforming mesh:
 * the hanging-node constraint can never be overruled by another multi-point constraint claiming the
   same slave (it is registered first in model order; a dropped hanging-node record is an error).
 
+**The mirror is data, and keeps no coordinates.** Every process of a domain-decomposed run holds the
+whole octree, so it is stored compactly: the cells as a struct of arrays, one row per cell
+(:class:`~edelweissfe.adaptivity.refinement.OctreeCells`: connectivity, level, parent, first child, root,
+body, active flag and the exact reference box), the root mesh as arrays of corner labels with an index
+from each vertex to the roots sharing it, and the node keys of the cells' nodes packed into integers --
+about 300 bytes per element instead of about 2 kilobytes of Python objects. The algorithms read the cells
+through named accessors (:meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.level`,
+:meth:`~edelweissfe.adaptivity.refinement.AdaptiveMesh.children`, ...). The coordinates of the nodes are
+the mesh's (:class:`~edelweissfe.models.mesh.Mesh`): an element is subdivided from the coordinates its
+nodes have there when it is refined, and the nodes a refinement creates are described there, once per
+refinement.
+
 .. autoclass:: edelweissfe.adaptivity.rootentities.RootEntityTable
-    :members: add_root, key, roots_sharing, roots_touching, root_face_position, local_point
+    :members: add_root, add_roots, check_manifold, key, keys, pack, unpack, roots_sharing, roots_touching,
+        root_face_position, local_point
+
+.. autoclass:: edelweissfe.adaptivity.refinement.OctreeCells
 
 .. autoclass:: edelweissfe.adaptivity.refinement.AdaptiveMesh
-    :members: add_root, refine, balance_2to1, classify_hanging, hanging_mpc_records, check_conformity,
-        node_keys, node_lattice_points
+    :members: add_root, add_roots, check_root_mesh, refine, describe_new_nodes, balance_2to1,
+        classify_hanging, hanging_mpc_records, check_conformity, active, cell_ids, is_active, level,
+        parent, children, connectivity, component, root_of, reference_box, node_coordinates,
+        element_coordinates, node_keys, node_lattice_points
 
 **Refinement markers.** Which elements are refined each increment is decided by one or more
 ``>>marker`` sub-keywords; the modifier refines the *union* of their marked sets. The available
@@ -409,12 +427,11 @@ way the skipped node stays in a modifier-private *pending* set and is reconsider
 round that changes anything: a hanging slave stops being one once its coarse neighbour is itself
 refined, and a quality veto can clear once local geometry changes.
 
-**Keeping AMR's own mirror in sync.** ``hAdaptivity`` keeps a private ``AdaptiveMesh`` mirror whose
-node coordinates are cached at the moment each element is created, and never re-read from the live
-model afterward. Without correcting that cache too, a LATER refinement of an element ``surfaceSnap``
-already snapped would silently subdivide from the stale, pre-snap geometry. ``surfaceSnap`` calls
-``HAdaptivityModelModifier.syncNodeCoordinates`` on every ``hAdaptivity`` instance in the model right
-after writing ``model.nodes``, closing this gap.
+**AMR refines the snapped geometry.** ``surfaceSnap`` moves the nodes through
+:meth:`~edelweissfe.models.femodel.FEModel.moveNodes`, in the mesh and at the node objects. The octree
+mirror of ``hAdaptivity`` keeps no coordinates of its own: it reads them from the mesh whenever it
+refines an element, so a later refinement of an element ``surfaceSnap`` already snapped subdivides the
+snapped geometry.
 
 .. pprint:: modelmodifier:surfacesnap
     :caption: Options:

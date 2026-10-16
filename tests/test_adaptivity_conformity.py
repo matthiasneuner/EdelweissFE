@@ -39,6 +39,7 @@ from _adaptivemeshbuilder import AdaptiveMeshBuilder
 from edelweissfe.adaptivity.hex20shapefunctions import hex20_box_coords
 from edelweissfe.adaptivity.hex20topology import Hex20Topology
 from edelweissfe.adaptivity.refinement import AdaptiveMesh
+from edelweissfe.models.mesh import Mesh
 from edelweissfe.utils.exceptions import TopologyError
 
 TOPOLOGY = Hex20Topology()
@@ -120,16 +121,16 @@ def test_theExactWeightCheckCatchesAWrongEntity():
 
 
 def test_rootsTakeTheModelsNodeLabels():
-    """Roots use the labels they are given, as they are; a label that was not seeded is an error."""
+    """Roots use the labels they are given, as they are; a label the mesh does not describe is an error."""
     X = hex20_box_coords(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
     labels = list(range(101, 121))
-    mesh = AdaptiveMesh(splitFactor=2, topology=Hex20Topology())
-    for label, x in zip(labels, X):
-        mesh.registry.seed(label, x, 0)
-    root = mesh.add_root(X, labels, 0)
-    assert mesh.elements[root]["conn"] == labels
-    with pytest.raises(ValueError, match="not seeded"):
-        mesh.add_root(hex20_box_coords(1.0, 2.0, 0.0, 1.0, 0.0, 1.0), list(range(201, 221)), 0)
+    nodes = Mesh()
+    nodes.addNodes(labels, X)
+    mesh = AdaptiveMesh(modelMesh=nodes, splitFactor=2, topology=Hex20Topology())
+    root = mesh.add_root(labels, 0)
+    assert mesh.connectivity(root) == labels
+    with pytest.raises(ValueError, match="not described in the mesh"):
+        mesh.add_root(list(range(201, 221)), 0)
 
 
 def test_refiningBeyondTheLatticeDepthRaises():
@@ -142,17 +143,18 @@ def test_refiningBeyondTheLatticeDepthRaises():
         eid = builder.mesh.refine(eid)[0]
     with pytest.raises(TopologyError, match="maximum refinement depth"):
         builder.mesh.refine(eid)
-    assert np.isfinite(builder.mesh.elements[eid]["coords"]).all()
+    assert np.isfinite(builder.mesh.element_coordinates(eid)).all()
 
 
 def test_aSplitNodeIsCaught():
     """Two labels at one point (here: one child node deliberately renamed) are two unconnected nodes;
     the check reports it instead of letting the mesh tear."""
     mesh = _coarseNextToRefined()
-    child = next(e for e in mesh.active() if mesh.elements[e]["level"] == 1)
-    impostor = max(mesh.registry.coordinates) + 1
-    mesh.registry.seed(impostor, mesh.registry.coordinates[mesh.elements[child]["conn"][0]], 0)
-    mesh.elements[child]["conn"][0] = impostor
+    child = next(e for e in mesh.active() if mesh.level(e) == 1)
+    mesh.describe_new_nodes()
+    impostor = int(mesh.modelMesh.nodeLabels.max()) + 1
+    mesh.modelMesh.addNodes([impostor], mesh.node_coordinates(mesh.connectivity(child)[:1]))
+    mesh._cells.connectivity[child, 0] = impostor
     mesh._boundaryNodesCache = None
     with pytest.raises(TopologyError, match="split or merged"):
         mesh.check_conformity(mesh.hanging_mpc_records())

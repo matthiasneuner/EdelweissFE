@@ -51,10 +51,8 @@ def _twoRoots(curvedWarped, splitFactor=2):
 
 def _childOfBTouchingA(mesh, b):
     """A child of B on its face x = 0 (the face shared with A): its box starts at B's low x."""
-    kids = mesh.elements[b]["children"]
-    return next(
-        k for k in kids if mesh.elements[k]["referenceBoxOrigin"][0] == mesh.elements[b]["referenceBoxOrigin"][0]
-    )
+    kids = mesh.children(b)
+    return next(k for k in kids if mesh.reference_box(k)[0][0] == mesh.reference_box(b)[0][0])
 
 
 @pytest.mark.parametrize("curvedWarped", [False, True])
@@ -64,7 +62,7 @@ def test_aCoarseRootNextToATwoLevelsFinerNeighbourIsRefined(curvedWarped, splitF
     mesh.refine(b)
     mesh.refine(_childOfBTouchingA(mesh, b))  # level 2 now touches the level-0 root A
     assert mesh.balance_2to1() >= 1
-    assert not mesh.elements[a]["active"], "A was not refined: its two-levels-finer face neighbour was missed"
+    assert not mesh.is_active(a), "A was not refined: its two-levels-finer face neighbour was missed"
     mesh.check_conformity(mesh.hanging_mpc_records())
 
 
@@ -72,7 +70,7 @@ def test_aNeighbourOnlyOneLevelFinerIsLeftAlone():
     mesh, a, b = _twoRoots(True)
     mesh.refine(b)
     assert mesh.balance_2to1() == 0
-    assert mesh.elements[a]["active"]
+    assert mesh.is_active(a)
 
 
 def test_aTwoLevelJumpInsideOneRootIsBalanced():
@@ -84,5 +82,5 @@ def test_aTwoLevelJumpInsideOneRootIsBalanced():
     mesh.refine(grandchildren[-1])  # its octant touching the siblings of kids[0]: level 3 next to level 1
     assert mesh.balance_2to1() >= 1
     mesh.check_conformity(mesh.hanging_mpc_records())
-    levels = {mesh.elements[e]["level"] for e in mesh.active()}
+    levels = {mesh.level(e) for e in mesh.active()}
     assert levels == {1, 2, 3}

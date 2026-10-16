@@ -738,9 +738,9 @@ def test_a_standalone_registry_still_mints_on_its_own():
     """The octree layer is model-agnostic and must stay usable without one."""
 
     registry = NodeRegistry()
-    registry.seed(7, [0.0, 0.0, 0.0])
+    registry.reserve_labels_up_to(7)
 
-    assert registry.label_of_new_node(("a new node",), [1.0, 0.0, 0.0]) == 8
+    assert registry.label_of_new_node(((7, 1),), [1.0, 0.0, 0.0]) == 8
 
 
 def test_a_registry_label_cannot_collide_with_one_the_model_hands_out():
@@ -750,12 +750,12 @@ def test_a_registry_label_cannot_collide_with_one_the_model_hands_out():
     model = _modelWithSetupNodes(1, 2, 3)
     registry = NodeRegistry(reserve_labels=model.topology.reserveNodeNumbers)
     for node in model.nodes.values():
-        registry.seed(node.label, node.coordinates)
+        registry.reserve_labels_up_to(node.label)
 
     with model.topology.changes():
-        minted = [registry.label_of_new_node(("first", i), [0.0, float(i), 0.0]) for i in range(3)]
+        minted = [registry.label_of_new_node(((1, i + 1),), [0.0, float(i), 0.0]) for i in range(3)]
         fromModel = list(model.topology.reserveNodeNumbers(3))
-        mintedAfterwards = [registry.label_of_new_node(("later", i), [0.0, 0.0, i + 1.0]) for i in range(3)]
+        mintedAfterwards = [registry.label_of_new_node(((2, i + 1),), [0.0, 0.0, i + 1.0]) for i in range(3)]
 
     assert not set(minted) & set(model.nodes)
     assert not set(minted) & set(fromModel)
@@ -769,11 +769,11 @@ def test_an_already_known_identity_consumes_no_label():
 
     model = _modelWithSetupNodes(1)
     registry = NodeRegistry(reserve_labels=model.topology.reserveNodeNumbers)
-    registry.seed(1, [0.0, 0.0, 0.0])
+    registry.reserve_labels_up_to(1)
 
     with model.topology.changes():
-        first = registry.label_of_new_node(("a new node",), [0.5, 0.0, 0.0])
-        assert registry.label_of_new_node(("a new node",), [0.5, 0.0, 0.0]) == first
+        first = registry.label_of_new_node(((1, 1),), [0.5, 0.0, 0.0])
+        assert registry.label_of_new_node(((1, 1),), [0.5, 0.0, 0.0]) == first
         (afterwards,) = model.topology.reserveNodeNumbers(1)
 
     assert (first, afterwards) == (2, 3)
@@ -787,7 +787,7 @@ def test_minting_outside_a_topology_change_raises():
     registry = NodeRegistry(reserve_labels=model.topology.reserveNodeNumbers)
 
     with pytest.raises(TopologyError, match="topology change"):
-        registry.label_of_new_node(("a new node",), [5.0, 0.0, 0.0])
+        registry.label_of_new_node(((1, 1),), [5.0, 0.0, 0.0])
 
 
 def test_a_shallow_copy_of_a_model_gets_a_pipeline_acting_on_the_copy():

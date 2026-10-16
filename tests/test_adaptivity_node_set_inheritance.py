@@ -36,6 +36,7 @@ from _adaptivemeshbuilder import AdaptiveMeshBuilder
 from edelweissfe.adaptivity.hex20shapefunctions import hex20_box_coords
 from edelweissfe.adaptivity.hex20topology import Hex20Topology
 from edelweissfe.adaptivity.refinement import AdaptiveMesh
+from edelweissfe.models.mesh import Mesh
 
 TOPOLOGY = Hex20Topology()
 
@@ -53,7 +54,7 @@ def _nodesOnRootEntity(mesh, labels):
     """Active nodes whose exact topological key lies on the root entity spanned by ``labels``."""
     found = set()
     for eid in mesh.active():
-        for label, key in zip(mesh.elements[eid]["conn"], mesh.node_keys(eid)):
+        for label, key in zip(mesh.connectivity(eid), mesh.node_keys(eid)):
             spanned = {key.entity} if key.kind == "vertex" else set(key.entity) if key.kind != "interior" else None
             if spanned is not None and spanned <= labels:
                 found.add(label)
@@ -64,7 +65,7 @@ def _nodesOnRootEntity(mesh, labels):
 @pytest.mark.parametrize("warp", [False, True])
 def test_aFaceSetGainsExactlyTheNewNodesOnThatFace(splitFactor, warp):
     mesh, root, X = _singleRoot(splitFactor, warp)
-    conn = mesh.elements[root]["conn"]
+    conn = mesh.connectivity(root)
     face = next(
         f for f in TOPOLOGY.faces if all(abs(np.rint(TOPOLOGY.reference_node_param()[i][0]) - 1) == 0 for i in f)
     )
@@ -79,7 +80,7 @@ def test_aFaceSetGainsExactlyTheNewNodesOnThatFace(splitFactor, warp):
 
 def test_anEdgeSetGainsOnlyTheNewNodesOnThatEdge():
     mesh, root, _ = _singleRoot(2)
-    conn = mesh.elements[root]["conn"]
+    conn = mesh.connectivity(root)
     edge = TOPOLOGY.edges[0]
     mesh.define_node_set("edge", [conn[i] for i in edge])
     mesh.refine(root)
@@ -91,7 +92,7 @@ def test_anIncompleteFacePassesOnlyItsCompleteEdges():
     """A set holding a face minus one corner node is not a face set: new face-interior nodes must not
     join it; new nodes on the two edges that are still complete must."""
     mesh, root, _ = _singleRoot(2)
-    conn = mesh.elements[root]["conn"]
+    conn = mesh.connectivity(root)
     face = TOPOLOGY.faces[0]
     dropped = face[0]
     mesh.define_node_set("partial", [conn[i] for i in face if i != dropped])
@@ -120,7 +121,7 @@ def test_elementSetsAndSurfacesAreInheritedByTheChildren():
 
 
 def test_refiningAnInactiveElementReturnsItsChildren():
-    mesh = AdaptiveMesh(splitFactor=2)  # the default topology is HEX20
+    mesh = AdaptiveMesh(modelMesh=Mesh(), splitFactor=2)  # the default topology is HEX20
     builder = AdaptiveMeshBuilder(2)
     root = builder.addRoot(hex20_box_coords(0.0, 1.0, 0.0, 1.0, 0.0, 1.0))
     kids = builder.mesh.refine(root)
@@ -133,7 +134,7 @@ def test_aNodeSetAwayFromTheRefinedElementIsUnchanged():
     mesh = builder.mesh
     root = builder.addRoot(hex20_box_coords(0.0, 1.0, 0.0, 1.0, 0.0, 1.0))
     other = builder.addRoot(hex20_box_coords(5.0, 6.0, 0.0, 1.0, 0.0, 1.0))
-    elsewhere = set(mesh.elements[other]["conn"])
+    elsewhere = set(mesh.connectivity(other))
     mesh.define_node_set("elsewhere", elsewhere)
     mesh.refine(root)
     assert mesh.nodeSets["elsewhere"] == elsewhere

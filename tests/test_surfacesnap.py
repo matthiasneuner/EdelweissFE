@@ -352,14 +352,14 @@ def test_maxlevel_2_also_works(tmp_path):
     model.topology.update()
 
     amr = model.modelModifiers["amr"]
-    levelOfElement = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOfElement = {number: amr._octree.level(eid) for eid, number in amr._eidToNumber.items()}
     assert set(levelOfElement.values()) == {1}, "sanity check: a single topology update must reach exactly level 1"
 
     _markOnNextUpdate(amr, set(levelOfElement))
     changed = model.topology.update()
     assert changed, "the second, directly-seeded round must also have refined something"
 
-    levelOfElement = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOfElement = {number: amr._octree.level(eid) for eid, number in amr._eidToNumber.items()}
     assert 2 in set(levelOfElement.values()), "level 2 must actually have been reached this time"
 
     finalWall = {n.label for n in model.nodeSets[TRACKED_WALL_SET]}
@@ -369,26 +369,29 @@ def test_maxlevel_2_also_works(tmp_path):
 
 
 def test_a_second_refinement_of_an_already_snapped_element_uses_corrected_geometry(tmp_path):
-    """Regression test for a real bug found in review: hAdaptivity's own ``AdaptiveMesh`` mirror
-    caches each element's node coordinates at the moment IT was created, and never re-reads
-    ``model.nodes`` afterward. Without ``ModelModifier.syncNodeCoordinates`` (called from
-    surfaceSnap's own ``apply()``), a level-1 element that surfaceSnap already corrected would,
-    if refined AGAIN, generate its level-2 children from the mirror's stale, PRE-snap geometry --
-    silently discarding the correction. Verified two ways: the mirror's own cached coordinates
-    must match ``model.nodes`` immediately after the first snap, and after forcing a second
-    refinement round (same direct-seeding technique as test_maxlevel_2_also_works), the resulting
-    level-2 wall nodes must still be exactly on the true cylinder -- which they would NOT be if
-    their parent's children were generated from stale geometry.
+    """Regression test for a real bug found in review: hAdaptivity's own ``AdaptiveMesh`` mirror used
+    to cache each element's node coordinates at the moment IT was created, so a level-1 element that
+    surfaceSnap already corrected would, if refined AGAIN, generate its level-2 children from the
+    mirror's stale, PRE-snap geometry -- silently discarding the correction. The mirror now keeps no
+    coordinates and reads them from the mesh when it refines. Verified two ways: the coordinates the
+    mirror would subdivide from match ``model.nodes`` immediately after the first snap, and after
+    forcing a second refinement round (same direct-seeding technique as test_maxlevel_2_also_works),
+    the resulting level-2 wall nodes must still be exactly on the true cylinder -- which they would
+    NOT be if their parent's children were generated from stale geometry.
     """
 
     model, wallLabels = _buildModel(tmp_path, midsideNodes="curved", maxLevel=2, nSectors=1)
     amr = model.modelModifiers["amr"]
     model.topology.update()
 
+    octree = amr._octree
     mismatches = [
-        label
-        for label, coord in amr._octree.registry.coordinates.items()
-        if label in model.nodes and not np.allclose(coord, model.nodes[label].coordinates, atol=1e-9)
+        eid
+        for eid in octree.active()
+        if not np.array_equal(
+            octree.element_coordinates(eid),
+            np.array([model.nodes[label].coordinates for label in octree.connectivity(eid)]),
+        )
     ]
     assert not mismatches, f"hAdaptivity's mirror must be kept in sync with model.nodes, but diverged for {mismatches}"
 
@@ -547,7 +550,7 @@ def test_a_resolved_hanging_collision_is_retried_and_snapped(tmp_path):
     assert pendingAfterRound1, "the asymmetric refinement must have left at least one node pending"
 
     amr = model.modelModifiers["amr"]
-    levelOf = {number: amr._octree.elements[eid]["level"] for eid, number in amr._eidToNumber.items()}
+    levelOf = {number: amr._octree.level(eid) for eid, number in amr._eidToNumber.items()}
     stillCoarse = {el for el, level in levelOf.items() if level == 0}
     assert stillCoarse, "sanity check: the other three sectors must still be unrefined"
 

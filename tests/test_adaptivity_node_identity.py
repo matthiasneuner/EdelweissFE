@@ -81,9 +81,15 @@ def _refineBoth():
     return builder.mesh
 
 
+def _nodeCoordinates(mesh):
+    """Every node of the octree's mesh, label -> coordinates (the new ones described first)."""
+    mesh.describe_new_nodes()
+    return dict(zip(mesh.modelMesh.nodeLabels.tolist(), mesh.modelMesh.nodeCoordinates))
+
+
 def _duplicateGroups(mesh, decimals=9):
     seen = {}
-    for label, coord in mesh.registry.coordinates.items():
+    for label, coord in _nodeCoordinates(mesh).items():
         seen.setdefault(tuple(np.round(coord, decimals)), []).append(label)
     return {k: v for k, v in seen.items() if len(v) > 1}
 
@@ -107,9 +113,7 @@ def test_the_rounding_tie_point_is_a_single_node():
     """The specific point that tore the pry-out mesh open."""
     mesh = _refineBoth()
     hits = [
-        label
-        for label, coord in mesh.registry.coordinates.items()
-        if np.allclose(coord, TIE_POINT, rtol=0.0, atol=1e-9)
+        label for label, coord in _nodeCoordinates(mesh).items() if np.allclose(coord, TIE_POINT, rtol=0.0, atol=1e-9)
     ]
     assert len(hits) == 1, "the tie point carries {:d} labels: {:s}".format(len(hits), repr(hits))
 
@@ -124,7 +128,7 @@ def test_distinct_bodies_still_keep_distinct_labels():
     labelsOfBody = []
     for componentId in (0, 1):
         labelsOfBody.append(
-            {label for label in mesh.registry.coordinates if mesh.registry.componentOf[label] == componentId}
+            {label for eid in mesh.cell_ids() if mesh.component(eid) == componentId for label in mesh.connectivity(eid)}
         )
     assert labelsOfBody[0] and labelsOfBody[1]
     assert not (labelsOfBody[0] & labelsOfBody[1])
