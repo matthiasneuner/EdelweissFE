@@ -146,6 +146,27 @@ def test_refiningBeyondTheLatticeDepthRaises():
     assert np.isfinite(builder.mesh.element_coordinates(eid)).all()
 
 
+def test_aCellIsSubdividedFromTheMeshAsItIsWhenRefined():
+    """The octree keeps no coordinates: a node moved in the mesh after its cell was created -- by a tie,
+    a surface snap -- is where the cell's children are placed from, and the new nodes are described in
+    that mesh once the refinement pass is over."""
+    builder = AdaptiveMeshBuilder(2)
+    eid = builder.addRoot(hex20_box_coords(0.0, 1.0, 0.0, 1.0, 0.0, 1.0))
+    corner = builder.mesh.connectivity(eid)[0]
+    builder.nodes.moveNodes([corner], [[-0.5, -0.5, -0.5]])
+    nNodesBefore = builder.nodes.nNodes
+    kids = builder.mesh.refine(eid)
+    assert builder.nodes.nNodes == nNodesBefore
+    childAtCorner = next(k for k in kids if corner in builder.mesh.connectivity(k))
+    expected = TOPOLOGY.subdivide(
+        builder.nodes.nodeCoordinates[builder.nodes.rowsOfNodes(builder.mesh.connectivity(eid))], 2
+    )
+    np.testing.assert_array_equal(builder.mesh.element_coordinates(childAtCorner), expected[kids.index(childAtCorner)])
+    newLabels = builder.mesh.describe_new_nodes()
+    assert builder.nodes.nNodes == nNodesBefore + len(newLabels) and newLabels
+    np.testing.assert_array_equal(builder.mesh.element_coordinates(childAtCorner), expected[kids.index(childAtCorner)])
+
+
 def test_aSplitNodeIsCaught():
     """Two labels at one point (here: one child node deliberately renamed) are two unconnected nodes;
     the check reports it instead of letting the mesh tear."""

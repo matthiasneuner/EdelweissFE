@@ -88,6 +88,21 @@ def test_bothRootsGiveTheSharedPointsIdenticalKeys(S):
         assert table.local_point(1, keyA) == _toLattice(inA)
         assert table.local_point(2, keyA) == _toLattice(inB)
         assert sorted(table.roots_sharing(keyA)) == [1, 2]
+        assert table.unpack(table.pack(keyA)) == keyA
+
+
+def test_aPackedKeyNamesExactlyItsKey():
+    """Packing is a bijection on keys: every kind round-trips, and distinct keys pack differently -- also
+    keys that differ only in the body, or only in the last position digit."""
+    table = RootEntityTable(TOPOLOGY, M)
+    table.add_root(1, list(range(1, 21)), componentId=0)
+    table.add_root(2, list(range(101, 121)), componentId=1)
+    points = list(itertools.product(range(0, 2 * M + 1), repeat=3))
+    keys = {key for root in (1, 2) for key in table.keys(root, points)}
+    assert {key.kind for key in keys} == {"vertex", "edge", "face", "interior"}
+    packed = {table.pack(key) for key in keys}
+    assert len(packed) == len(keys)
+    assert all(table.unpack(table.pack(key)) == key for key in keys)
 
 
 def test_collapsedAndNonManifoldRootsAreRejected():
