@@ -117,3 +117,19 @@ def test_explicitly_stored_zeros_are_dropped_without_changing_any_product(system
         block = a.diagonalBlock(field)
         assert not np.any(block.data == 0.0)
         assert np.array_equal(block.indices, b.diagonalBlock(field).indices)
+
+
+def test_a_failing_preconditioner_is_called_once_and_its_exception_raised(system):
+    from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLLGMRESSolver
+
+    A, As, dinv, equilibrated = system
+    calls = []
+
+    def failing(r):
+        calls.append(1)
+        raise RuntimeError("preconditioner failed")
+
+    solver = PyAMGCLLGMRESSolver(A.shape[0], {"M": 10, "K": 2})
+    with pytest.raises(RuntimeError, match="preconditioner failed"):
+        solver.solve(equilibrated, np.ones(A.shape[0]), failing, 1e-10, 50)
+    assert len(calls) == 1
