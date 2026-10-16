@@ -219,6 +219,7 @@ CONFIG_CASTS = {
     "lgmresResetOnNewIncrement": _boolFromConfig,
     "sweeps": int,
     "symmetric": _boolFromConfig,
+    "fieldOrder": _fieldNamesFromConfig,
     "useRigidBodyNullspace": _boolFromConfig,
     "etaMin": float,
     "etaMax": float,
@@ -335,6 +336,14 @@ class BlockAMGSolver(LinearSolver):
         If True, each sweep is followed by a reverse-order sweep, starting one field before the one
         just updated. Not required by the GMRES-type outer solve (right preconditioning only needs a
         fixed linear operator).
+    fieldOrder
+        The order in which a sweep visits the fields, as field names; fields not listed follow in DOF
+        order. ``None`` (default) is the DOF order. The order matters when the coupling is one-way: for
+        a gradient-enhanced damage model the displacement rows depend on the nonlocal field
+        (:math:`K_{ud} \neq 0`) while the nonlocal rows barely depend on the displacement
+        (:math:`K_{du} \approx 0`). Visiting the nonlocal field first makes one sweep the block
+        back-substitution of that (nearly) block-triangular system; the DOF order (displacement first)
+        sweeps with the nonlocal correction still zero and so ignores :math:`K_{ud}` entirely.
     fieldPreconds
         Optional mapping of field name to an AMGCL preconditioner parameter tree, overriding the
         dimension-based default for that field.
@@ -590,6 +599,7 @@ class BlockAMGSolver(LinearSolver):
         lgmresResetOnNewIncrement: bool = False,
         sweeps: int = 1,
         symmetric: bool = True,
+        fieldOrder: list = None,
         hierarchyDropTol: float = 0.0,
         hierarchyDropLumping: bool = False,
         fieldPreconds: dict = None,
@@ -635,6 +645,7 @@ class BlockAMGSolver(LinearSolver):
         _checkLgmresRecyclingKeys(lgmresAlwaysReset, lgmresResetOnNewIncrement)
         self._sweeps = sweeps
         self._symmetric = symmetric
+        self._fieldOrder = fieldOrder
         self._fieldPreconds = fieldPreconds or {}
         self._useRigidBodyNullspace = useRigidBodyNullspace
         # Explicitly supplied offline maps: never invalidated, since they are not derived from any
@@ -750,6 +761,27 @@ class BlockAMGSolver(LinearSolver):
         :attr:`~edelweissfe.linsolve.base.LinearSolver.lastSolveSummary`. ``None`` before the first
         call."""
         return self._lastSolveSummary
+
+    def _sweepOrder(self, blocks: list) -> list:
+        """The block indices in the order a Gauss-Seidel sweep visits them: ``fieldOrder`` first, then
+        every remaining field in DOF order.
+
+        Raises
+        ------
+        ValueError
+            If ``fieldOrder`` names a field this system does not have.
+        """
+        names = [block.name for block in blocks]
+        requested = self._fieldOrder or []
+        unknown = [name for name in requested if name not in names]
+        if unknown:
+            raise ValueError(
+                "blockamg: fieldOrder names {:} which this system does not have; its fields are {:}".format(
+                    unknown, names
+                )
+            )
+        first = [names.index(name) for name in requested]
+        return first + [i for i in range(len(blocks)) if i not in first]
 
     def _hierarchyIsStale(self, outerIters: int, rebuilt: bool, capHit: bool) -> bool:
         """Whether the standing hierarchies should be rebuilt before the next solve.
@@ -1099,6 +1131,11 @@ class BlockAMGSolver(LinearSolver):
             return "must be 1 or 3"
         if name in ("p1FineValueType", "p1CoarseValueType") and value not in ("double", "float"):
             return "must be 'double' or 'float'"
+        if name == "fieldOrder" and value and self._blocks is not None:
+            known = [block.name for block in self._blocks]
+            unknown = [fieldName for fieldName in value if fieldName not in known]
+            if unknown:
+                return "names {:}, but the system's fields are {:}".format(unknown, known)
         if name == "dumpOnDegradationDir" and value is not None:
             try:
                 os.makedirs(value, exist_ok=True)
@@ -1537,14 +1574,16 @@ class BlockAMGSolver(LinearSolver):
         # a single field, now subsumed by the equilibrated system's one-pass build) and was clean:
         # iterations inside the floor, 5.8% faster on its own.
 
+        sweepOrder = self._sweepOrder(blocks)
+
         def blockGaussSeidel(residual):
             x = [np.zeros(sizes[i]) for i in range(nFields)]
             visited = [False] * nFields
             for _ in range(self._sweeps):
-                sweepOnce(range(nFields), residual, x, visited)
+                sweepOnce(sweepOrder, residual, x, visited)
                 if self._symmetric:
                     # the last field was just updated with everything else current: start one before it
-                    sweepOnce(range(nFields - 2, -1, -1), residual, x, visited)
+                    sweepOnce(sweepOrder[-2::-1], residual, x, visited)
             return np.concatenate(x)
 
         preconditioner = LinearOperator((n, n), matvec=blockGaussSeidel, dtype=np.float64)

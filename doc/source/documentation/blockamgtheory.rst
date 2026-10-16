@@ -547,6 +547,12 @@ Block preconditioner and per-field hierarchies
       - ``true``
       - Follow each sweep by a reverse-order sweep (starting one field before the one just
         updated). Not required by the GMRES-type outer solve.
+    * - ``fieldOrder``
+      - ``null`` (DOF order)
+      - Field names in the order a sweep visits them; unlisted fields follow in DOF order. For a
+        gradient-enhanced damage model, ``["nonlocal damage"]`` visits the driving field first: with
+        :math:`K_{du} \approx 0` one sweep is then the block back-substitution of the (nearly)
+        block-triangular system, while the DOF order ignores :math:`K_{ud}`.
     * - ``useRigidBodyNullspace``
       - ``true``
       - Give every vector field the full six-mode (3D) or three-mode (2D) rigid-body
