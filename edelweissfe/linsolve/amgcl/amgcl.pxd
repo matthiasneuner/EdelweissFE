@@ -95,6 +95,22 @@ cdef extern from "amgcl-wrapper.hpp":
         void applyPreconditioner(int n, const double* rhs, double* x) except +
         string report() except +
 
+    # 3x3 blocks set up in double, stored in float -- see builtin_float_matrices.
+    cdef cppclass LinearSolverBlock3Float:
+        LinearSolverBlock3Float(const char* json_params) except +
+        void solve(int n,
+                   const int* ptr,
+                   const int* col,
+                   const double* val,
+                   const double* rhs,
+                   double* x,
+                   int& iters,
+                   double& error) except +
+        void set_nullspace(const double* B, int rows, int cols) except +
+        void build(int n, const int* ptr, const int* col, const double* val) except +
+        void applyPreconditioner(int n, const double* rhs, double* x) except +
+        string report() except +
+
     # blockamg's equilibrated, field-split system As = D A D: the outer Krylov operator, the
     # coupling blocks between fields and, on demand, the diagonal blocks -- built in one threaded
     # pass, see EquilibratedSystemT's own comment.
