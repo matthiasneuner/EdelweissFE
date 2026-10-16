@@ -171,10 +171,10 @@ public:
 // hierarchy in block form. Vectors stay double.
 namespace amgcl {
 
-  // @brief A float-stored 3x3 block times a double vector block, accumulated in double. Without it,
-  // AMGCL's generic static_matrix product would return -- and accumulate in -- the matrix's value
-  // type, float; with it, every sparse product of the cycle accumulates in double (a non-template
-  // overload is preferred over the generic template).
+  /// @brief A float-stored 3x3 block times a double vector block, accumulated in double. Without it,
+  /// AMGCL's generic static_matrix product would return -- and accumulate in -- the matrix's value
+  /// type, float; with it, every sparse product of the cycle accumulates in double (a non-template
+  /// overload is preferred over the generic template).
   inline static_matrix< double, 3, 1 > operator*( const static_matrix< float, 3, 3 >&  a,
                                                   const static_matrix< double, 3, 1 >& b )
   {
@@ -190,7 +190,7 @@ namespace amgcl {
 
   namespace backend {
 
-    // @brief The builtin backend over double blocks, with the level matrices stored in float blocks.
+    /// @brief The builtin backend over double blocks, with the level matrices stored in float blocks.
     template < typename BlockType >
     struct builtin_float_matrices : public builtin< BlockType > {
       typedef builtin< BlockType >                                    Base;
@@ -356,26 +356,26 @@ public:
   }
 };
 
-// The equilibrated, field-split system of blockamg.py's outer solve, built in one OpenMP-threaded
-// pass over A's CSR arrays instead of a chain of serial SciPy copies and slices.
-//
-// blockamg solves A x = b as (D A D)(D^-1 x) = D b, D = diag(dinv), and its block Gauss-Seidel
-// sweep needs every field's equilibrated diagonal block (for the per-field preconditioners, on a
-// hierarchy rebuild) and the equilibrated coupling blocks between fields (on every solve). This
-// class holds
-//
-//   * the equilibrated operator As = D A D, the outer Krylov operator: matvec(), residual(), and the
-//     operator LGMRESOuterSolverT::solve() iterates on. Each entry is formed exactly as SciPy's
-//     former `As.data *= dinv[As.indices]; As.data *= dinv[rows]` did, (a_ij * dinv_j) * dinv_i, so
-//     the operator is bitwise the former one;
-//   * the coupling blocks As[field i, field j], i != j, rectangular, with field-local column
-//     indices: couplingMatvec();
-//   * the per-row, per-field entry counts that let a diagonal block As[field i, field i] be written
-//     straight into caller-owned (NumPy) arrays on demand: diagonalBlockNnz() / fillDiagonalBlock().
-//
-// The copy is a parallel first touch, so the operator is spread over the NUMA nodes like every other
-// AMGCL matrix (the input arrays come from a single-threaded SciPy allocation). Columns are stored as
-// int, as in the input: 12 instead of 16 bytes per entry in every outer matrix-vector product.
+/// The equilibrated, field-split system of blockamg.py's outer solve, built in one OpenMP-threaded
+/// pass over A's CSR arrays instead of a chain of serial SciPy copies and slices.
+///
+/// blockamg solves A x = b as (D A D)(D^-1 x) = D b, D = diag(dinv), and its block Gauss-Seidel
+/// sweep needs every field's equilibrated diagonal block (for the per-field preconditioners, on a
+/// hierarchy rebuild) and the equilibrated coupling blocks between fields (on every solve). This
+/// class holds
+///
+///   * the equilibrated operator As = D A D, the outer Krylov operator: matvec(), residual(), and the
+///     operator LGMRESOuterSolverT::solve() iterates on. Each entry is formed exactly as SciPy's
+///     former `As.data *= dinv[As.indices]; As.data *= dinv[rows]` did, (a_ij * dinv_j) * dinv_i, so
+///     the operator is bitwise the former one;
+///   * the coupling blocks As[field i, field j], i != j, rectangular, with field-local column
+///     indices: couplingMatvec();
+///   * the per-row, per-field entry counts that let a diagonal block As[field i, field i] be written
+///     straight into caller-owned (NumPy) arrays on demand: diagonalBlockNnz() / fillDiagonalBlock().
+///
+/// The copy is a parallel first touch, so the operator is spread over the NUMA nodes like every other
+/// AMGCL matrix (the input arrays come from a single-threaded SciPy allocation). Columns are stored as
+/// int, as in the input: 12 instead of 16 bytes per entry in every outer matrix-vector product.
 class EquilibratedSystemT {
 public:
   typedef amgcl::backend::crs< double, int, int > Matrix;
@@ -388,7 +388,7 @@ public:
   std::vector< size_t >                    diagonalPtrOffset_;
   int                                      n_ = 0, nFields_ = 0;
 
-  // @brief |a_ii| for every row (0 where no diagonal entry is stored), the basis of the equilibration.
+  /// @brief |a_ii| for every row (0 where no diagonal entry is stored), the basis of the equilibration.
   static void absoluteDiagonal( int n, const int* ptr, const int* col, const double* val, double* out )
   {
 #pragma omp parallel for
@@ -401,11 +401,11 @@ public:
     }
   }
 
-  // @brief Build As = D A D and the coupling blocks.
-  // @param n, ptr, col, val A, square CSR (columns need not be sorted; duplicates are kept as given).
-  // @param dinv the equilibration, D = diag(dinv).
-  // @param nFields, fieldBounds the fields' DOF ranges, [fieldBounds[2k], fieldBounds[2k+1]),
-  // disjoint.
+  /// @brief Build As = D A D and the coupling blocks.
+  /// @param n, ptr, col, val A, square CSR (columns need not be sorted; duplicates are kept as given).
+  /// @param dinv the equilibration, D = diag(dinv).
+  /// @param nFields, fieldBounds the fields' DOF ranges, [fieldBounds[2k], fieldBounds[2k+1]),
+  /// disjoint.
   void build( int           n,
               const int*    ptr,
               const int*    col,
@@ -511,8 +511,8 @@ public:
     }
   }
 
-  // @brief Write As[field f, field g] (field-local columns) into ptr/col/val -- ptr already holding
-  // the block's row pointers.
+  /// @brief Write As[field f, field g] (field-local columns) into ptr/col/val -- ptr already holding
+  /// the block's row pointers.
   void fillBlock( int f, int g, const int* blockPtr, int* blockCol, double* blockVal ) const
   {
     const int start = fieldStart_[f], nRows = fieldStop_[f] - fieldStart_[f], columnStart = fieldStart_[g];
@@ -557,9 +557,9 @@ public:
     return diagonalPtr_[diagonalPtrOffset_[f + 1] - 1];
   }
 
-  // @brief As[field f, field f] into caller-owned arrays of diagonalBlockSize(f) + 1 and
-  // diagonalBlockNnz(f) entries -- written in parallel, so freshly allocated (untouched) arrays get
-  // the same NUMA spread as the operator.
+  /// @brief As[field f, field f] into caller-owned arrays of diagonalBlockSize(f) + 1 and
+  /// diagonalBlockNnz(f) entries -- written in parallel, so freshly allocated (untouched) arrays get
+  /// the same NUMA spread as the operator.
   void fillDiagonalBlock( int f, int* ptr, int* col, double* val ) const
   {
     checkField( f );
@@ -567,7 +567,7 @@ public:
     fillBlock( f, f, ptr, col, val );
   }
 
-  // @brief y <- As x
+  /// @brief y <- As x
   void matvec( const double* x, double* y ) const
   {
     checkBuilt();
@@ -576,7 +576,7 @@ public:
     amgcl::backend::spmv( 1.0, *operator_, xRange, 0.0, yRange );
   }
 
-  // @brief r <- rhs - As x
+  /// @brief r <- rhs - As x
   void residual( const double* rhs, const double* x, double* r ) const
   {
     checkBuilt();
@@ -586,9 +586,9 @@ public:
     amgcl::backend::residual( rhsRange, *operator_, xRange, rRange );
   }
 
-  // @brief y (field f) <- As[field f, field f] x (field f), read straight from the operator's rows
-  // (the diagonal blocks are only materialized for a hierarchy rebuild). Only the block Gauss-Seidel
-  // sweep's revisits of a field need it -- sweeps > 1 or symmetric.
+  /// @brief y (field f) <- As[field f, field f] x (field f), read straight from the operator's rows
+  /// (the diagonal blocks are only materialized for a hierarchy rebuild). Only the block Gauss-Seidel
+  /// sweep's revisits of a field need it -- sweeps > 1 or symmetric.
   void diagonalBlockMatvec( int f, const double* x, double* y ) const
   {
     checkField( f );
@@ -607,7 +607,7 @@ public:
     }
   }
 
-  // @brief y (field f) <- As[field f, field g] x (field g), f != g
+  /// @brief y (field f) <- As[field f, field g] x (field g), f != g
   void couplingMatvec( int f, int g, const double* x, double* y ) const
   {
     checkField( f );
@@ -894,25 +894,25 @@ public:
 // uniform on [-1, 1], one draw per free DOF in order); unlike AMGCL's, the estimate is independent of
 // the thread count and reproducible run to run.
 
-// The fine smoother as the two-grid cycle sees it, independent of the operator's storage format
-// (scalar entries or node-wise 3x3 blocks) and value type (double or float). Vectors are always plain
-// double arrays of the field's scalar size.
+/// The fine smoother as the two-grid cycle sees it, independent of the operator's storage format
+/// (scalar entries or node-wise 3x3 blocks) and value type (double or float). Vectors are always plain
+/// double arrays of the field's scalar size.
 class PTwoGridFineSmoother {
 public:
   virtual ~PTwoGridFineSmoother() {}
 
-  // @brief One Chebyshev sweep (degree steps) on A x = b, continuing from x -- or, with xIsZero, from
-  // x = 0 without reading x at all (its content is then irrelevant).
+  /// @brief One Chebyshev sweep (degree steps) on A x = b, continuing from x -- or, with xIsZero, from
+  /// x = 0 without reading x at all (its content is then irrelevant).
   virtual void smooth( const double* b, double* x, bool xIsZero ) = 0;
 
-  // @brief r <- b - A x
+  /// @brief r <- b - A x
   virtual void residual( const double* b, const double* x, double* r ) const = 0;
 };
 
-// @brief r <- b - A x for the fine operator in AMGCL's own formats: double scalar or block entries
-// (AMGCL reinterprets the scalar vectors as node-wise ones for a block matrix,
-// amgcl/backend/detail/matrix_ops.hpp), and float scalar entries, where AMGCL's kernel already
-// accumulates in the vectors' type, double (`sum += float * double`).
+/// @brief r <- b - A x for the fine operator in AMGCL's own formats: double scalar or block entries
+/// (AMGCL reinterprets the scalar vectors as node-wise ones for a block matrix,
+/// amgcl/backend/detail/matrix_ops.hpp), and float scalar entries, where AMGCL's kernel already
+/// accumulates in the vectors' type, double (`sum += float * double`).
 template < typename MatrixValueType >
 inline void ptwogridFineResidual( const amgcl::backend::crs< MatrixValueType, int, int >& A,
                                   const double*                                           b,
@@ -926,11 +926,11 @@ inline void ptwogridFineResidual( const amgcl::backend::crs< MatrixValueType, in
   amgcl::backend::residual( bRange, A, xRange, rRange );
 }
 
-// @brief r <- b - A x for float 3x3 blocks with double vectors. AMGCL has no such kernel: its mixed
-// block product (amgcl/value_type/static_matrix.hpp) returns, and so accumulates in, the *matrix's*
-// value type, float. Here every block row is accumulated in double, in the same order as AMGCL's
-// double block kernel (per block: a_i0 x_0 + a_i1 x_1 + a_i2 x_2, then added to the row sum), so the
-// only difference to the double operator is the rounding of the stored entries.
+/// @brief r <- b - A x for float 3x3 blocks with double vectors. AMGCL has no such kernel: its mixed
+/// block product (amgcl/value_type/static_matrix.hpp) returns, and so accumulates in, the *matrix's*
+/// value type, float. Here every block row is accumulated in double, in the same order as AMGCL's
+/// double block kernel (per block: a_i0 x_0 + a_i1 x_1 + a_i2 x_2, then added to the row sum), so the
+/// only difference to the double operator is the rounding of the stored entries.
 inline void ptwogridFineResidual( const amgcl::backend::crs< amgcl::static_matrix< float, 3, 3 >, int, int >& A,
                                   const double*                                                               b,
                                   const double*                                                               x,
@@ -963,12 +963,12 @@ inline void ptwogridFineResidual( const amgcl::backend::crs< amgcl::static_matri
   }
 }
 
-// The fine operator in one storage format (scalar entries, or node-wise BxB blocks) and one value
-// type, with the Chebyshev smoother acting on it. ValueType is the double entry type (double, or a
-// double 3x3 block); MatrixValueType is how the operator is stored for the smoother and the residual:
-// ValueType itself, or its float counterpart -- half the bytes per entry, the dominant traffic of
-// the cycle. The spectral-radius estimate only ever runs on a double operator: a float level is made
-// from a double one (makeFloatCopy()), which has estimated or re-checked the radius before.
+/// The fine operator in one storage format (scalar entries, or node-wise BxB blocks) and one value
+/// type, with the Chebyshev smoother acting on it. ValueType is the double entry type (double, or a
+/// double 3x3 block); MatrixValueType is how the operator is stored for the smoother and the residual:
+/// ValueType itself, or its float counterpart -- half the bytes per entry, the dominant traffic of
+/// the cycle. The spectral-radius estimate only ever runs on a double operator: a float level is made
+/// from a double one (makeFloatCopy()), which has estimated or re-checked the radius before.
 template < typename ValueType, typename MatrixValueType = ValueType >
 class PTwoGridFineLevelT : public PTwoGridFineSmoother {
 public:
@@ -990,8 +990,8 @@ public:
     p_.assign( A_->nrows * BlockSize, 0.0 );
   }
 
-  // @brief The same level with the operator's entries rounded to float (same structure, same
-  // polynomial, same double inverse diagonal), in one parallel pass.
+  /// @brief The same level with the operator's entries rounded to float (same structure, same
+  /// polynomial, same double inverse diagonal), in one parallel pass.
   template < typename FloatValueType >
   std::unique_ptr< PTwoGridFineLevelT< ValueType, FloatValueType > > makeFloatCopy() const
   {
@@ -1021,9 +1021,9 @@ public:
     return level;
   }
 
-  // @brief Set up the Chebyshev polynomial for the given spectral radius.
-  // @param lower, higher amgcl::relaxation::chebyshev's own `float` parameters, kept as `float` so
-  // the ellipse bounds round exactly as AMGCL's do.
+  /// @brief Set up the Chebyshev polynomial for the given spectral radius.
+  /// @param lower, higher amgcl::relaxation::chebyshev's own `float` parameters, kept as `float` so
+  /// the ellipse bounds round exactly as AMGCL's do.
   void setPolynomial( unsigned degree, float lower, float higher, double spectralRadius )
   {
     degree_   = degree;
@@ -1034,14 +1034,14 @@ public:
     c_ = 0.5 * ( hi - lo );
   }
 
-  // @brief Power iteration for the spectral radius of A: the loop of
-  // amgcl::backend::spectral_radius (estimate sum_i |(A b)_i b_i| per scalar component, b normalized),
-  // with two differences that make the estimate a deterministic function of the matrix alone: the
-  // start vector is the caller's instead of per-thread random numbers, and the reductions run over a
-  // fixed partition of the rows, summed in order, instead of whichever order the threads finish in.
-  // Accumulating per scalar component also makes a block operator's estimate the scalar one's, up to
-  // summation order. The last normalized iterate -- the estimate of the dominant eigenvector -- is
-  // returned in dominantVector, as the start of a later, short re-check of the estimate.
+  /// @brief Power iteration for the spectral radius of A: the loop of
+  /// amgcl::backend::spectral_radius (estimate sum_i |(A b)_i b_i| per scalar component, b normalized),
+  /// with two differences that make the estimate a deterministic function of the matrix alone: the
+  /// start vector is the caller's instead of per-thread random numbers, and the reductions run over a
+  /// fixed partition of the rows, summed in order, instead of whichever order the threads finish in.
+  /// Accumulating per scalar component also makes a block operator's estimate the scalar one's, up to
+  /// summation order. The last normalized iterate -- the estimate of the dominant eigenvector -- is
+  /// returned in dominantVector, as the start of a later, short re-check of the estimate.
   double estimateSpectralRadius( int                          powerIters,
                                  const std::vector< double >& startVector,
                                  std::vector< double >&       dominantVector ) const
@@ -1100,14 +1100,14 @@ public:
     return radius < 0 ? 2.0 : radius;
   }
 
-  // @brief `degree_` Chebyshev steps on A x = b, continuing from the given x -- the recurrence of
-  // amgcl::relaxation::chebyshev::solve(), step for step, with two economies that leave the result
-  // bitwise unchanged:
-  //   * from x = 0 (xIsZero, the pre-smoothing), the first residual is b itself -- b - A 0 is b
-  //     exactly for a finite A -- so its sparse product is skipped, and x = 0 + p is written as p
-  //     (identical, up to the sign of a zero entry);
-  //   * AMGCL's two vector updates, p <- alpha r + beta p and x <- 1 p + 1 x, run as one pass with
-  //     the same arithmetic per entry.
+  /// @brief `degree_` Chebyshev steps on A x = b, continuing from the given x -- the recurrence of
+  /// amgcl::relaxation::chebyshev::solve(), step for step, with two economies that leave the result
+  /// bitwise unchanged:
+  ///   * from x = 0 (xIsZero, the pre-smoothing), the first residual is b itself -- b - A 0 is b
+  ///     exactly for a finite A -- so its sparse product is skipped, and x = 0 + p is written as p
+  ///     (identical, up to the sign of a zero entry);
+  ///   * AMGCL's two vector updates, p <- alpha r + beta p and x <- 1 p + 1 x, run as one pass with
+  ///     the same arithmetic per entry.
   void smooth( const double* b, double* x, bool xIsZero ) override
   {
     const ptrdiff_t n     = static_cast< ptrdiff_t >( r_.size() );
@@ -1154,16 +1154,16 @@ public:
     }
   }
 
-  // @brief res <- b - A x
+  /// @brief res <- b - A x
   void residual( const double* b, const double* x, double* res ) const override
   {
     ptwogridFineResidual( *A_, b, x, res );
   }
 };
 
-// @brief The p-two-grid preconditioner for one vector field's diagonal block: build() once per
-// hierarchy refresh, apply() once per outer Krylov iteration. See the comment block above for the
-// Dirichlet scheme and the spectral-radius reuse.
+/// @brief The p-two-grid preconditioner for one vector field's diagonal block: build() once per
+/// hierarchy refresh, apply() once per outer Krylov iteration. See the comment block above for the
+/// Dirichlet scheme and the spectral-radius reuse.
 class PTwoGridPreconditionerT {
 public:
   typedef amgcl::backend::builtin< double >                    CoarseBackend;
@@ -1206,9 +1206,9 @@ public:
          setupFineOperatorSeconds_ = 0.0, setupSpectralRadiusSeconds_ = 0.0;
   double applyFineSeconds_ = 0.0, applyCoarseSeconds_ = 0.0;
 
-  // @brief Parse the flat parameter tree: nuPre, nuPost, fineDegree, fineLower, fineHigher,
-  // finePowerIters, fineRecheckIters, fineRecheckTolerance, fineBlockSize, fineValueType,
-  // coarseValueType, and the coarse level's AMGCL preconditioner tree under "coarse".
+  /// @brief Parse the flat parameter tree: nuPre, nuPost, fineDegree, fineLower, fineHigher,
+  /// finePowerIters, fineRecheckIters, fineRecheckTolerance, fineBlockSize, fineValueType,
+  /// coarseValueType, and the coarse level's AMGCL preconditioner tree under "coarse".
   PTwoGridPreconditionerT( const char* json_params )
   {
     std::string json_str( json_params );
@@ -1223,21 +1223,21 @@ public:
     return std::chrono::duration< double >( Clock::now() - start ).count();
   }
 
-  // @brief Build everything apply() needs.
-  // @param n, ptr, col, val the field's equilibrated diagonal block (scalar CSR, sorted columns,
-  // Dirichlet identity rows included). Copied; the caller's arrays are not referenced after build().
-  // @param nNodes, isCorner, edgeEndpoints the P1 topology map (edgeEndpoints: nNodes x 2,
-  // row-major; read for midside nodes only).
-  // @param nullspace, nullspaceCols the coarse near null-space, rows = free coarse DOFs in coarse
-  // order (corner order, then DOF), row-major; nullspaceCols == 0 for none.
-  // @param spectralRadius > 0: start from this fine spectral radius (typically a previous build's)
-  // instead of estimating it from scratch. With a dominantVector (n entries, the previous build's
-  // fineDominantVector()) it is re-checked first by fineRecheckIters power iterations from that
-  // vector, which cost a few sparse products instead of the full estimate's finePowerIters: a
-  // re-check estimate up to 1% above the supplied radius keeps it, one above that but within the smoother's
-  // `fineHigher` margin replaces it, and one beyond that margin -- the operator stiffened more than
-  // the margin covers -- triggers the full estimate. Without a dominantVector the radius is used as
-  // supplied.
+  /// @brief Build everything apply() needs.
+  /// @param n, ptr, col, val the field's equilibrated diagonal block (scalar CSR, sorted columns,
+  /// Dirichlet identity rows included). Copied; the caller's arrays are not referenced after build().
+  /// @param nNodes, isCorner, edgeEndpoints the P1 topology map (edgeEndpoints: nNodes x 2,
+  /// row-major; read for midside nodes only).
+  /// @param nullspace, nullspaceCols the coarse near null-space, rows = free coarse DOFs in coarse
+  /// order (corner order, then DOF), row-major; nullspaceCols == 0 for none.
+  /// @param spectralRadius > 0: start from this fine spectral radius (typically a previous build's)
+  /// instead of estimating it from scratch. With a dominantVector (n entries, the previous build's
+  /// fineDominantVector()) it is re-checked first by fineRecheckIters power iterations from that
+  /// vector, which cost a few sparse products instead of the full estimate's finePowerIters: a
+  /// re-check estimate up to 1% above the supplied radius keeps it, one above that but within the smoother's
+  /// `fineHigher` margin replaces it, and one beyond that margin -- the operator stiffened more than
+  /// the margin covers -- triggers the full estimate. Without a dominantVector the radius is used as
+  /// supplied.
   void build( int                n,
               const int*         ptr,
               const int*         col,
@@ -1398,8 +1398,8 @@ public:
     coarseX_.assign( nCoarseFree_, 0.0 );
   }
 
-  // @brief powerIters power iterations on the fine operator from startVector (see
-  // PTwoGridFineLevelT::estimateSpectralRadius); the final iterate goes to fineDominantVector_.
+  /// @brief powerIters power iterations on the fine operator from startVector (see
+  /// PTwoGridFineLevelT::estimateSpectralRadius); the final iterate goes to fineDominantVector_.
   double estimateFineSpectralRadius( int powerIters, const std::vector< double >& startVector )
   {
     if ( fineBlock3_ )
@@ -1407,8 +1407,8 @@ public:
     return fineScalar_->estimateSpectralRadius( powerIters, startVector, fineDominantVector_ );
   }
 
-  // @brief The full estimate, from the deterministic start vector: AMGCL's single-thread one,
-  // mt19937 seeded 0, uniform on [-1, 1], one draw per free DOF in order.
+  /// @brief The full estimate, from the deterministic start vector: AMGCL's single-thread one,
+  /// mt19937 seeded 0, uniform on [-1, 1], one draw per free DOF in order.
   double estimateFineSpectralRadiusInFull()
   {
     const int iters = prm.get( "finePowerIters", 300 );
@@ -1425,7 +1425,7 @@ public:
     return estimateFineSpectralRadius( iters, startVector );
   }
 
-  // @brief The fine spectral radius for this build -- see build()'s `spectralRadius` parameter.
+  /// @brief The fine spectral radius for this build -- see build()'s `spectralRadius` parameter.
   double chooseFineSpectralRadius( double        suppliedRadius,
                                    const double* dominantVector,
                                    int           dominantVectorSize,
@@ -1493,11 +1493,11 @@ public:
     }
   }
 
-  // @brief P on the free DOFs: identity on corners, 1/2, 1/2 on each midside from its two
-  // edge-endpoint corners, per DOF; no rows for Dirichlet fine DOFs, no columns for Dirichlet coarse
-  // DOFs, and the weight of a dropped column is *not* redistributed (a constrained corner contributes
-  // exactly zero to a homogeneous Newton correction). A free midside DOF whose both endpoint DOFs are
-  // constrained is an orphan and raises.
+  /// @brief P on the free DOFs: identity on corners, 1/2, 1/2 on each midside from its two
+  /// edge-endpoint corners, per DOF; no rows for Dirichlet fine DOFs, no columns for Dirichlet coarse
+  /// DOFs, and the weight of a dropped column is *not* redistributed (a constrained corner contributes
+  /// exactly zero to a homogeneous Newton correction). A free midside DOF whose both endpoint DOFs are
+  /// constrained is an orphan and raises.
   void buildProlongation( int nNodes, int nDim, const signed char* isCorner, const int* edgeEndpoints )
   {
     // coarse numbering: corners in node order, nDim DOFs each; free coarse DOFs renumbered densely
@@ -1584,19 +1584,19 @@ public:
     PT_ = amgcl::backend::transpose( *P_ );
   }
 
-  // @brief `sweeps` fine sweeps; the first one from x = 0 if xIsZero
+  /// @brief `sweeps` fine sweeps; the first one from x = 0 if xIsZero
   void smoothFine( double* x, int sweeps, bool xIsZero )
   {
     for ( int sweep = 0; sweep < sweeps; ++sweep )
       fine_->smooth( rhs_.data(), x, xIsZero && sweep == 0 );
   }
 
-  // @brief x <- M^-1 r: one two-grid cycle on the free DOFs -- nuPre fine sweeps, coarse-grid
-  // correction, nuPost fine sweeps; Dirichlet DOFs pass through, x_i = r_i. The cycle's fine iterate
-  // is x itself: written from x = 0 without reading it (by the first pre-sweep, or, with no
-  // pre-sweeps, by the prolongated coarse correction itself), it stays zero on Dirichlet DOFs (zero
-  // right-hand side there, no rows of P) until they are set to r_i last. Without pre-sweeps the
-  // fine residual of x = 0 is the right-hand side itself, so no product is needed for it.
+  /// @brief x <- M^-1 r: one two-grid cycle on the free DOFs -- nuPre fine sweeps, coarse-grid
+  /// correction, nuPost fine sweeps; Dirichlet DOFs pass through, x_i = r_i. The cycle's fine iterate
+  /// is x itself: written from x = 0 without reading it (by the first pre-sweep, or, with no
+  /// pre-sweeps, by the prolongated coarse correction itself), it stays zero on Dirichlet DOFs (zero
+  /// right-hand side there, no rows of P) until they are set to r_i last. Without pre-sweeps the
+  /// fine residual of x = 0 is the right-hand side itself, so no product is needed for it.
   void apply( int n, const double* r, double* x )
   {
     if ( !coarse_ && !coarseFloat_ ) {
@@ -1657,7 +1657,7 @@ public:
   }
   int nCoarseFree() const { return nCoarseFree_; }
 
-  // @brief the coarse level's AMGCL hierarchy report
+  /// @brief the coarse level's AMGCL hierarchy report
   std::string report() const
   {
     if ( !coarse_ && !coarseFloat_ ) {
