@@ -285,9 +285,9 @@ class PTwoGridPreconditioner:
                 # Build the full (unrestricted) coarse-DOF near null-space first, then restrict to the
                 # free coarse DOFs -- same two-step shape as the rest of blockamg's null-space
                 # construction, just applied to the corner-node subset's own synthetic block instead of
-                # the full field. The coarse DOFs are the corners' DOFs in node order, a Dirichlet row
-                # being one with exactly one stored entry -- the same convention the C++ build uses.
-                isDirichlet = np.diff(A.indptr) == 1
+                # the full field. The coarse DOFs are the corners' DOFs in node order; the Dirichlet rows
+                # are the C++ build's own (a nonzero diagonal and no nonzero off-diagonal entry).
+                isDirichlet = PyAMGCLPTwoGrid.dirichletRows(A)
                 cornerNodeRows = np.nonzero(self._isCorner)[0]
                 nCorners = len(cornerNodeRows)
                 fullDofRowsForCorners = np.repeat(cornerNodeRows, nDim) * nDim + np.tile(np.arange(nDim), nCorners)
