@@ -1500,17 +1500,19 @@ class BlockAMGSolver(LinearSolver):
                     )
                     backendPrecision = precondParams.pop("backendPrecision", "double")
                     backendBlockSize = precondParams.pop("backendBlockSize", 1)
+                    backendScalarSetup = precondParams.pop("backendScalarSetup", False)
                     solver = PyAMGCLSolver(
                         {
                             "precond": precondParams,
                             "backendPrecision": backendPrecision,
                             "backendBlockSize": backendBlockSize,
+                            "backendScalarSetup": backendScalarSetup,
                         }
                     )
-                    # set_nullspace() is unsupported (and always raises) on a block backend -- AMGCL's
-                    # own near-null-space path is unimplemented for block value types; untouched by the
-                    # rigid-body-basis choice below since backendBlockSize > 1 stays opt-in.
-                    if isVectorField and backendBlockSize == 1:
+                    # set_nullspace() is unsupported (and raises) on a block backend -- AMGCL's own
+                    # near-null-space path is unimplemented for block value types -- unless the hierarchy
+                    # is set up on scalar entries and only stored in blocks (backendScalarSetup).
+                    if isVectorField and (backendBlockSize == 1 or backendScalarSetup):
                         with performancetiming.timeit("nullspace construction"):
                             # Coordinates come from self._model (set by setModel), read fresh every
                             # rebuild rather than pushed in ahead of time. Gated on

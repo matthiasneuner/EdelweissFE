@@ -29,10 +29,10 @@
 // value-type-dependent scratch conversion happens inside this class, not at the Cython/Python
 // boundary, since applyPreconditioner() is called once per outer Krylov iteration (hot path) while
 // build() is not.
-template < typename ValueType >
+template < typename ValueType, typename BackendType = amgcl::backend::builtin< ValueType > >
 class LinearSolverT {
 public:
-  typedef amgcl::backend::builtin< ValueType > Backend;
+  typedef BackendType Backend;
   typedef amgcl::make_solver< amgcl::runtime::preconditioner< Backend >, amgcl::runtime::solver::wrapper< Backend > >
     Solver;
 
@@ -222,6 +222,40 @@ namespace amgcl {
 
     template < typename B1, typename B2 >
     struct backends_compatible< builtin_float_matrices< B1 >, builtin_float_matrices< B2 > > : std::true_type {};
+
+    /// @brief The builtin backend over *scalar* double entries -- so the hierarchy is set up exactly as
+    /// the scalar backend's, with the full near-null-space (AMGCL's tentative prolongation supports one
+    /// only for scalar value types) -- whose level matrices are stored, and read in the cycle, as float
+    /// 3x3 blocks.
+    ///
+    /// With a 6-mode rigid-body near-null-space the coarse levels carry 6 unknowns per aggregate instead
+    /// of 3 per node; a coarse level is still blocked by 3x3 (each 6x6 aggregate coupling is four 3x3
+    /// blocks), which only needs every level size to be a multiple of 3 -- true for 3 DOFs per fine
+    /// node and 6 (or 3) modes per aggregate, and checked in copy_matrix(). The vectors stay scalar
+    /// double; AMGCL's builtin products reinterpret them per 3x3 block row, and the float-block x
+    /// double-vector product above accumulates in double.
+    struct builtin_scalar_setup_float_blocks : public builtin< double > {
+      typedef builtin< double >                       Base;
+      typedef static_matrix< float, 3, 3 >            StoredType;
+      typedef crs< StoredType, ptrdiff_t, ptrdiff_t > matrix;
+
+      struct provides_row_iterator : std::false_type {};
+
+      static std::shared_ptr< matrix > copy_matrix( std::shared_ptr< Base::matrix > A, const Base::params& )
+      {
+        if ( A->nrows % 3 != 0 || A->ncols % 3 != 0 ) {
+          throw std::runtime_error( "backendScalarSetup: a hierarchy level of " + std::to_string( A->nrows ) + " x " +
+                                    std::to_string( A->ncols ) +
+                                    " unknowns cannot be stored in 3x3 blocks -- the near null-space must have 3 "
+                                    "or 6 modes and the field 3 DOFs per node." );
+        }
+        return std::make_shared< matrix >( amgcl::adapter::block_matrix< static_matrix< double, 3, 3 > >( *A ) );
+      }
+    };
+
+    template <>
+    struct backends_compatible< builtin_scalar_setup_float_blocks, builtin_scalar_setup_float_blocks >
+      : std::true_type {};
 
   } // namespace backend
 } // namespace amgcl
@@ -1749,6 +1783,10 @@ typedef LinearSolverBlockT< amgcl::static_matrix< double, 3, 3 > > LinearSolverB
 typedef LinearSolverBlockT< amgcl::static_matrix< double, 3, 3 >,
                             amgcl::backend::builtin_float_matrices< amgcl::static_matrix< double, 3, 3 > > >
   LinearSolverBlock3Float;
+
+/// Scalar double hierarchy setup with the full near-null-space, levels stored and applied as float 3x3
+/// blocks -- see builtin_scalar_setup_float_blocks.
+typedef LinearSolverT< double, amgcl::backend::builtin_scalar_setup_float_blocks > LinearSolverScalarSetupBlock3Float;
 
 // blockamg's equilibrated, field-split system, see EquilibratedSystemT above.
 typedef EquilibratedSystemT EquilibratedSystem;

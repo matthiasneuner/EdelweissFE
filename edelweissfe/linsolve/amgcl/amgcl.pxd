@@ -43,6 +43,23 @@ cdef extern from "amgcl-wrapper.hpp":
         void applyPreconditioner(int n, const double* rhs, double* x) except +
         string report() except +
 
+    # Scalar double setup with the full near null-space, levels stored as float 3x3 blocks -- see
+    # builtin_scalar_setup_float_blocks.
+    cdef cppclass LinearSolverScalarSetupBlock3Float:
+        LinearSolverScalarSetupBlock3Float(const char* json_params) except +
+        void solve(int n,
+                   const int* ptr,
+                   const int* col,
+                   const double* val,
+                   const double* rhs,
+                   double* x,
+                   int& iters,
+                   double& error) except +
+        void set_nullspace(const double* B, int rows, int cols) except +
+        void build(int n, const int* ptr, const int* col, const double* val) except +
+        void applyPreconditioner(int n, const double* rhs, double* x) except +
+        string report() except +
+
     # Same interface, backed by amgcl::backend::builtin<float> -- half the memory traffic in the
     # smoother apply, at the cost of matrix/hierarchy precision. rhs/x stay double at this
     # boundary too; the narrowing/widening happens inside the C++ wrapper.

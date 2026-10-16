@@ -204,6 +204,14 @@ value type, and are consumed before the rest of the tree is forwarded verbatim:
     only near-null-space -- the translations -- and gives up the **rotational** rigid-body modes
     described next.
 
+``backendScalarSetup``
+    **Experimental**, with ``backendBlockSize = 3`` and ``backendPrecision = "float"`` only: set the
+    hierarchy up on the scalar double entries, with the full rigid-body near-null-space (rotations
+    included), and store and apply only its level matrices as float :math:`3\times 3` blocks. With six
+    modes the coarse levels carry six unknowns per aggregate; they are still stored in
+    :math:`3\times 3` blocks (four per :math:`6\times 6` aggregate coupling), which only requires every
+    level size to be a multiple of three.
+
 Near-null-space and the Chebyshev smoother
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

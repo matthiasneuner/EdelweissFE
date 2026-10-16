@@ -105,3 +105,39 @@ def test_the_float_block_cycle_preconditions_gmres_as_well(system):
 def test_float_with_block_size_2_is_still_refused():
     with pytest.raises(NotImplementedError):
         PyAMGCLSolver({"precond": dict(_PRECOND), "backendBlockSize": 2, "backendPrecision": "float"})
+
+
+def _rigidBodyModes(m):
+    """The six rigid-body modes of the fixture's m^3 node grid (unit spacing), node-major -- the same basis for
+    both hierarchies compared, so its fit to the equilibrated operator does not matter here."""
+    axis = np.arange(m, dtype=float)
+    coords = np.array(np.meshgrid(axis, axis, axis, indexing="ij")).reshape(3, -1).T
+    coords -= coords.mean(axis=0)
+    nodes = len(coords)
+    B = np.zeros((3 * nodes, 6))
+    for d in range(3):
+        B[d::3, d] = 1.0
+    x, y, z = coords.T
+    B[1::3, 3], B[2::3, 3] = -z, y
+    B[0::3, 4], B[2::3, 4] = z, -x
+    B[0::3, 5], B[1::3, 5] = -y, x
+    return B
+
+
+def test_a_scalar_setup_takes_the_full_nullspace_and_matches_the_scalar_hierarchy(system):
+    A, b = system
+    scalar = PyAMGCLSolver({"precond": dict(_PRECOND)})
+    blocked = PyAMGCLSolver(
+        {"precond": dict(_PRECOND), "backendBlockSize": 3, "backendPrecision": "float", "backendScalarSetup": True}
+    )
+    for solver in (scalar, blocked):
+        solver.set_nullspace(_rigidBodyModes(12))
+        solver.build(A)
+    x, y = blocked.applyPreconditioner(b), scalar.applyPreconditioner(b)
+    # the same hierarchy, set up identically; only its stored level matrices are rounded to float
+    assert np.linalg.norm(x - y) / np.linalg.norm(y) < 1e-5
+
+
+def test_a_scalar_setup_is_refused_without_float_blocks():
+    with pytest.raises(NotImplementedError):
+        PyAMGCLSolver({"precond": dict(_PRECOND), "backendBlockSize": 3, "backendScalarSetup": True})
