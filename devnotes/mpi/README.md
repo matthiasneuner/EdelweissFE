@@ -73,4 +73,5 @@ compare_checkpoints.py`); mode check (`testfiles/mpi/check_element_distribution.
 - `harness/` — verification and measurement scripts (normally in `next_v2611/mpi_explicit_benchmarks/tools/`; the
   Python scripts carry a `.py.txt` suffix here so the repository's linters skip them — drop it to use them;
   paths inside are absolute to that workspace). Reference data (`refactor_reference_marmot_e992a3f4/`, c1_150
-  baseline) and benchmark decks stay in the workspace, not in the repository.
+  baseline) and benchmark decks stay in the workspace, not in the repository; the AMR byte-identity gate scripts
+  of P6.4a/b are in `next_v2611/mpi_explicit_benchmarks/tools/amr_gate/`.
