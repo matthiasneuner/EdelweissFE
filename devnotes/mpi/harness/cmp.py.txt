@@ -1,0 +1,9 @@
+import numpy as np,glob,os,sys
+a_dir,b_dir=sys.argv[1],sys.argv[2]
+for f in sorted(glob.glob(a_dir+'/*.npy')):
+    g=os.path.join(b_dir,os.path.basename(f))
+    if not os.path.exists(g): print(os.path.basename(f),'MISSING'); continue
+    a=np.load(f); b=np.load(g)
+    if a.shape!=b.shape: print(os.path.basename(f),'SHAPE',a.shape,b.shape); continue
+    d=np.max(np.abs(a-b)) if a.size else 0; s=np.max(np.abs(a)) if a.size else 0
+    print('%-55s %s'%(os.path.basename(f), 'BITWISE' if np.array_equal(a,b) else 'maxdiff %.3e (rel %.3e)'%(d, d/max(s,1e-300))))

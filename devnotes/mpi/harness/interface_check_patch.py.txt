@@ -1,0 +1,45 @@
+import os
+import numpy as np
+import edelweissfe.domaindecomposition.subdomaininterface as si
+os.environ['CHECK_OLD_INTERFACE']='1'
+interfaceChecks = []
+if os.environ.get("CHECK_OLD_INTERFACE"):
+    from mpi4py import MPI as _MPI
+    _newInit = si.SubdomainInterface.__init__
+
+    def _checkedInit(self, communicator, elementProcesses, touchedDofs, links=None):
+        _newInit(self, communicator, elementProcesses, touchedDofs, links)
+        # the construction of 7cbfa8b4: touched + closure, Allgatherv, lexsort
+        nDof = elementProcesses.nDof
+        rank, size = communicator.Get_rank(), communicator.Get_size()
+        touched = np.asarray(touchedDofs, dtype=np.int64)
+        linked, group = si.multiPointConstraintGroups(links)
+        if linked.size:
+            groupsTouched = np.unique(group[np.isin(linked, touched)])
+            touched = np.concatenate([touched, linked[np.isin(group, groupsTouched)]])
+        localDofs = np.unique(touched)
+        counts = np.array(communicator.allgather(localDofs.shape[0]), dtype=np.int64)
+        allDofs = np.empty(counts.sum(), dtype=np.int64)
+        disp = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        communicator.Allgatherv(localDofs, [allDofs, counts, disp, _MPI.INT64_T])
+        allRanks = np.repeat(np.arange(size, dtype=np.int64), counts)
+        t = np.zeros(nDof, dtype=bool); t[allDofs] = True
+        untouched = np.flatnonzero(~t)
+        if untouched.size:
+            allDofs = np.concatenate([allDofs, untouched]); allRanks = np.concatenate([allRanks, np.zeros(untouched.size, dtype=np.int64)])
+            if rank == 0:
+                localDofs = np.union1d(localDofs, untouched)
+        order = np.lexsort((allRanks, allDofs)); allDofs = allDofs[order]; allRanks = allRanks[order]
+        first = np.ones(allDofs.shape[0], dtype=bool); first[1:] = allDofs[1:] != allDofs[:-1]
+        owner = np.empty(nDof, dtype=np.int64); owner[allDofs[first]] = allRanks[first]
+        isLocal = np.zeros(nDof, dtype=bool); isLocal[localDofs] = True
+        shared = isLocal[allDofs] & (allRanks != rank)
+        sd, sr = allDofs[shared], allRanks[shared]
+        neighbours = np.unique(sr).tolist()
+        same = (np.array_equal(owner, self.dofOwners) and np.array_equal(localDofs, self.subdomainDofs)
+                and neighbours == self.neighbours and np.array_equal(np.unique(sd), self.interfaceDofs)
+                and all(np.array_equal(sd[sr == n], self.sharedDofsWith(n)) for n in neighbours))
+        interfaceChecks.append(bool(same))
+
+    si.SubdomainInterface.__init__ = _checkedInit
+

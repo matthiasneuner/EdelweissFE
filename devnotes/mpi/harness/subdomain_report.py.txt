@@ -1,0 +1,17 @@
+"""subdomain_report.py LOG: summarize the first 'Subdomains:' report of a NEDMPI log."""
+import re, sys
+t = open(sys.argv[1]).read()
+i = t.index("Subdomains:")
+block, glue = "", False
+for raw in t[i - 1 :].splitlines()[:40]:
+    if block and (raw[1:].startswith("Time integration") or raw.startswith("element ")):
+        break
+    content = raw[1:81].rstrip()
+    block += content if (block.endswith("/") or glue) else " " + content
+    glue = len(content) == 80
+nums = lambda key: [int(x) for x in re.search(key + r"\s*([\d/]+)", block).group(1).split("/")]
+print(block[-400:]) if "-d" in sys.argv else None
+iface = nums("interface DOFs"); sent = nums("sent per increment"); nb = nums("neighbours"); ce = nums("constraints evaluated")
+g = int(re.search(r"every process:\s*(\d+)", block).group(1))
+print("interface DOFs sum %d max %d | neighbours mean %.2f max %d | constraint entries sent/inc sum %d max %d (%.2f MB) | constraints per proc %s | gathered claims %d"
+      % (sum(iface), max(iface), sum(nb) / len(nb), max(nb), sum(sent), max(sent), sum(sent) * 8 / 1e6, "/".join(map(str, ce)), g))

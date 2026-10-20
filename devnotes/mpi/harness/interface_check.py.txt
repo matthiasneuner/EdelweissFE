@@ -1,0 +1,21 @@
+"""interface_check.py DECKDIR... : run decks under mpirun with the derived SubdomainInterface compared to the
+construction of 7cbfa8b4 at every rebuild (owners, subdomain DOFs, neighbours, shared DOFs)."""
+import os, sys, io, contextlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+from mpi4py import MPI
+import interface_check_patch as patch
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+for d in sys.argv[1:]:
+    os.chdir(d)
+    del patch.interfaceChecks[:]
+    with contextlib.redirect_stdout(io.StringIO()):
+        try:
+            finiteElementSimulation(parseInputFile("test.inp"), verbose=False, suppressPlots=True)
+        except Exception as e:
+            print("ERROR", d, e, file=sys.stderr)
+    c = MPI.COMM_WORLD.gather(list(patch.interfaceChecks), root=0)
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        flat = [x for cs in c for x in cs]
+        print("%s: %d/%d identical" % (os.path.basename(d), sum(flat), len(flat)), flush=True)

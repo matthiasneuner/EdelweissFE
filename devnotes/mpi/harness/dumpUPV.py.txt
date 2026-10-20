@@ -1,0 +1,34 @@
+"""Run test decks in-process and save the final solution bit-exactly: dumpU.py OUTDIR DIR1 DIR2 ..."""
+import os, sys, io, contextlib
+import numpy as np
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+out = os.path.abspath(sys.argv[1]); os.makedirs(out, exist_ok=True)
+rank = 0
+try:
+    from edelweissfe.domaindecomposition.mpienvironment import processRank
+    rank = processRank()
+except ImportError:
+    pass
+for d in sys.argv[2:]:
+    d = os.path.abspath(d); cwd = os.getcwd(); os.chdir(d)
+    try:
+        inp = parseInputFile("test.inp")
+        with contextlib.redirect_stdout(io.StringIO()):
+            model, _ = finiteElementSimulation(inp, verbose=False, suppressPlots=True)
+        if getattr(model.elementDistribution, "holdsNodesOfSubdomainOnly", False):
+            # P6.3c: each process holds the nodes of its subdomain only -- gather the node fields of the
+            # whole model (the same arrays, in the same order, as model.nodeFields of a process holding
+            # every node)
+            from edelweissfe.models.elementdistribution import nodeFieldValuesHere
+            fields = model.elementDistribution.nodeFieldsOfWholeModel(model, nodeFieldValuesHere(model))
+            U = None if fields is None else np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in fields.values() if e in f])
+        else:
+            U = np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+        if rank == 0:
+            np.save(os.path.join(out, os.path.basename(os.path.dirname(d)) + "__" + os.path.basename(d) + ".npy"), U)
+            print(os.path.basename(d), "OK", U.size)
+    except Exception as e:
+        print(os.path.basename(d), "ERROR", repr(e)[:300])
+    finally:
+        os.chdir(cwd)

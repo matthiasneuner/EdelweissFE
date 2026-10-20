@@ -1,0 +1,20 @@
+import os, sys, io, contextlib
+def rss():
+    with open("/proc/self/status") as f:
+        for l in f:
+            if l.startswith("VmRSS"): return int(l.split()[1]) / 1024.0
+from edelweissfe.utils.inputfileparser import parseInputFile
+from edelweissfe.models.femodel import FEModel
+from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
+from edelweissfe.journal.journal import Journal
+from edelweissfe.numerics.dofmanager import DofManager
+os.chdir(sys.argv[1]); base = rss()
+inp = parseInputFile("test.inp"); j = Journal(verbose=False)
+with contextlib.redirect_stdout(io.StringIO()):
+    m = FEModel(3); m = fillFEModelFromInputFile(m, inp, j); a = rss()
+    m.prepareYourself(j); b = rss()
+    dm = DofManager(m.nodeFields.values(), m.scalarVariables.values(), m.elements.values(), m.constraints.values(), m.nodeSets.values(), initializeVIJPattern=False, determiningIndexToHostObjectMapping=False); c = rss()
+ne = len(m.elements); nn = len(m.nodes)
+states = sum(e.getStateVars().nbytes for e in m.elements.values()) / 2**20
+print("elements %d nodes %d dofs %d" % (ne, nn, dm.nDof))
+print("python+imports %.0f MB; mesh+elements %.0f MB (%.1f KB/el); prepareYourself %+.0f MB; DofManager %+.0f MB; of which element state vectors %.0f MB" % (base, a-base, (a-base)*1024/ne, b-a, c-b, states))

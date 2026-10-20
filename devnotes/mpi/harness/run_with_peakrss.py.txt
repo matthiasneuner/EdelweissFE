@@ -1,0 +1,15 @@
+"""Run the edelweissfe CLI and report this process' peak resident memory on stderr."""
+import resource, sys, shutil, runpy, atexit
+def report():
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    rank = 0
+    try:
+        from edelweissfe.domaindecomposition.mpienvironment import processRank
+        rank = processRank()
+    except Exception:
+        pass
+    sys.stderr.write("PEAKRSS rank %d %.1f MB\n" % (rank, peak))
+atexit.register(report)
+sys.argv = ["edelweissfe"] + sys.argv[1:]
+from edelweissfe._cli._edelweissfe import main
+main()

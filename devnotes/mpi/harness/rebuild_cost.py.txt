@@ -1,0 +1,237 @@
+"""rebuild_cost.py RUNDIR [MAXINC] [CONTACTFREQ]
+
+Run the c1_150 verify deck (NEDMPI) in RUNDIR and measure, per process, every rebuild of the equation
+system (NED.buildEquationSystem) and the subdomain definitions inside it: wall time, the parts of the
+definition, and the peak resident memory a rebuild adds above the resident memory before it (VmHWM
+reset through /proc/self/clear_refs before each rebuild). Prints a table on rank 0: per rebuild, the
+max/mean/min over the processes. Run under mpirun with PYTHONPATH pointing at the worktree.
+P6.3a measurement tool (2026-10-15).
+"""
+
+import functools
+import os
+import sys
+import time
+
+import numpy as np
+
+d = sys.argv[1]
+maxInc = sys.argv[2] if len(sys.argv) > 2 else "60"
+contactFrequency = sys.argv[3] if len(sys.argv) > 3 else "10"
+os.makedirs(d, exist_ok=True)
+deck = "/home/matthias/constitutive_modeling/next_v2611/mpi_explicit_benchmarks/c1_150/verify/deck"
+os.chdir(d)
+if not os.path.exists("mesh"):
+    try:
+        os.symlink(deck + "/mesh", "mesh")
+    except FileExistsError:
+        pass
+s = open(deck + "/test.inp").read()
+s = s.replace("maxNumInc=250", "maxNumInc=" + maxInc).replace("*solver, solver=NEDParallel", "*solver, solver=NEDMPI")
+s = s.replace("contact-update-frequency=500", "contact-update-frequency=" + contactFrequency)
+from mpi4py import MPI  # noqa: E402
+
+rank = MPI.COMM_WORLD.Get_rank()
+if rank == 0:
+    open("test.inp", "w").write(s)
+MPI.COMM_WORLD.Barrier()
+
+import edelweissfe  # noqa: E402
+import edelweissfe.domaindecomposition.domaindecomposition as dd  # noqa: E402
+import edelweissfe.domaindecomposition.subdomaininterface as si  # noqa: E402
+import edelweissfe.solvers.nonlinearexplicitdynamic as ned  # noqa: E402
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation  # noqa: E402
+from edelweissfe.utils.inputfileparser import parseInputFile  # noqa: E402
+
+if rank == 0:
+    print("CODE", edelweissfe.__file__, flush=True)
+
+
+def status(key):
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith(key):
+                return int(line.split()[1]) / 1024.0
+
+
+records = []  # (rebuild index, label, seconds)
+rebuilds = []  # (kind, seconds, rss before, peak above before)
+current = [None]
+
+
+def timed(owner, name, label):
+    original = getattr(owner, name)
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            records.append((current[0], label, time.perf_counter() - start))
+
+    setattr(owner, name, wrapper)
+
+
+def timedRebuild():
+    original = ned.NED.buildEquationSystem
+
+    @functools.wraps(original)
+    def wrapper(self, model, step, previous=None):
+        kind = "carried" if previous is not None else ("start" if not rebuilds else "afresh")
+        current[0] = len(rebuilds)
+        rebuilds.append(None)
+        rssBefore = status("VmRSS")
+        with open("/proc/self/clear_refs", "w") as f:
+            f.write("5")
+        start = time.perf_counter()
+        try:
+            return original(self, model, step, previous)
+        finally:
+            rebuilds[current[0]] = (kind, time.perf_counter() - start, rssBefore, status("VmHWM") - rssBefore)
+            current[0] = None
+
+    ned.NED.buildEquationSystem = wrapper
+
+
+timedRebuild()
+DD = dd.DomainDecomposition
+timed(DD, "define", "define")
+timed(DD, "_checkReplicatedLayout", " layout check")
+timed(dd.GlobalDofNumbering, "ofModel", "  numbering of model")
+timed(dd.GlobalDofNumbering, "requireAgreementWith", "  numbering agreement")
+timed(dd, "layoutFingerprint", "  fingerprint")
+for name, label in [
+    ("_partition", " partition"),
+    ("_constraintOwnersOf", " constraint owners"),
+    ("_adoptOwnership", " adopt ownership"),
+    ("_defineInterface", " define interface"),
+    ("_closeOverMultiPointConstraints", "  mpc closure"),
+    ("_reportSubdomains", " report"),
+]:
+    if hasattr(DD, name):
+        timed(DD, name, label)
+timed(si.SubdomainInterface, "__init__", "  SubdomainInterface")
+timed(dd.ModelStateSynchronization, "__init__", "  state synchronization layout")
+timed(si.ConstraintForceExchange, "__init__", "  constraint force exchange layout")
+timed(ned.NED, "planIncrement", "plan increment")
+timed(DD, "interfaceAssemblyFor", " interface force assembly")
+timed(ned.NED, "_assembleLumpedOperators", "lumped operators")
+_dm = ned.DofManager
+class _TimedDofManager(_dm):
+    def __init__(self, *a, **k):
+        start = time.perf_counter()
+        super().__init__(*a, **k)
+        records.append((current[0], "dof manager", time.perf_counter() - start))
+ned.DofManager = _TimedDofManager
+timed(ned.NED, "buildMPCTransformation", "mpc transformation")
+timed(ned.NED, "checkMPCDirichletConflicts", "mpc dirichlet check")
+if os.environ.get("PROFILE_DEFINE") and rank == 0:
+    import cProfile, pstats
+    _define = DD.define
+    def _profiled(self, *a, **k):
+        pr = cProfile.Profile(); pr.enable()
+        try:
+            return _define(self, *a, **k)
+        finally:
+            pr.disable(); pstats.Stats(pr).sort_stats("cumulative").print_stats(45)
+    DD.define = _profiled
+
+memRecords = []
+if os.environ.get("MEM_DETAIL"):
+    def memWrapped(owner, name, label):
+        original = getattr(owner, name)
+
+        @functools.wraps(original)
+        def wrapper(*args, **kwargs):
+            before = status("VmRSS")
+            with open("/proc/self/clear_refs", "w") as f:
+                f.write("5")
+            try:
+                return original(*args, **kwargs)
+            finally:
+                memRecords.append((current[0], label, status("VmHWM") - before, status("VmRSS") - before))
+
+        setattr(owner, name, wrapper)
+
+    for n, l in [("_checkReplicatedLayout", "layout check"), ("_constraintOwnersOf", "constraint owners"),
+                 ("_adoptOwnership", "adopt ownership"), ("_defineInterface", "define interface")]:
+        memWrapped(DD, n, l)
+    memWrapped(ned.NED, "_assembleLumpedOperators", "lumped operators")
+    memWrapped(ned.NED, "planIncrement", "plan increment")
+    memWrapped(_TimedDofManager, "__init__", "dof manager")
+    memWrapped(ned.NED, "buildMPCTransformation", "mpc transformation")
+    memWrapped(DD, "_reportSubdomains", "report")
+
+if os.environ.get("SHOW_OWNERS"):
+    _assign = dd.assignConstraintsByMajority
+
+    def _shown(nodeRows, lowest, nParts):
+        owners = _assign(nodeRows, lowest, nParts)
+        if rank == 0:
+            for name, rows in nodeRows.items():
+                p = lowest[np.asarray(rows, dtype=np.int64)]
+                print("OWNER", name, owners[name], np.bincount(p[p < nParts], minlength=nParts).tolist(), flush=True)
+        return owners
+
+    dd.assignConstraintsByMajority = _shown
+    _assignConstraints = DD._assignConstraints
+
+    def _assigned(self, model):
+        _assignConstraints(self, model)
+        if rank == 0:
+            print("ASSIGNED", self._constraintOwners, "shares", None if self._processShares is None else np.round(self._processShares, 4).tolist(), flush=True)
+
+    DD._assignConstraints = _assigned
+
+interfaceChecks = []
+if os.environ.get("CHECK_OLD_INTERFACE"):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from interface_check_patch import interfaceChecks  # noqa: E402,F811
+
+model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=bool(os.environ.get("VERBOSE")), suppressPlots=True)
+
+comm = MPI.COMM_WORLD
+allRebuilds = comm.gather(rebuilds, root=0)
+allRecords = comm.gather(records, root=0)
+peak = comm.gather(status("VmHWM"), root=0)
+checks = comm.gather(interfaceChecks, root=0)
+mems = comm.gather(memRecords, root=0)
+if rank == 0:
+    P = len(allRebuilds)
+    print("processes", P)
+    n = min(len(r) for r in allRebuilds)
+    for i in range(n):
+        kinds = {r[i][0] for r in allRebuilds}
+        t = np.array([r[i][1] for r in allRebuilds])
+        rss = np.array([r[i][2] for r in allRebuilds])
+        hwm = np.array([r[i][3] for r in allRebuilds])
+        print(
+            "REBUILD %d %s: time max %.3f mean %.3f min %.3f s | rss before mean %.0f MB | peak above before max %.0f mean %.0f MB"
+            % (i, "/".join(sorted(kinds)), t.max(), t.mean(), t.min(), rss.mean(), hwm.max(), hwm.mean())
+        )
+        print("   peak above before by rank: " + " ".join("%.0f" % x for x in hwm))
+        labels = []
+        for rec in allRecords[0]:
+            if rec[0] == i and rec[1] not in labels:
+                labels.append(rec[1])
+        for label in labels:
+            per = np.array([sum(x[2] for x in recs if x[0] == i and x[1] == label) for recs in allRecords])
+            print("   %-38s max %.3f mean %.3f min %.3f" % (label, per.max(), per.mean(), per.min()))
+    others = {}
+    for recs in allRecords:
+        for rec in recs:
+            if rec[0] is None:
+                others.setdefault(rec[1], []).append(rec[2])
+    for label, v in others.items():
+        print("OUTSIDE REBUILD %-30s calls(all procs) %d total max-proc-mean %.3f" % (label, len(v), sum(v) / P))
+    if os.environ.get("CHECK_OLD_INTERFACE"):
+        flat = [c for cs in checks for c in cs]
+        print("INTERFACE vs 7cbfa8b4 construction: %d/%d identical" % (sum(flat), len(flat)))
+    if os.environ.get("MEM_DETAIL"):
+        labels = sorted({(r[0], r[1]) for r in mems[0]}, key=lambda x: (x[0] is None, x[0] or 0, x[1]))
+        for i, label in labels:
+            peaks = [max([r[2] for r in recs if r[0] == i and r[1] == label] or [0]) for recs in mems]
+            kept = [sum(r[3] for r in recs if r[0] == i and r[1] == label) for recs in mems]
+            print("MEM rebuild %s %-20s peak above start max %.0f mean %.0f MB | kept mean %.0f MB" % (i, label, max(peaks), np.mean(peaks), np.mean(kept)))
+    print("PEAK VmHWM since last reset: max %.0f mean %.0f MB" % (max(peak), np.mean(peak)))

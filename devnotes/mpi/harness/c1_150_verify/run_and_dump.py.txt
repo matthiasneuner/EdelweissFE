@@ -1,0 +1,14 @@
+import os, sys, numpy as np
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.inputfileparser import parseInputFile
+try:
+    from edelweissfe.domaindecomposition.mpienvironment import isRootProcess
+except ImportError:  # a branch without domain decomposition
+    def isRootProcess():
+        return True
+d = sys.argv[1]; os.chdir(d)
+import edelweissfe; print("CODE", edelweissfe.__file__)
+model, _ = finiteElementSimulation(parseInputFile("test.inp"), verbose=True, suppressPlots=True)
+U = np.hstack([f[e].flatten() for e in ("U", "P", "V") for f in model.nodeFields.values() if e in f])
+if isRootProcess():
+    np.save(os.path.join(d, "UPV.npy"), U)

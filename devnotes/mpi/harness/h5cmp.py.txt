@@ -1,0 +1,14 @@
+import sys, h5py, numpy as np
+a, b = h5py.File(sys.argv[1], "r"), h5py.File(sys.argv[2], "r")
+diffs, n = [], 0
+def visit(name, obj):
+    global n
+    if isinstance(obj, h5py.Dataset):
+        n += 1
+        if name not in b: diffs.append(("missing", name)); return
+        x, y = obj[()], b[name][()]
+        if x.dtype.kind in "fiu" and not np.array_equal(x, y): diffs.append(("data", name))
+a.visititems(visit)
+attrs = [(k, a[g].attrs[k], b[g].attrs[k] if g in b and k in b[g].attrs else "MISSING") for g in ["/", "solver"] if g in a for k in a[g].attrs
+         if not (g in b and k in b[g].attrs and np.array_equal(a[g].attrs[k], b[g].attrs[k]))]
+print(n, "datasets;", len(diffs), "differ:", diffs[:5], "attrs differing:", attrs)

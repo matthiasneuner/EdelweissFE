@@ -1,0 +1,27 @@
+"""mpirun -n 3 python inject_failure.py DECKDIR KIND: raise in the element evaluation of rank 1 only."""
+import io, os, sys, contextlib
+import edelweissfe.solvers.nonlinearexplicitdynamicmpi as nedmpi
+from edelweissfe.domaindecomposition.mpienvironment import processRank
+from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulation
+from edelweissfe.utils.exceptions import CutbackRequest
+from edelweissfe.utils.inputfileparser import parseInputFile
+
+deck, kind = sys.argv[1], sys.argv[2]
+original = nedmpi.computeSubdomainElementsForExplicit
+calls = [0]
+
+def faulty(*args, **kwargs):
+    calls[0] += 1
+    if processRank() == 1 and calls[0] == 50:
+        if kind == "cutback":
+            raise CutbackRequest("injected: return mapping did not converge", 0.5)
+        raise RuntimeError("injected: something else broke")
+    return original(*args, **kwargs)
+
+nedmpi.computeSubdomainElementsForExplicit = faulty
+os.chdir(deck)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    finiteElementSimulation(parseInputFile("test.inp"), verbose=True, suppressPlots=True)
+failedLines = [l.strip() for l in out.getvalue().splitlines() if "failed" in l.lower() or "cutback" in l.lower()]
+print("rank", processRank(), "returned after", calls[0], "element passes;", failedLines[:2])
