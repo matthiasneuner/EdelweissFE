@@ -111,6 +111,53 @@ criterion of their Newton iterations with the solver option ``convergenceCriteri
 .. automodule:: edelweissfe.solvers.base.convergencecriteria
    :members:
 
+Iteration table of the implicit solvers
+---------------------------------------
+
+Every Newton iteration writes one row to the console: per field, the largest flux residual and the largest
+correction, each marked ``✓`` once the criterion is met. With a linear solver that reports per-solve diagnostics
+(e.g. ``blockamg`` at ``verbosity=info``), a ``linear solve`` column follows with the solver's iteration count
+and achieved residual. The rows are never wrapped, so a model with many fields gives long lines rather than
+broken ones.
+
+.. code-block:: text
+
+          displacement            nonlocal damage              linear solve
+       ||R||∞     ||ddU||∞      ||R||∞     ||ddU||∞         iters        ‖r‖
+       2.07e+01    8.35e-03     2.12e-02    8.15e-07          14        3.01e-04✓
+
+.. automodule:: edelweissfe.solvers.base.convergencetable
+   :members:
+
+Performance table of the implicit solvers
+-----------------------------------------
+
+At the end of a step, and every ``report-performance-frequency`` increments if that option is set, the implicit
+solvers print where the step's time went (:mod:`~edelweissfe.utils.performancetiming`): one row per timed part,
+nested parts indented below their parent, each with its share of the step's wall clock, its number of calls and its
+time per call. The table ends with the sum of the top-level rows, the wall clock since the start of the step, and the
+share left ``unaccounted``, the time spent in code no timer covers. Every part of an increment is timed, so this share
+stays small; a large one points at work that has no row yet.
+
+Besides the element loop and the linear solve, the rows include the parts that cost a lot on large models although no
+element is involved:
+
+* ``topology update``: the model modifiers (e.g. ``AMR``), then the ties and the contact catching up;
+* ``equation system rebuild``, after a change of the mesh or of a constraint's DOF footprint: ``dof manager``,
+  ``linear solver setup``, ``system matrix pattern``, ``mpc transformation build`` and ``mpc dirichlet conflict
+  check``;
+* ``mpc transform system matrix``: condensing the slave DOFs of the multi-point constraints out of the system;
+* ``inertia and damping terms`` (``NID``, ``NIDParallel``), per Newton iteration: ``newmark kinematics``,
+  ``inertia and damping forces`` and ``effective tangent``;
+* ``reset residual and tangent``, per Newton iteration;
+* ``accept increment``, ``finalize increment`` and ``conservation report``, per accepted increment;
+* ``output``, per output increment: ``field output`` and one row per output manager, under the name of its
+  ``*output`` line.
+
+The timers start from zero together with the step's wall clock, so the rows and the wall clock of a step's table cover
+the same time, whatever ran before the step. A resumed run (``*restart, readFrom=...``) whose checkpoint replays a
+topology history prints that replay in a table of its own (top-level ``AMR`` rows), before the step's table.
+
 ``NEST`` - Nonlinear Explicit Static
 -------------------------------------
 

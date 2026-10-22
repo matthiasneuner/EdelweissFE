@@ -49,6 +49,7 @@ from edelweissfe.helpers.inputfilehelpers import (
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel, printPrettyModelSummary
+from edelweissfe.utils import performancetiming
 from edelweissfe.utils.checkpoint import ResumeCheckpoint
 from edelweissfe.utils.exceptions import RestartError, StepFailed
 from edelweissfe.utils.fieldoutput import FieldOutputController
@@ -171,7 +172,9 @@ def finiteElementSimulation(
     if restartDefinitions and restartDefinitions[0].get("readFrom"):
         resumeCheckpoint = ResumeCheckpoint(restartDefinitions[0]["readFrom"])
         resumeStepNumber = resumeCheckpoint.stepNumber
+        tic = getCurrentTime()
         resumeCheckpoint.restoreModel(model, journal)
+        restoreTime = getCurrentTime() - tic
         journal.message(
             "Resuming from restart checkpoint {:} (step {:}, time {:})".format(
                 resumeCheckpoint.fileName, resumeStepNumber, model.time
@@ -179,6 +182,13 @@ def finiteElementSimulation(
             identification,
             0,
         )
+        # Restoring replays the checkpoint's topology history, and the AMR calls of that replay are
+        # timed. They are reported here, in a table of their own: the step's timers start from zero
+        # together with its wall clock (the solver's beginStep), so the replay would otherwise be
+        # lost. A checkpoint without a topology history replays nothing worth a table (the mesh
+        # dependents' refresh is a no-op then), and gets none.
+        if model.topology.history:
+            journal.printPrettyTable(performancetiming.makePrettyTable(wallTime=restoreTime), identification)
 
     plotter = createPlotterFromInputFile(inputfile, journal)
     stepManager = createStepManagerFromInputFile(inputfile)

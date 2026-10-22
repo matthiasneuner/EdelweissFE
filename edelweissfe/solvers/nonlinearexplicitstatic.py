@@ -252,6 +252,9 @@ class NEST(NIST):
             The output managers.
         """
 
+        # The step's table covers the step only; whatever was timed before it is not its row.
+        performancetiming.reset()
+
         self.validateModelCapabilities(model)
 
         for constraintName, constraint in model.constraints.items():
@@ -277,20 +280,6 @@ class NEST(NIST):
         )
 
         self.journal.printSeperationLine()
-
-        presentVariableNames = list(self.theDofManager.idcsOfFieldsInDofVector.keys())
-
-        if self.theDofManager.idcsOfScalarVariablesInDofVector:
-            presentVariableNames += [
-                "scalar variables",
-            ]
-
-        nVariables = len(presentVariableNames)
-        self.iterationHeader = ("{:^25}" * nVariables).format(*presentVariableNames)
-        # Centers each label over its 12-wide value+marker cell; kept in sync with
-        # NonlinearImplicitStatic's identical real-field header.
-        self.iterationHeader2 = ("{:^12}{:^12} ").format("||R||∞", "||ddU||∞") * nVariables
-        self.iterationMessageTemplate = "{:11.2e}{:1}{:11.2e}{:1} "
 
         self.computationTimes = createTimingDict()
 

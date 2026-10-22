@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.timesteppers.base.timestepperbase import TimeStepperBase
+from edelweissfe.utils import performancetiming
 from edelweissfe.utils.exceptions import (
     ConditionalStop,
     IncrementFailed,
@@ -247,9 +248,13 @@ class StepBase(ABC):
                     isRetry = False
 
                     if solver.isOutputIncrement(timeStep):
-                        fieldOutputController.finalizeIncrement()
-                        for manager in outputManagers:
-                            manager.finalizeIncrement(statusInfoDict=solver.incrementStatus)
+                        with performancetiming.timeit("output"):
+                            with performancetiming.timeit("field output"):
+                                fieldOutputController.finalizeIncrement()
+                            for manager in outputManagers:
+                                # One row per manager, under the name of its *output line.
+                                with performancetiming.timeit(manager.name):
+                                    manager.finalizeIncrement(statusInfoDict=solver.incrementStatus)
 
             except ReachedMaxIncrements:
                 pass

@@ -127,8 +127,8 @@ cdef class PyAMGCLSolver:
         unsupported (AMGCL rejects it at construction, since the float-stored level matrices do not
         provide a row iterator) and block-ILU0/ILUk/ILUT/ILUP fall back to AMGCL's generic approximate
         triangular solve instead of the exact one plain ``builtin`` gets. Block size 2 with float raises.
-        :meth:`set_nullspace` always raises on a block backend -- AMGCL's own near-null-space path is
-        unimplemented for block value types.
+        On a block backend :meth:`set_nullspace` takes the B translations only (the rotations are carried by the
+        scalar backend), see there.
 
         Example params:
         {
@@ -187,8 +187,15 @@ cdef class PyAMGCLSolver:
         B: an (n, cols) array-like; column j is the j-th near null-space vector (float64). Copied into
         the C++ solver, so the array need not be kept alive. Must be called before the first solve().
         Passing an (n, 0) array clears any previously set null-space. Always double, regardless of
-        ``backendPrecision`` -- see the class docstring. Raises on a block backend (``blockSize > 1``)
-        -- AMGCL's own near-null-space path is unimplemented for block value types.
+        ``backendPrecision`` -- see the class docstring.
+
+        A block backend (``blockSize > 1``) takes the B translations only: an (n, B) array with one diagonal
+        B x B block of positive weights per node, e.g. the translations ``D^-1 t`` of an equilibrated block
+        ``D A D`` (:func:`~edelweissfe.linsolve.nullspace.translationNullspace`). Its next hierarchy is then
+        smoothed aggregation with a tentative prolongation built from them instead of AMGCL's identity blocks
+        (``amgcl-block-translations.hpp``), so the parameters must ask for smoothed aggregation. Anything else
+        -- the rotations, an entry off the diagonal blocks, a weight that is not positive -- raises
+        ``RuntimeError``; the rotations are carried by the scalar backend.
         """
         cdef np.ndarray[np.float64_t, ndim=2, mode="c"] B_arr = np.ascontiguousarray(B, dtype=np.float64)
         cdef int rows = B_arr.shape[0]
@@ -311,9 +318,9 @@ cdef class PyAMGCLEquilibratedSystem:
                           _constDoubleData(scalingArray), bounds.shape[0] // 2, _intData(bounds), unscaled)
         self.n = n
 
-    def diagonalBlock(self, int field, bint unscaled=False):
-        """``As[field, field]`` -- or with ``unscaled`` ``A[field, field]``, exactly A's entries if :meth:`build`
-        stored A -- as a new scipy.sparse csr_matrix (sorted columns if ``A``'s were)."""
+    def diagonalBlock(self, int field):
+        """``As[field, field]`` as a new scipy.sparse csr_matrix (sorted columns if ``A``'s were), whichever
+        operator :meth:`build` stored."""
         cdef int size = self.system.diagonalBlockSize(field)
         cdef int nnz = self.system.diagonalBlockNnz(field)
         cdef np.ndarray[np.int32_t, ndim=1, mode="c"] indptr = np.empty(size + 1, dtype=np.int32)
@@ -322,7 +329,7 @@ cdef class PyAMGCLEquilibratedSystem:
         cdef int[::1] indptr_ = indptr
         cdef int[::1] indices_ = indices
         cdef double[::1] data_ = data
-        self.system.fillDiagonalBlock(field, &indptr_[0], &indices_[0], &data_[0], unscaled)
+        self.system.fillDiagonalBlock(field, &indptr_[0], &indices_[0], &data_[0])
         return scipy.sparse.csr_matrix((data[:nnz], indices[:nnz], indptr), shape=(size, size), copy=False)
 
     def matvec(self, object x, bint unscaled=False):
@@ -565,64 +572,6 @@ cdef class PyAMGCLLGMRESSolver:
         self.lastIterations = iters
         self.lastError = error
         return np.ldexp(x, exponent)
-
-
-cdef class PyAMGCLSpGEMM:
-    """OpenMP-threaded sparse-matrix product/sum, wrapping AMGCL's own
-    ``amgcl::backend::builtin::product()``/``sum()`` -- verified directly (not assumed) against the
-    installed headers that both are OpenMP-parallel (``spgemm_saad``/``spgemm_rmerge`` and ``sum()``
-    itself each carry ``#pragma omp parallel``/``#pragma omp for``).
-
-    Used by :meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.
-    _transformSystemMatrixAmgcl` as an opt-in alternative (``useAmgclSpgemm``/
-    ``useAmgclMPCCondensation``) to the plain ``T^T @ K @ T + C`` expression's ``scipy.sparse`` CSR
-    products/addition, all single-threaded (SciPy's own sparse routines carry no OpenMP parallelism
-    at all). This class exposes the two primitives (``product``, ``sum``) generically, one call at a
-    time, matching ``SpGEMMHelperT``'s own design (square matrices only; compose calls in Python).
-    """
-    cdef SpGEMMHelper* helper
-
-    def __cinit__(self):
-        self.helper = new SpGEMMHelper()
-
-    def __dealloc__(self):
-        if self.helper != NULL:
-            del self.helper
-
-    def _copyOut(self):
-        cdef int nRows = self.helper.resultNRows()
-        cdef int nCols = self.helper.resultNCols()
-        if nRows != nCols:
-            raise AssertionError(
-                "PyAMGCLSpGEMM: result is {:}x{:}, not square -- product()/sum() are only defined "
-                "for square, equal-size inputs (enforced in SpGEMMHelperT::product/sum), so this "
-                "should be unreachable.".format(nRows, nCols)
-            )
-        cdef int nnz = self.helper.resultNnz()
-        cdef np.ndarray[np.int32_t, ndim=1, mode="c"] ptrOut = np.empty(nRows + 1, dtype=np.int32)
-        cdef np.ndarray[np.int32_t, ndim=1, mode="c"] colOut = np.empty(nnz, dtype=np.int32)
-        cdef np.ndarray[np.float64_t, ndim=1, mode="c"] valOut = np.empty(nnz, dtype=np.float64)
-        cdef int[::1] ptrOut_ = ptrOut
-        cdef int[::1] colOut_ = colOut
-        cdef double[::1] valOut_ = valOut
-        self.helper.copyResult(&ptrOut_[0], &colOut_[0], &valOut_[0])
-        return scipy.sparse.csr_matrix((valOut, colOut, ptrOut), shape=(nRows, nRows))
-
-    def product(self, object A, object B):
-        """Returns A @ B (both square scipy.sparse CSR, same size) as a new csr_matrix."""
-        A, aPtr, aCol, aVal = _csrArrays(A)
-        B, bPtr, bCol, bVal = _csrArrays(B)
-        self.helper.product(A.shape[0], _intData(aPtr), _intData(aCol), _constDoubleData(aVal),
-                            B.shape[0], _intData(bPtr), _intData(bCol), _constDoubleData(bVal))
-        return self._copyOut()
-
-    def sum(self, double alpha, object A, double beta, object B):
-        """Returns alpha*A + beta*B (both square scipy.sparse CSR, same size) as a new csr_matrix."""
-        A, aPtr, aCol, aVal = _csrArrays(A)
-        B, bPtr, bCol, bVal = _csrArrays(B)
-        self.helper.sum(alpha, A.shape[0], _intData(aPtr), _intData(aCol), _constDoubleData(aVal),
-                        beta, B.shape[0], _intData(bPtr), _intData(bCol), _constDoubleData(bVal))
-        return self._copyOut()
 
 
 cdef class PyAMGCLPTwoGrid:

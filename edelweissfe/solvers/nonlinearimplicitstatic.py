@@ -42,12 +42,14 @@ from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.csrgeneratorv2 import CSRGenerator
 from edelweissfe.numerics.dofmanager import DofManager, DofVector, VIJSystemMatrix
+from edelweissfe.numerics.parallelizationutilities import forEachSliceInParallel
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.convergencecriteria import (
     AbaqusConvergenceCriterion,
     ConvergenceCriterionBase,
     LegacyConvergenceCriterion,
 )
+from edelweissfe.solvers.base.convergencetable import ConvergenceTable
 from edelweissfe.solvers.base.dirichlet import applyDirichletToStiffness
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.stepactions.base.stepactionbase import StepActionBase
@@ -134,21 +136,17 @@ class NISTSchema:
         default=None,
         documentedDefault="auto",
     )
-    useAmgclMPCCondensation: bool | None = schemaField(
+    useThreadedMPCCondensation: bool | None = schemaField(
         description=(
-            "Condense the multi-point-constraint system matrix via the direct T^T K T + C "
-            "expression, but through AMGCL's own OpenMP-threaded product()/sum() "
-            "instead of SciPy's single-threaded CSR sparse routines. Offline-measured on a "
-            "reference model as faster than the direct SciPy expression, "
-            "correctness-verified to floating-point precision. Leaves more raw nnz than the "
-            "plain expression (AMGCL's product()/sum() do not prune exact-cancellation zeros the "
-            "way SciPy's do) -- not eliminated at the MPC-transform step itself, since "
-            "applyDirichletToStiffness already prunes immediately after, gated by the existing "
-            "pruneCondensedMatrixZeros option (default auto, pruned with PARDISO), uniformly for "
-            "both condensation strategies; that gate exists precisely because PARDISO's reordering on these path-"
-            "dependent condensed systems is known to drift with unpruned explicit-zero structural "
-            "entries, and blockamg's hierarchy-reuse gates on raw nnz. Off by default pending a "
-            "live gate (offline-validated only so far)."
+            "Condense the multi-point-constraint system matrix, T^T K T + C, with an OpenMP-threaded "
+            "kernel instead of SciPy's single-threaded CSR routines: every row of the result is computed "
+            "directly from the rows of K it combines, with no intermediate matrix, and rows of K that no "
+            "constraint touches are copied unchanged. The result does not depend on the number of "
+            "threads. Leaves more raw nnz than the "
+            "plain expression (explicit zeros are kept, SciPy's products drop exact-cancellation "
+            "zeros); applyDirichletToStiffness prunes them right after, gated by "
+            "pruneCondensedMatrixZeros (default auto: pruned for PARDISO, kept for blockamg, whose "
+            "hierarchy reuse needs a stable pattern). Off by default."
         ),
         dtype=bool,
         default=False,
@@ -240,7 +238,7 @@ class NIST(NonlinearSolverBase):
         "linsolver": "",
         "linsolverConfigFile": "",
         "pruneCondensedMatrixZeros": None,
-        "useAmgclMPCCondensation": False,
+        "useThreadedMPCCondensation": False,
         "report-performance-frequency": 0,
         "convergenceCriterion": "legacy",
         "abaqusResidualTolerance": 5e-3,
@@ -334,6 +332,11 @@ class NIST(NonlinearSolverBase):
 
         self.applyStepActionsAtStepStart(model, step)
 
+        # The step's table reports its rows against this wall clock, so the two start together.
+        # Whatever was timed before the step -- a checkpoint's topology replay, a caller's own timed
+        # work -- would otherwise be counted in the rows but not in the wall clock, and the share
+        # left unaccounted would be off by that much: far below zero on a large refined model.
+        performancetiming.reset()
         self._stepWallClockTic = perf_counter()
 
     def prepareIncrement(self, step, model: FEModel, isRetry: bool):
@@ -350,6 +353,11 @@ class NIST(NonlinearSolverBase):
             True if the increment is retried after a cutback: the model modifiers already decided on
             the state the retry starts from.
         """
+
+        # The separator opens this increment's block here, before the topology update, so that what the
+        # update reports (refinement, contact status) heads the increment it belongs to instead of
+        # trailing the previous one.
+        self.journal.printSeperationLine()
 
         topologyUpdate = self.updateTopologyAndConnectivity(model, step, offerModelModifiers=not isRetry)
         self._modelHasChanged = topologyUpdate.topologyChanged
@@ -388,12 +396,10 @@ class NIST(NonlinearSolverBase):
         connectivityHasChanged = self._connectivityHasChanged
         U, dU, P, K = self._U, self._dU, self._P, self._K
 
-        # One separator, marking the start of this increment's block. Everything about this
-        # increment -- an equation-system rebuild if one is needed, the MPC/Dirichlet
-        # diagnostics that come with it, the Newton table, all of it -- is printed after this
-        # single header, nested one level deeper (see the messages below), instead of being
-        # sandwiched between a second separator of its own.
-        self.journal.printSeperationLine()
+        # The header of this increment's block (opened by the separator in prepareIncrement). Everything
+        # about the solution -- an equation-system rebuild if one is needed, the MPC/Dirichlet
+        # diagnostics that come with it, the Newton table, all of it -- is printed after it, nested one
+        # level deeper (see the messages below).
         self.journal.message(
             "increment {:}: {:8f}, {:8f}; time {:10f} to {:10f}".format(
                 timeStep.number,
@@ -413,92 +419,84 @@ class NIST(NonlinearSolverBase):
             )
 
         if modelHasChanged or connectivityHasChanged or self.theDofManager is None:
-            self.theDofManager = DofManager(
-                model.nodeFields.values(),
-                model.scalarVariables.values(),
-                model.elements.values(),
-                model.constraints.values(),
-                model.nodeSets.values(),
-            )
-            # findDirichletIndices() keys its cache in part on self.theDofManager, so
-            # entries from the discarded manager would otherwise keep it (and everything
-            # it references) alive for the rest of the run.
-            self._dirichletIndicesCache = None
-            self.journal.message(
-                "eq. system rebuilt: {:} dof".format(self.theDofManager.nDof),
-                self.identification,
-                2,
-            )
-
-            # The per-field block extents, not just the total. Fields are laid out
-            # field-major in contiguous slices, so this states the block structure of the
-            # equation system -- which is what a field-split preconditioner needs, and what
-            # tells you at a glance how a coupled model's DOFs are actually distributed.
-            for fieldName, fieldIndices in self.theDofManager.idcsOfFieldsInDofVector.items():
+            with performancetiming.timeit("equation system rebuild"):
+                with performancetiming.timeit("dof manager"):
+                    self.theDofManager = DofManager(
+                        model.nodeFields.values(),
+                        model.scalarVariables.values(),
+                        model.elements.values(),
+                        model.constraints.values(),
+                        model.nodeSets.values(),
+                    )
+                # findDirichletIndices() keys its cache in part on self.theDofManager, so
+                # entries from the discarded manager would otherwise keep it (and everything
+                # it references) alive for the rest of the run.
+                self._dirichletIndicesCache = None
                 self.journal.message(
-                    "field '{:}': {:} dof, [{:}, {:})".format(
-                        fieldName,
-                        fieldIndices.stop - fieldIndices.start,
-                        fieldIndices.start,
-                        fieldIndices.stop,
-                    ),
+                    "eq. system rebuilt: {:} dof".format(self.theDofManager.nDof),
                     self.identification,
                     2,
                 )
 
-            # The one interface point a solver needs beyond the plain (A, b) call: it
-            # derives whatever it wants (field layout, node coordinates, topology) from
-            # these itself. Re-pushed on every (re)build so it tracks the mesh across AMR.
-            self.linSolver.setModel(model, self.theDofManager)
+                # The per-field block extents, not just the total. Fields are laid out
+                # field-major in contiguous slices, so this states the block structure of the
+                # equation system -- which is what a field-split preconditioner needs, and what
+                # tells you at a glance how a coupled model's DOFs are actually distributed.
+                for fieldName, fieldIndices in self.theDofManager.idcsOfFieldsInDofVector.items():
+                    self.journal.message(
+                        "field '{:}': {:} dof, [{:}, {:})".format(
+                            fieldName,
+                            fieldIndices.stop - fieldIndices.start,
+                            fieldIndices.start,
+                            fieldIndices.stop,
+                        ),
+                        self.identification,
+                        2,
+                    )
 
-            presentVariableNames = list(self.theDofManager.idcsOfFieldsInDofVector.keys())
+                # The one interface point a solver needs beyond the plain (A, b) call: it
+                # derives whatever it wants (field layout, node coordinates, topology) from
+                # these itself. Re-pushed on every (re)build so it tracks the mesh across AMR.
+                with performancetiming.timeit("linear solver setup"):
+                    self.linSolver.setModel(model, self.theDofManager)
 
-            if self.theDofManager.idcsOfScalarVariablesInDofVector:
-                presentVariableNames += [
-                    "scalar variables",
-                ]
+                presentVariableNames = list(self.theDofManager.idcsOfFieldsInDofVector.keys())
 
-            # Centers each label over its 12-wide value+marker cell (see checkConvergence's
-            # iterationMessageTemplate).
-            subHeaderCell = "{:^12}{:^12} "
-            self.iterationHeader = ("{:^25}" * len(presentVariableNames)).format(*presentVariableNames)
-            self.iterationHeader2 = subHeaderCell.format("||R||∞", "||ddU||∞") * len(presentVariableNames)
+                if self.theDofManager.idcsOfScalarVariablesInDofVector:
+                    presentVariableNames += [
+                        "scalar variables",
+                    ]
 
-            if self.linSolver.reportsSolveSummary:
-                # Extra column for the linear solver's diagnostics; checkConvergence appends
-                # the matching row cell. Gap capped at 1 space -- wider wraps the row past the
-                # Journal's 76-char limit for level-2 messages.
-                gap = " "
-                self.iterationHeader += gap + "{:^25}".format("linear solve")
-                self.iterationHeader2 += gap + subHeaderCell.format("iters", "‖r‖")
+                self.convergenceTable = ConvergenceTable(presentVariableNames, self.linSolver.reportsSolveSummary)
 
-            self.iterationMessageTemplate = "{:11.2e}{:1}{:11.2e}{:1} "
+                with performancetiming.timeit("system matrix pattern"):
+                    K = self.theDofManager.constructVIJSystemMatrix()
+                    self.csrGenerator = CSRGenerator(K)
 
-            K = self.theDofManager.constructVIJSystemMatrix()
-            self.csrGenerator = CSRGenerator(K)
+                U = self.theDofManager.constructDofVector()
+                P = self.theDofManager.constructDofVector()
+                dU = self.theDofManager.constructDofVector()
 
-            U = self.theDofManager.constructDofVector()
-            P = self.theDofManager.constructDofVector()
-            dU = self.theDofManager.constructDofVector()
+                for fieldName, field in model.nodeFields.items():
+                    U = self.theDofManager.writeNodeFieldToDofVector(U, field, "U")
 
-            for fieldName, field in model.nodeFields.items():
-                U = self.theDofManager.writeNodeFieldToDofVector(U, field, "U")
+                for variable in model.scalarVariables.values():
+                    U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]] = variable.value
 
-            for variable in model.scalarVariables.values():
-                U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]] = variable.value
+                with performancetiming.timeit("mpc transformation build"):
+                    self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
+                with performancetiming.timeit("mpc dirichlet conflict check"):
+                    self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
 
-            self.mpcTransformation = self.buildMPCTransformation(model, step.actions)
-            self.checkMPCDirichletConflicts(self.mpcTransformation, step.actions)
-
-            # After a change of the mesh or of the constraint connectivity, the last accepted
-            # dU belongs to a different DOF layout, so this one increment is not extrapolated
-            # -- the same fallback as after a failed increment. Otherwise (the first build of a
-            # step) the predictor continues from it.
-            if modelHasChanged or connectivityHasChanged:
-                self.prevTimeStep = None
-            elif self.dU is not None:
-                dU[:] = self.dU
-            self._U, self._dU, self._P, self._K = U, dU, P, K
+                # After a change of the mesh or of the constraint connectivity, the last accepted
+                # dU belongs to a different DOF layout, so this one increment is not extrapolated
+                # -- the same fallback as after a failed increment. Otherwise (the first build of a
+                # step) the predictor continues from it.
+                if modelHasChanged or connectivityHasChanged:
+                    self.prevTimeStep = None
+                elif self.dU is not None:
+                    dU[:] = self.dU
+                self._U, self._dU, self._P, self._K = U, dU, P, K
 
         self.incrementStatus = {
             "step": step.number,
@@ -510,8 +508,7 @@ class NIST(NonlinearSolverBase):
             "notes": "",
         }
 
-        self.journal.message(self.iterationHeader, self.identification, level=2)
-        self.journal.message(self.iterationHeader2, self.identification, level=2)
+        self.journal.preformatted(self.convergenceTable.headerLines(), self.identification, level=2)
 
         if modelHasChanged and equilibrateAfterModelChange:
             # Settle the warm-started refined mesh to equilibrium at the LAST converged load
@@ -605,6 +602,7 @@ class NIST(NonlinearSolverBase):
         self._U, self._dU, self._P = U, dU, P
         self._iterationCounter = iterationCounter
 
+    @performancetiming.timeit("accept increment")
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Commit the converged increment to the model, and keep the predictor's state; see
         :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.acceptIncrement`.
@@ -636,18 +634,19 @@ class NIST(NonlinearSolverBase):
         if iterationCounter >= step.criticalIter:
             step.timeStepper.preventIncrementIncrease()
 
-        # write results to nodes:
-        for fieldName, field in model.nodeFields.items():
-            self.theDofManager.writeDofVectorToNodeField(U, field, "U")
-            self.theDofManager.writeDofVectorToNodeField(P, field, "P")
-            self.theDofManager.writeDofVectorToNodeField(dU, field, "dU")
+        with performancetiming.timeit("write results to nodes"):
+            for fieldName, field in model.nodeFields.items():
+                self.theDofManager.writeDofVectorToNodeField(U, field, "U")
+                self.theDofManager.writeDofVectorToNodeField(P, field, "P")
+                self.theDofManager.writeDofVectorToNodeField(dU, field, "dU")
 
-        for variable in model.scalarVariables.values():
-            variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
+            for variable in model.scalarVariables.values():
+                variable.value = U[self.theDofManager.idcsOfScalarVariablesInDofVector[variable]]
 
         self.updateRigidBodies(model, timeStep)
 
-        model.advanceToTime(timeStep.totalTime)
+        with performancetiming.timeit("advance model time"):
+            model.advanceToTime(timeStep.totalTime)
 
         self.journal.message(
             "Converged in {:} iteration(s)".format(iterationCounter),
@@ -774,25 +773,30 @@ class NIST(NonlinearSolverBase):
         distributedLoads = stepActions["distributedload"].values()
         bodyForces = stepActions["bodyforce"].values()
 
-        # Find which global DOFs the Dirichlet BCs constrain, once up front.
-        self.locateConstrainedDofs(dirichlets)
+        with performancetiming.timeit("step actions at increment start"):
+            # Find which global DOFs the Dirichlet BCs constrain, once up front.
+            self.locateConstrainedDofs(dirichlets)
 
-        self.applyStepActionsAtIncrementStart(model, timeStep, stepActions)
+            self.applyStepActionsAtIncrementStart(model, timeStep, stepActions)
 
         self.initializeIncrement(U_n, stepActions, model, timeStep)
 
-        dU, isExtrapolatedIncrement = self.extrapolateLastIncrement(
-            extrapolation, timeStep, dU, dirichlets, prevTimeStep, model
-        )
+        with performancetiming.timeit("predictor"):
+            dU, isExtrapolatedIncrement = self.extrapolateLastIncrement(
+                extrapolation, timeStep, dU, dirichlets, prevTimeStep, model
+            )
 
         while True:
             for geostatic in stepActions["geostatic"].values():
                 geostatic.applyAtIterationStart()
 
-            U_np[:] = U_n
-            U_np += dU
+            with performancetiming.timeit("reset residual and tangent"):
+                U_np[:] = U_n
+                U_np += dU
 
-            P[:] = K[:] = F[:] = FConstraints[:] = PExt[:] = 0.0
+                P[:] = F[:] = FConstraints[:] = PExt[:] = 0.0
+                # K holds the entries of all element matrices, far too many to zero on a single thread
+                forEachSliceInParallel(lambda s: K[s].fill(0.0), len(K))
 
             P, K, F = self.computeElements(elements, U_np, dU, P, K, F, timeStep)
             PExt, K = self.assembleLoads(nodeforces, distributedLoads, bodyForces, U_np, PExt, K, timeStep)

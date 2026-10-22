@@ -184,6 +184,19 @@ extensions += [
     )
 ]
 
+print("Gather the extension for the threaded multi-point-constraint condensation")
+extensions += [
+    Extension(
+        "*",
+        ["edelweissfe/numerics/mpccondensation.pyx"],
+        include_dirs=[numpy.get_include()],
+        language="c++",
+        # no fused multiply-add: the condensed values must not depend on the CPU the extension was built for
+        extra_compile_args=compile_flags(cxx20=True, openmp=True, arch=arch_flags, gcc_only=["-ffp-contract=off"]),
+        extra_link_args=link_flags(openmp=True),
+    )
+]
+
 print("Gather the extensions for fast dirichlet application")
 extensions += [
     Extension(
@@ -254,6 +267,9 @@ extensions += [
     Extension(
         "*",
         sources=["edelweissfe/linsolve/amgcl/amgcl.pyx"],
+        # Reached only through an #include in amgcl-wrapper.hpp, which neither Cython's dependency scan nor
+        # setuptools follows: without this entry, a header-only edit leaves the up-to-date-looking extension stale.
+        depends=["edelweissfe/linsolve/amgcl/amgcl-block-translations.hpp"],
         include_dirs=[numpy.get_include(), join(native_prefix, "include"), "."],
         language="c++",
         # MSVC's default language standard (C++14) already covers AMGCL's C++11 requirement.

@@ -200,6 +200,7 @@ import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import carriesLinearMomentum
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.numerics.dofmanager import DofManager, DofVector, VIJSystemMatrix
+from edelweissfe.numerics.parallelizationutilities import forEachSliceInParallel
 from edelweissfe.outputmanagers.base.outputmanagerbase import OutputManagerBase
 from edelweissfe.solvers.base.conservationchecks import (
     CONSERVATION_TOLERANCE,
@@ -218,6 +219,12 @@ from edelweissfe.utils.schema import schemaField
 #: can ask for (``minInc`` is a fraction of the step, typically 1e-8 at its smallest) and far above
 #: the double-precision remainder (observed: 2e-14 of a step of 2.0).
 _NEGLIGIBLE_INCREMENT_FRACTION = 1e-10
+
+#: Rows per block of the mass matrix, the blocks the inertia forces are computed in on the thread
+#: pool (see :meth:`NonlinearImplicitDynamic._rowBlocks`). A model of 2.3 M degrees of freedom gets
+#: 141 blocks, several per thread to balance the load, each with millions of entries -- far more work
+#: than handing it to a thread costs. A model of fewer rows is a single block, computed serially.
+_MASS_ROWS_PER_BLOCK = 1 << 14
 
 
 @dataclass(frozen=True)
@@ -294,6 +301,12 @@ class _NewmarkSystem:
         it would be all zeros but for a few entries per element.
     M, C
         The mass and the damping as CSR matrices, for the residual's matrix-vector products.
+    MRowBlocks, MRowsPerBlock
+        ``M`` in blocks of ``MRowsPerBlock`` consecutive rows (:data:`_MASS_ROWS_PER_BLOCK`), sharing
+        its arrays, for the products with the mass on the thread pool (:meth:`massTimes`).
+    massByField
+        Each dynamic field's total assembled mass (:meth:`NonlinearImplicitDynamic._totalMassByField`),
+        a property of ``M`` alone, so computed once here rather than per accepted increment.
     V, A
         The velocity and acceleration at the last converged increment.
     """
@@ -306,8 +319,24 @@ class _NewmarkSystem:
     dampingVIJValues: np.ndarray
     M: csr_matrix
     C: csr_matrix
+    MRowBlocks: list[csr_matrix]
+    MRowsPerBlock: int
+    massByField: dict
     V: DofVector
     A: DofVector
+
+    def massTimes(self, vector) -> np.ndarray:
+        """``M @ vector``, one row block of :attr:`MRowBlocks` per call on the thread pool -- bitwise
+        the product with the whole of ``M`` (see :meth:`NonlinearImplicitDynamic._rowBlocks`)."""
+
+        vector = np.asarray(vector)
+        product = np.empty_like(vector)
+
+        def multiplyRows(rows: slice):
+            product[rows] = self.MRowBlocks[rows.start // self.MRowsPerBlock] @ vector
+
+        forEachSliceInParallel(multiplyRows, len(product), self.MRowsPerBlock)
+        return product
 
 
 @dataclass
@@ -652,6 +681,7 @@ class NonlinearImplicitDynamic(NIST):
             self._initialAccelerationPending = False
             self._computeInitialAcceleration(system, U_n, stepActions, model, timeStep)
 
+    @performancetiming.timeit("inertia and damping terms")
     def assembleAdditionalTerms(
         self, dU: DofVector, R: DofVector, F: DofVector, K: VIJSystemMatrix, timeStep: TimeStep
     ):
@@ -675,37 +705,55 @@ class NonlinearImplicitDynamic(NIST):
         increment = self._currentIncrement
         system = increment.system
 
-        self._newmarkVelocityAndAcceleration(
-            dU,
-            system.V,
-            system.A,
-            increment.dT,
-            increment.beta,
-            increment.gamma,
-            system.dynamicDofs,
-            increment.V_np,
-            increment.A_np,
-        )
-        PInertia = system.M @ np.asarray(increment.A_np)
-        PDamping = system.C @ np.asarray(increment.V_np)
+        with performancetiming.timeit("newmark kinematics"):
+            self._newmarkVelocityAndAcceleration(
+                dU,
+                system.V,
+                system.A,
+                increment.dT,
+                increment.beta,
+                increment.gamma,
+                system.dynamicDofs,
+                increment.V_np,
+                increment.A_np,
+            )
 
-        R -= PInertia
-        R -= PDamping
+        with performancetiming.timeit("inertia and damping forces"):
+            # The damping is diagonal, so C @ V_np costs next to nothing.
+            PInertia = system.massTimes(increment.A_np)
+            PDamping = system.C @ np.asarray(increment.V_np)
 
-        # The inertia and damping forces are fluxes of the same field as the internal forces, so
-        # they enter the reference scale of the relative flux tolerance too. Without them a body in
-        # free flight -- no internal force at all -- would be held to an absolute 1e-7.
-        F += np.abs(PInertia)
-        F += np.abs(PDamping)
+            R -= PInertia
+            R -= PDamping
+
+            # The inertia and damping forces are fluxes of the same field as the internal forces, so
+            # they enter the reference scale of the relative flux tolerance too. Without them a body in
+            # free flight -- no internal force at all -- would be held to an absolute 1e-7.
+            F += np.abs(PInertia)
+            F += np.abs(PDamping)
 
         # The effective tangent K + M / (beta dT^2) + gamma C / (beta dT). Same VIJ layout as K, so
         # it is an entry-wise sum, before the parent's CSR conversion, MPC condensation and
-        # Dirichlet row replacement. Note that `a * M` forms a temporary VIJ-length vector for the
-        # duration of this line; it is not kept. The damping is diagonal and touches only its few
-        # nonzero slots.
-        K += increment.massFactor * np.asarray(system.Mvij)
-        K[system.dampingVIJIndices] += increment.dampingFactor * system.dampingVIJValues
+        # Dirichlet row replacement. On a large model that sum runs over a billion entries, so the
+        # mass is added slice by slice on the thread pool, which also keeps the temporary `a * M` as
+        # short as a slice. The damping is diagonal and touches only its few nonzero slots.
+        with performancetiming.timeit("effective tangent"):
+            # Slice by slice, a longer mass vector would silently add only its prefix, where the
+            # whole-array sum raised; the layouts are the same by construction, so say so.
+            if len(system.Mvij) != len(K):
+                raise ValueError(
+                    "The mass ({:} entries) and the tangent ({:} entries) differ in their VIJ layout.".format(
+                        len(system.Mvij), len(K)
+                    )
+                )
 
+            def addScaledMass(s: slice):
+                K[s] += increment.massFactor * system.Mvij[s]
+
+            forEachSliceInParallel(addScaledMass, len(K))
+            K[system.dampingVIJIndices] += increment.dampingFactor * system.dampingVIJValues
+
+    @performancetiming.timeit("finalize increment")
     def finalizeIncrement(self, model: FEModel):
         """The converged trial kinematics become the state; see the parent's hook. Only an accepted
         increment gets here -- a failing one leaves by exception and keeps the previous velocity
@@ -724,11 +772,11 @@ class NonlinearImplicitDynamic(NIST):
         system.A[:] = increment.A_np
         self._writeVelocityAndAccelerationToNodeFields(system, model)
 
-        kineticEnergy = 0.5 * float(np.dot(np.asarray(system.V), system.M @ np.asarray(system.V)))
-        self.journal.message("kinetic energy {:e}".format(kineticEnergy), self.identification, 2)
-
         # What a topology change before the next increment is compared against.
         self._conservedAtLastAccept = self._conservedQuantities(system, model)
+        self.journal.message(
+            "kinetic energy {:e}".format(self._conservedAtLastAccept.kineticEnergy), self.identification, 2
+        )
 
     @staticmethod
     def _newmarkVelocityAndAcceleration(
@@ -845,24 +893,25 @@ class NonlinearImplicitDynamic(NIST):
         topologyChanged = topologyRecords != self._topologyRecordsAtLastBuild
         self._topologyRecordsAtLastBuild = topologyRecords
 
-        dynamicDofs, dynamicFields = self._locateDynamicDofs()
+        with performancetiming.timeit("newmark system setup"):
+            dynamicDofs, dynamicFields = self._locateDynamicDofs()
 
-        if dofManagerChanged:
-            V = self.theDofManager.constructDofVector()
-            A = self.theDofManager.constructDofVector()
-            for fieldName in dynamicFields:
-                field = model.nodeFields[fieldName]
-                # The input-file driver creates both entries (zero) on every mass-carrying field
-                # before anything runs, and a checkpoint restores them -- so on that path they are
-                # always present, zero meaning a start from rest. Guarded all the same for a model
-                # assembled programmatically, which never passes through that driver: a missing
-                # entry is then the same start from rest, not an error.
-                if "V" in field:
-                    V = self.theDofManager.writeNodeFieldToDofVector(V, field, "V")
-                if "A" in field:
-                    A = self.theDofManager.writeNodeFieldToDofVector(A, field, "A")
-        else:
-            V, A = system.V, system.A
+            if dofManagerChanged:
+                V = self.theDofManager.constructDofVector()
+                A = self.theDofManager.constructDofVector()
+                for fieldName in dynamicFields:
+                    field = model.nodeFields[fieldName]
+                    # The input-file driver creates both entries (zero) on every mass-carrying field
+                    # before anything runs, and a checkpoint restores them -- so on that path they are
+                    # always present, zero meaning a start from rest. Guarded all the same for a model
+                    # assembled programmatically, which never passes through that driver: a missing
+                    # entry is then the same start from rest, not an error.
+                    if "V" in field:
+                        V = self.theDofManager.writeNodeFieldToDofVector(V, field, "V")
+                    if "A" in field:
+                        A = self.theDofManager.writeNodeFieldToDofVector(A, field, "A")
+            else:
+                V, A = system.V, system.A
 
         reusedMassAndDamping = None
         if (
@@ -874,9 +923,9 @@ class NonlinearImplicitDynamic(NIST):
             reusedMassAndDamping = self._reuseMassAndDamping(system, model)
 
         if reusedMassAndDamping is not None:
-            Mvij, damping, M, C = reusedMassAndDamping
+            Mvij, damping, M, C, massByField = reusedMassAndDamping
         else:
-            Mvij, damping, M, C = self._assembleMassAndDamping(model, dynamicDofs, dynamicFields)
+            Mvij, damping, M, C, massByField = self._assembleMassAndDamping(model, dynamicDofs, dynamicFields)
 
         self._newmarkSystem = _NewmarkSystem(
             dofManager=self.theDofManager,
@@ -887,16 +936,20 @@ class NonlinearImplicitDynamic(NIST):
             dampingVIJValues=damping[1],
             M=M,
             C=C,
+            MRowBlocks=self._rowBlocks(M, _MASS_ROWS_PER_BLOCK),
+            MRowsPerBlock=_MASS_ROWS_PER_BLOCK,
+            massByField=massByField,
             V=V,
             A=A,
         )
 
         if dofManagerChanged and topologyChanged:
             if self._conservedAtLastAccept is not None:
-                self.reportTopologyChangeConservation(
-                    self._conservedAtLastAccept,
-                    self._conservedQuantities(self._newmarkSystem, model),
-                )
+                with performancetiming.timeit("conservation report"):
+                    self.reportTopologyChangeConservation(
+                        self._conservedAtLastAccept,
+                        self._conservedQuantities(self._newmarkSystem, model),
+                    )
             self._initialAccelerationPending = bool(self.options["computeInitialAcceleration"])
             self.journal.message(
                 (
@@ -905,7 +958,7 @@ class NonlinearImplicitDynamic(NIST):
                     else "keeping the interpolated acceleration (computeInitialAcceleration is off)"
                 ),
                 self.identification,
-                1,
+                2,
             )
 
         return self._newmarkSystem
@@ -913,7 +966,7 @@ class NonlinearImplicitDynamic(NIST):
     @performancetiming.timeit("reuse mass and damping")
     def _reuseMassAndDamping(
         self, system: _NewmarkSystem, model: FEModel
-    ) -> tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix] | None:
+    ) -> tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix, dict] | None:
         """The mass and the damping of ``system``, moved into the layout of the current
         :class:`~edelweissfe.numerics.dofmanager.DofManager` without reassembling them -- or None if
         that manager differs from the old one in anything the operators depend on.
@@ -940,10 +993,10 @@ class NonlinearImplicitDynamic(NIST):
 
         Returns
         -------
-        tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix] | None
+        tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix, dict] | None
             The mass as a VIJ value vector of the current manager, the damping's VIJ indices and
-            values (all in the unchanged element slots), and both as CSR matrices -- or None if they
-            have to be reassembled.
+            values (all in the unchanged element slots), both as CSR matrices, and the mass by field
+            (unchanged, as the fields' slots are) -- or None if they have to be reassembled.
         """
 
         old = system.dofManager
@@ -982,7 +1035,7 @@ class NonlinearImplicitDynamic(NIST):
             2,
         )
 
-        return Mvij, (system.dampingVIJIndices, system.dampingVIJValues), system.M, system.C
+        return Mvij, (system.dampingVIJIndices, system.dampingVIJValues), system.M, system.C, system.massByField
 
     def _conservedQuantities(self, system: _NewmarkSystem, model: FEModel) -> _ConservedQuantities:
         """Total mass, linear momentum and kinetic energy of one Newmark system.
@@ -1016,10 +1069,10 @@ class NonlinearImplicitDynamic(NIST):
         """
 
         V = np.asarray(system.V)
-        MV = np.asarray(system.M @ V)
+        MV = system.massTimes(V)
 
         return _ConservedQuantities(
-            massByField=self._totalMassByField(system.M, system.dofManager, system.dynamicFields, model),
+            massByField=system.massByField,
             momentum=linearMomentum(MV, system.dofManager, system.dynamicFields, model),
             kineticEnergy=0.5 * float(V @ MV),
         )
@@ -1054,6 +1107,44 @@ class NonlinearImplicitDynamic(NIST):
             / model.nodeFields[fieldName].dimension
             for fieldName in fieldNames
         }
+
+    @staticmethod
+    def _rowBlocks(M: csr_matrix, rowsPerBlock: int) -> list[csr_matrix]:
+        """``M`` cut into CSR matrices of ``rowsPerBlock`` consecutive rows (the last one may be
+        shorter), whose products with a vector can run on separate threads.
+
+        A block's column indices and values are views of ``M``'s, so the blocks cost only their row
+        pointers. SciPy computes every row of ``M @ x`` on its own, from zero, adding the row's
+        products in storage order; a block holds the same entries in the same order, with indices of
+        the same type, so its rows of ``block @ x`` are bitwise those of ``M @ x``.
+
+        Parameters
+        ----------
+        M
+            The matrix.
+        rowsPerBlock
+            The number of rows of a block.
+
+        Returns
+        -------
+        list[csr_matrix]
+            The blocks, in row order.
+        """
+
+        nRows, nColumns = M.shape
+        blocks = []
+        for start in range(0, nRows, rowsPerBlock):
+            stop = min(start + rowsPerBlock, nRows)
+            entries = slice(M.indptr[start], M.indptr[stop])
+            # Built empty and given the views afterwards: the constructor would copy every view
+            # smaller than half of its array (SciPy's prune), so all blocks of a large model.
+            block = csr_matrix((stop - start, nColumns), dtype=M.dtype)
+            block.indptr = M.indptr[start : stop + 1] - M.indptr[start]
+            block.indices = M.indices[entries]
+            block.data = M.data[entries]
+            blocks.append(block)
+
+        return blocks
 
     def reportTopologyChangeConservation(self, before: _ConservedQuantities, after: _ConservedQuantities):
         """Report what a topology change did to the quantities that ought to survive it: every
@@ -1092,7 +1183,7 @@ class NonlinearImplicitDynamic(NIST):
                 ),
             ),
             self.identification,
-            1,
+            2,
         )
 
     def _locateDynamicDofs(self) -> tuple[np.ndarray, list]:
@@ -1149,10 +1240,10 @@ class NonlinearImplicitDynamic(NIST):
 
         Returns
         -------
-        tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix]
+        tuple[VIJSystemMatrix, tuple[np.ndarray, np.ndarray], csr_matrix, csr_matrix, dict]
             The mass as a VIJ value vector, the damping as the VIJ indices and values of its
-            nonzero diagonal entries (see :meth:`_lumpedDampingOfElement`), and the same two as CSR
-            matrices.
+            nonzero diagonal entries (see :meth:`_lumpedDampingOfElement`), the same two as CSR
+            matrices, and each dynamic field's total mass.
 
         Raises
         ------
@@ -1230,14 +1321,15 @@ class NonlinearImplicitDynamic(NIST):
                 )
             )
 
-        for fieldName, totalMass in self._totalMassByField(M, self.theDofManager, dynamicFields, model).items():
+        massByField = self._totalMassByField(M, self.theDofManager, dynamicFields, model)
+        for fieldName, totalMass in massByField.items():
             self.journal.message(
                 "consistent mass assembled: field '{:}' carries a total mass of {:e}".format(fieldName, totalMass),
                 self.identification,
                 2,
             )
 
-        return Mvij, (dampingVIJIndices, dampingVIJValues), M, C
+        return Mvij, (dampingVIJIndices, dampingVIJValues), M, C, massByField
 
     def _lumpedDampingOfElement(self, el) -> tuple[np.ndarray, np.ndarray]:
         """The lumped (diagonal) damping one element reports, placed on the diagonal of its own
@@ -1303,7 +1395,7 @@ class NonlinearImplicitDynamic(NIST):
                     "does not integrate in time; it is discarded and the field is treated "
                     "quasi-statically.".format(fieldName, self.identification),
                     self.identification,
-                    0,
+                    2,
                 )
 
     @performancetiming.timeit("initial acceleration")

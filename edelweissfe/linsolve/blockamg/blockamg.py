@@ -66,7 +66,8 @@ What it does per solve
    elasticity AMG, since both are directions in which the discretized operator has essentially zero
    stiffness -- when node coordinates are available, translations alone otherwise; a scalar field
    takes the default constant. A block backend (``backendBlockSize > 1``, the default for a 3D or 2D
-   vector field) cannot take a near-null-space and uses AMGCL's constant blocks instead.
+   vector field) cannot take the rotations: it takes the translations (``blockTranslationNullspace``, on
+   in the default trees), or AMGCL's constant blocks with that switched off.
 #. **Precondition the outer Krylov solve** (AMGCL's LGMRES, the only outer solver) with a block Gauss-Seidel sweep
    ``M^-1`` over the fields, each field's correction coming from one AMG V-cycle on its block, the couplings
    folded in between fields. With ``krylovOnScaledSystem = False`` (the default) the outer solve runs on
@@ -107,19 +108,20 @@ from edelweissfe.linsolve.nullspace import rigidBodyNullspace, translationNullsp
 # not affect, the Journal instance's own message-level suppression (see _log()) -- this gate decides
 # whether blockamg attempts to log at all; Journal's own level decides whether the attempt is shown.
 _VERBOSITY_LEVELS = ("silent", "warning", "info", "debug")
-# Journal indentation level, not verbosity: "info"/"debug" both nest at level 2, alongside the Newton
-# residual line each solve corresponds to -- they are the same nesting depth (a per-Newton-iteration
-# detail), just gated by different verbosity settings. "warning" stays at level 0 (the least indented,
-# most visible spot in the log) regardless of nesting, since a warning is rare and meant to stand out.
-_JOURNAL_LEVEL = {"warning": 0, "info": 2, "debug": 2}
+# Journal indentation level, not verbosity: every message nests at level 2, alongside the Newton residual
+# line each solve corresponds to -- all of them are per-Newton-iteration details, just gated by different
+# verbosity settings. A warning keeps that nesting too, and stands out by its "⚠" marker instead.
+_JOURNAL_LEVEL = 2
+_WARNING_MARKER = "⚠ "
 _IDENTIFICATION = "BlockAMGSolver"
 
 # "backendPrecision" and "backendBlockSize" are not AMGCL parameters -- they select the AMGCL
 # wrapper's own backend value type ("double" or "float" for backendPrecision; 1 (scalar), 2, or 3 for a
 # block-valued backend operating on B x B nodal blocks for backendBlockSize). Omitted from a fieldPreconds
 # tree they fall back to "double" and 1; the default trees (_defaultFieldPrecond) set both per dimension.
-# __call__ pops both out of whichever precond dict applies (default or a fieldPreconds override)
-# before forwarding the rest verbatim as the AMGCL JSON parameter tree.
+# _buildFieldPreconditioner pops both, and "blockTranslationNullspace" (see below), out of whichever precond
+# dict applies (default or a fieldPreconds override) before forwarding the rest verbatim as the AMGCL JSON
+# parameter tree.
 #
 # backendPrecision defaults to "double" when omitted from a fieldPreconds tree -- not what the shipped
 # field defaults use: _defaultFieldPrecond's own 3D tree sets it to "float" explicitly (see below). On
@@ -133,17 +135,21 @@ _IDENTIFICATION = "BlockAMGSolver"
 # the double hierarchy's on a captured damage-onset sequence, and faster.
 #
 # backendBlockSize defaults to the field's own nodal dimension (see _defaultFieldPrecond below): 3 for
-# a 3D vector field, 2 for a 2D one, 1 (scalar) otherwise. Setting it > 1 skips set_nullspace (see
-# __call__) -- AMGCL's near-null-space path is unimplemented for block value types, so the hierarchy
-# gets AMGCL's identity blocks: constants per component in the equilibrated variables, i.e. D-weighted
-# translations rather than the translations D^-1 t of the scaled block (nullspace.py), and no
-# rotational modes. Inside this block Gauss-Seidel preconditioner, 3x3 blocks stored in float with a
-# smoothed-aggregation spectral-radius estimate are nevertheless the measured winner on the reference
-# models (less index and value traffic per cycle) -- the code default.
+# a 3D vector field, 2 for a 2D one, 1 (scalar) otherwise. Setting it > 1 gives up the rotational
+# rigid-body modes (see _buildFieldPreconditioner): a block hierarchy takes the translations as its
+# near-null-space at most, and AMGCL's own identity blocks are constants per component in the equilibrated
+# variables, i.e. D-weighted translations rather than the translations D^-1 t of the scaled block (nullspace.py).
+# "blockTranslationNullspace": true, part of the 2D and 3D default trees, gives a block hierarchy those
+# translations instead (amgcl-block-translations.hpp); false falls back to the identity blocks. Inside this
+# block Gauss-Seidel preconditioner, 3x3 blocks stored in float with a smoothed-aggregation spectral-radius
+# estimate and the translations are nevertheless the measured winner on the reference models (less index and
+# value traffic per cycle than the scalar backend, fewer outer iterations than the identity blocks) -- the
+# code default.
 #
-# Both are set per field via fieldPreconds, e.g.
-# {"displacement": {**_defaultFieldPrecond(3), "backendBlockSize": 2}} to force 2x2 blocks on a field
-# the model built with dimension 3.
+# All three are set per field via fieldPreconds, e.g.
+# {"displacement": {**_defaultFieldPrecond(3), "backendBlockSize": 1, "backendPrecision": "double"}} to put a
+# 3D field on the scalar backend, in double (see above), which takes the full rigid-body modes, rotations
+# included (blockTranslationNullspace has nothing to add there, see _takesBlockTranslations).
 # power_iters 300: AMGCL's default (0) bounds the spectral radius by Gershgorin's theorem, pessimistically; a
 # power iteration is tighter but starts from a vector seeded per OpenMP thread, so it depends on the thread count.
 # The former 50 iterations left it badly under-converged on hard operators at some thread counts (needing far
@@ -183,18 +189,45 @@ def _defaultFieldPrecond(dimension: int) -> dict:
     outer iteration (less index and value traffic) at identical iteration counts. A 2D vector field
     (dimension 2) gets 2x2 blocks in double instead: this AMGCL wrapper has no float 2x2 backend to
     fall back to. A vector field of any other dimension, which was never part of the measurement, gets
-    the same smoother on the plain scalar backend -- the only backend that can carry a near null-space
-    (see :meth:`BlockAMGSolver._buildFieldPreconditioner`), so it keeps the rigid-body path. A scalar
-    field (dimension 1, e.g. ``nonlocal damage``) gets the scalar tree.
+    the same smoother on the plain scalar backend -- the only backend that takes the full rigid-body
+    near null-space (see :meth:`BlockAMGSolver._buildFieldPreconditioner`), so it keeps the rigid-body path. A
+    scalar field (dimension 1, e.g. ``nonlocal damage``) gets the scalar tree.
+
+    Both block trees build smoothed aggregation from the translations ``D^-1 t`` of the field's equilibrated
+    block (``blockTranslationNullspace``) instead of AMGCL's identity blocks, which are ``D``-weighted
+    translations: measured live on the reference models, faster on all but one and level within noise on
+    that one, with the same physical results (see the theory page).
     """
     # deep copies: the trees are nested, and a caller may adapt the one it gets
     if dimension == 3:
-        return copy.deepcopy({**_VECTOR_PRECOND_BASE, "backendPrecision": "float", "backendBlockSize": 3})
+        return copy.deepcopy(
+            {
+                **_VECTOR_PRECOND_BASE,
+                "backendPrecision": "float",
+                "backendBlockSize": 3,
+                "blockTranslationNullspace": True,
+            }
+        )
     if dimension == 2:
-        return copy.deepcopy({**_VECTOR_PRECOND_BASE, "backendPrecision": "double", "backendBlockSize": 2})
+        return copy.deepcopy(
+            {
+                **_VECTOR_PRECOND_BASE,
+                "backendPrecision": "double",
+                "backendBlockSize": 2,
+                "blockTranslationNullspace": True,
+            }
+        )
     if dimension > 1:
         return copy.deepcopy({**_VECTOR_PRECOND_BASE, "backendPrecision": "double", "backendBlockSize": 1})
     return copy.deepcopy(_DEFAULT_SCALAR_PRECOND)
+
+
+def _takesBlockTranslations(fieldTree: dict) -> bool:
+    """Whether a field's tree builds its block hierarchy from the translations ``D^-1 t`` of the scaled block
+    (``blockTranslationNullspace``) -- the one hierarchy where the key changes the coarse space. The scalar backend
+    (``backendBlockSize`` 1) takes the rigid-body modes, the translations included, whatever the key says. So a
+    default tree stays valid, and means what it says, with the scalar backend set on top."""
+    return fieldTree.get("blockTranslationNullspace", False) is True and fieldTree.get("backendBlockSize", 1) > 1
 
 
 #: The least excess over the reference outer iteration count that makes reused hierarchies stale, on top of
@@ -299,6 +332,7 @@ CONFIG_CASTS = {
     "residualGrowthFactor": float,
     "hierarchyStalenessFactor": float,
     "refreshOnNewIncrement": _boolFromConfig,
+    "reuseHierarchy": _boolFromConfig,
     "krylovOnScaledSystem": _boolFromConfig,
     "trueResidualMaxContinuations": int,
     "gapCompensatedTolerance": _boolFromConfig,
@@ -341,47 +375,20 @@ _P1_OPTIONS = {
 }
 
 
-class UnscaledBlockPreconditioner:
-    """One field's preconditioner M_i^-1 for A_scaled_ii = D A_ii D from an AMG hierarchy built on A_ii itself
-    (``hierarchyOnUnscaledBlock``). Since (D A_ii D)^-1 = D^-1 A_ii^-1 D^-1, one cycle gives the correction
-    D^-1 AMG(A_ii)^-1 D^-1 r.
-
-    Why: a block backend (``backendBlockSize > 1``) cannot take a near-null-space and uses AMGCL's constant
-    blocks. Those are the rigid-body translations of the block the hierarchy is built on -- of A_ii, but not of
-    A_scaled_ii, whose translations are D^-1 t."""
-
-    def __init__(self, hierarchy, scaling: np.ndarray):
-        """
-        hierarchy
-            The AMGCL hierarchy built on A_ii (its ``applyPreconditioner`` applies one cycle).
-        scaling
-            The field's slice of the equilibration, D = diag(scaling).
-        """
-        self._hierarchy = hierarchy
-        self._inverseScaling = 1.0 / scaling
-
-    def applyPreconditioner(self, residual: np.ndarray) -> np.ndarray:
-        """D^-1 AMG(A_ii)^-1 D^-1 residual."""
-        return self._inverseScaling * self._hierarchy.applyPreconditioner(self._inverseScaling * residual)
-
-    def report(self) -> str:
-        """The hierarchy's AMGCL report."""
-        return self._hierarchy.report()
-
-
 class BlockAMGSolver(LinearSolver):
     """Field-split block-AMG preconditioned Krylov solve (AMGCL's LGMRES, the only outer solver). Callable as
     ``(A, b) -> x``.
 
     The block structure is not configured here -- it is derived by the base class from the model and
     DOF manager the nonlinear solver hands over via
-    :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`. A field's near null-space, where its
-    backend can carry one at all (the plain scalar backend only -- see ``useRigidBodyNullspace``), is
-    decided from its nodal dimension: a vector field (dimension > 1) gets its full rigid-body basis
-    (translations and rotations) when node coordinates are available, translations alone otherwise;
-    a scalar field takes the default constant. The default ``fieldPreconds`` tree puts a 2D or 3D
-    vector field on a block backend instead, which has no near-null-space of its own, so this applies
-    to such a field only with an explicit scalar-backend ``fieldPreconds`` override.
+    :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`. A field's near null-space is decided from its
+    backend and its nodal dimension. On the plain scalar backend (see ``useRigidBodyNullspace``), a vector
+    field (dimension > 1) gets its full rigid-body basis (translations and rotations) when node
+    coordinates are available, translations alone otherwise; a scalar field takes the default constant.
+    The default ``fieldPreconds`` tree puts a 2D or 3D vector field on a block backend instead, which never
+    takes the rotations: it takes the translations (``blockTranslationNullspace``), or AMGCL's constant blocks
+    with that switched off. So the rigid-body basis applies to such a field only with an explicit
+    scalar-backend ``fieldPreconds`` override.
 
     Stateful across calls in two independent ways. This solver, like every other registered linear solver, sees
     only ``(A, b)`` per call, so it reconstructs the Newton-loop state rather than being told about it: from
@@ -468,14 +475,17 @@ class BlockAMGSolver(LinearSolver):
     fieldPreconds
         Optional mapping of field name to an AMGCL preconditioner parameter tree, overriding the
         dimension-based default for that field. Besides AMGCL's own keys a tree takes ``backendPrecision``,
-        ``backendBlockSize`` (see the comment above the default trees) and ``hierarchyOnUnscaledBlock``: build
-        the hierarchy on the field's unscaled block ``A_ii`` and apply it as ``D^-1 AMG(A_ii)^-1 D^-1``
-        (:class:`UnscaledBlockPreconditioner`; Chebyshev then needs ``"scale": true``).
+        ``backendBlockSize`` (see the comment above the default trees) and ``blockTranslationNullspace`` (``true``
+        in the default 2D/3D trees, ``false`` in a tree that leaves it out): on a block backend, build smoothed
+        aggregation from the translations ``D^-1 t`` of the field's scaled block instead of AMGCL's constant
+        blocks (``D``-weighted translations). On the scalar backend, whose rigid-body modes hold the translations
+        anyway, it changes nothing, so a default tree stays valid with ``backendBlockSize`` 1 set on top.
     useRigidBodyNullspace
-        Only takes effect on the plain scalar backend (``backendBlockSize == 1``) -- AMGCL's
-        near-null-space path is unimplemented for block value types, so a field on a block backend
-        (the default ``fieldPreconds`` tree for a 2D or 3D vector field) never gets one, whatever this
-        is set to. ``True`` (the default) builds a scalar-backend vector field's near null-space as the
+        Only takes effect on the plain scalar backend (``backendBlockSize == 1``) -- a block hierarchy takes the
+        translations only, so a field on a block backend (the default ``fieldPreconds`` tree for a 2D or 3D
+        vector field) never gets the rotations, whatever this is set to; it takes the translations with
+        ``blockTranslationNullspace``, the default. ``True`` (the
+        default) builds a scalar-backend vector field's near null-space as the
         full rigid-body basis -- translations *and* rotations -- once nodal coordinates for that field
         are available via ``self._model`` (set by
         :meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`), instead of translations alone. The
@@ -644,6 +654,11 @@ class BlockAMGSolver(LinearSolver):
         (default ``True``). With ``False`` a new increment alone keeps the standing hierarchies -- the
         first Newton iteration's Jacobian is the converged one of the previous increment -- and only
         the layout/pattern checks and ``hierarchyStalenessFactor`` decide.
+    reuseHierarchy
+        Reuse the AMG hierarchies across solves until one of the rebuild triggers fires (default
+        ``True``). With ``False`` every solve builds them for its own matrix: more builds, but no solve
+        on hierarchies built for an older Jacobian -- measured faster on a large contact model with live
+        adaptive refinement, where the reused hierarchies needed several times the outer iterations.
     trueResidualMaxContinuations
         How many times to warm-restart the outer solve (``x0`` from the previous pass, the same ``A_scaled``,
         ``b_scaled`` and ``M``, a tighter tolerance) if the true relative residual still exceeds ``eta`` after
@@ -795,6 +810,7 @@ class BlockAMGSolver(LinearSolver):
         residualGrowthFactor: float = 4.0,
         hierarchyStalenessFactor: float = 3.0,
         refreshOnNewIncrement: bool = True,
+        reuseHierarchy: bool = True,
         krylovOnScaledSystem: bool = False,
         gapCompensatedTolerance: bool = False,
         gapSafetyFactor: float = 0.3,
@@ -849,6 +865,7 @@ class BlockAMGSolver(LinearSolver):
         self._residualGrowthFactor = residualGrowthFactor
         self._hierarchyStalenessFactor = hierarchyStalenessFactor
         self._refreshOnNewIncrement = refreshOnNewIncrement
+        self._reuseHierarchy = reuseHierarchy
         self._krylovOnScaledSystem = krylovOnScaledSystem
         self._gapCompensatedTolerance = gapCompensatedTolerance
         self._gapSafetyFactor = gapSafetyFactor
@@ -995,8 +1012,10 @@ class BlockAMGSolver(LinearSolver):
         """
         if self._verbosityIndex < _VERBOSITY_LEVELS.index(level):
             return
+        if level == "warning" and not message.startswith(_WARNING_MARKER):
+            message = _WARNING_MARKER + message
         if self._journal is not None:
-            self._journal.message(message, _IDENTIFICATION, level=_JOURNAL_LEVEL[level])
+            self._journal.message(message, _IDENTIFICATION, level=_JOURNAL_LEVEL)
         else:
             print(message, flush=True)
 
@@ -1400,9 +1419,9 @@ class BlockAMGSolver(LinearSolver):
     @staticmethod
     def _fieldPrecondsRejection(fieldPreconds, dimensions: dict) -> "str | None":
         """Why a ``fieldPreconds`` mapping cannot be used, or ``None`` -- see :meth:`_settingsRejections`. Each
-        entry is checked for what the hierarchy build would fail on: the backend keys, and, once the fields are
-        known, a block size that matches the field's nodal dimension. An entry for a field the system does not
-        have is unused, not an error: one configuration file may serve several models."""
+        entry is checked for what the hierarchy build would fail on: the backend keys, a removed key, and, once the
+        fields are known, a block size that matches the field's nodal dimension. An entry for a field the system
+        does not have is unused, not an error: one configuration file may serve several models."""
         if not isinstance(fieldPreconds, dict):
             return "must map field names to AMGCL preconditioner trees"
         for fieldName, precond in fieldPreconds.items():
@@ -1414,14 +1433,32 @@ class BlockAMGSolver(LinearSolver):
                 return "entry '{:}': backendPrecision must be 'double' or 'float'".format(fieldName)
             if blockSize not in (1, 2, 3) or (blockSize == 2 and precision == "float"):
                 return "entry '{:}': backendBlockSize must be 1, 2 or 3 (2 only in double)".format(fieldName)
-            onUnscaledBlock = precond.get("hierarchyOnUnscaledBlock", False)
-            if not isinstance(onUnscaledBlock, bool):
-                return "entry '{:}': hierarchyOnUnscaledBlock must be true or false".format(fieldName)
-            relax = precond.get("relax")
-            unscaledChebyshev = isinstance(relax, dict) and relax.get("type") == "chebyshev" and not relax.get("scale")
-            if onUnscaledBlock and unscaledChebyshev:
-                return "entry '{:}': hierarchyOnUnscaledBlock needs Jacobi-scaled Chebyshev (relax.scale: true)".format(
-                    fieldName
+            if "hierarchyOnUnscaledBlock" in precond:
+                # refused rather than forwarded: AMGCL only warns about a key it does not know, on stderr
+                if precond["hierarchyOnUnscaledBlock"] is False:
+                    return (
+                        "entry '{:}': hierarchyOnUnscaledBlock was removed; false was its default and did nothing, "
+                        "so drop the key".format(fieldName)
+                    )
+                return (
+                    "entry '{:}': hierarchyOnUnscaledBlock was removed. For a vector field on a block backend, "
+                    'its coarse space is blockTranslationNullspace: set "blockTranslationNullspace": true in this '
+                    "entry (an entry replaces the default tree, it does not inherit that key), and to keep its "
+                    'Jacobi-scaled smoother put "scale": true inside the existing relax dict, next to '
+                    '"type": "chebyshev". A scalar field has no replacement: its hierarchy is built on the '
+                    "scaled block".format(fieldName)
+                )
+            if not isinstance(precond.get("blockTranslationNullspace", False), bool):
+                return "entry '{:}': blockTranslationNullspace must be true or false".format(fieldName)
+            # AMGCL's defaults: class amg, coarsening.type smoothed_aggregation
+            coarsening = precond.get("coarsening", {})
+            coarseningType = coarsening.get("type", "smoothed_aggregation") if isinstance(coarsening, dict) else None
+            if _takesBlockTranslations(precond) and (
+                precond.get("class", "amg") != "amg" or coarseningType != "smoothed_aggregation"
+            ):
+                return (
+                    "entry '{:}': blockTranslationNullspace needs smoothed aggregation (coarsening.type); it is "
+                    "true in the default 2D/3D trees, set it to false for another coarsening".format(fieldName)
                 )
             if blockSize > 1 and fieldName in dimensions and dimensions[fieldName] != blockSize:
                 return "entry '{:}': backendBlockSize {:} does not match the field's dimension {:}".format(
@@ -1499,16 +1536,18 @@ class BlockAMGSolver(LinearSolver):
             for i, block in enumerate(blocks)
         ]
 
-    def _diagonalBlock(self, system, index: int, unscaled: bool = False):
-        """The field's diagonal block of A_scaled (or with ``unscaled`` of A), with ``hierarchyDropTol`` applied."""
+    def _diagonalBlock(self, system, index: int):
+        """The field's diagonal block of A_scaled, with ``hierarchyDropTol`` applied."""
         with performancetiming.timeit("diagonal blocks"):
-            diagonalBlock = system.diagonalBlock(index, unscaled=unscaled)
+            diagonalBlock = system.diagonalBlock(index)
             return self._dropSmallEntries(diagonalBlock) if self._hierarchyDropTol > 0.0 else diagonalBlock
 
     def _buildFieldPreconditioner(self, block, system, index: int, scaling: np.ndarray):
         """The preconditioner of one field: the p-two-grid cycle for a vector field that opted into it
-        (``p1Maps`` / ``p1FieldNames``), one AMGCL hierarchy otherwise. A vector field's near null-space is its
-        rigid-body modes (see :meth:`_nullspaceCoordinates`); a scalar field takes AMGCL's default constant."""
+        (``p1Maps`` / ``p1FieldNames``), one AMGCL hierarchy otherwise. A vector field on the scalar backend gets
+        its rigid-body modes as near null-space (see :meth:`_nullspaceCoordinates`; the translations alone without
+        node coordinates), on a block backend the translations alone (``blockTranslationNullspace``, else AMGCL's
+        constant blocks); a scalar field takes AMGCL's default constant."""
         isVectorField = block.dimension > 1
 
         p1Map = None
@@ -1520,8 +1559,8 @@ class BlockAMGSolver(LinearSolver):
         # for a field whose near null-space can actually use them -- p-two-grid's coarse solve always
         # runs on the plain scalar backend (see its own docstring), but a single-level field's own
         # backend might not: the default fieldPreconds tree puts a 2D/3D vector field on a block backend,
-        # which has no near-null-space of its own (AMGCL's near-null-space path is unimplemented for
-        # block value types), so coordinates would be gathered and then simply discarded.
+        # which never takes the rotations (a block hierarchy takes the translations only, with
+        # blockTranslationNullspace), so coordinates would be gathered and then simply discarded.
         # the field's tree, resolved once (an explicit {} stays "AMGCL's defaults")
         fieldTree = (
             self._fieldPreconds[block.name]
@@ -1558,7 +1597,8 @@ class BlockAMGSolver(LinearSolver):
         precondParams = dict(fieldTree)
         backendPrecision = precondParams.pop("backendPrecision", "double")
         backendBlockSize = precondParams.pop("backendBlockSize", 1)
-        onUnscaledBlock = precondParams.pop("hierarchyOnUnscaledBlock", False)
+        precondParams.pop("blockTranslationNullspace", None)
+        blockTranslations = _takesBlockTranslations(fieldTree)
         # The hierarchy is only ever applied as a preconditioner: "preonly" keeps AMGCL from allocating the
         # work vectors of an iterative solver (BiCGStab by default) that would never run.
         preconditioner = PyAMGCLSolver(
@@ -1569,23 +1609,20 @@ class BlockAMGSolver(LinearSolver):
                 "backendBlockSize": backendBlockSize,
             }
         )
-        # A block backend cannot take a near null-space (AMGCL's own path is unimplemented for block value
-        # types); a scalar backend gets the rigid-body modes -- the error components a Chebyshev smoother does
-        # not reduce, which the coarse levels must represent -- of the block it is built on: of A_ii itself, or
-        # D^-1 times them for A_scaled_ii.
-        if isVectorField and backendBlockSize == 1:
-            modeScaling = np.ones_like(scaling) if onUnscaledBlock else scaling
+        # The near null-space -- the error components a Chebyshev smoother does not reduce, which the coarse
+        # levels must represent -- of A_scaled_ii, the block the hierarchy is built on: D^-1 times that of A_ii.
+        # A scalar backend gets the rigid-body modes. A block backend takes the translations alone (coords is
+        # None for it) with blockTranslationNullspace, the default; without it, AMGCL's constant blocks.
+        if isVectorField and (backendBlockSize == 1 or blockTranslations):
             with performancetiming.timeit("nullspace construction"):
                 if coords is not None:
-                    nullspace = rigidBodyNullspace(block, coords, modeScaling)
+                    nullspace = rigidBodyNullspace(block, coords, scaling)
                 else:
-                    nullspace = translationNullspace(block, modeScaling)
+                    nullspace = translationNullspace(block, scaling)
             preconditioner.set_nullspace(nullspace)
-        diagonalBlock = self._diagonalBlock(system, index, unscaled=onUnscaledBlock)
+        diagonalBlock = self._diagonalBlock(system, index)
         with performancetiming.timeit("{:} AMG build".format(block.name)):
             preconditioner.build(diagonalBlock)
-        if onUnscaledBlock:
-            return UnscaledBlockPreconditioner(preconditioner, scaling)
         return preconditioner
 
     def _p1Options(self) -> dict:
@@ -1729,6 +1766,24 @@ class BlockAMGSolver(LinearSolver):
 
         return bool(pending)
 
+    def _notSolved(self, n: int, reason: str) -> np.ndarray:
+        """The result of a solve that is declined because its system is not finite: NaN, without solving. It reaches
+        the nonlinear solver as a diverged solution, which cuts the increment back, and this solver's state is left
+        as it was.
+
+        Parameters
+        ----------
+        n
+            The number of DOFs.
+        reason
+            What is not finite, for the warning.
+        """
+        self._log("warning", "⚠ solve #{:}: {:}; returning NaN without solving.".format(self._solveCount, reason))
+        self._lastSolveSummary = LinearSolveSummary(
+            iters=0, residual=float("nan"), residualMet=False, retries=0, detailLines=()
+        )
+        return np.full(n, np.nan)
+
     def __call__(self, A, b):
         solveStartTime = time.time()
         from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLEquilibratedSystem
@@ -1751,18 +1806,8 @@ class BlockAMGSolver(LinearSolver):
         residualNorm = float(np.linalg.norm(b))
         if not np.isfinite(residualNorm):
             # Nothing to solve: the outer solve would spend its whole iteration cap on it, and the norm would
-            # pin the next forcing tolerance. The NaN correction reaches the nonlinear solver as a diverged
-            # solution, and this solver's state is left as it was.
-            self._log(
-                "warning",
-                "⚠ solve #{:}: the right-hand side is not finite; returning NaN without solving.".format(
-                    self._solveCount
-                ),
-            )
-            self._lastSolveSummary = LinearSolveSummary(
-                iters=0, residual=float("nan"), residualMet=False, retries=0, detailLines=()
-            )
-            return np.full(n, np.nan)
+            # pin the next forcing tolerance.
+            return self._notSolved(n, "the right-hand side is not finite")
         newIncrement = (
             self._lastResidualNorm is not None and residualNorm > self._residualGrowthFactor * self._lastResidualNorm
         )
@@ -1775,7 +1820,8 @@ class BlockAMGSolver(LinearSolver):
         # nothing to reuse yet, the field-block layout changed (e.g. an AMR event resized the DOF
         # vector), the sparsity pattern changed, a residual jump marks a new increment, or the
         # previous solve asked for it: its outer count drifted too far from that of the solve the hierarchies
-        # were built for, or it hit the cap (_hierarchyIsStale), or the model or the settings changed.
+        # were built for, or it hit the cap (_hierarchyIsStale), or the model or the settings changed. With
+        # reuseHierarchy off, every solve refreshes them.
         wasStale = self._refreshNext
         mustRefresh = (
             self._preconditioners is None
@@ -1784,6 +1830,7 @@ class BlockAMGSolver(LinearSolver):
             or patternChanged
             or (newIncrement and self._refreshOnNewIncrement)
             or wasStale
+            or not self._reuseHierarchy
         )
 
         # Captured now, in priority order matching mustRefresh above -- by the time the debug detail
@@ -1799,8 +1846,10 @@ class BlockAMGSolver(LinearSolver):
             rebuildReason = "pattern"
         elif newIncrement and self._refreshOnNewIncrement:
             rebuildReason = "increment"
-        else:
+        elif wasStale:
             rebuildReason = "stale"
+        else:
+            rebuildReason = "always"
 
         # (2) Equilibration: build the field preconditioners from A_scaled = D A D, D = diag(scaling)
         #     with scaling = 1 / sqrt|a_ii| (b_scaled = D b in the code). With
@@ -1830,6 +1879,19 @@ class BlockAMGSolver(LinearSolver):
                         "AMG scheme does not support. Use a direct solver for such a model.".format(
                             zeroDiagonal.size, int(zeroDiagonal[0])
                         )
+                    )
+                # A diagonal entry that is NaN or infinite is no better: it makes the scaling, and with it the
+                # translations' weights 1/scaling of a block hierarchy, non-finite, which AMGCL's hierarchy build
+                # rejects with a RuntimeError -- which nothing in the nonlinear solvers catches, whereas a NaN
+                # correction is a DivergingSolution and a cutback. Decline the solve like a non-finite right-hand
+                # side (checked after the zero diagonal, which is the user's error to see first).
+                nonFiniteDiagonal = np.nonzero(~np.isfinite(diagonal))[0]
+                if nonFiniteDiagonal.size:
+                    return self._notSolved(
+                        n,
+                        "the diagonal is not finite at {:} dof(s) (first at index {:})".format(
+                            nonFiniteDiagonal.size, int(nonFiniteDiagonal[0])
+                        ),
                     )
                 scaling = 1.0 / np.sqrt(diagonal)
             else:
@@ -2050,9 +2112,8 @@ class BlockAMGSolver(LinearSolver):
             detailLines=detailLines,
         )
         if outerIters > self._warnOuterIterationsThreshold:
-            # Rare and actionable, so this stays at "warning" (Journal level 0, the least indented and
-            # most visible spot in the log) and spells out the likely cause, unlike the routine
-            # per-solve line above it.
+            # Rare and actionable, so this is a "warning" (marked "⚠" in the log) and spells out the likely
+            # cause, unlike the routine per-solve line above it.
             self._log(
                 "warning",
                 "⚠ solve #{:} needed {:} outer Krylov iterations, above the warning threshold of {:}. "

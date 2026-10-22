@@ -30,8 +30,8 @@ from libcpp.string cimport string
 cdef extern from "amgcl-wrapper.hpp":
     # The interface every AMGCL solver backend implements (scalar or B x B blocks, double or float):
     # the matrix values and rhs/x are always double at this boundary, each backend converts
-    # internally -- see AMGCLSolverInterface. set_nullspace() throws on a block backend (AMGCL's own
-    # tentative-prolongation nullspace path is unimplemented for block value types).
+    # internally -- see AMGCLSolverInterface. On a block backend set_nullspace() takes the translations
+    # only, one diagonal block per node (see amgcl-block-translations.hpp).
     cdef cppclass AMGCLSolverInterface:
         void solve(int n,
                    const int* ptr,
@@ -62,7 +62,7 @@ cdef extern from "amgcl-wrapper.hpp":
                    int nFields, const int* fieldBounds, bint unscaled) except +
         int diagonalBlockSize(int f) except +
         int diagonalBlockNnz(int f) except +
-        void fillDiagonalBlock(int f, int* ptr, int* col, double* val, bint unscaled) except +
+        void fillDiagonalBlock(int f, int* ptr, int* col, double* val) except +
         void matvec(const double* x, double* y, bint unscaled) except +
         void residual(const double* rhs, const double* x, double* r, bint unscaled) except +
         void couplingMatvec(int f, int g, const double* x, double* y) except +
@@ -88,21 +88,6 @@ cdef extern from "amgcl-wrapper.hpp":
                    int& iters,
                    double& error,
                    bint onUnscaledOperator) except +
-
-    # OpenMP-threaded sparse-matrix product/sum, wired into
-    # edelweissfe/numerics/mpctransformation.py's T^T K T + C condensation as an opt-in alternative
-    # (useAmgclSpgemm/useAmgclMPCCondensation) to the plain expression's scipy CSR (single-threaded)
-    # routines. Square matrices only -- see SpGEMMHelperT's own comment for why.
-    cdef cppclass SpGEMMHelper:
-        SpGEMMHelper() except +
-        void product(int aN, const int* aPtr, const int* aCol, const double* aVal,
-                     int bN, const int* bPtr, const int* bCol, const double* bVal) except +
-        void sum(double alpha, int aN, const int* aPtr, const int* aCol, const double* aVal,
-                 double beta, int bN, const int* bPtr, const int* bCol, const double* bVal) except +
-        int resultNRows() except +
-        int resultNCols() except +
-        int resultNnz() except +
-        void copyResult(int* ptrOut, int* colOut, double* valOut) except +
 
     # The p-two-grid (P1) preconditioner of edelweissfe/linsolve/blockamg/ptwogrid.py, built and
     # applied entirely in C++ (OpenMP) -- see PTwoGridPreconditionerT's own comment.
