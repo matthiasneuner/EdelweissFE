@@ -43,7 +43,7 @@ def createSolver(opts) -> Callable:
         The options: ``outerTolerance`` (relative residual of the outer flexible GMRES, default 1e-3),
         ``innerCycles`` (applications of the inner preconditioner per outer iteration, default 2; ``null`` for inner
         solves to ``innerTolerance``), ``innerTolerance`` (relative tolerance of each inner ``blockamg`` solve, default
-        1e-1), ``restart`` (default 50), ``maxIterations`` (default 1000), ``schurApproximation`` (``"local"``, the
+        1e-1), ``restart`` (default 50), ``maxIterations`` (default 100), ``schurApproximation`` (``"local"``, the
         default, ``"nodal"`` or ``"none"``), ``schurDropTolerance`` (default 1e-4), ``schurWindow`` (default 600),
         ``schurHalo`` (default: ``schurWindow``), ``dumpSlowSolvesDir``/``dumpSlowSolveSeconds``/``dumpSlowSolvesMax``
         (default none/300/5), ``reuseSchurComplement`` (default true), ``schurStalenessFactor`` (default 1.5) and
@@ -85,7 +85,7 @@ def createSolver(opts) -> Callable:
         innerTolerance=float(optionMap.get("innerTolerance", 1e-1)),
         innerCycles=None if optionMap.get("innerCycles", 2) is None else int(optionMap.get("innerCycles", 2)),
         restart=int(optionMap.get("restart", 50)),
-        maxIterations=int(optionMap.get("maxIterations", 1000)),
+        maxIterations=int(optionMap.get("maxIterations", 100)),
         schurApproximation=str(optionMap.get("schurApproximation", "local")),
         schurDropTolerance=float(optionMap.get("schurDropTolerance", 1e-4)),
         schurWindow=int(optionMap.get("schurWindow", 600)),

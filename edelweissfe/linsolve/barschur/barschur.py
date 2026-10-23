@@ -117,7 +117,9 @@ class BarSchurSolver(LinearSolver):
     restart
         The FGMRES restart length.
     maxIterations
-        The maximum number of FGMRES iterations of a solve.
+        The maximum number of FGMRES iterations of a solve. On a hex20 tunnel segment with bond-slip, 498 of 502 solves
+        needed at most 100 (median 21); the others were Newton iterations at the damage onset whose increments mostly
+        failed anyway, one of them did not converge in 1000.
     schurApproximation
         ``"local"``, ``"nodal"`` or ``"none"``, see the module documentation.
     schurDropTolerance
@@ -158,7 +160,7 @@ class BarSchurSolver(LinearSolver):
         innerTolerance: float = 1e-1,
         innerCycles: int = 2,
         restart: int = 50,
-        maxIterations: int = 1000,
+        maxIterations: int = 100,
         schurApproximation: str = "local",
         schurDropTolerance: float = 1e-4,
         schurWindow: int = 600,

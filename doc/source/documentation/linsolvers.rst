@@ -170,7 +170,8 @@ iterations do not drift; a solve that fails with a reused one is repeated with a
 
 Configuration keys (defaults in parentheses): ``outerTolerance`` (1e-3, relative residual of the outer solve),
 ``innerCycles`` (2; ``null``: inner solves to ``innerTolerance``), ``innerTolerance`` (0.1), ``restart`` (50; much
-shorter restarts cost many more outer iterations), ``maxIterations`` (1000), ``schurApproximation`` (``"local"``; ``"nodal"``
+shorter restarts cost many more outer iterations), ``maxIterations`` (100; on the tunnel segment 498 of 502 solves needed at most 100, the rest were hopeless
+Newton iterations at the damage onset), ``schurApproximation`` (``"local"``; ``"nodal"``
 uses the diagonal block of each bar node only, which suffices for trusses but not for beams; ``"none"`` uses
 :math:`A_{kk}`), ``schurDropTolerance`` (1e-4), ``schurWindow`` (600 bar dofs per window core), ``schurHalo`` (bar dofs per halo on
 either side of a core; default ``schurWindow``), ``reuseSchurComplement`` (true), ``schurStalenessFactor`` (1.5),
