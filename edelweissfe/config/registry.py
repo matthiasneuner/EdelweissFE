@@ -393,6 +393,7 @@ for _linsolverName in [
     "mumps",
     "amgcl",
     "blockamg",
+    "barschur",
     "matrixdump",
 ]:
     _BUILTINS[("linsolver", _linsolverName)] = f"edelweissfe.linsolve.{_linsolverName}:createSolver"

@@ -87,10 +87,10 @@ from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.utils.embedding import (
+    MIN_PART_LENGTH,
     HostElementLocator,
     barGeometry,
     barLength,
-    MIN_PART_LENGTH,
     barPoint,
     splitBarElementAtHostBoundaries,
 )
@@ -165,6 +165,14 @@ class EmbeddedBondSchema:
         dtype=bool,
         default=False,
     )
+    minimumPartLength: float = schemaField(
+        description="With splitBars: bar elements are not split at host element boundaries that would leave a part "
+        "shorter than this fraction of the bar element; such a short part stays in the adjacent bar element. Very "
+        "short (beam) elements make the equation system nearly singular (12 EI / L^3 for beams). The bond elements "
+        "still follow the host element boundaries exactly. 0 splits at every boundary.",
+        dtype=float,
+        default=0.0,
+    )
 
 
 class EmbeddedBondSection:
@@ -222,9 +230,7 @@ class Generator(GeneratorBase):
         nDim = model.domainSize
 
         if configuration.splitBars:
-            rebarElements = [
-                newBar for bar in rebarElements for newBar in _splitBarAtHostBoundaries(bar, locator, model)
-            ]
+            rebarElements = _splitBarsAtHostBoundaries(rebarElements, locator, model, configuration.minimumPartLength)
             model._populateNodeFieldVariablesFromElements()
 
         bondElements = []
@@ -324,9 +330,47 @@ class Generator(GeneratorBase):
         )
 
 
-def _splitBarAtHostBoundaries(bar, locator: HostElementLocator, model: FEModel) -> list:
-    """Replace a bar element crossing host element boundaries by bar elements of the same type with nodes at the
+def _splitBarsAtHostBoundaries(
+    bars: list, locator: HostElementLocator, model: FEModel, minimumPartLength: float
+) -> list:
+    """Replace every bar element crossing host element boundaries by bar elements of the same type with nodes at the
     crossings, in the model and in all element sets containing it.
+
+    The element sets and node sets are updated once for all bars, not once per bar: each update copies the whole set
+    (e.g., ``all``), and a model has thousands of bar elements.
+
+    Returns
+    -------
+    list
+        The new bar elements, in the order of ``bars``; a bar element lying in one host element is kept.
+    """
+    replacements = {}
+    for bar in bars:
+        newBars = _splitBarAtHostBoundaries(bar, locator, model, minimumPartLength)
+        if newBars[0] is not bar:
+            replacements[bar] = newBars
+            model.removeElement(bar.elNumber)
+
+    for elementSet in model.elementSets.values():
+        if any(bar in elementSet for bar in replacements):
+            elementSet.replaceMembers([newBar for el in elementSet for newBar in replacements.get(el, [el])])
+
+    # the mid nodes of the original quadratic bars are not part of the new bars
+    usedNodes = {node for el in model.elements.values() for node in el.nodes}
+    orphans = {bar.nodes[2] for bar in replacements if barGeometry(bar)[0] == "bar3"} - usedNodes
+    if orphans:
+        for node in orphans:
+            del model.nodes[node.label]
+        for nodeSet in model.nodeSets.values():
+            if any(node in nodeSet for node in orphans):
+                nodeSet.replaceMembers([n for n in nodeSet if n not in orphans])
+
+    return [newBar for bar in bars for newBar in replacements.get(bar, [bar])]
+
+
+def _splitBarAtHostBoundaries(bar, locator: HostElementLocator, model: FEModel, minimumPartLength: float) -> list:
+    """Create the bar elements replacing a bar element that crosses host element boundaries, with nodes at the
+    crossings. The caller replaces the bar element in the model and in the sets.
 
     Returns
     -------
@@ -334,7 +378,7 @@ def _splitBarAtHostBoundaries(bar, locator: HostElementLocator, model: FEModel) 
         The new bar elements, or the bar element itself if it lies in one host element.
     """
     barShape, coordinates = barGeometry(bar)
-    parts, _ = splitBarElementAtHostBoundaries(bar, locator)
+    parts, _ = splitBarElementAtHostBoundaries(bar, locator, minimumPartLength=minimumPartLength)
 
     # break points: the boundaries of the embedded parts, including those to unembedded stretches
     breakPoints = [-1.0]
@@ -365,23 +409,6 @@ def _splitBarAtHostBoundaries(bar, locator: HostElementLocator, model: FEModel) 
         newBar.setNodes(nodes)
         model.createElement(newBar)
         newBars.append(newBar)
-
-    for elementSet in model.elementSets.values():
-        if bar in elementSet:
-            members = []
-            for el in elementSet:
-                members += newBars if el is bar else [el]
-            elementSet.replaceMembers(members)
-    model.removeElement(bar.elNumber)
-
-    if barShape == "bar3":
-        # the mid node of the original bar is not part of the new bars
-        midNode = bar.nodes[2]
-        if not any(midNode in el.nodes for el in model.elements.values()):
-            del model.nodes[midNode.label]
-            for nodeSet in model.nodeSets.values():
-                if midNode in nodeSet:
-                    nodeSet.replaceMembers([n for n in nodeSet if n is not midNode])
 
     return newBars
 

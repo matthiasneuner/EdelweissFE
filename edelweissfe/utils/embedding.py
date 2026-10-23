@@ -178,7 +178,9 @@ class BarPart:
     etaEnd: float
 
 
-def splitBarElementAtHostBoundaries(barElement, locator: HostElementLocator, samplesPerHostSize: float = 8.0):
+def splitBarElementAtHostBoundaries(
+    barElement, locator: HostElementLocator, samplesPerHostSize: float = 8.0, minimumPartLength: float = 0.0
+):
     """Split a bar element into the parts lying in individual host elements.
 
     The bar is sampled along its parametric coordinate, with a spacing well below the size of the smallest host
@@ -194,6 +196,9 @@ def splitBarElementAtHostBoundaries(barElement, locator: HostElementLocator, sam
         The locator of the host elements.
     samplesPerHostSize
         The number of samples per characteristic size of the smallest host element.
+    minimumPartLength
+        Parts shorter than this fraction of the bar element are merged into an adjacent part, which then also covers
+        the short stretch in the neighboring host element (see :func:`_mergeShortParts`). ``0`` keeps all parts.
 
     Returns
     -------
@@ -268,7 +273,7 @@ def splitBarElementAtHostBoundaries(barElement, locator: HostElementLocator, sam
         eta = etaExit if (newHost is not None and progress) else etaNext
         host = newHost
 
-    return _removeSlivers(parts), unembedded
+    return _mergeShortParts(_removeSlivers(parts), 2.0 * minimumPartLength), unembedded
 
 
 #: Parts of a bar element shorter than this (in its parametric coordinate, of length 2) are slivers, e.g., where a bar
@@ -290,3 +295,33 @@ def _removeSlivers(parts: list) -> list:
             part = BarPart(part.barElement, part.hostElement, middle, part.etaEnd)
         kept.append(part)
     return kept
+
+
+def _mergeShortParts(parts: list, minimumLength: float) -> list:
+    """Merge parts shorter than ``minimumLength`` (in the parametric coordinate) into an adjacent part.
+
+    A bar crossing a host element face close to one of its nodes, or close to another face, leaves a short part. Split
+    at it (``splitBars``), a beam element of length :math:`L` adds the bending stiffness :math:`12 EI / L^3`, which makes
+    the equation system nearly singular for very short parts. A short part is therefore merged into the previous part,
+    if that one is adjacent (no unembedded stretch in between), else into the next adjacent one; the merged part keeps
+    its host element, which then also covers the short stretch just outside of it. A short part without an adjacent
+    part is kept.
+    """
+    merged = list(parts)
+    i = 0
+    while i < len(merged):
+        part = merged[i]
+        if part.etaEnd - part.etaStart >= minimumLength or len(merged) == 1:
+            i += 1
+            continue
+        if i > 0 and part.etaStart - merged[i - 1].etaEnd <= MIN_PART_LENGTH:
+            previous = merged[i - 1]
+            merged[i - 1] = BarPart(previous.barElement, previous.hostElement, previous.etaStart, part.etaEnd)
+            del merged[i]
+        elif i + 1 < len(merged) and merged[i + 1].etaStart - part.etaEnd <= MIN_PART_LENGTH:
+            following = merged[i + 1]
+            merged[i + 1] = BarPart(following.barElement, following.hostElement, part.etaStart, following.etaEnd)
+            del merged[i]
+        else:
+            i += 1
+    return merged

@@ -91,44 +91,43 @@ NODE_PARAMETRIC_COORDINATES = {
 PARAMETRIC_DIMENSION = {shape: coords.shape[1] for shape, coords in NODE_PARAMETRIC_COORDINATES.items()}
 
 
+def _productsOfOtherFactors(factors: np.ndarray) -> np.ndarray:
+    """For factors ``(nNodes, dim)``, the products over all factors of a node except the ``d``-th one, ``(nNodes,
+    dim)``: the ``d``-th factor is replaced by 1, so the remaining factors are multiplied in their order."""
+    dim = factors.shape[1]
+    others = np.repeat(factors[:, None, :], dim, axis=1)
+    others[:, np.arange(dim), np.arange(dim)] = 1.0
+    return np.prod(others, axis=2)
+
+
 def _lagrangeTensorProductLinear(xi: np.ndarray, nodes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Multilinear shape functions of the corner nodes and their derivatives."""
     factors = 0.5 * (1.0 + nodes * xi)  # (nNodes, dim)
     N = np.prod(factors, axis=1)
-    dN = np.empty_like(nodes)
-    for d in range(nodes.shape[1]):
-        others = np.prod(np.delete(factors, d, axis=1), axis=1)
-        dN[:, d] = 0.5 * nodes[:, d] * others
+    dN = 0.5 * nodes * _productsOfOtherFactors(factors)
     return N, dN
 
 
 def _serendipity(xi: np.ndarray, corners: np.ndarray, midsides: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Quadratic serendipity shape functions (quad8, hexa20) and their derivatives."""
     dim = corners.shape[1]
-    nC, nM = corners.shape[0], midsides.shape[0]
-    N = np.empty(nC + nM)
-    dN = np.empty((nC + nM, dim))
 
     # corners: prod(1 + xi_i xi) / 2^dim * (sum(xi_i xi) - (dim - 1))
-    for a, c in enumerate(corners):
-        f = 1.0 + c * xi
-        p = np.prod(f) / 2**dim
-        s = np.dot(c, xi) - (dim - 1)
-        N[a] = p * s
-        for d in range(dim):
-            dp = c[d] * np.prod(np.delete(f, d)) / 2**dim
-            dN[a, d] = dp * s + p * c[d]
+    f = 1.0 + corners * xi
+    p = np.prod(f, axis=1) / 2**dim
+    s = corners @ xi - (dim - 1)
+    dp = corners * _productsOfOtherFactors(f) / 2**dim
+    NCorners = p * s
+    dNCorners = dp * s[:, None] + p[:, None] * corners
 
     # midsides: the coordinate with xi_i = 0 enters as (1 - xi^2), the others as (1 + xi_i xi) / 2
-    for m, c in enumerate(midsides):
-        a = nC + m
-        zero = int(np.flatnonzero(c == 0.0)[0])
-        g = np.where(c == 0.0, 1.0 - xi**2, 0.5 * (1.0 + c * xi))
-        N[a] = np.prod(g)
-        for d in range(dim):
-            dg = -2.0 * xi[d] if d == zero else 0.5 * c[d]
-            dN[a, d] = dg * np.prod(np.delete(g, d))
-    return N, dN
+    isZero = midsides == 0.0
+    g = np.where(isZero, 1.0 - xi**2, 0.5 * (1.0 + midsides * xi))
+    dg = np.where(isZero, -2.0 * xi, 0.5 * midsides)
+    NMidsides = np.prod(g, axis=1)
+    dNMidsides = dg * _productsOfOtherFactors(g)
+
+    return np.concatenate([NCorners, NMidsides]), np.vstack([dNCorners, dNMidsides])
 
 
 def shapeFunctionsAndDerivatives(shape: str, xi) -> tuple[np.ndarray, np.ndarray]:

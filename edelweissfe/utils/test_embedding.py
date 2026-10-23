@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from edelweissfe.utils.embedding import (
+    BarPart,
     HostElementLocator,
+    _mergeShortParts,
     barLength,
     splitBarElementAtHostBoundaries,
 )
@@ -187,3 +189,16 @@ def test_split_bar_through_mesh_corners_has_no_slivers(barShape):
     assert parts[0].etaStart == -1.0 and parts[-1].etaEnd == 1.0
     for p, q in zip(parts[:-1], parts[1:]):
         assert p.etaEnd == q.etaStart
+
+
+def test_merge_short_parts():
+    """A short part goes into the previous adjacent part, a short first part into the next one, an isolated short part
+    (unembedded stretches on both sides) is kept."""
+    part = lambda host, a, b: BarPart("bar", host, a, b)  # noqa: E731
+    merged = _mergeShortParts([part("h1", -1.0, 0.0), part("h2", 0.0, 0.01), part("h3", 0.01, 1.0)], 0.1)
+    assert [(p.hostElement, p.etaStart, p.etaEnd) for p in merged] == [("h1", -1.0, 0.01), ("h3", 0.01, 1.0)]
+    merged = _mergeShortParts([part("h1", -1.0, -0.98), part("h2", -0.98, 1.0)], 0.1)
+    assert [(p.hostElement, p.etaStart, p.etaEnd) for p in merged] == [("h2", -1.0, 1.0)]
+    isolated = [part("h1", -1.0, -0.5), part("h2", -0.2, -0.15), part("h3", 0.0, 1.0)]
+    assert _mergeShortParts(isolated, 0.1) == isolated
+    assert _mergeShortParts(isolated, 0.0) == isolated

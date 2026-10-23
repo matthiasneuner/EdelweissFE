@@ -332,6 +332,7 @@ CONFIG_CASTS = {
     "residualGrowthFactor": float,
     "hierarchyStalenessFactor": float,
     "refreshOnNewIncrement": _boolFromConfig,
+    "refreshOnCapHit": _boolFromConfig,
     "reuseHierarchy": _boolFromConfig,
     "krylovOnScaledSystem": _boolFromConfig,
     "trueResidualMaxContinuations": int,
@@ -654,6 +655,10 @@ class BlockAMGSolver(LinearSolver):
         (default ``True``). With ``False`` a new increment alone keeps the standing hierarchies -- the
         first Newton iteration's Jacobian is the converged one of the previous increment -- and only
         the layout/pattern checks and ``hierarchyStalenessFactor`` decide.
+    refreshOnCapHit
+        Refresh the AMG hierarchies after a solve that hit the outer iteration cap (default ``True``). ``False`` for
+        a caller that solves repeatedly with one matrix, for which a rebuilt hierarchy would be the same one (the
+        inner solves of :mod:`edelweissfe.linsolve.barschur`).
     reuseHierarchy
         Reuse the AMG hierarchies across solves until one of the rebuild triggers fires (default
         ``True``). With ``False`` every solve builds them for its own matrix: more builds, but no solve
@@ -810,6 +815,7 @@ class BlockAMGSolver(LinearSolver):
         residualGrowthFactor: float = 4.0,
         hierarchyStalenessFactor: float = 3.0,
         refreshOnNewIncrement: bool = True,
+        refreshOnCapHit: bool = True,
         reuseHierarchy: bool = True,
         krylovOnScaledSystem: bool = False,
         gapCompensatedTolerance: bool = False,
@@ -865,6 +871,7 @@ class BlockAMGSolver(LinearSolver):
         self._residualGrowthFactor = residualGrowthFactor
         self._hierarchyStalenessFactor = hierarchyStalenessFactor
         self._refreshOnNewIncrement = refreshOnNewIncrement
+        self._refreshOnCapHit = refreshOnCapHit
         self._reuseHierarchy = reuseHierarchy
         self._krylovOnScaledSystem = krylovOnScaledSystem
         self._gapCompensatedTolerance = gapCompensatedTolerance
@@ -913,6 +920,8 @@ class BlockAMGSolver(LinearSolver):
         self._blocks = None
         self._n = None
         self._lastNnz = None
+        # the field split of the matrix of the last preparePreconditioner, for applyPreconditioner
+        self._preparedSystem = None
         self._lastOuterIters = None
         # outer iterations of the solve the standing hierarchies were built for (see _hierarchyIsStale)
         self._stalenessReferenceIters = None
@@ -967,6 +976,63 @@ class BlockAMGSolver(LinearSolver):
         call."""
         return self._lastSolveSummary
 
+    def requestHierarchyRefresh(self) -> None:
+        """Rebuild the AMG hierarchies on the next solve, whatever the reuse rules say.
+
+        For a caller that knows the matrix changed while its sparsity pattern did not, e.g. a preconditioner that
+        calls this solver repeatedly with one matrix per outer solve (:mod:`edelweissfe.linsolve.barschur`)."""
+        self._refreshNext = True
+
+    def preparePreconditioner(self, A) -> bool:
+        """Build the preconditioner of ``A`` -- equilibration, field split and fresh hierarchies -- for
+        :meth:`applyPreconditioner`, for a caller that applies it within its own Krylov solve instead of solving with
+        this solver (e.g. once per outer iteration of :mod:`edelweissfe.linsolve.barschur`): the field split is
+        built once, not once per application.
+
+        Parameters
+        ----------
+        A
+            The matrix, sparse.
+
+        Returns
+        -------
+        bool
+            False if ``A`` cannot be equilibrated (a non-finite diagonal entry); a zero diagonal entry raises, see
+            :meth:`__call__`.
+        """
+        from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLEquilibratedSystem
+
+        A = self._canonicalMatrix(A)
+        blocks = self._resolveBlocks(A.shape[0])
+        with performancetiming.timeit("equilibration"):
+            scaling, reason = self._equilibration(A)
+        if scaling is None:
+            self._log("warning", "⚠ preconditioner not built: {:}.".format(reason))
+            self._preparedSystem = None
+            return False
+        with performancetiming.timeit("equilibrated system"):
+            system = PyAMGCLEquilibratedSystem()
+            system.build(A, scaling, [(block.start, block.stop) for block in blocks], unscaled=True)
+        self._buildHierarchies(system, blocks, scaling, A)
+        self._preparedSystem = system
+        return True
+
+    def applyPreconditioner(self, r: np.ndarray) -> np.ndarray:
+        """One application ``x = D M^-1 (D r)`` of the block Gauss-Seidel preconditioner built by
+        :meth:`preparePreconditioner` (``M`` built on ``D A D``, see :meth:`__call__`), on unscaled vectors.
+
+        Parameters
+        ----------
+        r
+            The residual.
+
+        Returns
+        -------
+        np.ndarray
+            The correction, an approximation of ``A^-1 r``.
+        """
+        return self._scaling * self._blockGaussSeidel(self._preparedSystem, self._scaling * np.asarray(r))
+
     def _hierarchyIsStale(self, outerIters: int, rebuilt: bool, capHit: bool) -> bool:
         """Whether the standing hierarchies should be rebuilt before the next solve.
 
@@ -975,7 +1041,7 @@ class BlockAMGSolver(LinearSolver):
         slow drift across several solves never trips a 1.5 factor. A rebuild needs the count to exceed both
         ``hierarchyStalenessFactor`` times that reference and the reference plus
         :data:`_STALENESS_MIN_EXCESS` -- at small counts a factor alone fires on noise. A solve
-        that hit the iteration cap always asks for a rebuild: its count says nothing about how far the
+        that hit the iteration cap asks for a rebuild (unless ``refreshOnCapHit`` is off): its count says nothing about how far the
         hierarchies drifted, only that they no longer do the job -- also when that solve had just rebuilt them
         (not rebuilding again was measured neutral, see the theory page). A missed tolerance does not: on
         the scaled system, with continuations off, it comes from the gap between the scaled residual the
@@ -990,7 +1056,7 @@ class BlockAMGSolver(LinearSolver):
         else:
             reference = self._stalenessReferenceIters
             drifted = outerIters > max(self._hierarchyStalenessFactor * reference, reference + _STALENESS_MIN_EXCESS)
-        return drifted or capHit
+        return drifted or (capHit and self._refreshOnCapHit)
 
     def _lgmresCapHit(self, iterations: int, tolerance: float) -> int:
         """``1`` if the last AMGCL LGMRES pass stopped at the iteration cap short of its own tolerance, else ``0``.
@@ -1784,21 +1850,125 @@ class BlockAMGSolver(LinearSolver):
         )
         return np.full(n, np.nan)
 
+    @staticmethod
+    def _canonicalMatrix(A) -> sp.csr_matrix:
+        """``A`` as CSR with sorted columns and no duplicate entries: AMGCL's block backends read the columns as
+        sorted, and no backend sums duplicate entries. A canonical copy if needed, leaving the caller's matrix as it
+        is."""
+        A = A.tocsr()
+        if not A.has_canonical_format:
+            A = A.copy()
+            A.sum_duplicates()
+        return A
+
+    @staticmethod
+    def _equilibration(A: sp.csr_matrix) -> tuple:
+        """The equilibration ``1 / sqrt|a_ii|`` of ``A``, see :meth:`__call__`.
+
+        A zero diagonal entry cannot be equilibrated: 1/sqrt(0) is inf, which would poison A_scaled and b_scaled with
+        non-finite values before the hierarchy build, and the failure would surface much later as a NaN correction
+        (i.e. as DivergingSolution, which reads like a physics problem rather than an unsupported system). Flooring
+        the divisor is not a fix either -- a 1e-300 floor merely turns inf into ~1e150 and blows the scaled operator
+        up to ~1e149, which is finite and equally useless. The honest answer is that a system with a structurally
+        zero diagonal is a saddle-point system (e.g. the multiplier block of a Lagrangian constraint, which never
+        writes its own diagonal), and smoothed-aggregation AMG on a zero block is not something this solver does:
+        it raises, and names the offending dofs.
+
+        A diagonal entry that is NaN or infinite is no better: it makes the scaling, and with it the translations'
+        weights 1/scaling of a block hierarchy, non-finite, which AMGCL's hierarchy build rejects with a RuntimeError
+        -- which nothing in the nonlinear solvers catches, whereas a NaN correction is a DivergingSolution and a
+        cutback. Such a system is declined like a non-finite right-hand side (checked after the zero diagonal, which
+        is the user's error to see first).
+
+        Returns
+        -------
+        tuple
+            ``(scaling, None)``, or ``(None, reason)`` for a non-finite diagonal.
+        """
+        from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLEquilibratedSystem
+
+        diagonal = PyAMGCLEquilibratedSystem.absoluteDiagonal(A)
+        zeroDiagonal = np.nonzero(diagonal == 0.0)[0]
+        if zeroDiagonal.size:
+            raise ValueError(
+                "blockamg: {:} dof(s) have a zero diagonal entry (first at index {:}) and "
+                "cannot be diagonally equilibrated. This is characteristic of a saddle-point "
+                "system -- a Lagrange-multiplier constraint, for instance, couples the "
+                "multiplier without ever writing its own diagonal -- which this field-split "
+                "AMG scheme does not support. Use a direct solver for such a model.".format(
+                    zeroDiagonal.size, int(zeroDiagonal[0])
+                )
+            )
+        nonFiniteDiagonal = np.nonzero(~np.isfinite(diagonal))[0]
+        if nonFiniteDiagonal.size:
+            return None, "the diagonal is not finite at {:} dof(s) (first at index {:})".format(
+                nonFiniteDiagonal.size, int(nonFiniteDiagonal[0])
+            )
+        return 1.0 / np.sqrt(diagonal), None
+
+    def _buildHierarchies(self, system, blocks: list, scaling: np.ndarray, A: sp.csr_matrix) -> None:
+        """Build the per-field hierarchies from the field split ``system`` of ``A`` and make them the standing ones,
+        with the equilibration and the field-block layout they were built for."""
+        with performancetiming.timeit("hierarchy build"):
+            try:
+                preconditioners = self._buildFieldPreconditioners(system, blocks, scaling)
+            except Exception as error:
+                if not self._hotReloadRollback:
+                    raise
+                self._rollBackHotReload(error)
+                preconditioners = self._buildFieldPreconditioners(system, blocks, scaling)
+            self._hotReloadRollback = []
+            # cleared only now: a failed build leaves the request standing for the next solve
+            self._refreshNext = False
+            self._preconditioners = preconditioners
+            self._scaling = scaling
+            self._blocks = blocks
+            self._n = A.shape[0]
+            self._lastNnz = A.nnz
+
+    def _blockGaussSeidel(self, system, residual: np.ndarray) -> np.ndarray:
+        """The preconditioner ``v = M^-1 r`` on the equilibrated system: block Gauss-Seidel sweeps over the fields,
+        ``M^-1 = (B + L)^-1`` for one forward sweep, ``B = blockdiag(M_i)``, ``M_i`` one AMG cycle on
+        ``A_scaled_ii`` of the standing hierarchies; ``system`` provides the blocks ``A_scaled_ij``."""
+        slices = [slice(block.start, block.stop) for block in self._blocks]
+        nFields = len(slices)
+        preconditioners = self._preconditioners
+
+        def sweepOnce(order, v, visited):
+            # Residual-correction form, v_i += M_i^-1 (r_i - sum_j A_scaled_ij v_j): a revisit of a field (sweeps > 1,
+            # or the symmetric reverse sweep) improves its v_i. On a first visit v_i = 0, and only the fields
+            # already visited contribute to the sum.
+            for i in order:
+                localResidual = residual[slices[i]].copy()
+                for j in range(nFields):
+                    if j != i and visited[j]:
+                        localResidual -= system.couplingMatvec(i, j, v[j])
+                if visited[i]:
+                    localResidual -= system.diagonalBlockMatvec(i, v[i])
+                    v[i] = v[i] + preconditioners[i].applyPreconditioner(localResidual)
+                else:
+                    v[i] = preconditioners[i].applyPreconditioner(localResidual)
+                    visited[i] = True
+
+        v = [np.zeros(s.stop - s.start) for s in slices]
+        visited = [False] * nFields
+        for _ in range(self._sweeps):
+            sweepOnce(range(nFields), v, visited)
+            if self._symmetric:
+                # the last field was just updated with everything else current: start one before it (with an
+                # AMG cycle it still has a residual left, but a cycle on it is saved)
+                sweepOnce(range(nFields - 2, -1, -1), v, visited)
+        return np.concatenate(v)
+
     def __call__(self, A, b):
         solveStartTime = time.time()
         from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLEquilibratedSystem
 
         self._solveCount += 1
         self._maybeHotReloadConfig()
-        A = A.tocsr()
-        if not A.has_canonical_format:
-            # AMGCL's block backends read the columns as sorted, and no backend sums duplicate entries: a
-            # canonical copy, leaving the caller's matrix as it is
-            A = A.copy()
-            A.sum_duplicates()
+        A = self._canonicalMatrix(A)
         n = A.shape[0]
         blocks = self._resolveBlocks(n)
-        slices = [slice(block.start, block.stop) for block in blocks]
         b = np.asarray(b).reshape(n)
 
         # (1) Newton-state detection: a residual jump marks a new increment (not a cutback after a diverged
@@ -1858,42 +2028,9 @@ class BlockAMGSolver(LinearSolver):
         #     right-preconditioned by the same equilibrated blocks (see __call__ below).
         with performancetiming.timeit("equilibration"):
             if mustRefresh:
-                diagonal = PyAMGCLEquilibratedSystem.absoluteDiagonal(A)
-                # A zero diagonal entry cannot be equilibrated: 1/sqrt(0) is inf, which would poison
-                # A_scaled and b_scaled with non-finite values before the hierarchy build, and the failure would
-                # surface much later as a NaN correction (i.e. as DivergingSolution, which reads like
-                # a physics problem rather than an unsupported system). Flooring the divisor is not a
-                # fix either -- a 1e-300 floor merely turns inf into ~1e150 and blows the scaled
-                # operator up to ~1e149, which is finite and equally useless. The honest answer is
-                # that a system with a structurally zero diagonal is a saddle-point system (e.g. the
-                # multiplier block of a Lagrangian constraint, which never writes its own diagonal),
-                # and smoothed-aggregation AMG on a zero block is not something this solver does.
-                # Say so, and name the offending dofs.
-                zeroDiagonal = np.nonzero(diagonal == 0.0)[0]
-                if zeroDiagonal.size:
-                    raise ValueError(
-                        "blockamg: {:} dof(s) have a zero diagonal entry (first at index {:}) and "
-                        "cannot be diagonally equilibrated. This is characteristic of a saddle-point "
-                        "system -- a Lagrange-multiplier constraint, for instance, couples the "
-                        "multiplier without ever writing its own diagonal -- which this field-split "
-                        "AMG scheme does not support. Use a direct solver for such a model.".format(
-                            zeroDiagonal.size, int(zeroDiagonal[0])
-                        )
-                    )
-                # A diagonal entry that is NaN or infinite is no better: it makes the scaling, and with it the
-                # translations' weights 1/scaling of a block hierarchy, non-finite, which AMGCL's hierarchy build
-                # rejects with a RuntimeError -- which nothing in the nonlinear solvers catches, whereas a NaN
-                # correction is a DivergingSolution and a cutback. Decline the solve like a non-finite right-hand
-                # side (checked after the zero diagonal, which is the user's error to see first).
-                nonFiniteDiagonal = np.nonzero(~np.isfinite(diagonal))[0]
-                if nonFiniteDiagonal.size:
-                    return self._notSolved(
-                        n,
-                        "the diagonal is not finite at {:} dof(s) (first at index {:})".format(
-                            nonFiniteDiagonal.size, int(nonFiniteDiagonal[0])
-                        ),
-                    )
-                scaling = 1.0 / np.sqrt(diagonal)
+                scaling, reason = self._equilibration(A)
+                if scaling is None:
+                    return self._notSolved(n, reason)
             else:
                 # Reuse the equilibration the standing hierarchies were built for. Any D gives the same
                 # system in other variables (A_scaled z = b_scaled with x = D z), so the outer solve still solves the
@@ -1916,23 +2053,7 @@ class BlockAMGSolver(LinearSolver):
 
         # (4) Hierarchies: one per field, rebuilt or reused (see mustRefresh above)
         if mustRefresh:
-            with performancetiming.timeit("hierarchy build"):
-                try:
-                    preconditioners = self._buildFieldPreconditioners(system, blocks, scaling)
-                except Exception as error:
-                    if not self._hotReloadRollback:
-                        raise
-                    self._rollBackHotReload(error)
-                    preconditioners = self._buildFieldPreconditioners(system, blocks, scaling)
-                self._hotReloadRollback = []
-                # cleared only now: a failed build leaves the request standing for the next solve
-                self._refreshNext = False
-                self._preconditioners = preconditioners
-                self._scaling = scaling
-                self._blocks = blocks
-                self._n = n
-                self._lastNnz = A.nnz
-        preconditioners = self._preconditioners
+            self._buildHierarchies(system, blocks, scaling, A)
 
         # The outer solve runs on the system the settings in force ask for, read once for this solve: a hot reload
         # rolled back above may have changed krylovOnScaledSystem since the system was built.
@@ -1941,37 +2062,8 @@ class BlockAMGSolver(LinearSolver):
             with performancetiming.timeit("equilibrated system"):
                 system.build(A, scaling, fieldBounds, unscaled=not onScaledSystem)
 
-        nFields = len(slices)
-        sizes = [block.stop - block.start for block in blocks]
-
-        # (5a) The preconditioner v = M^-1 r: block Gauss-Seidel sweeps over the fields, M^-1 = (B + L)^-1 for one
-        #      forward sweep, B = blockdiag(M_i), M_i one AMG cycle on A_scaled_ii.
-        def sweepOnce(order, residual, v, visited):
-            # Residual-correction form, v_i += M_i^-1 (r_i - sum_j A_scaled_ij v_j): a revisit of a field (sweeps > 1,
-            # or the symmetric reverse sweep) improves its v_i. On a first visit v_i = 0, and only the fields
-            # already visited contribute to the sum.
-            for i in order:
-                localResidual = residual[slices[i]].copy()
-                for j in range(nFields):
-                    if j != i and visited[j]:
-                        localResidual -= system.couplingMatvec(i, j, v[j])
-                if visited[i]:
-                    localResidual -= system.diagonalBlockMatvec(i, v[i])
-                    v[i] = v[i] + preconditioners[i].applyPreconditioner(localResidual)
-                else:
-                    v[i] = preconditioners[i].applyPreconditioner(localResidual)
-                    visited[i] = True
-
         def blockGaussSeidel(residual):
-            v = [np.zeros(sizes[i]) for i in range(nFields)]
-            visited = [False] * nFields
-            for _ in range(self._sweeps):
-                sweepOnce(range(nFields), residual, v, visited)
-                if self._symmetric:
-                    # the last field was just updated with everything else current: start one before it (with an
-                    # AMG cycle it still has a residual left, but a cycle on it is saved)
-                    sweepOnce(range(nFields - 2, -1, -1), residual, v, visited)
-            return np.concatenate(v)
+            return self._blockGaussSeidel(system, residual)
 
         # krylovOnScaledSystem = False: the outer solve runs on A itself, preconditioned by x = D M^-1 (D r) --
         # M built on D A D as always -- so that the residual it converges is the true one the solve is accepted

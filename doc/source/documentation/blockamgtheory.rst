@@ -1034,12 +1034,17 @@ Hierarchy reuse
       - ``3.0``
       - Refresh the hierarchies before the *next* solve if this solve's outer iteration count
         exceeded both this factor times and 15 more than that of the solve the hierarchies were built
-        for. A cap hit always refreshes them.
+        for. A cap hit refreshes them too (see ``refreshOnCapHit``).
     * - ``refreshOnNewIncrement``
       - ``true``
       - Refresh the hierarchies on a residual jump (a new increment). With ``false`` the
         first Newton iteration of an increment keeps the standing hierarchies; the layout/pattern
         checks and ``hierarchyStalenessFactor`` still apply.
+    * - ``refreshOnCapHit``
+      - ``true``
+      - Refresh the hierarchies after a solve that hit the outer iteration cap. ``false`` for a
+        caller that solves repeatedly with one matrix, for which a rebuilt hierarchy would be the
+        same one (the inner solves of ``barschur``).
     * - ``reuseHierarchy``
       - ``true``
       - Reuse the hierarchies across solves until a rebuild trigger fires. With ``false`` every
