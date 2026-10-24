@@ -112,8 +112,8 @@ Relevant module ``edelweissfe.generators.embeddedbond``
     :language: edelweiss
     :caption: Example (embedded beam): ``testfiles/marmot/EmbeddedBeamPile2D/test.inp``
 
-The bars keep their own dofs, coupled to the host only by the bond elements: iterative solution needs the
-``barschur`` linear solver instead of ``blockamg`` (see :doc:`linsolvers`). With ``splitBars``,
+The bars keep their own dofs, coupled to the host only by the bond elements: iterative solution needs
+``blockamg`` with the bar dofs condensed (``schurComplement``, see :doc:`linsolvers`). With ``splitBars``,
 ``minimumPartLength`` avoids very short bar elements, which make the equation system nearly singular.
 
 ``cuboidlatticegenerator`` - A cuboid lattice mesh generator
