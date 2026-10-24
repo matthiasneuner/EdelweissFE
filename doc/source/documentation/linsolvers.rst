@@ -46,9 +46,6 @@ Choose a linsolver after the ``*solver`` keyword:
     * - ``blockamg``
       - ✗
       - ``edelweissfe.linsolve.blockamg.blockamg``
-    * - ``barschur``
-      - ✗
-      - ``edelweissfe.linsolve.barschur.barschur``
     * - ``matrixdump``
       - —
       - ``edelweissfe.linsolve.matrixdump.matrixdump``
@@ -73,9 +70,8 @@ the run's bottleneck or exceeds available memory.
   physical field (e.g. displacement, nonlocal damage), combined by a block Gauss--Seidel sweep to
   precondition an outer GMRES/LGMRES. This is the route to problem sizes a direct factorization
   cannot reach at all.
-* ``barschur`` -- for embedded bars with their own dofs (bond-slip, ``embeddedBond``), on which
-  ``blockamg`` alone stalls: the bar dofs are condensed exactly, the other dofs are solved by an inner
-  ``blockamg`` on an approximate Schur complement, within an outer flexible GMRES.
+  With ``schurComplement``, it condenses selected dofs exactly first, for dofs on which AMG alone
+  stalls, such as those of embedded bars with bond-slip (``embeddedBond``).
 
 **A diagnostic wrapper**, which does not solve anything itself:
 
@@ -121,68 +117,44 @@ The method, the near-null-space construction, the adaptive outer tolerance, hier
    blockamgtheory
 
 
-The ``barschur`` solver
------------------------
+Schur complement condensation (``blockamg``)
+---------------------------------------------
 
-``barschur`` solves systems with **embedded bars that carry their own dofs**, i.e. bond-slip between reinforcement
-and concrete (the ``embeddedBond`` generator). The rows of the bar dofs are dominated by the bond springs to the nodes
-of their host elements, :math:`u_{bar} \approx \sum_i N_i u_i`, a relation that an aggregation AMG coarse space cannot
-represent: ``blockamg`` alone stalls on such systems from the first load step. With perfect bond (``embeddedRegion``)
-the same relation is a multi-point constraint, eliminated before the solve, and ``blockamg`` is the right choice.
+Some dofs make ``blockamg`` stall: the dofs of embedded bars with **bond-slip** (``embeddedBond``), for
+instance, are tied to the nodes of their host elements by stiff bond springs,
+:math:`u_{bar} \approx \sum_i N_i u_i`, a relation an aggregation AMG coarse space cannot represent.
+(With perfect bond, ``embeddedRegion``, the same relation is a multi-point constraint, eliminated before
+the solve, and plain ``blockamg`` is the right choice.) The ``schurComplement`` option of ``blockamg``
+condenses such dofs :math:`b` exactly -- a direct factorization of their block :math:`A_{bb}` -- and builds
+the field-split AMG on the approximate Schur complement :math:`\tilde S \approx A_{kk} - A_{kb}
+A_{bb}^{-1} A_{bk}` of all other dofs :math:`k`. Everything else is ``blockamg`` as usual.
 
-``barschur`` treats the bar dofs :math:`b` (all dofs of the nodes that carry only 1D elements: the bars and the bond
-elements) and all other dofs :math:`k` as the two blocks of a block LU factorization:
-
-.. math::
-
-    y_b = A_{bb}^{-1} r_b, \quad z_k = \tilde{S}^{-1} (r_k - A_{kb} y_b), \quad z_b = A_{bb}^{-1} (r_b - A_{bk} z_k).
-
-The bar block :math:`A_{bb}` decouples into one chain per bar and is factorized exactly. The Schur complement of the
-other dofs, :math:`S = A_{kk} - A_{kb} A_{bb}^{-1} A_{bk}`, is dense along each bar, but its entries decay within a
-few host elements (a bar on an elastic foundation): ``schurApproximation = "local"`` (the default) computes it in
-overlapping windows along the bars and drops the small entries. :math:`\tilde{S}^{-1}` is ``innerCycles`` (default 2)
-applications of the preconditioner of an inner ``blockamg`` (one block Gauss-Seidel sweep of AMG cycles over the
-fields), as a stationary iteration on :math:`\tilde{S}`; the outer solve is a flexible GMRES on the full system and
-does the acceleration. With ``"innerCycles": null``, :math:`\tilde{S}^{-1}` is instead an inner ``blockamg`` solve to
-``innerTolerance``. On a hex20 tunnel segment with bond-slip (2.07 M dofs), two cycles took a third less time per solve
-than inner solves to 0.3 (51 outer iterations instead of 32, but 102 AMG applications instead of 164, and no inner
-Krylov iterations or per-solve setup of the inner solver); one cycle needed three times the outer iterations, three
-cycles were slower than two. Through cracking, the run was about four times faster than with inner solves. The
-inner hierarchies of 3D vector fields use 50 instead of 300 power iterations for the Chebyshev smoother's spectral
-radius (unless the ``blockamg`` options give the field its own tree): they are rebuilt with every approximate Schur
-complement, and 50 gave the same outer iterations at a third of the build time. The approximate Schur complement and
-the inner hierarchies are reused for the following solves while the sparsity pattern stays the same and the outer
-iterations do not drift; a solve that fails with a reused one is repeated with a rebuilt one.
+The condensed dofs are chosen with the **markers** of adaptive mesh refinement (the options of a
+``>>marker`` line): the dofs of the interior nodes of the marked elements -- the nodes all of whose
+elements are marked -- are condensed. For embedded bars, mark the bars and the bond elements:
 
 .. code-block:: edelweiss
 
     *solver, solver=NISTParallel, name=theSolver
-    linsolver=barschur
-    linsolverConfigFile=barschur.json
+    linsolver=blockamg
+    linsolverConfigFile=blockamg.json
 
 .. code-block:: json
 
     {
-        "schurApproximation": "local",
-        "schurWindow": 300,
-        "blockamg": {}
+        "sweeps": 2,
+        "schurComplement": {
+            "markers": [
+                {"type": "elementSet", "elSet": "rebars"},
+                {"type": "elementSet", "elSet": "rebarBond_bond"}
+            ],
+            "directSolver": {"linsolver": "pardiso"}
+        }
     }
 
-Configuration keys (defaults in parentheses): ``outerTolerance`` (1e-3, relative residual of the outer solve),
-``innerCycles`` (2; ``null``: inner solves to ``innerTolerance``), ``innerTolerance`` (0.1), ``restart`` (50; much
-shorter restarts cost many more outer iterations), ``maxIterations`` (100; on the tunnel segment 498 of 502 solves needed at most 100, the rest were hopeless
-Newton iterations at the damage onset), ``schurApproximation`` (``"local"``; ``"nodal"``
-uses the diagonal block of each bar node only, which suffices for trusses but not for beams; ``"none"`` uses
-:math:`A_{kk}`), ``schurDropTolerance`` (1e-4), ``schurWindow`` (600 bar dofs per window core), ``schurHalo`` (bar dofs per halo on
-either side of a core; default ``schurWindow``), ``reuseSchurComplement`` (true), ``schurStalenessFactor`` (1.5),
-``dumpSlowSolvesDir`` / ``dumpSlowSolveSeconds`` / ``dumpSlowSolvesMax`` (write the systems of slow solves for offline
-diagnosis; off / 300 / 5) and ``blockamg`` (the options of the inner solver; with inner solves, an inner iteration
-cap, e.g. ``"outerRestart": 20``, bounds the cost of inner solves that converge poorly).
-Requires the optional ``amgcl`` extension.
-
-Very short bar elements make the equation system nearly singular for any solver (a beam of length :math:`L` adds the
-bending stiffness :math:`12 EI / L^3`); with ``splitBars``, set the ``embeddedBond`` option ``minimumPartLength`` to
-avoid them.
+``rebarBond_bond`` is the element set of bond elements the ``embeddedBond`` generator named ``rebarBond``
+creates. A ``fieldOutput`` marker condenses, e.g., a softening zone instead. The method, every key and the
+caveats are on the :doc:`blockamgtheory` page (section "Schur complement condensation").
 
 
 The ``amgcl`` solver

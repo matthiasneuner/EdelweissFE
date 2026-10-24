@@ -1,0 +1,16 @@
+{
+  "outerTol": 1e-10,
+  "sweeps": 2,
+  "schurComplement": {
+    "markers": [
+      {
+        "type": "elementSet",
+        "elSet": "rebars"
+      },
+      {
+        "type": "elementSet",
+        "elSet": "rebarBond_bond"
+      }
+    ]
+  }
+}

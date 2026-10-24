@@ -1034,17 +1034,12 @@ Hierarchy reuse
       - ``3.0``
       - Refresh the hierarchies before the *next* solve if this solve's outer iteration count
         exceeded both this factor times and 15 more than that of the solve the hierarchies were built
-        for. A cap hit refreshes them too (see ``refreshOnCapHit``).
+        for. A cap hit always refreshes them.
     * - ``refreshOnNewIncrement``
       - ``true``
       - Refresh the hierarchies on a residual jump (a new increment). With ``false`` the
         first Newton iteration of an increment keeps the standing hierarchies; the layout/pattern
         checks and ``hierarchyStalenessFactor`` still apply.
-    * - ``refreshOnCapHit``
-      - ``true``
-      - Refresh the hierarchies after a solve that hit the outer iteration cap. ``false`` for a
-        caller that solves repeatedly with one matrix, for which a rebuilt hierarchy would be the
-        same one (the inner solves of ``barschur``).
     * - ``reuseHierarchy``
       - ``true``
       - Reuse the hierarchies across solves until a rebuild trigger fires. With ``false`` every
@@ -1229,6 +1224,127 @@ the full estimate again. The cache is dropped when the model
 changes (e.g. after adaptive refinement).
 
 
+Schur complement condensation (opt-in)
+--------------------------------------
+
+Aggregation AMG fails on some dofs whatever the field split: the dofs of embedded bars with bond-slip are
+the prominent case. A bar node is tied by bond springs to the nodes of the host element it lies in, so a
+low-energy error has the bar follow the host, :math:`u_{bar} \approx \sum_i N_i u_i` -- an interpolation of
+nodes at other positions, which an aggregate moving as a rigid body cannot represent. The bars are also
+stiff 1D chains inside a softer 3D continuum, a strong anisotropy. ``blockamg`` alone stalls on such systems.
+
+``schurComplement`` condenses these dofs :math:`b` exactly and leaves AMG the remaining dofs :math:`k`:
+
+.. math::
+
+    \begin{bmatrix} A_{bb} & A_{bk} \\ A_{kb} & A_{kk} \end{bmatrix}
+    \begin{bmatrix} x_b \\ x_k \end{bmatrix} =
+    \begin{bmatrix} r_b \\ r_k \end{bmatrix},
+    \qquad
+    S = A_{kk} - A_{kb} A_{bb}^{-1} A_{bk}.
+
+The Schur complement :math:`S` is the operator of the remaining dofs once :math:`x_b` is eliminated -- for
+bars, the concrete stiffened by the bars as seen through their bond. It is again an operator of a continuum,
+which is what the per-field hierarchies handle well. The preconditioner of the outer Krylov solve is the block
+LU factorization,
+
+.. math::
+
+    y_b = A_{bb}^{-1} r_b, \qquad
+    z_k = M_{\tilde S}^{-1} (r_k - A_{kb} y_b), \qquad
+    z_b = A_{bb}^{-1} (r_b - A_{bk} z_k),
+
+which is nothing but one symmetric block Gauss--Seidel sweep over the two blocks :math:`[b, k]`: the first and
+the last step solve the :math:`b` block exactly (a direct factorization of :math:`A_{bb}`), the middle step
+is the usual field-split sweep :math:`M_{\tilde S}^{-1}` of ``blockamg``, built on an approximation
+:math:`\tilde S` of :math:`S` instead of on :math:`A`. With :math:`\tilde S = S` and exact field solves,
+the preconditioner is :math:`A^{-1}`; the outer Krylov solve corrects for both approximations.
+
+**The approximate Schur complement.** :math:`S` is dense wherever :math:`A_{bb}^{-1}` is -- along a whole bar.
+But the entries of the inverse of a banded, well-conditioned matrix decay exponentially away from the diagonal
+(Demko, Moss and Smith 1984); physically, a bar on its bond is a beam on an elastic foundation, and a load on it
+is felt only a few host elements away. :math:`\tilde S` therefore keeps only the significant entries:
+
+* a long, banded component of :math:`A_{bb}` (a bar, ordered along the bar by the reverse Cuthill--McKee
+  ordering) is cut into overlapping windows, cores of ``windowSize`` dofs with halos of ``haloSize`` dofs on
+  either side; for the dofs of a core, :math:`A_{bb}^{-1}` is replaced by the inverse of the window's block, and
+  only the core rows are kept (restricted additive Schwarz, Cai and Sarkis 1999). A short component (a short
+  bar) is a single window, which is exact;
+* a long component that is not banded (a zone of a 2D or 3D mesh, e.g. a softening zone) gets its exact
+  correction from the factorization of :math:`A_{bb}`, solved for the coupled remaining dofs in batches of
+  right-hand sides -- windows of a few hundred dofs would cut such a zone into pieces far smaller than the
+  distance over which its inverse decays;
+* entries :math:`|\tilde S_{ij}| < \tau \sqrt{|\tilde S_{ii} \tilde S_{jj}|}` are dropped (``dropTolerance``).
+
+**Choosing the condensed dofs.** The markers of adaptive mesh refinement select elements
+(:mod:`edelweissfe.adaptivity.marking`; any ``type`` with the options of its ``>>marker`` line), and :math:`b` holds
+all dofs of the *interior nodes* of the marked elements: the nodes that have at least one element, all of them
+marked. One rule serves every use:
+
+* embedded bars: mark the bar elements and the bond elements (``elementSet`` markers for the bar sets and the
+  ``<generator>_bond`` sets of ``embeddedBond``). A bar node belongs only to them; a host node also belongs to
+  continuum elements, so it stays in :math:`k`;
+* a softening zone: a ``fieldOutput`` marker on a ``perElement`` fieldOutput (damage, a hardening variable) with a
+  threshold, and a ``halo`` so that the nodes of the zone itself become interior. All dofs of a node are condensed,
+  e.g. displacement and nonlocal damage. A fieldOutput has no result before the first converged increment, so
+  nothing is condensed until then.
+
+The markers are evaluated on every solve; a fieldOutput changes only between increments, and a changed selection
+rebuilds :math:`\tilde S` and the hierarchies. Should the markers select every dof, nothing is condensed (with a
+warning): there would be nothing left for the field split, and a direct solver is the better choice.
+
+**Within a solve.** Every solve cuts :math:`A_{bb}`, :math:`A_{bk}` and :math:`A_{kb}` out of the current matrix
+(at positions found once per sparsity pattern) and factorizes :math:`A_{bb}`. :math:`\tilde S` is computed when
+the hierarchies are rebuilt -- under the same reuse rules as without condensation -- and the hierarchies are
+built on it: the field blocks are those of the remaining dofs (a field whose dofs are all condensed, such as the
+rotations of embedded beams, has none), and the node coordinates of the near null-space and the P1 maps of
+p-multigrid are restricted to the remaining nodes (a midside node whose edge endpoint is condensed becomes a
+corner). Between rebuilds, the sweep keeps the couplings of the standing :math:`\tilde S`, while :math:`A_{bb}`,
+:math:`A_{bk}` and :math:`A_{kb}` are those of the current matrix: unlike without condensation, where the couplings
+between the fields are taken from the current matrix on every solve. The outer Krylov solve runs on :math:`A`
+itself, so ``krylovOnScaledSystem`` cannot be combined with it. ``schurComplement`` is fixed at construction: a hot
+reload that changes it is rejected.
+
+**Two sweeps.** The sweep in residual-correction form makes ``sweeps = 2`` exactly two steps of the stationary
+iteration :math:`z \leftarrow z + M^{-1} (r - \tilde S z)` with the one-sweep preconditioner :math:`M^{-1}`,
+which on bar systems was found a good balance between AMG cycles and outer iterations; ``sweeps = 1`` is
+cheaper per iteration and needs more of them.
+
+**The direct solver.** ``directSolver`` names any registered linear solver that factorizes once for several
+right-hand sides (``factorize``/``solveFactorized``): ``superlu`` or ``pardiso`` (``klu``, ``mumps`` and ``petsclu``
+do not). Bars give block-tridiagonal chains, cheap for either; a softening zone is a 3D block whose tangent is
+non-symmetric and may be indefinite, for which a threaded, pivoting factorization (``pardiso``) is the better
+choice.
+
+.. list-table:: Schur complement condensation key
+    :width: 100%
+    :widths: 20 10 45
+    :header-rows: 1
+
+    * - Key
+      - Default
+      - Meaning
+    * - ``schurComplement``
+      - unset
+      - A JSON object with the keys below; unset: no condensation.
+
+The keys of ``schurComplement``:
+
+``markers`` (required)
+    A list of markers, each a JSON object with a ``type`` and the options of a ``>>marker`` line of
+    ``*modelModifier, type=hAdaptivity``, e.g. ``{"type": "fieldOutput", "fieldOutput": "damage",
+    "threshold": 0.05, "halo": 1}``. Sets, surfaces and fieldOutputs they name must exist.
+``approximation`` (``"local"``)
+    ``"local"``: :math:`\tilde S` as above. ``"none"``: :math:`\tilde S = A_{kk}`, the coupling through :math:`b`
+    ignored (for comparison).
+``dropTolerance`` (``1e-4``)
+    :math:`\tau`, the relative size below which entries of :math:`\tilde S` are dropped.
+``windowSize``, ``haloSize`` (``300``, ``windowSize``)
+    The dofs of a window's core along a banded component, and of the halo on either side. A component no longer
+    than one core with both halos is corrected exactly.
+``directSolver`` (EdelweissFE's default linear solver: PARDISO if available, else SuperLU)
+    ``{"linsolver": <name>, "options": {...}}``, the solver of :math:`A_{bb}`.
+
 A worked example
 ----------------
 
@@ -1351,3 +1467,10 @@ Further reading
   relaxation kernels and the native outer solver.
 * N. Alkmim et al., Int. J. Numer. Methods Eng. (2026) -- the field-split block-preconditioning
   strategy for coupled multi-field fracture models that this solver follows.
+* S. Demko, W. F. Moss, P. W. Smith, *Decay rates for inverses of band matrices*, Math. Comp. **43**
+  (1984) 491--499 -- why the Schur complement of condensed bars is local.
+* X.-C. Cai, M. Sarkis, *A restricted additive Schwarz preconditioner for general sparse linear
+  systems*, SIAM J. Sci. Comput. **21** (1999) 792--797 -- the windows of the approximate Schur
+  complement.
+* H. C. Elman, D. J. Silvester, A. J. Wathen, *Finite Elements and Fast Iterative Solvers*, Oxford
+  University Press (2014) -- block (Schur complement) preconditioners.

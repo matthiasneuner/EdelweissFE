@@ -99,6 +99,7 @@ import scipy.sparse as sp
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.linsolve.base import FieldBlock, LinearSolver, LinearSolveSummary
+from edelweissfe.linsolve.blockamg import schurcomplement
 from edelweissfe.linsolve.nullspace import rigidBodyNullspace, translationNullspace
 
 # Ordered low-to-high; index comparison decides whether a message at a given level should print.
@@ -332,7 +333,6 @@ CONFIG_CASTS = {
     "residualGrowthFactor": float,
     "hierarchyStalenessFactor": float,
     "refreshOnNewIncrement": _boolFromConfig,
-    "refreshOnCapHit": _boolFromConfig,
     "reuseHierarchy": _boolFromConfig,
     "krylovOnScaledSystem": _boolFromConfig,
     "trueResidualMaxContinuations": int,
@@ -359,6 +359,7 @@ CONFIG_CASTS = {
     "p1CoarseValueType": str,
     "p1FineSpectralRadiusReuse": _boolFromConfig,
     "p1CoarsePrecond": _mappingFromConfig,
+    "schurComplement": _mappingFromConfig,
 }
 
 
@@ -374,6 +375,13 @@ _P1_OPTIONS = {
     "p1CoarseValueType": "coarseValueType",
     "p1CoarsePrecond": "coarsePrecond",
 }
+
+
+def _sameCondensedDofs(dofs, otherDofs) -> bool:
+    """Whether two choices of Schur complement condensed dofs are the same; ``None`` is no condensation."""
+    if dofs is None or otherDofs is None:
+        return dofs is otherDofs
+    return np.array_equal(dofs, otherDofs)
 
 
 class BlockAMGSolver(LinearSolver):
@@ -655,10 +663,6 @@ class BlockAMGSolver(LinearSolver):
         (default ``True``). With ``False`` a new increment alone keeps the standing hierarchies -- the
         first Newton iteration's Jacobian is the converged one of the previous increment -- and only
         the layout/pattern checks and ``hierarchyStalenessFactor`` decide.
-    refreshOnCapHit
-        Refresh the AMG hierarchies after a solve that hit the outer iteration cap (default ``True``). ``False`` for
-        a caller that solves repeatedly with one matrix, for which a rebuilt hierarchy would be the same one (the
-        inner solves of :mod:`edelweissfe.linsolve.barschur`).
     reuseHierarchy
         Reuse the AMG hierarchies across solves until one of the rebuild triggers fires (default
         ``True``). With ``False`` every solve builds them for its own matrix: more builds, but no solve
@@ -756,6 +760,16 @@ class BlockAMGSolver(LinearSolver):
 
         Unrecognized keys are reported rather than ignored, and so are recognized ones that cannot
         be applied after construction.
+    schurComplement
+        Condense selected dofs exactly and build the field split on the approximate Schur complement of all
+        other dofs (:mod:`~edelweissfe.linsolve.blockamg.schurcomplement`): for dofs that make AMG stall, such as
+        those of embedded bars with bond-slip. A JSON object with the keys ``markers`` (required: a list of
+        markers with the options of a ``>>marker`` line of adaptive refinement, e.g. ``{"type": "elementSet",
+        "elSet": "rebars"}``; the dofs of the interior nodes of the marked elements are condensed),
+        ``approximation`` (``"local"``, the default, or ``"none"``), ``dropTolerance`` (``1e-4``), ``windowSize``
+        and ``haloSize`` (``300`` dofs and ``windowSize``) and ``directSolver`` (``{"linsolver": <name>, "options": {...}}``, a
+        linear solver that factorizes once for several right-hand sides; EdelweissFE's default linear solver
+        if omitted). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
     """
 
     #: See :attr:`~edelweissfe.linsolve.base.LinearSolver.identification`.
@@ -815,7 +829,6 @@ class BlockAMGSolver(LinearSolver):
         residualGrowthFactor: float = 4.0,
         hierarchyStalenessFactor: float = 3.0,
         refreshOnNewIncrement: bool = True,
-        refreshOnCapHit: bool = True,
         reuseHierarchy: bool = True,
         krylovOnScaledSystem: bool = False,
         gapCompensatedTolerance: bool = False,
@@ -829,6 +842,7 @@ class BlockAMGSolver(LinearSolver):
         dumpOnDegradationMaxDumps: int = 10,
         dumpOnDegradationContextSolves: int = 0,
         hotReloadConfigFile: str = None,
+        schurComplement: dict = None,
     ):
         self._outerTol = outerTol
         self._outerRestart = outerRestart
@@ -871,13 +885,13 @@ class BlockAMGSolver(LinearSolver):
         self._residualGrowthFactor = residualGrowthFactor
         self._hierarchyStalenessFactor = hierarchyStalenessFactor
         self._refreshOnNewIncrement = refreshOnNewIncrement
-        self._refreshOnCapHit = refreshOnCapHit
         self._reuseHierarchy = reuseHierarchy
         self._krylovOnScaledSystem = krylovOnScaledSystem
         self._gapCompensatedTolerance = gapCompensatedTolerance
         self._gapSafetyFactor = gapSafetyFactor
         self._gapMaxFactor = gapMaxFactor
         self._trueResidualMaxContinuations = trueResidualMaxContinuations
+        self._schurComplement = schurComplement
         if verbosity not in _VERBOSITY_LEVELS:
             raise ValueError("verbosity must be one of {:}, got {!r}".format(_VERBOSITY_LEVELS, verbosity))
         self._verbosityIndex = _VERBOSITY_LEVELS.index(verbosity)
@@ -920,8 +934,6 @@ class BlockAMGSolver(LinearSolver):
         self._blocks = None
         self._n = None
         self._lastNnz = None
-        # the field split of the matrix of the last preparePreconditioner, for applyPreconditioner
-        self._preparedSystem = None
         self._lastOuterIters = None
         # outer iterations of the solve the standing hierarchies were built for (see _hierarchyIsStale)
         self._stalenessReferenceIters = None
@@ -952,6 +964,15 @@ class BlockAMGSolver(LinearSolver):
                 "blockamg: " + "; ".join("{:} {:}".format(name, reason) for name, reason in rejections.items())
             )
 
+        # The Schur complement condensation (schurComplement), None without; created once its options are known to
+        # be valid. The approximate Schur complement the standing hierarchies were built on, and its condensed dofs.
+        self._condensation = (
+            schurcomplement.createCondensation(schurComplement) if schurComplement is not None else None
+        )
+        self._schurComplementMatrix = None
+        self._hierarchyCondensedDofs = None
+        self._warnedAllDofsSelected = False
+
         # Created only once construction is known to succeed: a configuration rejected above must not
         # leave a directory behind, and an uncreatable path should raise the ValueError above naming
         # dumpOnDegradationDir, not a bare OSError from makedirs() before validation even ran.
@@ -976,63 +997,6 @@ class BlockAMGSolver(LinearSolver):
         call."""
         return self._lastSolveSummary
 
-    def requestHierarchyRefresh(self) -> None:
-        """Rebuild the AMG hierarchies on the next solve, whatever the reuse rules say.
-
-        For a caller that knows the matrix changed while its sparsity pattern did not, e.g. a preconditioner that
-        calls this solver repeatedly with one matrix per outer solve (:mod:`edelweissfe.linsolve.barschur`)."""
-        self._refreshNext = True
-
-    def preparePreconditioner(self, A) -> bool:
-        """Build the preconditioner of ``A`` -- equilibration, field split and fresh hierarchies -- for
-        :meth:`applyPreconditioner`, for a caller that applies it within its own Krylov solve instead of solving with
-        this solver (e.g. once per outer iteration of :mod:`edelweissfe.linsolve.barschur`): the field split is
-        built once, not once per application.
-
-        Parameters
-        ----------
-        A
-            The matrix, sparse.
-
-        Returns
-        -------
-        bool
-            False if ``A`` cannot be equilibrated (a non-finite diagonal entry); a zero diagonal entry raises, see
-            :meth:`__call__`.
-        """
-        from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLEquilibratedSystem
-
-        A = self._canonicalMatrix(A)
-        blocks = self._resolveBlocks(A.shape[0])
-        with performancetiming.timeit("equilibration"):
-            scaling, reason = self._equilibration(A)
-        if scaling is None:
-            self._log("warning", "⚠ preconditioner not built: {:}.".format(reason))
-            self._preparedSystem = None
-            return False
-        with performancetiming.timeit("equilibrated system"):
-            system = PyAMGCLEquilibratedSystem()
-            system.build(A, scaling, [(block.start, block.stop) for block in blocks], unscaled=True)
-        self._buildHierarchies(system, blocks, scaling, A)
-        self._preparedSystem = system
-        return True
-
-    def applyPreconditioner(self, r: np.ndarray) -> np.ndarray:
-        """One application ``x = D M^-1 (D r)`` of the block Gauss-Seidel preconditioner built by
-        :meth:`preparePreconditioner` (``M`` built on ``D A D``, see :meth:`__call__`), on unscaled vectors.
-
-        Parameters
-        ----------
-        r
-            The residual.
-
-        Returns
-        -------
-        np.ndarray
-            The correction, an approximation of ``A^-1 r``.
-        """
-        return self._scaling * self._blockGaussSeidel(self._preparedSystem, self._scaling * np.asarray(r))
-
     def _hierarchyIsStale(self, outerIters: int, rebuilt: bool, capHit: bool) -> bool:
         """Whether the standing hierarchies should be rebuilt before the next solve.
 
@@ -1041,7 +1005,7 @@ class BlockAMGSolver(LinearSolver):
         slow drift across several solves never trips a 1.5 factor. A rebuild needs the count to exceed both
         ``hierarchyStalenessFactor`` times that reference and the reference plus
         :data:`_STALENESS_MIN_EXCESS` -- at small counts a factor alone fires on noise. A solve
-        that hit the iteration cap asks for a rebuild (unless ``refreshOnCapHit`` is off): its count says nothing about how far the
+        that hit the iteration cap always asks for a rebuild: its count says nothing about how far the
         hierarchies drifted, only that they no longer do the job -- also when that solve had just rebuilt them
         (not rebuilding again was measured neutral, see the theory page). A missed tolerance does not: on
         the scaled system, with continuations off, it comes from the gap between the scaled residual the
@@ -1056,7 +1020,7 @@ class BlockAMGSolver(LinearSolver):
         else:
             reference = self._stalenessReferenceIters
             drifted = outerIters > max(self._hierarchyStalenessFactor * reference, reference + _STALENESS_MIN_EXCESS)
-        return drifted or (capHit and self._refreshOnCapHit)
+        return drifted or capHit
 
     def _lgmresCapHit(self, iterations: int, tolerance: float) -> int:
         """``1`` if the last AMGCL LGMRES pass stopped at the iteration cap short of its own tolerance, else ``0``.
@@ -1158,6 +1122,9 @@ class BlockAMGSolver(LinearSolver):
         test of the first solve on this one.
         """
         super().setModel(model, dofManager)
+        if self._condensation is not None:
+            self._condensation.setModel(model, dofManager)
+            self._warnedAllDofsSelected = False
         self._dropDerivedCaches()
         self._refreshNext = True
         self._lastResidualNorm = None
@@ -1258,6 +1225,7 @@ class BlockAMGSolver(LinearSolver):
         role: str,
         triggerSolveCount: int,
         stateFields: dict,
+        condensedDofs: "np.ndarray | None" = None,
     ) -> None:
         """Write one raw ``(A, b)`` pair, plus its field-block layout and solver-state bookkeeping, to
         ``dumpOnDegradationDir`` -- see the class docstring's ``dumpOnDegradationDir``/
@@ -1268,7 +1236,8 @@ class BlockAMGSolver(LinearSolver):
 
         ``A``/``b`` are the raw system as handed to :meth:`__call__` (before equilibration), matching
         :class:`~edelweissfe.linsolve.matrixdump.matrixdump.MatrixDumpSolver`'s own dump format so the
-        same offline tooling can read either.
+        same offline tooling can read either. With Schur complement condensation, the condensed dofs are written
+        too (``schurDofs_<stem>.npy``).
         """
         stem = "{:02d}_{:05d}".format(self._instanceOrdinal, solveCount)
         matrixPath = os.path.join(self._dumpOnDegradationDir, "A_{:}.npz".format(stem))
@@ -1294,6 +1263,10 @@ class BlockAMGSolver(LinearSolver):
             ],
             **stateFields,
         }
+        if condensedDofs is not None:
+            condensedDofsPath = os.path.join(self._dumpOnDegradationDir, "schurDofs_{:}.npy".format(stem))
+            np.save(condensedDofsPath, condensedDofs)
+            record["condensedDofsFile"] = os.path.basename(condensedDofsPath)
 
         manifestPath = os.path.join(self._dumpOnDegradationDir, "manifest.jsonl")
         with open(manifestPath, "a") as manifestFile:
@@ -1315,7 +1288,9 @@ class BlockAMGSolver(LinearSolver):
             ),
         )
 
-    def _dumpDegradedSystem(self, A: sp.csr_matrix, b: np.ndarray, blocks: list, solveState: dict) -> None:
+    def _dumpDegradedSystem(
+        self, A: sp.csr_matrix, b: np.ndarray, blocks: list, solveState: dict, condensedDofs: "np.ndarray | None"
+    ) -> None:
         """Dump the triggering solve itself, then as much of its context window
         (``dumpOnDegradationContextSolves`` preceding solves, from :attr:`_recentSolveHistory`) as the
         remaining ``dumpOnDegradationMaxDumps`` budget allows, oldest first. ``solveState`` is the solve's
@@ -1326,7 +1301,14 @@ class BlockAMGSolver(LinearSolver):
             BlockAMGSolver._degradationDumpsWritten < self._dumpOnDegradationMaxDumps
         ):
             self._dumpOneSystem(
-                triggerSolveCount, A, b, blocks, "trigger", triggerSolveCount=triggerSolveCount, stateFields=solveState
+                triggerSolveCount,
+                A,
+                b,
+                blocks,
+                "trigger",
+                triggerSolveCount=triggerSolveCount,
+                stateFields=solveState,
+                condensedDofs=condensedDofs,
             )
 
         for entry in self._recentSolveHistory:
@@ -1342,6 +1324,7 @@ class BlockAMGSolver(LinearSolver):
                 "context",
                 triggerSolveCount=triggerSolveCount,
                 stateFields=entry["state"],
+                condensedDofs=entry["condensedDofs"],
             )
 
     # Settings whose stored attribute does not follow the self._<name> convention. Listed
@@ -1394,6 +1377,8 @@ class BlockAMGSolver(LinearSolver):
             "p1FineValueType": self._p1FineValueType,
             "p1CoarseValueType": self._p1CoarseValueType,
             "p1CoarsePrecond": self._p1CoarsePrecond,
+            "krylovOnScaledSystem": self._krylovOnScaledSystem,
+            "schurComplement": self._schurComplement,
         }
 
     def _settingsRejections(self, settings: dict, dimensions: dict) -> dict:
@@ -1471,6 +1456,17 @@ class BlockAMGSolver(LinearSolver):
         reason = self._fieldPrecondsRejection(settings["fieldPreconds"], dimensions)
         if reason is not None:
             reject(reason, "fieldPreconds")
+
+        if settings["schurComplement"] is not None:
+            reason = schurcomplement.optionsRejection(settings["schurComplement"])
+            if reason is not None:
+                reject(reason, "schurComplement")
+            elif settings["krylovOnScaledSystem"]:
+                reject(
+                    "cannot be combined with krylovOnScaledSystem: the outer solve runs on A itself",
+                    "schurComplement",
+                    "krylovOnScaledSystem",
+                )
 
         directory = settings["dumpOnDegradationDir"]
         if directory is not None and not os.path.isdir(directory):
@@ -1602,6 +1598,10 @@ class BlockAMGSolver(LinearSolver):
             for i, block in enumerate(blocks)
         ]
 
+    def _hierarchyIsCondensing(self) -> bool:
+        """Whether the hierarchies being built are those of the remaining dofs of a Schur complement condensation."""
+        return self._condensation is not None and self._condensation.hasCondensedDofs()
+
     def _diagonalBlock(self, system, index: int):
         """The field's diagonal block of A_scaled, with ``hierarchyDropTol`` applied."""
         with performancetiming.timeit("diagonal blocks"):
@@ -1616,10 +1616,16 @@ class BlockAMGSolver(LinearSolver):
         constant blocks); a scalar field takes AMGCL's default constant."""
         isVectorField = block.dimension > 1
 
+        # with Schur complement condensation, the block holds only the remaining nodes of the field: what is derived
+        # from the model is restricted to them
+        remainingNodes = self._condensation.remainingNodes(block.name) if self._hierarchyIsCondensing() else None
+
         p1Map = None
         if isVectorField and (block.name in self._p1Maps or block.name in self._p1FieldNamesRequested):
             with performancetiming.timeit("p1 topology"):
                 p1Map = self._getP1Map(block.name)
+            if p1Map is not None and remainingNodes is not None:
+                p1Map = schurcomplement.restrictP1Map(*p1Map, remainingNodes)
 
         # Node coordinates cost an O(nNodes) Python loop on first gather (cached after); only fetch them
         # for a field whose near null-space can actually use them -- p-two-grid's coarse solve always
@@ -1635,6 +1641,8 @@ class BlockAMGSolver(LinearSolver):
         )
         onScalarBackend = p1Map is not None or fieldTree.get("backendBlockSize", 1) == 1
         coords = self._nullspaceCoordinates(block.name) if isVectorField and onScalarBackend else None
+        if coords is not None and remainingNodes is not None:
+            coords = coords[remainingNodes]
 
         if p1Map is not None:
             from edelweissfe.linsolve.blockamg.ptwogrid import PTwoGridPreconditioner
@@ -1760,6 +1768,12 @@ class BlockAMGSolver(LinearSolver):
                     rejected.append("{:} ({:})".format(name, error))
                 continue
             if name in self._HOT_RELOAD_IGNORED:
+                continue
+            if name == "schurComplement":
+                # Fixed at construction: the condensation is set up against the model (the sets and fieldOutputs its
+                # markers read), which a failed or rolled-back reload could leave inconsistent with the hierarchies.
+                if value != self._schurComplement:
+                    rejected.append("{:} (fixed at construction, not hot-reloadable)".format(name))
                 continue
             if name not in validNames:
                 unknown.append(name)
@@ -1981,6 +1995,24 @@ class BlockAMGSolver(LinearSolver):
         newIncrement = (
             self._lastResidualNorm is not None and residualNorm > self._residualGrowthFactor * self._lastResidualNorm
         )
+
+        # (1b) Schur complement condensation (schurComplement): select the condensed dofs b, cut the blocks of A and
+        #      factorize A_bb. The field split below is then built for the remaining dofs k, on the approximate Schur
+        #      complement S~ of A_bb instead of on A.
+        condensation = self._condensation
+        if condensation is not None:
+            try:
+                condensation.update(A)
+            except (RuntimeError, np.linalg.LinAlgError) as error:
+                # e.g. a singular A_bb (a softening zone that lost all stiffness): a cutback, as for a non-finite system
+                return self._notSolved(n, "the condensed block A_bb cannot be factorized ({:})".format(error))
+            if condensation.selectedAllDofs and not self._warnedAllDofsSelected:
+                self._log("warning", "⚠ blockamg: the schurComplement markers select every dof; nothing is condensed")
+                self._warnedAllDofsSelected = True
+        condensing = condensation is not None and condensation.hasCondensedDofs()
+        condensedDofs = condensation.condensedDofs if condensing else None
+        condensedDofsChanged = not _sameCondensedDofs(condensedDofs, self._hierarchyCondensedDofs)
+        fieldBlocks = condensation.remainingFieldBlocks(blocks) if condensing else blocks
         # A hierarchy built for another sparsity pattern can be a far worse preconditioner (measured to need
         # far more outer iterations than a fresh one). nnz is an O(1) proxy for a pattern change; it errs on
         # the safe side.
@@ -1995,7 +2027,8 @@ class BlockAMGSolver(LinearSolver):
         wasStale = self._refreshNext
         mustRefresh = (
             self._preconditioners is None
-            or blocks != self._blocks
+            or fieldBlocks != self._blocks
+            or condensedDofsChanged
             or n != self._n
             or patternChanged
             or (newIncrement and self._refreshOnNewIncrement)
@@ -2010,7 +2043,9 @@ class BlockAMGSolver(LinearSolver):
             rebuildReason = None
         elif self._preconditioners is None:
             rebuildReason = "first"
-        elif blocks != self._blocks or n != self._n:
+        elif condensedDofsChanged:
+            rebuildReason = "condensed dofs"
+        elif fieldBlocks != self._blocks or n != self._n:
             rebuildReason = "amr"
         elif patternChanged:
             rebuildReason = "pattern"
@@ -2026,9 +2061,27 @@ class BlockAMGSolver(LinearSolver):
         #     krylovOnScaledSystem = True the outer solve also runs on this substitution, solving
         #     A x = b as (D A D) z = D b, x = D z; with the default False it solves A x = b directly,
         #     right-preconditioned by the same equilibrated blocks (see __call__ below).
+        if condensing and mustRefresh:
+            with performancetiming.timeit("schur complement"):
+                fieldSplitMatrix = condensation.approximateSchurComplement(A)
+            if condensedDofsChanged:
+                # built for the old remaining dofs
+                self._p1FineSpectralRadiusCache.clear()
+            self._log(
+                "info",
+                "blockamg: {:} dofs condensed, S~ of the {:} others with {:} nonzeros".format(
+                    condensedDofs.size, n - condensedDofs.size, fieldSplitMatrix.nnz
+                ),
+            )
+        elif condensing:
+            # the S~ the standing hierarchies were built on
+            fieldSplitMatrix = self._schurComplementMatrix
+        else:
+            fieldSplitMatrix = A
+
         with performancetiming.timeit("equilibration"):
             if mustRefresh:
-                scaling, reason = self._equilibration(A)
+                scaling, reason = self._equilibration(fieldSplitMatrix)
                 if scaling is None:
                     return self._notSolved(n, reason)
             else:
@@ -2038,29 +2091,29 @@ class BlockAMGSolver(LinearSolver):
                 # iterations and, if it drives the solve to the cap, the accuracy of that one solve.
                 scaling = self._scaling
 
-            b_scaled = scaling * b
-
         # (3) Field split: A_scaled and its blocks A_scaled_ij in one threaded pass over A -- the outer Krylov
         #     operator, the couplings the sweep needs on every solve, and on a rebuild the diagonal blocks the
         #     hierarchies are built from.
-        fieldBounds = [(block.start, block.stop) for block in blocks]
+        fieldBounds = [(block.start, block.stop) for block in fieldBlocks]
         # stored: the operator of the outer solve, A_scaled or A itself (krylovOnScaledSystem); the blocks are
         # those of A_scaled either way
         storedUnscaled = not self._krylovOnScaledSystem
         with performancetiming.timeit("equilibrated system"):
             system = PyAMGCLEquilibratedSystem()
-            system.build(A, scaling, fieldBounds, unscaled=storedUnscaled)
+            system.build(fieldSplitMatrix, scaling, fieldBounds, unscaled=storedUnscaled)
 
         # (4) Hierarchies: one per field, rebuilt or reused (see mustRefresh above)
         if mustRefresh:
-            self._buildHierarchies(system, blocks, scaling, A)
+            self._buildHierarchies(system, fieldBlocks, scaling, A)
+            self._hierarchyCondensedDofs = condensedDofs
+            self._schurComplementMatrix = fieldSplitMatrix if condensing else None
 
         # The outer solve runs on the system the settings in force ask for, read once for this solve: a hot reload
         # rolled back above may have changed krylovOnScaledSystem since the system was built.
         onScaledSystem = self._krylovOnScaledSystem
         if onScaledSystem == storedUnscaled:
             with performancetiming.timeit("equilibrated system"):
-                system.build(A, scaling, fieldBounds, unscaled=not onScaledSystem)
+                system.build(fieldSplitMatrix, scaling, fieldBounds, unscaled=not onScaledSystem)
 
         def blockGaussSeidel(residual):
             return self._blockGaussSeidel(system, residual)
@@ -2068,7 +2121,22 @@ class BlockAMGSolver(LinearSolver):
         # krylovOnScaledSystem = False: the outer solve runs on A itself, preconditioned by x = D M^-1 (D r) --
         # M built on D A D as always -- so that the residual it converges is the true one the solve is accepted
         # on.
-        if onScaledSystem:
+        # With condensation the outer solve runs on A itself (a one-field system of A, not equilibrated), preconditioned
+        # by the block LU factorization around the sweep on S~ (see schurcomplement).
+        operator = system
+        if condensing:
+            with performancetiming.timeit("equilibrated system"):
+                operator = PyAMGCLEquilibratedSystem()
+                operator.build(A, np.ones(n), [(0, n)], unscaled=True)
+
+            def outerPreconditioner(residual):
+                return condensation.precondition(
+                    residual, lambda remainingResidual: scaling * blockGaussSeidel(scaling * remainingResidual)
+                )
+
+            outerRightHandSide = b
+        elif onScaledSystem:
+            b_scaled = scaling * b
             outerRightHandSide, outerPreconditioner = b_scaled, blockGaussSeidel
         else:
 
@@ -2100,7 +2168,7 @@ class BlockAMGSolver(LinearSolver):
             pass stopped at the iteration cap short of ``tolerance``, 0 otherwise."""
             lgmres = self._outerLgmres(n)
             z = lgmres.solve(
-                system,
+                operator,
                 outerRightHandSide,
                 outerPreconditioner,
                 tolerance,
@@ -2237,7 +2305,7 @@ class BlockAMGSolver(LinearSolver):
             and (outerIters > self._degradationThreshold() or (capHit and not converged))
             and BlockAMGSolver._degradationDumpsWritten < self._dumpOnDegradationMaxDumps
         ):
-            self._dumpDegradedSystem(A, b, blocks, solveState)
+            self._dumpDegradedSystem(A, b, blocks, solveState, condensedDofs)
         # Recorded *after* the dump above, so a trigger's own context window (from
         # _recentSolveHistory) never includes itself -- only solves strictly preceding it. Guarded on
         # dumpOnDegradationContextSolves so a run with the feature off never holds onto extra matrices.
@@ -2253,6 +2321,7 @@ class BlockAMGSolver(LinearSolver):
                     "b": np.array(b, copy=True),
                     "blocks": blocks,
                     "state": solveState,
+                    "condensedDofs": condensedDofs,
                 }
             )
         if not converged and capHit:
