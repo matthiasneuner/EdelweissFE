@@ -46,7 +46,7 @@ def createSolver(opts) -> Callable:
         1e-1), ``restart`` (default 50), ``maxIterations`` (default 100), ``schurApproximation`` (``"local"``, the
         default, ``"nodal"`` or ``"none"``), ``schurDropTolerance`` (default 1e-4), ``schurWindow`` (default 600),
         ``schurHalo`` (default: ``schurWindow``), ``dumpSlowSolvesDir``/``dumpSlowSolveSeconds``/``dumpSlowSolvesMax``
-        (default none/300/5), ``reuseSchurComplement`` (default true), ``schurStalenessFactor`` (default 1.5) and
+        (default none/300/5), ``reuseSchurComplement`` (default false), ``schurStalenessFactor`` (default 1.5) and
         ``blockamg`` (the options of the inner ``blockamg`` solver). A key that is not one of them raises a
         ``ValueError``. A non-mapping ``opts`` is tolerated, in which case every default applies.
 
@@ -93,6 +93,6 @@ def createSolver(opts) -> Callable:
         dumpSlowSolvesDir=optionMap.get("dumpSlowSolvesDir"),
         dumpSlowSolveSeconds=float(optionMap.get("dumpSlowSolveSeconds", 300.0)),
         dumpSlowSolvesMax=int(optionMap.get("dumpSlowSolvesMax", 5)),
-        reuseSchurComplement=bool(optionMap.get("reuseSchurComplement", True)),
+        reuseSchurComplement=bool(optionMap.get("reuseSchurComplement", False)),
         schurStalenessFactor=float(optionMap.get("schurStalenessFactor", 1.5)),
     )

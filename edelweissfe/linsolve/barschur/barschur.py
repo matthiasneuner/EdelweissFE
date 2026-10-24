@@ -133,7 +133,8 @@ class BarSchurSolver(LinearSolver):
         as long as the sparsity pattern does not change and the outer iterations do not drift, see
         ``schurStalenessFactor``. A solve with a reused one that is not converged after twice (and 20 more than) the
         outer iterations of the first solve after the last rebuild is repeated with a rebuilt one, and the next three
-        solves rebuild directly.
+        solves rebuild directly. Off by default: in the damage phase, where the matrix changes from one Newton
+        iteration to the next, the repeated solves cost more than the saved rebuilds.
     dumpSlowSolvesDir
         Write the systems of solves slower than ``dumpSlowSolveSeconds`` to this directory, for offline diagnosis
         (``slow_<n>_A.npz``, ``_b.npy``, ``_barDofs.npy``, ``_barNodeSizes.npy``, ``_fields.json``); ``None`` (the
@@ -165,7 +166,7 @@ class BarSchurSolver(LinearSolver):
         schurDropTolerance: float = 1e-4,
         schurWindow: int = 600,
         schurHalo: int = None,
-        reuseSchurComplement: bool = True,
+        reuseSchurComplement: bool = False,
         schurStalenessFactor: float = 1.5,
         dumpSlowSolvesDir: str = None,
         dumpSlowSolveSeconds: float = 300.0,

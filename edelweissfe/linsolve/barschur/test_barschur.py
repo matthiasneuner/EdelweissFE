@@ -64,9 +64,18 @@ def test_bar_schur_complement_preconditioner_converges(options):
     assert np.linalg.norm(x - reference) <= 1e-2 * np.linalg.norm(reference)
 
 
-def test_bar_schur_complement_is_reused_for_the_same_pattern():
+def test_bar_schur_complement_is_rebuilt_by_default():
     A, b, fieldStructure, dofsPerNode = _bondSlipSystem()
     solver = createSolver({"schurWindow": 8, "blockamg": {"verbosity": "silent"}})
+    solver.setBarDofs(fieldStructure, dofsPerNode, A.shape[0])
+    solver(A, b)
+    solver(1.01 * A, b)  # a new matrix with the same sparsity pattern
+    assert "rebuilt" in solver.lastSolveSummary.detailLines[0]
+
+
+def test_bar_schur_complement_is_reused_for_the_same_pattern():
+    A, b, fieldStructure, dofsPerNode = _bondSlipSystem()
+    solver = createSolver({"schurWindow": 8, "reuseSchurComplement": True, "blockamg": {"verbosity": "silent"}})
     solver.setBarDofs(fieldStructure, dofsPerNode, A.shape[0])
     solver(A, b)
     assert "rebuilt" in solver.lastSolveSummary.detailLines[0]

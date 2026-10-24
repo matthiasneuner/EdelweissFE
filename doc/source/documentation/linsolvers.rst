@@ -151,8 +151,12 @@ cycles were slower than two. Through cracking, the run was about four times fast
 inner hierarchies of 3D vector fields use 50 instead of 300 power iterations for the Chebyshev smoother's spectral
 radius (unless the ``blockamg`` options give the field its own tree): they are rebuilt with every approximate Schur
 complement, and 50 gave the same outer iterations at a third of the build time. The approximate Schur complement and
-the inner hierarchies are reused for the following solves while the sparsity pattern stays the same and the outer
-iterations do not drift; a solve that fails with a reused one is repeated with a rebuilt one.
+the inner hierarchies are rebuilt for every solve. With ``reuseSchurComplement``, they are reused for the following
+solves while the sparsity pattern stays the same and the outer iterations do not drift, and a solve that fails with a
+reused one is repeated with a rebuilt one. On the tunnel segment (fine20, bond-slip, to the onset of cracking) reuse
+did not pay: 16 % of the solves had to be repeated, and these took 28 % of the solve time. Rebuilding every time needed
+22 % fewer outer iterations in total and was about 14 % cheaper per solve (normalized for the machines; the same
+force-displacement curve).
 
 .. code-block:: edelweiss
 
@@ -174,7 +178,7 @@ shorter restarts cost many more outer iterations), ``maxIterations`` (100; on th
 Newton iterations at the damage onset), ``schurApproximation`` (``"local"``; ``"nodal"``
 uses the diagonal block of each bar node only, which suffices for trusses but not for beams; ``"none"`` uses
 :math:`A_{kk}`), ``schurDropTolerance`` (1e-4), ``schurWindow`` (600 bar dofs per window core), ``schurHalo`` (bar dofs per halo on
-either side of a core; default ``schurWindow``), ``reuseSchurComplement`` (true), ``schurStalenessFactor`` (1.5),
+either side of a core; default ``schurWindow``), ``reuseSchurComplement`` (false), ``schurStalenessFactor`` (1.5, with reuse only),
 ``dumpSlowSolvesDir`` / ``dumpSlowSolveSeconds`` / ``dumpSlowSolvesMax`` (write the systems of slow solves for offline
 diagnosis; off / 300 / 5) and ``blockamg`` (the options of the inner solver; with inner solves, an inner iteration
 cap, e.g. ``"outerRestart": 20``, bounds the cost of inner solves that converge poorly).
