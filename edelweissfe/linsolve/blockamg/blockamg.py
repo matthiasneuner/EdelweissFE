@@ -102,7 +102,7 @@ import scipy.sparse as sp
 
 import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.linsolve.base import FieldBlock, LinearSolver, LinearSolveSummary
-from edelweissfe.linsolve.blockamg import schurcomplement
+from edelweissfe.linsolve.blockamg import rigidbodycoarselevel, schurcomplement
 from edelweissfe.linsolve.nullspace import rigidBodyNullspace, translationNullspace
 
 # Ordered low-to-high; index comparison decides whether a message at a given level should print.
@@ -224,6 +224,23 @@ def _defaultFieldPrecond(dimension: int) -> dict:
     if dimension > 1:
         return copy.deepcopy({**_VECTOR_PRECOND_BASE, "backendPrecision": "double", "backendBlockSize": 1})
     return copy.deepcopy(_DEFAULT_SCALAR_PRECOND)
+
+
+#: The keys of a ``fieldPreconds`` tree that are not AMGCL parameters but select how blockamg builds the field's
+#: preconditioner: the backend (see the comment above the default trees), the translations of a block backend
+#: (``blockTranslationNullspace``) and the rigid-body coarse level (``rigidBodyCoarseLevel``).
+_FIELD_TREE_KEYS = ("backendPrecision", "backendBlockSize", "blockTranslationNullspace", "rigidBodyCoarseLevel")
+
+
+def _amgclTree(fieldTree: dict) -> dict:
+    """A field's tree without the keys of blockamg itself (:data:`_FIELD_TREE_KEYS`): the AMGCL tree, forwarded
+    verbatim."""
+    return {key: value for key, value in fieldTree.items() if key not in _FIELD_TREE_KEYS}
+
+
+def _asksForRigidBodyCoarseLevel(fieldTree) -> bool:
+    """Whether a field's tree asks for the rigid-body coarse level (``rigidBodyCoarseLevel``)."""
+    return isinstance(fieldTree, dict) and rigidbodycoarselevel.isRequested(fieldTree.get("rigidBodyCoarseLevel"))
 
 
 def _takesBlockTranslations(fieldTree: dict) -> bool:
@@ -492,6 +509,14 @@ class BlockAMGSolver(LinearSolver):
         aggregation from the translations ``D^-1 t`` of the field's scaled block instead of AMGCL's constant
         blocks (``D``-weighted translations). On the scalar backend, whose rigid-body modes hold the translations
         anyway, it changes nothing, so a default tree stays valid with ``backendBlockSize`` 1 set on top.
+        ``rigidBodyCoarseLevel`` (opt-in; ``true``, or an object of options) gives a 2D or 3D vector field on a block
+        backend a first coarse level built from all its rigid-body modes, rotations included, instead of AMGCL's
+        hierarchy on the translations (:mod:`~edelweissfe.linsolve.blockamg.rigidbodycoarselevel`): for
+        bending-dominated structures. The rest of the tree configures it as it would configure AMGCL's hierarchy, and
+        the hierarchy below it. It needs the field's node coordinates (from the model, or ``nodeCoordinates``);
+        without them the field gets its tree without the key, with a warning. Options: ``prolongation``
+        (``"smoothed"``, default, or ``"tentative"``), ``coarseHierarchyPrecision`` (``"double"``, default, or
+        ``"float"``) and ``fineSpectralRadiusReuse`` (``false``, default; as ``p1FineSpectralRadiusReuse``).
     useRigidBodyNullspace
         Only takes effect on the plain scalar backend (``backendBlockSize == 1``) -- a block hierarchy takes the
         translations only, so a field on a block backend (the default ``fieldPreconds`` tree for a 2D or 3D
@@ -525,6 +550,12 @@ class BlockAMGSolver(LinearSolver):
         computed lazily, once, the first time one of those fields' hierarchies is built (from
         ``self._model``, set by ``setModel``, rather than pushed in by the nonlinear solver ahead of
         time).
+    nodeCoordinates
+        Optional mapping of field name to the field's node coordinates, ``(nNodes, >= dimension)`` in the field's
+        dof order, injected directly -- the offline construction path, as ``p1Maps``: a live run reads them from the
+        model (:meth:`~edelweissfe.linsolve.base.LinearSolver.setModel`). Given, they take precedence over the model's
+        and are kept when the model changes. Used by the rigid-body coarse level and, on the scalar backend, by
+        ``useRigidBodyNullspace``.
     p1FieldNames
         Optional list of vector field names to use p-multigrid for. A field named here gets its P1
         topology map computed on first need (via :func:`edelweissfe.numerics.p1topology.buildP1Map` on
@@ -819,6 +850,7 @@ class BlockAMGSolver(LinearSolver):
         hierarchyDropLumping: bool = False,
         fieldPreconds: dict = None,
         useRigidBodyNullspace: bool = True,
+        nodeCoordinates: dict = None,
         p1Maps: dict = None,
         p1FieldNames: list = None,
         p1Nu: int = None,
@@ -870,11 +902,17 @@ class BlockAMGSolver(LinearSolver):
         # _lazyP1MapNames so setModel() can drop exactly those on an AMR/connectivity rebuild.
         self._p1Maps = p1Maps or {}
         self._lazyP1MapNames = set()
-        # Per-field node coordinates, derived from self._model; dropped in setModel().
+        # Per-field node coordinates, derived from self._model; dropped in setModel(). Those given as nodeCoordinates
+        # are never dropped: they were not derived from any model.
         self._nodeCoordinateCache = {}
-        # Per-field fine spectral radius and dominant vector of the p-two-grid smoother, kept for the next build
-        # only with p1FineSpectralRadiusReuse; dropped in setModel() like the caches above.
-        self._p1FineSpectralRadiusCache = {}
+        self._givenNodeCoordinates = {
+            fieldName: np.asarray(coordinates, dtype=float)
+            for fieldName, coordinates in (nodeCoordinates or {}).items()
+        }
+        # Per-field fine spectral radius and dominant vector of a two-grid smoother (the p-two-grid's, the rigid-body
+        # coarse level's), kept for the next build only with p1FineSpectralRadiusReuse or the rigid-body coarse
+        # level's fineSpectralRadiusReuse; dropped in setModel() like the caches above.
+        self._fineSpectralRadiusCache = {}
         self._p1FieldNamesRequested = set(_fieldNamesFromConfig(p1FieldNames) or [])
         self._p1Nu = p1Nu
         self._p1NuPre = p1NuPre
@@ -1151,7 +1189,7 @@ class BlockAMGSolver(LinearSolver):
             self._p1Maps.pop(fieldName, None)
         self._lazyP1MapNames.clear()
         self._nodeCoordinateCache.clear()
-        self._p1FineSpectralRadiusCache.clear()
+        self._fineSpectralRadiusCache.clear()
 
     def _getNodeCoordinates(self, fieldName: str) -> "np.ndarray | None":
         """This field's node coordinates, node-major, or ``None`` if unavailable.
@@ -1161,8 +1199,11 @@ class BlockAMGSolver(LinearSolver):
         this is unavailable when it matters (``setModel`` is called on every rebuild, same as
         ``setFieldStructure`` always was), so the only real callers of the ``None`` path are offline
         probes driving this solver directly via the lower-level :meth:`setFieldStructure`, or
-        ``useRigidBodyNullspace=False``.
+        ``useRigidBodyNullspace=False``. Coordinates given as ``nodeCoordinates`` take precedence.
         """
+        given = self._givenNodeCoordinates.get(fieldName)
+        if given is not None:
+            return given
         if self._model is None:
             return None
         cached = self._nodeCoordinateCache.get(fieldName)
@@ -1349,13 +1390,14 @@ class BlockAMGSolver(LinearSolver):
         "p1FieldNames": "_p1FieldNamesRequested",
     }
     # Changing which file is watched, from inside that file, is not a thing worth supporting.
-    # The deprecated LGMRES recycling keys have no setting left to change. p1Maps (arrays) and condensation (an
-    # object) are handed to the constructor, not configuration file settings.
+    # The deprecated LGMRES recycling keys have no setting left to change. p1Maps and nodeCoordinates (arrays) and
+    # condensation (an object) are handed to the constructor, not configuration file settings.
     _HOT_RELOAD_IGNORED = (
         "hotReloadConfigFile",
         "lgmresAlwaysReset",
         "lgmresResetOnNewIncrement",
         "p1Maps",
+        "nodeCoordinates",
         "condensation",
     )
 
@@ -1472,6 +1514,20 @@ class BlockAMGSolver(LinearSolver):
                     "p1FineBlockSize",
                     "p1FieldNames",
                 )
+        if isinstance(settings["fieldPreconds"], dict):
+            p1Fields = set(settings["p1FieldNames"]) | set(self._p1Maps)
+            both = sorted(
+                name
+                for name, tree in settings["fieldPreconds"].items()
+                if name in p1Fields and _asksForRigidBodyCoarseLevel(tree)
+            )
+            if both:
+                reject(
+                    "the fields {:} ask for both the p-two-grid and the rigid-body coarse level (rigidBodyCoarseLevel "
+                    "in fieldPreconds); a field has one coarse level".format(both),
+                    "p1FieldNames",
+                    "fieldPreconds",
+                )
 
         reason = self._fieldPrecondsRejection(settings["fieldPreconds"], dimensions)
         if reason is not None:
@@ -1546,7 +1602,38 @@ class BlockAMGSolver(LinearSolver):
                 return "entry '{:}': backendBlockSize {:} does not match the field's dimension {:}".format(
                     fieldName, blockSize, dimensions[fieldName]
                 )
+            reason = BlockAMGSolver._rigidBodyCoarseLevelRejection(precond)
+            if reason is not None:
+                return "entry '{:}': {:}".format(fieldName, reason)
         return None
+
+    @staticmethod
+    def _rigidBodyCoarseLevelRejection(fieldTree: dict) -> "str | None":
+        """Why a field's tree cannot have the rigid-body coarse level it asks for (``rigidBodyCoarseLevel``), or
+        ``None``: the form of its options here, everything else from the C++ class, which checks the tree as it
+        configures the coarse level (:func:`~edelweissfe.linsolve.blockamg.rigidbodycoarselevel.parameterRejection`).
+        """
+        value = fieldTree.get("rigidBodyCoarseLevel", False)
+        reason = rigidbodycoarselevel.optionsRejection(value)
+        if reason is not None:
+            return "rigidBodyCoarseLevel " + reason
+        if not rigidbodycoarselevel.isRequested(value):
+            return None
+        blockSize = fieldTree.get("backendBlockSize", 1)
+        if blockSize not in (2, 3):
+            return (
+                "rigidBodyCoarseLevel needs a block backend, backendBlockSize 2 or 3 (a 2D or 3D vector field), got "
+                "{:}: the scalar backend takes the rigid-body modes as its near null-space itself "
+                "(useRigidBodyNullspace)".format(blockSize)
+            )
+        options = rigidbodycoarselevel.options(value)
+        return rigidbodycoarselevel.parameterRejection(
+            _amgclTree(fieldTree),
+            blockSize,
+            fieldTree.get("backendPrecision", "double"),
+            options["prolongation"],
+            options["coarseHierarchyPrecision"],
+        )
 
     def _degradationThreshold(self) -> int:
         """The outer-iteration count above which a solve is dumped: ``dumpOnDegradationThreshold``, or the
@@ -1636,7 +1723,8 @@ class BlockAMGSolver(LinearSolver):
 
     def _buildFieldPreconditioner(self, block, system, index: int, scaling: np.ndarray):
         """The preconditioner of one field: the p-two-grid cycle for a vector field that opted into it
-        (``p1Maps`` / ``p1FieldNames``), one AMGCL hierarchy otherwise. A vector field on the scalar backend gets
+        (``p1Maps`` / ``p1FieldNames``), the rigid-body coarse level for one whose tree asks for it
+        (``rigidBodyCoarseLevel``), one AMGCL hierarchy otherwise. A vector field on the scalar backend gets
         its rigid-body modes as near null-space (see :meth:`_nullspaceCoordinates`; the translations alone without
         node coordinates), on a block backend the translations alone (``blockTranslationNullspace``, else AMGCL's
         constant blocks); a scalar field takes AMGCL's default constant."""
@@ -1666,18 +1754,34 @@ class BlockAMGSolver(LinearSolver):
             else _defaultFieldPrecond(block.dimension)
         )
         onScalarBackend = p1Map is not None or fieldTree.get("backendBlockSize", 1) == 1
-        coords = self._nullspaceCoordinates(block.name) if isVectorField and onScalarBackend else None
+        # the rigid-body coarse level needs the coordinates whatever useRigidBodyNullspace (scalar backend) says
+        rigidBodyCoarseLevel = isVectorField and _asksForRigidBodyCoarseLevel(fieldTree)
+        if rigidBodyCoarseLevel:
+            coords = self._getNodeCoordinates(block.name)
+        elif isVectorField and onScalarBackend:
+            coords = self._nullspaceCoordinates(block.name)
+        else:
+            coords = None
         if coords is not None and remainingNodes is not None:
             coords = coords[remainingNodes]
+
+        if rigidBodyCoarseLevel:
+            if coords is not None:
+                return self._buildRigidBodyCoarseLevel(block, system, index, scaling, fieldTree, coords)
+            # without coordinates there are no rotations: the field's tree without the key (the AMGCL path below
+            # leaves it out), loudly
+            self._warnOnce(
+                "⚠ blockamg: field '{:}' asks for rigidBodyCoarseLevel, but its node coordinates are unavailable (no "
+                "model, and no nodeCoordinates given): it gets its tree without it, AMGCL's hierarchy on the "
+                "translations".format(block.name)
+            )
 
         if p1Map is not None:
             from edelweissfe.linsolve.blockamg.ptwogrid import PTwoGridPreconditioner
 
             p1Options = {option: value for option, value in self._p1Options().items() if value is not None}
-            fineSpectralRadius, fineDominantVector = (
-                self._p1FineSpectralRadiusCache.get(block.name, (None, None))
-                if self._p1FineSpectralRadiusReuse
-                else (None, None)
+            fineSpectralRadius, fineDominantVector = self._reusedFineSpectralRadius(
+                block.name, self._p1FineSpectralRadiusReuse
             )
             preconditioner = PTwoGridPreconditioner(
                 *p1Map, fineSpectralRadius=fineSpectralRadius, fineDominantVector=fineDominantVector, **p1Options
@@ -1685,19 +1789,14 @@ class BlockAMGSolver(LinearSolver):
             diagonalBlock = self._diagonalBlock(system, index)
             with performancetiming.timeit("{:} p-two-grid build".format(block.name)):
                 preconditioner.build(diagonalBlock, scaling, coords=coords)
-            if self._p1FineSpectralRadiusReuse:
-                self._p1FineSpectralRadiusCache[block.name] = (
-                    preconditioner.fineSpectralRadius,
-                    preconditioner.fineDominantVector,
-                )
+            self._keepFineSpectralRadius(block.name, preconditioner, self._p1FineSpectralRadiusReuse)
             return preconditioner
 
         from edelweissfe.linsolve.amgcl.amgcl import PyAMGCLSolver
 
-        precondParams = dict(fieldTree)
-        backendPrecision = precondParams.pop("backendPrecision", "double")
-        backendBlockSize = precondParams.pop("backendBlockSize", 1)
-        precondParams.pop("blockTranslationNullspace", None)
+        precondParams = _amgclTree(fieldTree)
+        backendPrecision = fieldTree.get("backendPrecision", "double")
+        backendBlockSize = fieldTree.get("backendBlockSize", 1)
         blockTranslations = _takesBlockTranslations(fieldTree)
         # The hierarchy is only ever applied as a preconditioner: "preonly" keeps AMGCL from allocating the
         # work vectors of an iterative solver (BiCGStab by default) that would never run.
@@ -1724,6 +1823,44 @@ class BlockAMGSolver(LinearSolver):
         with performancetiming.timeit("{:} AMG build".format(block.name)):
             preconditioner.build(diagonalBlock)
         return preconditioner
+
+    def _buildRigidBodyCoarseLevel(self, block, system, index: int, scaling: np.ndarray, fieldTree: dict, coords):
+        """The preconditioner of a field whose tree asks for the rigid-body coarse level (``rigidBodyCoarseLevel``,
+        :mod:`~edelweissfe.linsolve.blockamg.rigidbodycoarselevel`), built on its equilibrated diagonal block with the
+        coordinates of its nodes."""
+        options = rigidbodycoarselevel.options(fieldTree["rigidBodyCoarseLevel"])
+        fineSpectralRadius, fineDominantVector = self._reusedFineSpectralRadius(
+            block.name, options["fineSpectralRadiusReuse"]
+        )
+        preconditioner = rigidbodycoarselevel.RigidBodyCoarseLevelPreconditioner(
+            _amgclTree(fieldTree),
+            fieldTree.get("backendBlockSize", 1),
+            fieldTree.get("backendPrecision", "double"),
+            prolongation=options["prolongation"],
+            coarseHierarchyPrecision=options["coarseHierarchyPrecision"],
+            fineSpectralRadius=fineSpectralRadius,
+            fineDominantVector=fineDominantVector,
+        )
+        diagonalBlock = self._diagonalBlock(system, index)
+        with performancetiming.timeit("{:} rigid-body coarse level build".format(block.name)):
+            preconditioner.build(diagonalBlock, scaling, coords)
+        self._keepFineSpectralRadius(block.name, preconditioner, options["fineSpectralRadiusReuse"])
+        return preconditioner
+
+    def _reusedFineSpectralRadius(self, fieldName: str, reuse: bool) -> tuple:
+        """The fine spectral radius and dominant vector of the field's previous two-grid build, for the next build to
+        re-check instead of estimating in full, if ``reuse`` (``p1FineSpectralRadiusReuse``, or the rigid-body coarse
+        level's ``fineSpectralRadiusReuse``); ``(None, None)`` otherwise, and before the first build."""
+        return self._fineSpectralRadiusCache.get(fieldName, (None, None)) if reuse else (None, None)
+
+    def _keepFineSpectralRadius(self, fieldName: str, preconditioner, reuse: bool) -> None:
+        """Keep the fine spectral radius and dominant vector of a two-grid build for the field's next build, if
+        ``reuse`` (see :meth:`_reusedFineSpectralRadius`)."""
+        if reuse:
+            self._fineSpectralRadiusCache[fieldName] = (
+                preconditioner.fineSpectralRadius,
+                preconditioner.fineDominantVector,
+            )
 
     def _p1Options(self) -> dict:
         """The p-two-grid settings as :class:`~edelweissfe.linsolve.blockamg.ptwogrid.PTwoGridPreconditioner`
@@ -2102,7 +2239,7 @@ class BlockAMGSolver(LinearSolver):
                 fieldSplitMatrix = condensation.approximateSchurComplement(A)
             if condensedDofsChanged:
                 # built for the old remaining dofs
-                self._p1FineSpectralRadiusCache.clear()
+                self._fineSpectralRadiusCache.clear()
             self._log(
                 "info",
                 "blockamg: {:} dofs condensed; the approximate Schur complement of the {:} remaining dofs has {:} "
