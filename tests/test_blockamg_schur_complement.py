@@ -101,7 +101,7 @@ def test_a_zone_that_is_no_chain_gets_its_exact_correction():
 
 def test_block_lu_with_the_exact_schur_complement_is_the_inverse():
     A, b, barDofs = _barOnFoundation(n=6)
-    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=10_000)
+    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=10_000, blockFactors="LU")
     condensation.update(A)
     S = condensation.approximateSchurComplement(A).toarray()
     z = condensation.precondition(b, lambda r_k: np.linalg.solve(S, r_k))
@@ -260,3 +260,15 @@ def test_a_hot_reload_does_not_change_the_condensation(tmp_path):
     )
     assert not solver._maybeHotReloadConfig()
     assert solver._schurComplement == options["schurComplement"]
+
+
+def test_by_default_the_block_upper_triangular_factor_is_inverted():
+    """With the exact S, the default applies the inverse of U = [A_bb A_bk; 0 S]."""
+    A, b, barDofs = _barOnFoundation(n=6)
+    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=10_000)
+    condensation.update(A)
+    S = condensation.approximateSchurComplement(A).toarray()
+    z = condensation.precondition(b, lambda r_k: np.linalg.solve(S, r_k))
+    U = sp.bmat([[condensation.A_bb, condensation.A_bk], [None, sp.csr_matrix(S)]])
+    order = np.concatenate([barDofs, condensation.remainingDofs])
+    assert np.allclose(U @ z[order], b[order], rtol=0.0, atol=1e-10 * np.abs(b).max())

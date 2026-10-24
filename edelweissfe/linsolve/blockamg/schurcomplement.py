@@ -50,6 +50,20 @@ preconditioner of the outer Krylov solve is the block LU factorization
 with :math:`M_{\\tilde S}^{-1}` the field-split block Gauss-Seidel sweep of ``blockamg`` on an approximation
 :math:`\\tilde S` of :math:`S`. With :math:`\\tilde S = S` and an exact sweep it is :math:`A^{-1}`.
 
+This is the inverse of both block factors of :math:`A` and solves with :math:`A_{bb}` twice. The default
+(``blockFactors = "U"``) inverts only the block upper triangular factor
+:math:`U = \\begin{bmatrix} A_{bb} & A_{bk} \\\\ 0 & S \\end{bmatrix}` of
+:math:`A = \\begin{bmatrix} I & 0 \\\\ A_{kb} A_{bb}^{-1} & I \\end{bmatrix} U`, with one solve:
+
+.. math::
+
+    z_k = M_{\\tilde S}^{-1} r_k, \\quad z_b = A_{bb}^{-1} (r_b - A_{bk} z_k):
+
+the remaining dofs first, then the condensed ones follow them (for bars: the bars follow the concrete). With exact
+:math:`S`, GMRES converges in two iterations instead of one (the preconditioned operator has the minimal polynomial
+:math:`(\\lambda - 1)^2`); with :math:`\\tilde S` and AMG, the outer iterations hardly grow, and every one saves a
+solve with :math:`A_{bb}`.
+
 :math:`S` is dense wherever :math:`A_{bb}^{-1}` is, e.g. along a whole bar. Its entries decay quickly away from
 the diagonal, though (a bar on its bond is a beam on an elastic foundation: a load is felt only a few host elements
 away), so :math:`\\tilde S` keeps only the significant ones:
@@ -92,6 +106,7 @@ DEFAULT_OPTIONS = {
     "windowSize": 300,
     "haloSize": None,
     "directSolver": {"linsolver": "superlu"},
+    "blockFactors": "U",
 }
 
 #: The number of right-hand sides per batch of the exact correction of a component (:meth:`_exactCorrection`) ...
@@ -122,6 +137,8 @@ def optionsRejection(options) -> "str | None":
         return "'dropTolerance' must be at least 0 and less than 1 (else the diagonal would be dropped)"
     if not options.get("windowSize", 300) >= 1 or not (options.get("haloSize") or 0) >= 0:
         return "'windowSize' must be at least 1 and 'haloSize' not negative"
+    if options.get("blockFactors", "U") not in ("U", "LU"):
+        return "'blockFactors' must be 'U' or 'LU'"
     directSolver = options.get("directSolver", DEFAULT_OPTIONS["directSolver"])
     if not isinstance(directSolver, Mapping) or "linsolver" not in directSolver:
         return "'directSolver' must be an object with a 'linsolver' name (and optional 'options')"
@@ -163,6 +180,7 @@ def createCondensation(options) -> "SchurComplementCondensation":
         dropTolerance=float(options["dropTolerance"]),
         windowSize=windowSize,
         haloSize=windowSize if options["haloSize"] is None else int(options["haloSize"]),
+        blockFactors=options["blockFactors"],
     )
 
 
@@ -188,6 +206,9 @@ class SchurComplementCondensation:
         The relative size :math:`\\tau` below which entries of :math:`\\tilde S` are dropped.
     windowSize, haloSize
         The dofs of a window's core along a banded component, and of its halo on either side.
+    blockFactors
+        The block factors of :math:`A` the preconditioner inverts: ``"U"``, the block upper triangular one (one solve
+        with :math:`A_{bb}`), or ``"LU"``, both (two solves), see the module documentation.
     """
 
     def __init__(
@@ -198,6 +219,7 @@ class SchurComplementCondensation:
         dropTolerance: float = 1e-4,
         windowSize: int = 300,
         haloSize: int = 300,
+        blockFactors: str = "U",
     ):
         self._markers = markers
         self._directSolver = directSolver
@@ -205,6 +227,7 @@ class SchurComplementCondensation:
         self._dropTolerance = dropTolerance
         self._windowSize = windowSize
         self._haloSize = haloSize
+        self._blockFactors = blockFactors
 
         # the model, its elements as the candidates of the markers, and per node its number of elements and its dofs,
         # see setModel
@@ -323,7 +346,8 @@ class SchurComplementCondensation:
         return blocks
 
     def precondition(self, r: np.ndarray, preconditionRemaining) -> np.ndarray:
-        """One application of the block LU preconditioner, see the module documentation.
+        """One application of the preconditioner: the inverse of the block factors ``blockFactors`` of :math:`A`, see
+        the module documentation.
 
         Parameters
         ----------
@@ -338,11 +362,14 @@ class SchurComplementCondensation:
             :math:`z \\approx A^{-1} r`.
         """
         b, k = self.condensedDofs, self.remainingDofs
-        r_b = r[b]
-        y_b = self._directSolver.solveFactorized(r_b)
+        solveCondensed = self._directSolver.solveFactorized
         z = np.empty_like(r)
-        z[k] = preconditionRemaining(r[k] - self.A_kb @ y_b)
-        z[b] = self._directSolver.solveFactorized(r_b - self.A_bk @ z[k])
+        if self._blockFactors == "LU":
+            y_b = solveCondensed(r[b])
+            z[k] = preconditionRemaining(r[k] - self.A_kb @ y_b)
+        else:
+            z[k] = preconditionRemaining(r[k])
+        z[b] = solveCondensed(r[b] - self.A_bk @ z[k])
         return z
 
     # ----- the remaining dofs, on which blockamg builds its field split -----

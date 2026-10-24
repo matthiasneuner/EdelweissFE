@@ -769,7 +769,8 @@ class BlockAMGSolver(LinearSolver):
         ``approximation`` (``"local"``, the default, or ``"none"``), ``dropTolerance`` (``1e-4``), ``windowSize``
         and ``haloSize`` (``300`` dofs and ``windowSize``) and ``directSolver`` (``{"linsolver": <name>,
         "options": {...}}``, a linear solver that factorizes once for several right-hand sides; ``superlu`` if
-        omitted). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
+        omitted) and ``blockFactors`` (``"U"``, the default: the block upper triangular factor, one solve
+        with the condensed block per application; ``"LU"``: the block LU factorization, two). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
     """
 
     #: See :attr:`~edelweissfe.linsolve.base.LinearSolver.identification`.

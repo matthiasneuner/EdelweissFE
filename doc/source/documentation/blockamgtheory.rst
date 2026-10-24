@@ -1260,6 +1260,22 @@ is the usual field-split sweep :math:`M_{\tilde S}^{-1}` of ``blockamg``, built 
 :math:`\tilde S` of :math:`S` instead of on :math:`A`. With :math:`\tilde S = S` and exact field solves,
 the preconditioner is :math:`A^{-1}`; the outer Krylov solve corrects for both approximations.
 
+This is the inverse of :math:`A` written as the product of both block factors, with two solves with
+:math:`A_{bb}`. By default (``blockFactors = "U"``) only the block upper triangular factor
+:math:`U = \begin{bmatrix} A_{bb} & A_{bk} \\ 0 & S \end{bmatrix}` of
+:math:`A = \begin{bmatrix} I & 0 \\ A_{kb} A_{bb}^{-1} & I \end{bmatrix} U` is inverted, with one solve:
+
+.. math::
+
+    z_k = M_{\tilde S}^{-1} r_k, \qquad z_b = A_{bb}^{-1} (r_b - A_{bk} z_k).
+
+The remaining dofs are solved first, and the condensed ones follow them -- for bars, the bars follow the concrete,
+which is exactly the relation AMG cannot represent. With :math:`\tilde S = S` and exact field solves, GMRES
+converges in two iterations instead of one (the preconditioned operator has the minimal polynomial
+:math:`(\lambda - 1)^2`); with the approximations, the outer iterations were found to hardly grow, and every one
+saves a solve with :math:`A_{bb}`. The block lower triangular factor (bars first, concrete held fixed) was tried
+too and needed considerably more outer iterations.
+
 **The approximate Schur complement.** :math:`S` is dense wherever :math:`A_{bb}^{-1}` is -- along a whole bar.
 But the entries of the inverse of a banded, well-conditioned matrix decay exponentially away from the diagonal
 (Demko, Moss and Smith 1984); physically, a bar on its bond is a beam on an elastic foundation, and a load on it
@@ -1346,6 +1362,9 @@ The keys of ``schurComplement``:
 ``windowSize``, ``haloSize`` (``300``, ``windowSize``)
     The dofs of a window's core along a banded component, and of the halo on either side. A component no longer
     than one core with both halos is corrected exactly.
+``blockFactors`` (``"U"``)
+    ``"U"``: the block upper triangular factor, one solve with :math:`A_{bb}` per application. ``"LU"``: the block
+    LU factorization, two solves.
 ``directSolver`` (``{"linsolver": "superlu"}``)
     ``{"linsolver": <name>, "options": {...}}``, the solver of :math:`A_{bb}`.
 
