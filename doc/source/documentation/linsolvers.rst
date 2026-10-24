@@ -147,8 +147,7 @@ elements are marked -- are condensed. For embedded bars, mark the bars and the b
             "markers": [
                 {"type": "elementSet", "elSet": "rebars"},
                 {"type": "elementSet", "elSet": "rebarBond_bond"}
-            ],
-            "directSolver": {"linsolver": "pardiso"}
+            ]
         }
     }
 

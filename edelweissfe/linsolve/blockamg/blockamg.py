@@ -767,9 +767,9 @@ class BlockAMGSolver(LinearSolver):
         markers with the options of a ``>>marker`` line of adaptive refinement, e.g. ``{"type": "elementSet",
         "elSet": "rebars"}``; the dofs of the interior nodes of the marked elements are condensed),
         ``approximation`` (``"local"``, the default, or ``"none"``), ``dropTolerance`` (``1e-4``), ``windowSize``
-        and ``haloSize`` (``300`` dofs and ``windowSize``) and ``directSolver`` (``{"linsolver": <name>, "options": {...}}``, a
-        linear solver that factorizes once for several right-hand sides; EdelweissFE's default linear solver
-        if omitted). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
+        and ``haloSize`` (``300`` dofs and ``windowSize``) and ``directSolver`` (``{"linsolver": <name>,
+        "options": {...}}``, a linear solver that factorizes once for several right-hand sides; ``superlu`` if
+        omitted). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
     """
 
     #: See :attr:`~edelweissfe.linsolve.base.LinearSolver.identification`.

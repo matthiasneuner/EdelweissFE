@@ -1312,9 +1312,13 @@ cheaper per iteration and needs more of them.
 
 **The direct solver.** ``directSolver`` names any registered linear solver that factorizes once for several
 right-hand sides (``factorize``/``solveFactorized``): ``superlu`` or ``pardiso`` (``klu``, ``mumps`` and ``petsclu``
-do not). Bars give block-tridiagonal chains, cheap for either; a softening zone is a 3D block whose tangent is
-non-symmetric and may be indefinite, for which a threaded, pivoting factorization (``pardiso``) is the better
-choice.
+do not). Every outer iteration solves with :math:`A_{bb}` twice, so the cost of a back substitution counts most:
+for the block-tridiagonal chains of bars, ``superlu`` (the default) is the cheaper one. A large compact zone (a
+softening zone of a 3D mesh) shifts the weight to the exact correction of :math:`\tilde S`, which solves for many
+right-hand sides at once -- there a threaded factorization (``pardiso``) does better. For a softening zone, mind
+that condensation pays only where AMG struggles with the zone: plain ``blockamg`` handles a typical
+gradient-enhanced damage band well, and the condensation then costs more per iteration and per rebuild of
+:math:`\tilde S` (rebuilt whenever the zone grows) than it saves in iterations.
 
 .. list-table:: Schur complement condensation key
     :width: 100%
@@ -1342,7 +1346,7 @@ The keys of ``schurComplement``:
 ``windowSize``, ``haloSize`` (``300``, ``windowSize``)
     The dofs of a window's core along a banded component, and of the halo on either side. A component no longer
     than one core with both halos is corrected exactly.
-``directSolver`` (EdelweissFE's default linear solver: PARDISO if available, else SuperLU)
+``directSolver`` (``{"linsolver": "superlu"}``)
     ``{"linsolver": <name>, "options": {...}}``, the solver of :math:`A_{bb}`.
 
 A worked example

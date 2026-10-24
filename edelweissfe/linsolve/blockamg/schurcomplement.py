@@ -91,7 +91,7 @@ DEFAULT_OPTIONS = {
     "dropTolerance": 1e-4,
     "windowSize": 300,
     "haloSize": None,
-    "directSolver": None,
+    "directSolver": {"linsolver": "superlu"},
 }
 
 #: The number of right-hand sides per batch of the exact correction of a component (:meth:`_exactCorrection`) ...
@@ -122,8 +122,8 @@ def optionsRejection(options) -> "str | None":
         return "'dropTolerance' must be at least 0 and less than 1 (else the diagonal would be dropped)"
     if not options.get("windowSize", 300) >= 1 or not (options.get("haloSize") or 0) >= 0:
         return "'windowSize' must be at least 1 and 'haloSize' not negative"
-    directSolver = options.get("directSolver")
-    if directSolver is not None and (not isinstance(directSolver, Mapping) or "linsolver" not in directSolver):
+    directSolver = options.get("directSolver", DEFAULT_OPTIONS["directSolver"])
+    if not isinstance(directSolver, Mapping) or "linsolver" not in directSolver:
         return "'directSolver' must be an object with a 'linsolver' name (and optional 'options')"
     return None
 
@@ -132,10 +132,10 @@ def createCondensation(options) -> "SchurComplementCondensation":
     """The condensation of the ``schurComplement`` options (see :func:`optionsRejection`).
 
     The markers are created through the marker registry (:mod:`edelweissfe.config.markerlibrary`) from exactly the
-    options of a ``>>marker`` line, the direct solver through the linear solver registry; without
-    ``directSolver``, EdelweissFE's default linear solver is used (PARDISO if available, else SuperLU).
+    options of a ``>>marker`` line, the direct solver through the linear solver registry (SuperLU by default: its
+    back substitution, twice per outer iteration, is cheap for the chains of bars).
     """
-    from edelweissfe.config.linsolve import getDefaultLinSolver, getLinSolverByName
+    from edelweissfe.config.linsolve import getLinSolverByName
     from edelweissfe.config.markerlibrary import getMarkerClass
 
     reason = optionsRejection(options)
@@ -151,12 +151,9 @@ def createCondensation(options) -> "SchurComplementCondensation":
             raise ValueError("blockamg: schurComplement: every marker needs a 'type'")
         markers.append(getMarkerClass(markerType).fromOptions(markerOptions))
 
-    if options["directSolver"] is None:
-        directSolver = getDefaultLinSolver()
-    else:
-        directSolver = getLinSolverByName(
-            options["directSolver"]["linsolver"], dict(options["directSolver"].get("options", {}))
-        )
+    directSolver = getLinSolverByName(
+        options["directSolver"]["linsolver"], dict(options["directSolver"].get("options", {}))
+    )
 
     windowSize = int(options["windowSize"])
     return SchurComplementCondensation(
