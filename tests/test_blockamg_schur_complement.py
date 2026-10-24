@@ -16,6 +16,7 @@ from _blockamgsystems import gridLaplacian
 from edelweissfe.adaptivity.marking import ElementSetMarker
 from edelweissfe.linsolve.base import FieldBlock
 from edelweissfe.linsolve.blockamg import createSolver
+from edelweissfe.linsolve.blockamg.blockamg import BlockAMGSolver
 from edelweissfe.linsolve.blockamg.schurcomplement import (
     SchurComplementCondensation,
     _solveTransposed,
@@ -54,12 +55,13 @@ def _barOnFoundation(n=14, barLength=None, springStiffness=1e3, barStiffness=1e4
 class _FixedDofs(SchurComplementCondensation):
     """A condensation of given dofs, without a model."""
 
-    def __init__(self, dofs, **options):
-        super().__init__([], SuperLUSolver(), **options)
-        self._fixedDofs = dofs
+    def __init__(self, dofs, createDirectSolver=SuperLUSolver, **options):
+        super().__init__([], createDirectSolver, **options)
+        self.fixedDofs = dofs
 
     def _selectCondensedDofs(self):
-        return self._fixedDofs
+        # one dof per node: the windows count dofs
+        return self.fixedDofs, self.fixedDofs
 
 
 def _exactSchurComplement(A, barDofs):
@@ -69,17 +71,17 @@ def _exactSchurComplement(A, barDofs):
     return A_kk - A_kb @ np.linalg.solve(A_bb, A_bk)
 
 
-@pytest.mark.parametrize("windowSize", [10_000, 40])
-def test_approximate_schur_complement_is_close_to_the_exact_one(windowSize):
+@pytest.mark.parametrize("windowNodes", [10_000, 40])
+def test_approximate_schur_complement_is_close_to_the_exact_one(windowNodes):
     """Without dropping, one window over the whole bar (an exact correction) gives the exact S, and short windows
     with halos give it up to the decay of A_bb^-1 along the bar."""
     A, _, barDofs = _barOnFoundation(n=8)
-    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=windowSize, haloSize=40)
+    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowNodes=windowNodes, haloNodes=40)
     condensation.update(A)
     S = condensation.approximateSchurComplement(A).toarray()
     exact = _exactSchurComplement(A, barDofs)
     error = np.abs(S - exact).max() / np.abs(exact).max()
-    assert error < (1e-12 if windowSize > A.shape[0] else 1e-6)
+    assert error < (1e-12 if windowNodes > A.shape[0] else 1e-6)
 
 
 def test_a_zone_that_is_no_chain_gets_its_exact_correction():
@@ -90,10 +92,10 @@ def test_a_zone_that_is_no_chain_gets_its_exact_correction():
     A.sort_indices()
     i, j, k = np.meshgrid(*(np.arange(4, 12),) * 3, indexing="ij")
     zone = np.sort((i + n * j + n * n * k).ravel())
-    condensation = _FixedDofs(zone, dropTolerance=0.0, windowSize=8, haloSize=8)
+    condensation = _FixedDofs(zone, dropTolerance=0.0, windowNodes=8, haloNodes=8)
     condensation.update(A)
-    windows, exactDofs = condensation._windowsAndExactDofs()
-    assert windows == [] and exactDofs.size == zone.size
+    windows, zoneDofs = condensation._windowsAndZones()
+    assert windows == [] and zoneDofs.size == zone.size
     S = condensation.approximateSchurComplement(A).toarray()
     exact = _exactSchurComplement(A, zone)
     assert np.abs(S - exact).max() / np.abs(exact).max() < 1e-12
@@ -101,7 +103,7 @@ def test_a_zone_that_is_no_chain_gets_its_exact_correction():
 
 def test_block_lu_with_the_exact_schur_complement_is_the_inverse():
     A, b, barDofs = _barOnFoundation(n=6)
-    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=10_000, blockFactors="LU")
+    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowNodes=10_000, blockFactors="LU")
     condensation.update(A)
     S = condensation.approximateSchurComplement(A).toarray()
     z = condensation.precondition(b, lambda r_k: np.linalg.solve(S, r_k))
@@ -111,9 +113,8 @@ def test_block_lu_with_the_exact_schur_complement_is_the_inverse():
 def test_blockamg_with_condensed_bar_dofs_converges():
     """The hierarchies are built on S~ of the host dofs, and the outer solve converges on the whole system."""
     A, b, barDofs = _barOnFoundation(n=18)
-    solver = createSolver({"outerTol": 1e-8, "verbosity": "silent", "sweeps": 2})
+    solver = BlockAMGSolver(outerTol=1e-8, verbosity="silent", sweeps=2, condensation=_FixedDofs(barDofs))
     solver.setFieldStructure([FieldBlock("u", 0, A.shape[0], 1)])
-    solver._condensation = _FixedDofs(barDofs)
     x = solver(A, b)
     assert np.linalg.norm(b - A @ x) / np.linalg.norm(b) < 1e-8
     assert solver.lastSolveSummary.iters < 30
@@ -145,16 +146,16 @@ def test_condensed_dofs_are_those_of_the_interior_nodes_of_the_marked_elements()
     dofs = {label: np.array([2 * (label - 1), 2 * (label - 1) + 1]) for label in nodes}
     dofManager = SimpleNamespace(idcsOfFieldVariablesInDofVector=dofs)
 
-    condensation = SchurComplementCondensation([ElementSetMarker("bars"), ElementSetMarker("bonds")], SuperLUSolver())
+    condensation = SchurComplementCondensation([ElementSetMarker("bars"), ElementSetMarker("bonds")], SuperLUSolver)
     condensation.setModel(model, dofManager)
-    assert np.array_equal(condensation._selectCondensedDofs(), [0, 1, 2, 3])
+    assert np.array_equal(condensation._selectCondensedDofs()[0], [0, 1, 2, 3])
 
-    onlyBars = SchurComplementCondensation([ElementSetMarker("bars")], SuperLUSolver())
+    onlyBars = SchurComplementCondensation([ElementSetMarker("bars")], SuperLUSolver)
     onlyBars.setModel(model, dofManager)
-    assert np.array_equal(onlyBars._selectCondensedDofs(), [0, 1])
+    assert np.array_equal(onlyBars._selectCondensedDofs()[0], [0, 1])
 
     with pytest.raises(KeyError, match="element set 'rebars'"):
-        SchurComplementCondensation([ElementSetMarker("rebars")], SuperLUSolver()).setModel(model, dofManager)
+        SchurComplementCondensation([ElementSetMarker("rebars")], SuperLUSolver).setModel(model, dofManager)
 
 
 def test_remaining_field_blocks_drop_the_condensed_nodes():
@@ -202,6 +203,8 @@ def test_options_are_checked():
         createCondensation({})
     with pytest.raises(ValueError, match="unknown key"):
         createCondensation({"markers": [{"type": "elementSet", "elSet": "bars"}], "windowSze": 3})
+    with pytest.raises(ValueError, match="initialOnly"):
+        createCondensation({"markers": [{"type": "elementSet", "elSet": "bars", "initialOnly": True}]})
     with pytest.raises(ValueError, match="krylovOnScaledSystem"):
         createSolver(
             {"krylovOnScaledSystem": True, "schurComplement": {"markers": [{"type": "elementSet", "elSet": "bars"}]}}
@@ -209,9 +212,8 @@ def test_options_are_checked():
 
 
 def _solverWithFixedDofs(A, dofs):
-    solver = createSolver({"outerTol": 1e-8, "verbosity": "silent", "sweeps": 2})
+    solver = BlockAMGSolver(outerTol=1e-8, verbosity="silent", sweeps=2, condensation=_FixedDofs(dofs))
     solver.setFieldStructure([FieldBlock("u", 0, A.shape[0], 1)])
-    solver._condensation = _FixedDofs(dofs)
     return solver
 
 
@@ -225,30 +227,41 @@ def test_s_tilde_and_hierarchies_are_reused_and_rebuilt_when_the_condensed_dofs_
     assert np.linalg.norm(1.01 * b - A @ x) / np.linalg.norm(1.01 * b) < 1e-8
 
     # fewer condensed dofs (a zone that changed between increments): rebuilt for the new remaining dofs
-    solver._condensation._fixedDofs = barDofs[: barDofs.size // 2]
+    solver._condensation.fixedDofs = barDofs[: barDofs.size // 2]
     x = solver(A, b)
     assert solver._schurComplementMatrix is not S
     assert np.array_equal(solver._hierarchyCondensedDofs, barDofs[: barDofs.size // 2])
     assert np.linalg.norm(b - A @ x) / np.linalg.norm(b) < 1e-8
 
     # nothing condensed: the plain field split on A
-    solver._condensation._fixedDofs = np.empty(0, dtype=np.int64)
+    solver._condensation.fixedDofs = np.empty(0, dtype=np.int64)
     x = solver(A, b)
     assert solver._hierarchyCondensedDofs is None and solver._schurComplementMatrix is None
     assert solver._blocks == [FieldBlock("u", 0, A.shape[0], 1)]
     assert np.linalg.norm(b - A @ x) / np.linalg.norm(b) < 1e-8
 
 
-def test_a_singular_condensed_block_declines_the_solve():
-    """NaN, i.e. a cutback for the nonlinear solver, as for any system that cannot be solved -- not an exception."""
+class _SingularSolver(SuperLUSolver):
+    """A direct solver that finds every matrix singular."""
+
+    def factorize(self, A):
+        raise np.linalg.LinAlgError("singular, for the test")
+
+
+def test_a_condensed_block_that_cannot_be_factorized_is_solved_without_condensation():
+    """A cutback would meet the same block again (the condensed dofs come from the last converged increment): the
+    solve does without the condensation."""
     A, b, barDofs = _barOnFoundation(n=8)
-    A = A.tolil()
-    A[barDofs[0], :] = 0.0
-    A[:, barDofs[0]] = 0.0
-    A = A.tocsr()
-    A.eliminate_zeros()
-    x = _solverWithFixedDofs(A, barDofs)(A, b)
-    assert np.isnan(x).all()
+    solver = BlockAMGSolver(outerTol=1e-8, verbosity="silent", condensation=_FixedDofs(barDofs, _SingularSolver))
+    solver.setFieldStructure([FieldBlock("u", 0, A.shape[0], 1)])
+    x = solver(A, b)
+    assert np.linalg.norm(b - A @ x) / np.linalg.norm(b) < 1e-8
+    assert solver._hierarchyCondensedDofs is None
+
+
+def test_superlu_reports_a_singular_matrix_as_a_linear_algebra_error():
+    with pytest.raises(np.linalg.LinAlgError):
+        SuperLUSolver().factorize(sp.csr_matrix(np.array([[1.0, 1.0], [1.0, 1.0]])))
 
 
 def test_a_hot_reload_does_not_change_the_condensation(tmp_path):
@@ -265,10 +278,47 @@ def test_a_hot_reload_does_not_change_the_condensation(tmp_path):
 def test_by_default_the_block_upper_triangular_factor_is_inverted():
     """With the exact S, the default applies the inverse of U = [A_bb A_bk; 0 S]."""
     A, b, barDofs = _barOnFoundation(n=6)
-    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowSize=10_000)
+    condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowNodes=10_000)
     condensation.update(A)
     S = condensation.approximateSchurComplement(A).toarray()
     z = condensation.precondition(b, lambda r_k: np.linalg.solve(S, r_k))
     U = sp.bmat([[condensation.A_bb, condensation.A_bk], [None, sp.csr_matrix(S)]])
     order = np.concatenate([barDofs, condensation.remainingDofs])
     assert np.allclose(U @ z[order], b[order], rtol=0.0, atol=1e-10 * np.abs(b).max())
+
+
+def test_tutorial_why_the_condensation_works():
+    """The method in three observations, on a bar on an elastic foundation (small enough for dense matrices)."""
+    from scipy.sparse.linalg import LinearOperator, gmres
+
+    A, b, barDofs = _barOnFoundation(n=6, barLength=36)
+    remaining = np.setdiff1d(np.arange(A.shape[0]), barDofs)
+
+    # 1. The inverse of the bar block decays exponentially along the bar (Demko, Moss and Smith): a load on a bar
+    #    on its bond is felt only nearby. This is why S = A_kk - A_kb A_bb^-1 A_bk may be cut into windows.
+    inverseOfBar = np.linalg.inv(A[barDofs][:, barDofs].toarray())
+    #    Here, the bar is ten times stiffer than its bond, and the factor per dof is about 0.73.
+    alongTheBar = np.abs(inverseOfBar[0]) / abs(inverseOfBar[0, 0])
+    assert np.all(np.diff(alongTheBar[:30]) < 0.0) and alongTheBar[30] < 1e-3
+
+    # 2. With the exact S, the block LU factorization is the inverse of A: GMRES needs one iteration ...
+    # 3. ... and the block upper triangular factor alone two (A U^-1 = L, unit block lower triangular, (L - I)^2 = 0)
+    S = _exactSchurComplement(A, barDofs)
+    for blockFactors, iterations in (("LU", 1), ("U", 2)):
+        condensation = _FixedDofs(barDofs, dropTolerance=0.0, windowNodes=10_000, blockFactors=blockFactors)
+        condensation.update(A)
+        assert np.array_equal(condensation.remainingDofs, remaining)
+
+        def preconditioner(r):
+            return condensation.precondition(np.asarray(r).ravel(), lambda r_k: np.linalg.solve(S, r_k))
+
+        counted = []
+        x, info = gmres(
+            A,
+            b,
+            M=LinearOperator(A.shape, matvec=preconditioner),
+            rtol=1e-10,
+            callback=lambda residual: counted.append(residual),
+            callback_type="pr_norm",
+        )
+        assert info == 0 and len(counted) == iterations

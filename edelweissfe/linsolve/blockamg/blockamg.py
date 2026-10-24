@@ -53,6 +53,9 @@ has to be specified by hand.
 What it does per solve
 ----------------------
 
+#. **Condense (optional).** With ``schurComplement``, selected dofs that make AMG stall (e.g. those of embedded
+   bars with bond-slip) are solved exactly, and everything below is done for the approximate Schur complement of the
+   remaining dofs instead of for :math:`A`, see :mod:`~edelweissfe.linsolve.blockamg.schurcomplement`.
 #. **Equilibrate.** Symmetric diagonal (Jacobi) scaling :math:`\\hat A = D A D`, with
    :math:`D = \\operatorname{diag}(\\lvert A_{ii} \\rvert^{-1/2})` (its diagonal is ``scaling`` in the code),
    removes the large dynamic range (Dirichlet penalties + stiffness) that otherwise wrecks AMG's
@@ -766,11 +769,15 @@ class BlockAMGSolver(LinearSolver):
         those of embedded bars with bond-slip. A JSON object with the keys ``markers`` (required: a list of
         markers with the options of a ``>>marker`` line of adaptive refinement, e.g. ``{"type": "elementSet",
         "elSet": "rebars"}``; the dofs of the interior nodes of the marked elements are condensed),
-        ``approximation`` (``"local"``, the default, or ``"none"``), ``dropTolerance`` (``1e-4``), ``windowSize``
-        and ``haloSize`` (``300`` dofs and ``windowSize``) and ``directSolver`` (``{"linsolver": <name>,
+        ``approximation`` (``"local"``, the default, or ``"none"``), ``dropTolerance`` (``1e-4``), ``windowNodes``
+        and ``haloNodes`` (``50`` nodes and ``windowNodes``), ``directSolver`` (``{"linsolver": <name>,
         "options": {...}}``, a linear solver that factorizes once for several right-hand sides; ``superlu`` if
-        omitted) and ``blockFactors`` (``"U"``, the default: the block upper triangular factor, one solve
-        with the condensed block per application; ``"LU"``: the block LU factorization, two). ``None`` (the default): no condensation. Not with ``krylovOnScaledSystem``.
+        omitted) and ``blockFactors`` (``"U"``, the default: the block upper triangular factor, one solve with the
+        condensed block per application; ``"LU"``: the block LU factorization, two). ``None`` (the default): no
+        condensation. Not with ``krylovOnScaledSystem``. Fixed at construction (not hot-reloadable).
+    condensation
+        A :class:`~edelweissfe.linsolve.blockamg.schurcomplement.SchurComplementCondensation` handed over directly
+        instead of configured by ``schurComplement`` (e.g. one of fixed dofs, in a test). Not a configuration key.
     """
 
     #: See :attr:`~edelweissfe.linsolve.base.LinearSolver.identification`.
@@ -844,6 +851,7 @@ class BlockAMGSolver(LinearSolver):
         dumpOnDegradationContextSolves: int = 0,
         hotReloadConfigFile: str = None,
         schurComplement: dict = None,
+        condensation: "schurcomplement.SchurComplementCondensation" = None,
     ):
         self._outerTol = outerTol
         self._outerRestart = outerRestart
@@ -965,14 +973,16 @@ class BlockAMGSolver(LinearSolver):
                 "blockamg: " + "; ".join("{:} {:}".format(name, reason) for name, reason in rejections.items())
             )
 
-        # The Schur complement condensation (schurComplement), None without; created once its options are known to
-        # be valid. The approximate Schur complement the standing hierarchies were built on, and its condensed dofs.
+        # The Schur complement condensation (schurComplement, or one handed over directly), None without; created
+        # once its options are known to be valid. The approximate Schur complement the standing hierarchies were
+        # built on, and its condensed dofs.
         self._condensation = (
-            schurcomplement.createCondensation(schurComplement) if schurComplement is not None else None
+            schurcomplement.createCondensation(schurComplement) if schurComplement is not None else condensation
         )
         self._schurComplementMatrix = None
         self._hierarchyCondensedDofs = None
-        self._warnedAllDofsSelected = False
+        # warnings given once per model, see _warnOnce
+        self._warningsGiven = set()
 
         # Created only once construction is known to succeed: a configuration rejected above must not
         # leave a directory behind, and an uncreatable path should raise the ValueError above naming
@@ -1125,7 +1135,10 @@ class BlockAMGSolver(LinearSolver):
         super().setModel(model, dofManager)
         if self._condensation is not None:
             self._condensation.setModel(model, dofManager)
-            self._warnedAllDofsSelected = False
+        # built for the dofs of the previous model
+        self._schurComplementMatrix = None
+        self._hierarchyCondensedDofs = None
+        self._warningsGiven = set()
         self._dropDerivedCaches()
         self._refreshNext = True
         self._lastResidualNorm = None
@@ -1336,9 +1349,15 @@ class BlockAMGSolver(LinearSolver):
         "p1FieldNames": "_p1FieldNamesRequested",
     }
     # Changing which file is watched, from inside that file, is not a thing worth supporting.
-    # The deprecated LGMRES recycling keys have no setting left to change. p1Maps are arrays handed to the
-    # constructor, not a configuration file setting.
-    _HOT_RELOAD_IGNORED = ("hotReloadConfigFile", "lgmresAlwaysReset", "lgmresResetOnNewIncrement", "p1Maps")
+    # The deprecated LGMRES recycling keys have no setting left to change. p1Maps (arrays) and condensation (an
+    # object) are handed to the constructor, not configuration file settings.
+    _HOT_RELOAD_IGNORED = (
+        "hotReloadConfigFile",
+        "lgmresAlwaysReset",
+        "lgmresResetOnNewIncrement",
+        "p1Maps",
+        "condensation",
+    )
 
     def _fieldDimensions(self) -> dict:
         """The nodal dimension of every field of the last hierarchy build, by name; empty before the first."""
@@ -1598,6 +1617,12 @@ class BlockAMGSolver(LinearSolver):
             self._buildFieldPreconditioner(block, system, i, scaling[block.start : block.stop])
             for i, block in enumerate(blocks)
         ]
+
+    def _warnOnce(self, message: str) -> None:
+        """Log a warning only the first time it occurs for the current model."""
+        if message not in self._warningsGiven:
+            self._warningsGiven.add(message)
+            self._log("warning", message)
 
     def _hierarchyIsCondensing(self) -> bool:
         """Whether the hierarchies being built are those of the remaining dofs of a Schur complement condensation."""
@@ -2001,16 +2026,26 @@ class BlockAMGSolver(LinearSolver):
         #      factorize A_bb. The field split below is then built for the remaining dofs k, on the approximate Schur
         #      complement S~ of A_bb instead of on A.
         condensation = self._condensation
+        condensing = False
         if condensation is not None:
             try:
                 condensation.update(A)
-            except (RuntimeError, np.linalg.LinAlgError) as error:
-                # e.g. a singular A_bb (a softening zone that lost all stiffness): a cutback, as for a non-finite system
-                return self._notSolved(n, "the condensed block A_bb cannot be factorized ({:})".format(error))
-            if condensation.selectedAllDofs and not self._warnedAllDofsSelected:
-                self._log("warning", "⚠ blockamg: the schurComplement markers select every dof; nothing is condensed")
-                self._warnedAllDofsSelected = True
-        condensing = condensation is not None and condensation.hasCondensedDofs()
+                condensing = condensation.hasCondensedDofs()
+            except np.linalg.LinAlgError as error:
+                # e.g. a softening zone or a bond that lost all stiffness. The condensed dofs come from the last
+                # converged increment, so a cutback would meet the same block again: this solve does without.
+                self._log(
+                    "warning",
+                    "⚠ solve #{:}: the condensed block A_bb cannot be factorized ({:}); solved without the Schur "
+                    "complement condensation".format(self._solveCount, error),
+                )
+            if condensation.selectedAllDofs:
+                self._warnOnce("⚠ blockamg: the schurComplement markers select every dof; nothing is condensed")
+            elif condensing and condensation.condensedDofs.size > n // 2:
+                self._warnOnce(
+                    "⚠ blockamg: the schurComplement markers select more than half of the dofs: the solve is mostly a "
+                    "direct one, with the cost of AMG on top"
+                )
         condensedDofs = condensation.condensedDofs if condensing else None
         condensedDofsChanged = not _sameCondensedDofs(condensedDofs, self._hierarchyCondensedDofs)
         fieldBlocks = condensation.remainingFieldBlocks(blocks) if condensing else blocks
@@ -2070,10 +2105,16 @@ class BlockAMGSolver(LinearSolver):
                 self._p1FineSpectralRadiusCache.clear()
             self._log(
                 "info",
-                "blockamg: {:} dofs condensed, S~ of the {:} others with {:} nonzeros".format(
-                    condensedDofs.size, n - condensedDofs.size, fieldSplitMatrix.nnz
-                ),
+                "blockamg: {:} dofs condensed; the approximate Schur complement of the {:} remaining dofs has {:} "
+                "nonzeros".format(condensedDofs.size, n - condensedDofs.size, fieldSplitMatrix.nnz),
             )
+            if condensation.nonPositiveDiagonalEntries:
+                self._log(
+                    "warning",
+                    "⚠ solve #{:}: the approximate Schur complement has {:} non-positive diagonal entries: the "
+                    "condensed dofs do not hold all of the softening, and AMG on the remaining dofs may "
+                    "struggle".format(self._solveCount, condensation.nonPositiveDiagonalEntries),
+                )
         elif condensing:
             # the S~ the standing hierarchies were built on
             fieldSplitMatrix = self._schurComplementMatrix

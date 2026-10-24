@@ -155,6 +155,13 @@ elements are marked -- are condensed. For embedded bars, mark the bars and the b
 creates. A ``fieldOutput`` marker condenses, e.g., a softening zone instead. The method, every key and the
 caveats are on the :doc:`blockamgtheory` page (section "Schur complement condensation").
 
+This option replaces the former ``barschur`` solver. Its configuration translates as follows: ``linsolver=blockamg``;
+the bar dofs by ``markers`` for the bar and bond element sets; ``schurWindow``/``schurHalo`` (dofs) by
+``windowNodes``/``haloNodes`` (nodes); ``schurDropTolerance`` by ``dropTolerance``; ``innerCycles`` by blockamg's
+``sweeps``; the options of the inner ``blockamg`` by blockamg's own keys at the top level; ``outerTolerance``,
+``restart`` and ``maxIterations`` by blockamg's ``outerTol``, ``lgmresM`` and ``outerRestart``. The ``"nodal"``
+approximation has no counterpart.
+
 
 The ``amgcl`` solver
 --------------------

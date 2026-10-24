@@ -1233,7 +1233,8 @@ low-energy error has the bar follow the host, :math:`u_{bar} \approx \sum_i N_i 
 nodes at other positions, which an aggregate moving as a rigid body cannot represent. The bars are also
 stiff 1D chains inside a softer 3D continuum, a strong anisotropy. ``blockamg`` alone stalls on such systems.
 
-``schurComplement`` condenses these dofs :math:`b` exactly and leaves AMG the remaining dofs :math:`k`:
+``schurComplement`` condenses these dofs exactly -- we call them :math:`b`, the condensed ("bar") dofs -- and leaves
+AMG the remaining (kept) dofs :math:`k`:
 
 .. math::
 
@@ -1270,32 +1271,43 @@ This is the inverse of :math:`A` written as the product of both block factors, w
     z_k = M_{\tilde S}^{-1} r_k, \qquad z_b = A_{bb}^{-1} (r_b - A_{bk} z_k).
 
 The remaining dofs are solved first, and the condensed ones follow them -- for bars, the bars follow the concrete,
-which is exactly the relation AMG cannot represent. With :math:`\tilde S = S` and exact field solves, GMRES
-converges in two iterations instead of one (the preconditioned operator has the minimal polynomial
-:math:`(\lambda - 1)^2`); with the approximations, the outer iterations were found to hardly grow, and every one
-saves a solve with :math:`A_{bb}`. The block lower triangular factor (bars first, concrete held fixed) was tried
-too and needed considerably more outer iterations.
+which is exactly the relation AMG cannot represent.
+
+Why one factor is enough: its last step solves the rows of :math:`b` exactly, so after the first outer iteration
+the residual in these rows is zero, and from then on the outer Krylov solve iterates on the rows of :math:`k` alone,
+with the operator :math:`S \tilde S^{-1}` -- the same as with the full block LU factorization, which saves one
+iteration more. With :math:`\tilde S = S` and exact field solves, GMRES converges in two iterations instead of
+one: :math:`A U^{-1}` is the unit block lower triangular factor :math:`L` of :math:`A = L U`, and
+:math:`(L - I)^2 = 0`. With the approximations, the outer iterations were found to hardly grow, and every one saves
+a solve with :math:`A_{bb}`. The block lower triangular factor (bars first, concrete held fixed) was tried too: its
+last step leaves a residual in the rows of :math:`b`, coupled to :math:`k` by the stiff bond, and it needed
+considerably more outer iterations.
 
 **The approximate Schur complement.** :math:`S` is dense wherever :math:`A_{bb}^{-1}` is -- along a whole bar.
 But the entries of the inverse of a banded, well-conditioned matrix decay exponentially away from the diagonal
 (Demko, Moss and Smith 1984); physically, a bar on its bond is a beam on an elastic foundation, and a load on it
 is felt only a few host elements away. :math:`\tilde S` therefore keeps only the significant entries:
 
-* a long, banded component of :math:`A_{bb}` (a bar, ordered along the bar by the reverse Cuthill--McKee
-  ordering) is cut into overlapping windows, cores of ``windowSize`` dofs with halos of ``haloSize`` dofs on
+* a banded component of :math:`A_{bb}` -- a chain: a bar, ordered along the bar by the reverse Cuthill--McKee
+  ordering -- is cut into overlapping windows, cores of ``windowNodes`` nodes with halos of ``haloNodes`` nodes on
   either side; for the dofs of a core, :math:`A_{bb}^{-1}` is replaced by the inverse of the window's block, and
-  only the core rows are kept (restricted additive Schwarz, Cai and Sarkis 1999). A short component (a short
+  only the core rows are kept (restricted additive Schwarz, Cai and Sarkis 1999). Windows count nodes, as the
+  decay length is a length along the bar, whatever the dofs per node (a truss, a beam). A short component (a short
   bar) is a single window, which is exact;
-* a long component that is not banded (a zone of a 2D or 3D mesh, e.g. a softening zone) gets its exact
-  correction from the factorization of :math:`A_{bb}`, solved for the coupled remaining dofs in batches of
-  right-hand sides -- windows of a few hundred dofs would cut such a zone into pieces far smaller than the
-  distance over which its inverse decays;
+* a component that is not banded (a zone of a 2D or 3D mesh, e.g. a softening zone) gets its exact correction from
+  a factorization of its own block, solved for the coupled remaining dofs in batches of right-hand sides --
+  windows along a chain would cut such a zone into pieces far smaller than the distance over which its inverse
+  decays;
 * entries :math:`|\tilde S_{ij}| < \tau \sqrt{|\tilde S_{ii} \tilde S_{jj}|}` are dropped (``dropTolerance``).
 
 **Choosing the condensed dofs.** The markers of adaptive mesh refinement select elements
 (:mod:`edelweissfe.adaptivity.marking`; any ``type`` with the options of its ``>>marker`` line), and :math:`b` holds
 all dofs of the *interior nodes* of the marked elements: the nodes that have at least one element, all of them
-marked. One rule serves every use:
+marked. One rule serves every use::
+
+    bar node:   bar, bond                -> all marked -> condensed
+    host node:  bond, concrete, concrete -> not all    -> kept
+
 
 * embedded bars: mark the bar elements and the bond elements (``elementSet`` markers for the bar sets and the
   ``<generator>_bond`` sets of ``embeddedBond``). A bar node belongs only to them; a host node also belongs to
@@ -1305,9 +1317,16 @@ marked. One rule serves every use:
   e.g. displacement and nonlocal damage. A fieldOutput has no result before the first converged increment, so
   nothing is condensed until then.
 
-The markers are evaluated on every solve; a fieldOutput changes only between increments, and a changed selection
-rebuilds :math:`\tilde S` and the hierarchies. Should the markers select every dof, nothing is condensed (with a
-warning): there would be nothing left for the field split, and a direct solver is the better choice.
+The markers are evaluated on every solve (``initialOnly`` is rejected); a fieldOutput changes only between
+increments, and a changed selection rebuilds :math:`\tilde S` and the hierarchies. Should the markers select every
+dof, nothing is condensed (with a warning): there would be nothing left for the field split, and a direct solver is
+the better choice; more than half of the dofs is warned about too. Only the dofs of nodes can be condensed, and
+always all fields of a node together: dofs that belong to no node (e.g. Lagrange multipliers) cannot be selected.
+
+**Robustness.** If :math:`A_{bb}` cannot be factorized (a zone or a bond that lost all stiffness), the solve does
+without the condensation, with a warning: the condensed dofs come from the last converged increment, so a cutback
+would meet the same block again. An approximate Schur complement with non-positive diagonal entries (the condensed
+zone does not hold all of the softening, and AMG on the rest may struggle) is warned about as well.
 
 **Within a solve.** Every solve cuts :math:`A_{bb}`, :math:`A_{bk}` and :math:`A_{kb}` out of the current matrix
 (at positions found once per sparsity pattern) and factorizes :math:`A_{bb}`. :math:`\tilde S` is computed when
@@ -1328,8 +1347,9 @@ cheaper per iteration and needs more of them.
 
 **The direct solver.** ``directSolver`` names any registered linear solver that factorizes once for several
 right-hand sides (``factorize``/``solveFactorized``): ``superlu`` or ``pardiso`` (``klu``, ``mumps`` and ``petsclu``
-do not). Every outer iteration solves with :math:`A_{bb}` twice, so the cost of a back substitution counts most:
-for the block-tridiagonal chains of bars, ``superlu`` (the default) is the cheaper one. A large compact zone (a
+do not). Every outer iteration solves with :math:`A_{bb}`, so the cost of a back substitution counts most:
+for the block-tridiagonal chains of bars, ``superlu`` (the default) is the cheaper one (with ``blockFactors =
+"LU"``, twice per iteration). A large compact zone (a
 softening zone of a 3D mesh) shifts the weight to the exact correction of :math:`\tilde S`, which solves for many
 right-hand sides at once -- there a threaded factorization (``pardiso``) does better. For a softening zone, mind
 that condensation pays only where AMG struggles with the zone: plain ``blockamg`` handles a typical
@@ -1359,9 +1379,9 @@ The keys of ``schurComplement``:
     ignored (for comparison).
 ``dropTolerance`` (``1e-4``)
     :math:`\tau`, the relative size below which entries of :math:`\tilde S` are dropped.
-``windowSize``, ``haloSize`` (``300``, ``windowSize``)
-    The dofs of a window's core along a banded component, and of the halo on either side. A component no longer
-    than one core with both halos is corrected exactly.
+``windowNodes``, ``haloNodes`` (``50``, ``windowNodes``)
+    The nodes of a window's core along a chain, and of the halo on either side. A chain no longer than one core with
+    both halos is corrected exactly.
 ``blockFactors`` (``"U"``)
     ``"U"``: the block upper triangular factor, one solve with :math:`A_{bb}` per application. ``"LU"``: the block
     LU factorization, two solves.
