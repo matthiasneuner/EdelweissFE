@@ -1,4 +1,6 @@
 ** = RigidBodyMPC3D solved by blockamg (the MPC rigid body leaves no zero diagonal, unlike the Lagrange version); same U.ref.
+** The reference is the direct solver's, so the linear solves go to a fixed outer tolerance far below the U.ref check
+** (blockamg.json): with the adaptive tolerance, the converged Newton path depends on the preconditioner.
 *modelGenerator, generator=boxGen, name=gen
 lX=100
 lY=10
@@ -21,6 +23,7 @@ all
 
 *solver, solver=NIST, name=theSolver
 linsolver=blockamg
+linsolverConfigFile=blockamg.json
 
 *fieldOutput
 >>perNode, name=load,  nSet=gen_left, field=displacement, result=P, f(x)='sum(x[:,1])'
