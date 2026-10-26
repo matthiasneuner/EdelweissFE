@@ -100,6 +100,19 @@ class EnsightConfigurationSchema:
     elSet: str | None = schemaField(description="Element set.", dtype=str, default=None)
     nSet: str | None = schemaField(description="Node set.", dtype=str, default=None)
     transient: bool = schemaField(description="Set transient ensight output.", dtype=bool, default=True)
+    deformedGeometry: str | None = schemaField(
+        description="Name of a vector node field (e.g. 'displacement'): the geometry is then written in the deformed "
+        "configuration, reference coordinates + the field, at every output, so a viewer shows the deformed state "
+        "without a warp filter. Nodes without the field keep their reference coordinates.",
+        dtype=str,
+        default=None,
+    )
+    deformationScaleFactor: float = schemaField(
+        description="Used with deformedGeometry: the geometry is written as reference coordinates + this factor "
+        "times the field, e.g., 10 to magnify small deformations. The written field values are not scaled.",
+        dtype=float,
+        default=1.0,
+    )
 
 
 @dataclass(frozen=True)
@@ -210,6 +223,32 @@ class EnsightUnstructuredPart:
         self.description = description  # string, describing the part; max. 80 characters
         self.partNumber = partNumber
         self.nodeCoordinateArray = np.asarray([node.coordinates for node in nodes])
+        self.referenceCoordinateArray = self.nodeCoordinateArray
+
+    def deform(self, nodeField, scaleFactor: float = 1.0) -> None:
+        """Set the coordinates to the reference coordinates plus the (scaled) nodal values ``U`` of a vector node
+        field; nodes without the field keep their reference coordinates.
+
+        Parameters
+        ----------
+        nodeField
+            The :class:`~edelweissfe.fields.nodefield.NodeField`, e.g., of the displacement.
+        scaleFactor
+            The factor the nodal values are scaled with, e.g., to magnify small deformations.
+        """
+        if len(self.nodes) == 0:
+            return
+        cache = getattr(self, "_deformCache", None)
+        if cache is None or cache[0] is not nodeField or cache[1] != nodeField._version:
+            rows = np.array([nodeField._indicesOfNodesInArray.get(n, -1) for n in self.nodes], dtype=int)
+            self._deformCache = (nodeField, nodeField._version, rows)
+        rows = self._deformCache[2]
+        hasField = rows >= 0
+        U = np.asarray(nodeField["U"])
+        coordinates = np.array(self.referenceCoordinateArray, dtype=float, copy=True)
+        nDim = min(coordinates.shape[1], U.shape[1])
+        coordinates[hasField, :nDim] += scaleFactor * U[rows[hasField], :nDim]
+        self.nodeCoordinateArray = coordinates
 
     def writeToFile(
         self,
@@ -891,6 +930,8 @@ class OutputManager(OutputManagerBase):
         self.intermediateSaveInterval = int(val) if val is not None else None
         self.overwrite = defaults.overwrite
         transient = defaults.transient
+        self.deformedGeometry = defaults.deformedGeometry
+        self.deformationScaleFactor = defaults.deformationScaleFactor
         configSetName = None
         configIsNodeSet = None
 
@@ -901,6 +942,8 @@ class OutputManager(OutputManagerBase):
             self.intermediateSaveInterval = configurationBlock.intermediateSaveInterval
             transient = configurationBlock.transient
             self.overwrite = configurationBlock.overwrite
+            self.deformedGeometry = configurationBlock.deformedGeometry
+            self.deformationScaleFactor = configurationBlock.deformationScaleFactor
 
             if configurationBlock.nSet:
                 configSetName = configurationBlock.nSet
@@ -1153,7 +1196,19 @@ class OutputManager(OutputManagerBase):
 
         self._meshSignature = signature
 
-        # write the current geometry only if it changed
+        # write the current geometry only if it changed -- in the deformed configuration, at every output
+        if self.deformedGeometry is not None:
+            if self.deformedGeometry not in model.nodeFields:
+                raise KeyError(
+                    f"Ensight output {self.name}: deformedGeometry={self.deformedGeometry} is not a node field of "
+                    f"the model; available: {list(model.nodeFields)}"
+                )
+            nodeField = model.nodeFields[self.deformedGeometry]
+            for part in self.geometryParts:
+                if hasattr(part, "deform"):
+                    part.deform(nodeField, self.deformationScaleFactor)
+            mesh_changed = True
+
         if mesh_changed:
             geometry = EnsightGeometry("geometry", "EdelweissFE", "*export*", ensightPartList=self.geometryParts)
             self.ensightCase.writeGeometryTrendChunk(geometry, self.transientTAndFSetNumber)

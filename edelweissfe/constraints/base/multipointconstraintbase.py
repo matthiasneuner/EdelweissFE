@@ -128,6 +128,21 @@ class MultiPointConstraintBase(OptionSchemaProvider, ABC):
             ``(slaveDofIndex, [(masterDofIndex, coefficient), ...])``.
         """
 
+    def fieldsOnMasterNodes(self) -> list:
+        """Return the fields this constraint needs on master nodes that no element might provide, e.g. the
+        ``rotation`` of a rigid body's reference point.
+
+        The model creates these field variables like those of elements and ordinary constraints. The default
+        is none: most multi-point constraints tie slaves to masters that elements discretize anyway.
+
+        Returns
+        -------
+        list
+            ``(node, [fieldName, ...])`` pairs.
+        """
+
+        return []
+
     def claimedSlaveNodes(self) -> set:
         """Return the nodes this constraint claims as multi-point-constraint slaves.
 

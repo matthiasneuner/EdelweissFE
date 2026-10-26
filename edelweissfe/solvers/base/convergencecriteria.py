@@ -71,6 +71,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from edelweissfe.config import phenomena
 from edelweissfe.numerics.dofmanager import DofManager, DofVector
 
 
@@ -208,7 +209,11 @@ class LegacyConvergenceCriterion(ConvergenceCriterionBase):
 
         return FieldConvergence(
             fluxResidual,
-            fluxResidual <= max(fluxResidualTolerances[field] * spatialAveragedFlux, 1e-7),
+            fluxResidual
+            <= max(
+                fluxResidualTolerances[field] * spatialAveragedFlux,
+                phenomena.fluxResidualAbsoluteTolerance.get(field, 1e-7),
+            ),
             correction,
             correction < self.fieldCorrectionTolerances[field],
             indexOfMax,

@@ -137,6 +137,11 @@ fluxResidualToleranceAlternative = {
     "jacobi": 5e-3,
 }
 
+# Absolute floor of the flux residual criterion of the legacy convergence criterion, per field
+# (r_max <= max(R * q_avg, floor)); fields not listed use 1e-7. Example: a gradient-enhanced damage field whose
+# flux is ~0 before damage starts can need a larger floor than the default.
+fluxResidualAbsoluteTolerance = {}
+
 # domain                 dimensions
 domainMapping = {
     "1d": 1,
