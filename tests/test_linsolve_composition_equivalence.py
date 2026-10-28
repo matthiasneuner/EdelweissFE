@@ -39,6 +39,7 @@ checked against the tolerance instead. One outer iteration count (marked) depend
 threads, 64 with one."""
 
 import json
+from functools import cache
 
 import numpy as np
 import pytest
@@ -114,9 +115,10 @@ _REBUILT = {
 _GAP = {"scaled": 19.24, "scaled gapCompensated": 19.58}
 
 
-def _beamWithDamage(seed: int = 0, couplingStrength: float = 1e-2):
-    """A propped 3D cantilever (displacement) with a nonlocal damage field on its nodes (a graph Laplacian of the
-    element edges plus a mass-like diagonal), coupled both ways by weak random blocks."""
+@cache
+def _beamWithDamageOnce(seed: int, couplingStrength: float):
+    """Built once per module: drawing the random coupling blocks takes seconds, and every test solves the same
+    system."""
     K, coordinates, constrained = cantilever((64, 6, 6), (16.0, 1.5, 1.5))
     nNodes = len(coordinates)
     distances = np.linalg.norm(coordinates[:, None, :] - coordinates[None, :, :], axis=2)
@@ -130,6 +132,14 @@ def _beamWithDamage(seed: int = 0, couplingStrength: float = 1e-2):
     b = rng.standard_normal(A.shape[0])
     fields = [FieldBlock("displacement", 0, 3 * nNodes, 3), FieldBlock("nonlocal damage", 3 * nNodes, 4 * nNodes, 1)]
     return A, b, fields, coordinates
+
+
+def _beamWithDamage(seed: int = 0, couplingStrength: float = 1e-2):
+    """A propped 3D cantilever (displacement) with a nonlocal damage field on its nodes (a graph Laplacian of the
+    element edges plus a mass-like diagonal), coupled both ways by weak random blocks. Each call returns its own
+    copies, so a solver that scales or reorders the system in place cannot change it for the next test."""
+    A, b, fields, coordinates = _beamWithDamageOnce(seed, couplingStrength)
+    return A.copy(), b.copy(), list(fields), coordinates.copy()
 
 
 def _composed(coordinates, fields, **presetOptions) -> ComposedLinearSolver:

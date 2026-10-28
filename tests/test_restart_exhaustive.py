@@ -675,17 +675,21 @@ def _plainValue(value, directory: str, depth: int = 0):
         return None if value.dtype == object else (value.dtype.str, value.shape, value.tobytes())
     if isinstance(value, TimeStep):
         return _plainValue((value.number, value.stepProgressIncrement, value.stepProgress, value.totalTime), directory)
+    # A container is plain only if every entry is; the first one that is not decides, so the rest of,
+    # say, a model's element dictionary is never visited.
     if isinstance(value, (list, tuple, set, frozenset)):
-        entries = [_plainValue(entry, directory, depth) for entry in value]
-        if any(entry is None for entry in entries):
-            return None
+        entries = []
+        for entry in value:
+            entries.append(_plainValue(entry, directory, depth))
+            if entries[-1] is None:
+                return None
         return tuple(sorted(entries, key=repr) if isinstance(value, (set, frozenset)) else entries)
     if isinstance(value, dict):
-        entries = [
-            (_plainValue(key, directory, depth), _plainValue(entry, directory, depth)) for key, entry in value.items()
-        ]
-        if any(key is None or entry is None for key, entry in entries):
-            return None
+        entries = []
+        for key, entry in value.items():
+            entries.append((_plainValue(key, directory, depth), _plainValue(entry, directory, depth)))
+            if entries[-1][0] is None or entries[-1][1] is None:
+                return None
         return tuple(sorted(entries, key=repr))
     if depth == 0 and type(value).__module__.startswith("edelweissfe"):
         try:
@@ -709,14 +713,15 @@ def _components(model, step, outputManagers, directory: Path) -> dict:
     components |= {"fieldOutput " + name: o for name, o in step.fieldOutputController.fieldOutputs.items()}
     for actionType, actions in step.actions.items():
         components |= {"{:} {:}".format(actionType, name): a for name, a in actions.items()}
-    return {
-        key: {
+    snapshot = {}
+    for key, component in components.items():
+        values = {
             name: _plainValue(value, str(directory))
             for name, value in vars(component).items()
-            if name not in _NOT_STATE and _plainValue(value, str(directory)) is not None
+            if name not in _NOT_STATE
         }
-        for key, component in components.items()
-    }
+        snapshot[key] = {name: v for name, v in values.items() if v is not None}
+    return snapshot
 
 
 def _differingComponents(resumed: dict, reference: dict) -> list:

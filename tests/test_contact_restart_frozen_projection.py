@@ -37,6 +37,9 @@ from edelweissfe.drivers.inputfiledrivensimulation import finiteElementSimulatio
 from edelweissfe.utils.exceptions import RestartError
 from edelweissfe.utils.inputfileparser import parseInputFile
 
+#: Increments between two outputs of the explicit solver, and so between two restart writes.
+_OUTPUT_FREQUENCY = 5
+
 
 def _box(name, origin, length, elProvider, elType):
     x0, y0, z0 = origin
@@ -121,7 +124,7 @@ upper_all
 *job, name=contactRestartJob, domain=3d
 *solver, solver=NEDParallel, name=theSolver
 courant-number={0.3 if amr else 0.8}
-output-frequency=5
+output-frequency={_OUTPUT_FREQUENCY}
 contact-update-frequency=7
 {"topology-check-frequency=100" if amr else ""}
 {model}
@@ -149,13 +152,16 @@ def _fields(model) -> dict:
 
 
 def _truncateAndResume(directory: Path, constraintType: str, nFull: int, nTruncated: int, extra="", amr=False):
-    """Run nTruncated increments writing checkpoints, then resume from the last one to nFull.
+    """Run nTruncated increments writing one checkpoint, at the end, then resume from it to nFull.
 
     The contact-update frequency (7) is no divisor of the output frequency (5), so a checkpoint
     usually falls between two searches."""
 
+    assert nTruncated % _OUTPUT_FREQUENCY == 0, "a checkpoint is written at an output only"
+    writeInterval = nTruncated // _OUTPUT_FREQUENCY
     writer = (
-        f"*output, type=restart, name=restart\nwriteInterval=1, baseName={directory / 'ckpt'}, numberOfFilesToKeep=1\n"
+        f"*output, type=restart, name=restart\nwriteInterval={writeInterval}, baseName={directory / 'ckpt'}, "
+        "numberOfFilesToKeep=1\n"
     )
     _run(directory, "truncated", constraintType, nTruncated, extra + writer, amr)
     (checkpoint,) = directory.glob("ckpt_*.h5")
