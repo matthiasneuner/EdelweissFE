@@ -488,8 +488,17 @@ class NIST(NonlinearSolverBase):
                 self.convergenceTable = ConvergenceTable(presentVariableNames, self.linSolver.reportsSolveSummary)
 
                 with performancetiming.timeit("system matrix pattern"):
-                    K = self.theDofManager.constructVIJSystemMatrix()
-                    self.csrGenerator = CSRGenerator(K)
+                    with performancetiming.timeit("VIJ system matrix"):
+                        K = self.theDofManager.constructVIJSystemMatrix()
+                    with performancetiming.timeit("CSR generator"):
+                        self.csrGenerator = CSRGenerator(K)
+                    self.journal.message(
+                        "system matrix: {:} VIJ entries, {:} stored nonzeros in the CSR pattern".format(
+                            len(self.theDofManager.I), self.csrGenerator.csrMatrix.nnz
+                        ),
+                        self.identification,
+                        2,
+                    )
 
                 U = self.theDofManager.constructDofVector()
                 P = self.theDofManager.constructDofVector()
@@ -977,7 +986,8 @@ class NIST(NonlinearSolverBase):
         """Impose the Dirichlet BCs on the system matrix -- and, given the right-hand side(s) ``rhs``
         (modified in place), eliminate the constrained DOFs from the columns as well; see
         :func:`edelweissfe.solvers.base.dirichlet.applyDirichletToStiffness`."""
-        K = applyDirichletToStiffness(K, dirichlets, rhs)
+        with performancetiming.timeit("rows and columns"):
+            K = applyDirichletToStiffness(K, dirichlets, rhs)
 
         # Compacting the explicit zeros out of a condensed K (see _shouldPruneCondensedMatrixZeros): PARDISO's
         # reordering of these poorly conditioned, path-dependent (contact/friction) systems is sensitive enough to
@@ -988,8 +998,10 @@ class NIST(NonlinearSolverBase):
         # the generator scatters every update into its full-length buffer via a fixed map. A copy is pruned instead.
         if self.mpcTransformation is not None and self._shouldPruneCondensedMatrixZeros():
             if K is self.csrGenerator.csrMatrix:
-                K = K.copy()
-            K.eliminate_zeros()
+                with performancetiming.timeit("copy of K"):
+                    K = K.copy()
+            with performancetiming.timeit("eliminate zeros"):
+                K.eliminate_zeros()
 
         return K
 

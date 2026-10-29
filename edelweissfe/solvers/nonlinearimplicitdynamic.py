@@ -1263,7 +1263,8 @@ class NonlinearImplicitDynamic(NIST):
                 continue
 
             try:
-                el.computeConsistentInertia(Mvij[el])
+                with performancetiming.timeit("inertia of an element"):
+                    el.computeConsistentInertia(Mvij[el])
             except NotImplementedError as error:
                 raise NotImplementedError(
                     "{:} needs a consistent mass matrix, which element {:} ({:}) does not provide; "
@@ -1273,7 +1274,8 @@ class NonlinearImplicitDynamic(NIST):
                     )
                 ) from error
 
-            indices, values = self._lumpedDampingOfElement(el)
+            with performancetiming.timeit("damping of an element"):
+                indices, values = self._lumpedDampingOfElement(el)
             dampingVIJIndices.append(indices)
             dampingVIJValues.append(values)
 
@@ -1296,8 +1298,10 @@ class NonlinearImplicitDynamic(NIST):
 
         # The mass matrix has the stiffness' VIJ layout, so the solver's own CSR generator for K
         # (built for this DofManager) sums it into K's sparsity pattern -- no COO sort of its own.
-        M = self.csrGenerator.updateCSR(np.asarray(Mvij))
-        C = coo_matrix((dampingVIJValues, (I[dampingVIJIndices], J[dampingVIJIndices])), shape=(nDof, nDof)).tocsr()
+        with performancetiming.timeit("mass to CSR"):
+            M = self.csrGenerator.updateCSR(np.asarray(Mvij))
+        with performancetiming.timeit("damping to CSR"):
+            C = coo_matrix((dampingVIJValues, (I[dampingVIJIndices], J[dampingVIJIndices])), shape=(nDof, nDof)).tocsr()
 
         # Checked on the summed CSR values: a non-finite entry survives the summation, and the CSR
         # arrays are the shorter ones. Symmetry is not checked here but per element type in the

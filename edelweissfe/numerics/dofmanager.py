@@ -36,6 +36,7 @@ from itertools import chain
 
 import numpy as np
 
+import edelweissfe.utils.performancetiming as performancetiming
 from edelweissfe.config.phenomena import phenomena
 from edelweissfe.fields.nodefield import NodeField
 from edelweissfe.nodecouplingentity.base.nodecouplingentity import (
@@ -144,7 +145,8 @@ class DofManager:
 
         # initialization:
 
-        self._determineDofsAndTheirIndices(nodeFields, scalarVariables)
+        with performancetiming.timeit("dof indices of the node fields"):
+            self._determineDofsAndTheirIndices(nodeFields, scalarVariables)
 
         self._gatherInformationAboutEntities(elements, constraints, nodeSets)
 
@@ -162,14 +164,17 @@ class DofManager:
         self._hasVIJPattern = initializeVIJPattern
 
         if initializeAccumulatedNodalFluxesFieldwise:
-            self.nAccumulatedNodalFluxesFieldwise = self._computeAccumulatedNodalFluxesFieldWise(self.fields)
+            with performancetiming.timeit("accumulated nodal fluxes"):
+                self.nAccumulatedNodalFluxesFieldwise = self._computeAccumulatedNodalFluxesFieldWise(self.fields)
 
         if initializeVIJPattern:
             self._sizeVIJ = self._accumulatedElementVIJSize + self._accumulatedConstraintVIJSize
-            self.I, self.J, self.idcsOfHigherOrderEntitiesInVIJ = self._initializeVIJPattern()
+            with performancetiming.timeit("VIJ pattern"):
+                self.I, self.J, self.idcsOfHigherOrderEntitiesInVIJ = self._initializeVIJPattern()
 
         if determiningIndexToHostObjectMapping:
-            self.indexToHostObjectMapping |= self._determineIndexToNodeMap()
+            with performancetiming.timeit("index to host object map"):
+                self.indexToHostObjectMapping |= self._determineIndexToNodeMap()
 
     def _determineDofsAndTheirIndices(self, nodeFields: list, scalarVariables: list):
 
@@ -190,23 +195,28 @@ class DofManager:
 
     def _gatherInformationAboutEntities(self, elements, constraints, nodeSets):
 
-        (
-            self.accumulatedElementNDof,
-            self._accumulatedElementVIJSize,
-            self._nAccumulatedNodalFluxesFieldwiseFromElements,
-            self.largestNumberOfElNDof,
-        ) = self._gatherElementsInformation(elements)
+        with performancetiming.timeit("size of the elements"):
+            (
+                self.accumulatedElementNDof,
+                self._accumulatedElementVIJSize,
+                self._nAccumulatedNodalFluxesFieldwiseFromElements,
+                self.largestNumberOfElNDof,
+            ) = self._gatherElementsInformation(elements)
 
-        (
-            self.accumulatedConstraintNDof,
-            self._accumulatedConstraintVIJSize,
-            self._nAccumulatedNodalFluxesFieldwiseFromConstraints,
-            self.largestNumberOfConstraintNDof,
-        ) = self._gatherConstraintsInformation(constraints)
+        with performancetiming.timeit("size of the constraints"):
+            (
+                self.accumulatedConstraintNDof,
+                self._accumulatedConstraintVIJSize,
+                self._nAccumulatedNodalFluxesFieldwiseFromConstraints,
+                self.largestNumberOfConstraintNDof,
+            ) = self._gatherConstraintsInformation(constraints)
 
-        self.idcsOfFieldsOnNodeSetsInDofVector = self._locateFieldsOnNodeSetsInDofVector(nodeSets)
-        self.idcsOfElementsInDofVector = self._locateNodeCouplingEntitiesInDofVector(elements)
-        self.idcsOfConstraintsInDofVector = self._locateConstraintsInDofVector(constraints)
+        with performancetiming.timeit("node sets in the dof vector"):
+            self.idcsOfFieldsOnNodeSetsInDofVector = self._locateFieldsOnNodeSetsInDofVector(nodeSets)
+        with performancetiming.timeit("elements in the dof vector"):
+            self.idcsOfElementsInDofVector = self._locateNodeCouplingEntitiesInDofVector(elements)
+        with performancetiming.timeit("constraints in the dof vector"):
+            self.idcsOfConstraintsInDofVector = self._locateConstraintsInDofVector(constraints)
 
     def refreshConstraintIndices(self, constraints: list):
         """Re-locate the constraints' degrees of freedom after their connectivity changed.
