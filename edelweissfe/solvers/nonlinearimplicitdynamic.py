@@ -1279,8 +1279,9 @@ class NonlinearImplicitDynamic(NIST):
             dampingVIJIndices.append(indices)
             dampingVIJValues.append(values)
 
-        dampingVIJIndices = np.concatenate(dampingVIJIndices)
-        dampingVIJValues = np.concatenate(dampingVIJValues)
+        with performancetiming.timeit("concatenate damping"):
+            dampingVIJIndices = np.concatenate(dampingVIJIndices)
+            dampingVIJValues = np.concatenate(dampingVIJValues)
 
         nDof = self.theDofManager.nDof
         I = self.theDofManager.I  # noqa: E741
@@ -1288,10 +1289,13 @@ class NonlinearImplicitDynamic(NIST):
 
         isDynamic = np.zeros(nDof, dtype=bool)
         isDynamic[dynamicDofs] = True
-        couplesDynamicOnly = isDynamic[I] & isDynamic[J]
-        self._warnAboutDiscardedInertia(Mvij, dampingVIJIndices, couplesDynamicOnly)
+        with performancetiming.timeit("dynamic-only mask over the VIJ entries"):
+            couplesDynamicOnly = isDynamic[I] & isDynamic[J]
+        with performancetiming.timeit("warn about discarded inertia"):
+            self._warnAboutDiscardedInertia(Mvij, dampingVIJIndices, couplesDynamicOnly)
         # Mass and damping on the quasi-static fields are discarded, see the warning above.
-        Mvij[~couplesDynamicOnly] = 0.0
+        with performancetiming.timeit("zero the quasi-static mass"):
+            Mvij[~couplesDynamicOnly] = 0.0
         keptDamping = couplesDynamicOnly[dampingVIJIndices]
         dampingVIJIndices = dampingVIJIndices[keptDamping]
         dampingVIJValues = dampingVIJValues[keptDamping]

@@ -1000,8 +1000,12 @@ class NIST(NonlinearSolverBase):
             if K is self.csrGenerator.csrMatrix:
                 with performancetiming.timeit("copy of K"):
                     K = K.copy()
+            nnzBefore = K.nnz
             with performancetiming.timeit("eliminate zeros"):
                 K.eliminate_zeros()
+            self.journal.message(
+                "pruned K: {:} -> {:} stored nonzeros".format(nnzBefore, K.nnz), self.identification, 2
+            )
 
         return K
 
