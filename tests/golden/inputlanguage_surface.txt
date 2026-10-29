@@ -600,6 +600,8 @@ Dynamic h-adaptivity model modifier for HEX20 hanging-node AMR.
         [elSet] Element set. (<class 'str'>, default = None)
         [nSet] Node set. (<class 'str'>, default = None)
         [transient] Set transient ensight output. (<class 'bool'>, default = True)
+        [deformedGeometry] Name of a vector node field (e.g. 'displacement'): the geometry is then written in the deformed configuration, reference coordinates + the field, at every output, so a viewer shows the deformed state without a warp filter. Nodes without the field keep their reference coordinates. (<class 'str'>, default = None)
+        [deformationScaleFactor] Used with deformedGeometry: the geometry is written as reference coordinates + this factor times the field, e.g., 10 to magnify small deformations. The written field values are not scaled. (<class 'float'>, default = 1.0)
 ===== module documentation: edelweissfe.outputmanagers.fractureenergyintegrator =====
 [fractureEnergyIntegrator] A simple integrator to compute the fracture energy by integrating a load-displacement curve.
   required arguments

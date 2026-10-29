@@ -60,6 +60,22 @@ Module ``edelweissfe.constraints.linearizedrigidbody``
     :caption: Example 3D: ``testfiles/marmot/LinearizedRigidBodyConstraint3D/test.inp``
 
 
+``rigidbodympc`` - Linearized rigid body by DOF elimination
+-----------------------------------------------------------
+
+Module ``edelweissfe.constraints.rigidbodympc``
+
+.. automodule:: edelweissfe.constraints.rigidbodympc
+    :members: __doc__
+
+.. pprint:: constraint:rigidbodympc
+    :caption: Options:
+
+.. literalinclude:: ../../../testfiles/marmot/RigidBodyMPC3D/test.inp
+    :language: edelweiss
+    :caption: Example 3D: ``testfiles/marmot/RigidBodyMPC3D/test.inp``
+
+
 ``rigidbody`` - Geometrically exact rigid body constraints in 3D
 ---------------------------------------------------------------------------
 
@@ -494,6 +510,33 @@ Module ``edelweissfe.constraints.hangingnode``
 .. literalinclude:: ../../../testfiles/marmot/AMR_PatchTestU/test.inp
     :language: edelweiss
     :caption: Example (static 2:1 patch test): ``testfiles/marmot/AMR_PatchTestU/test.inp``
+
+``embeddedregion`` - Embedded elements (perfect bond of reinforcement)
+----------------------------------------------------------------------
+
+Ties every node of the embedded elements (e.g., truss or beam elements of reinforcement bars or structural members,
+meshed independently of the host) to the host continuum element it lies in, :math:`u_s = \sum_a N_a(\xi_s)\, u_{a}`, by master-slave DOF
+elimination, like Abaqus' ``*EMBEDDED ELEMENT``. For bond-slip, see the ``embeddedbond`` generator in
+:doc:`generators`.
+
+The nodal ``P`` of an embedded (slave) node is reported on the slave node itself, before condensation: a reaction
+summed over a node set must include the embedded nodes on that boundary.
+
+Module ``edelweissfe.constraints.embeddedregion``
+
+.. automodule:: edelweissfe.constraints.embeddedregion
+    :members: __doc__
+
+.. pprint:: constraint:embeddedregion
+    :caption: Options:
+
+.. literalinclude:: ../../../testfiles/marmot/EmbeddedRegionRebar2D/test.inp
+    :language: edelweiss
+    :caption: Example: ``testfiles/marmot/EmbeddedRegionRebar2D/test.inp``
+
+.. literalinclude:: ../../../testfiles/marmot/EmbeddedBeamCantilever2D/test.inp
+    :language: edelweiss
+    :caption: Example (embedded beam, rotations tied): ``testfiles/marmot/EmbeddedBeamCantilever2D/test.inp``
 
 Implementing your own constraints
 ---------------------------------
