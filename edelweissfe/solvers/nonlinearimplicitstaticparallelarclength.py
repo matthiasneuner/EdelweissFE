@@ -177,6 +177,14 @@ class NISTPArcLength(NISTParallel):
             self.arcLengthController = None
             self.dLambda = None
 
+        if self.arcLengthController is not None and (
+            self.options["lineSearch"] or self.options["fallBackToQuasiNewton"]
+        ):
+            raise NotImplementedError(
+                "lineSearch and fallBackToQuasiNewton are not available under an arc length controller, whose Newton "
+                "iterations solve for the load parameter, too"
+            )
+
         return super().beginStep(step, model, fieldOutputController, outputmanagers)
 
     def solveIncrement(
