@@ -357,8 +357,8 @@ class NISTPArcLength(NISTParallel):
             # the prescribed degrees of freedom where the predicted load parameter puts them: their prescribed change
             # over the step, scaled by it
             for dirichlet in dirichlets:
-                dU[dirichlet.constrainedDofIndices] = (
-                    dLambda * dirichlet.getPrescribedIncrement(referenceTimeStep).flatten()
+                dU[dirichlet.constrainedDofIndices] = dLambda * dirichlet.getPrescribedIncrementOfConstrainedDofs(
+                    referenceTimeStep
                 )
 
         quasiNewton = QuasiNewtonFallback(self.options["fallBackToQuasiNewton"])
