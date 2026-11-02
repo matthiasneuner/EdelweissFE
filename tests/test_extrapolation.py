@@ -138,14 +138,14 @@ def solverWithHistory(extrapolation, sizes, dUs) -> NIST:
     """A NIST solver whose accepted history is the given increments (oldest first), sizes in step progress."""
     solver = NIST(loadConfiguration({}), Journal(verbose=False), extrapolation=extrapolation)
     timeSteps = [TimeStep(i + 1, size, 0.0, size, 0.0, 0.0) for i, size in enumerate(sizes)]
-    solver.prevTimeStep, solver.dU = timeSteps[-1], np.array(dUs[-1], dtype=float)
+    solver.prevTimeStep, solver.dUOfLastIncrement = timeSteps[-1], np.array(dUs[-1], dtype=float)
     if len(sizes) > 1:
-        solver.timeStepBeforePrev, solver.dUBeforePrev = timeSteps[-2], np.array(dUs[-2], dtype=float)
+        solver.timeStepBeforePrev, solver.dUOfIncrementBeforeLast = timeSteps[-2], np.array(dUs[-2], dtype=float)
     return solver
 
 
 def predict(solver, size, dirichlets=()) -> tuple[np.ndarray, bool]:
-    dU = np.full(len(solver.dU), np.nan)
+    dU = np.full(len(solver.dUOfLastIncrement), np.nan)
     timeStep = TimeStep(9, size, 0.0, size, 0.0, 0.0)
     return solver.extrapolateLastIncrement(
         solver.options["extrapolation"], timeStep, dU, list(dirichlets), solver.prevTimeStep, None
@@ -320,10 +320,10 @@ def test_the_history_of_a_quadratic_extrapolation_is_checkpointed():
     restored = NIST(loadConfiguration({}), Journal(verbose=False), extrapolation="quadratic")
     restored.setRestartData(solver.getRestartData())
 
-    np.testing.assert_array_equal(restored.dUBeforePrev, [1.0, 2.0])
+    np.testing.assert_array_equal(restored.dUOfIncrementBeforeLast, [1.0, 2.0])
     assert restored.timeStepBeforePrev.stepProgressIncrement == 0.2
     np.testing.assert_array_equal(predict(restored, 0.1)[0], predict(solver, 0.1)[0])
 
     # a linear extrapolation keeps no older history: its checkpoint is what it always was
     linear = solverWithHistory("linear", [0.1], [[3.0, 4.0]])
-    assert set(linear.getRestartData()) == {"prevTimeStep", "dU"}
+    assert set(linear.getRestartData()) == {"prevTimeStep", "dUOfLastIncrement"}
