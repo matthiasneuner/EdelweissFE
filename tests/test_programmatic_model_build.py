@@ -347,10 +347,6 @@ def test_full_step_and_solver_cycle_driven_programmatically():
 
     jobInfo = loadConfiguration(dict())
 
-    for nodeField in model.nodeFields.values():
-        nodeField.createFieldValueEntry("U")
-        nodeField.createFieldValueEntry("P")
-
     model._linkFieldVariableObjects(model.nodeSets["all"])
 
     # --- field outputs, built through the controller's typed methods ---
