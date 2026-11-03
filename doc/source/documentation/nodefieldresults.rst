@@ -105,6 +105,12 @@ parts, each through the layout of the equation system that holds them: ``dU`` on
 on, ``P`` and ``V`` on the nodes of the configuration it ends in. A node that left the active domain in that
 increment therefore keeps its ``dU``, and holds zero in ``P`` and ``V``.
 
+The implicit dynamic solver (``NID``) integrates the inertia of the particles either in the particles or at the
+nodes (option ``meshfreeInertia``, see :mod:`~edelweissfe.solvers.nonlinearimplicitdynamic`). In the particles, the
+particles carry their velocity and acceleration in their state, and ``V`` and ``A`` of the kernel functions' nodes
+are zero; at the nodes, ``NID`` carries them in ``V`` and ``A`` by node, as the explicit meshfree solver carries
+``V``. Either way, ``P`` holds the inertial force: in the particles' residual contributions, or added at the nodes.
+
 Using the entries in code
 -------------------------
 
