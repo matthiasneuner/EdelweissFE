@@ -56,6 +56,12 @@ from edelweissfe.elements.pointmass import PointMass
 from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
+from edelweissfe.numerics.dofmanager import DofManager
+from edelweissfe.numerics.systemmatrixassembly import (
+    DirectCSRSystemMatrixAssembly,
+    VIJSystemMatrixAssembly,
+)
+from edelweissfe.numerics.systemmatrixcontributor import countEntriesOfBlock
 from edelweissfe.points.node import Node
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.inputfileparser import parseInputFile
@@ -379,9 +385,9 @@ referencePoint=gen_bottomLeftBack
     _assertTangentIsTheDerivative(constraint, U, U)
 
 
-def test_node_to_discrete_rigid_body_penalty(tmp_path):
-    """The rotation-rotation block of the reference point is excluded: the constraint omits it (it needs the second
-    derivative of the exponential map), as documented in its class docstring."""
+def _nodeToDiscreteRigidBodyCase(tmp_path, slaveNodeSet: str):
+    """The node-to-discrete-rigid-body penalty contact of the nodes of ``slaveNodeSet`` against a box below the unit
+    cube, the model, and a state in which the slave nodes penetrate the box's top face."""
 
     _writeBoxStl(tmp_path / "support.stl", (-1.0, -1.0, -1.0), (2.0, 0.0, 2.0))
     model = _buildModel(
@@ -395,7 +401,7 @@ mass=1.0
 inertia="1.0, 1.0, 1.0"
 
 *constraint, type=nodeToDiscreteRigidBodyPenalty, name=theConstraint
-nSet=gen_bottom
+nSet={slaveNodeSet}
 rigidBody=support
 penalty=1e3
 searchDistance=1.0
@@ -411,11 +417,38 @@ searchDistance=1.0
         # the slave nodes penetrate the support's top face by far more than the perturbation
         return np.array([0.0, -0.05, 0.0]) + _noise(node, field, 1e-3)
 
-    U = localVector(constraint, nodalValue)
+    return model, constraint, localVector(constraint, nodalValue)
+
+
+def test_node_to_discrete_rigid_body_penalty(tmp_path):
+    """The rotation-rotation block of the reference point is excluded: the constraint omits it (it needs the second
+    derivative of the exponential map), as documented in its class docstring."""
+
+    model, constraint, U = _nodeToDiscreteRigidBodyCase(tmp_path, "gen_bottom")
+    rpNode = constraint.rpNode
     rpRotation = _localIndices(constraint, lambda node, field: node is rpNode and field == "rotation")
 
     _assertTangentIsTheDerivative(constraint, U, U, excluded=rpRotation)
     assert constraint.totalNormalForce > 0.0, "the contact must be active"
+
+
+def test_one_slave_node_to_discrete_rigid_body_penalty_is_assembled_alike_on_both_paths(tmp_path):
+    """With one slave node the block lists exactly nDof**2 = 81 entries (36 + 9 + 18 + 18), in an order that is not
+    column-major: both assemblies place every value at its own entry, so the assembled matrices agree."""
+
+    model, constraint, U = _nodeToDiscreteRigidBodyCase(tmp_path, "gen_bottomLeftBack")
+    assert countEntriesOfBlock(constraint) == constraint.nDof**2
+
+    dofManager = DofManager(model.nodeFields.values(), model.scalarVariables.values(), [], [constraint], [])
+    assembled = []
+    for assemblyType in (VIJSystemMatrixAssembly, DirectCSRSystemMatrixAssembly):
+        K = assemblyType(dofManager, 1)
+        K.beginAssembly()
+        constraint.computeKernels(U, U, np.zeros(constraint.nDof), K[constraint], None)
+        assembled.append(K.assembledMatrix().toarray())
+
+    assert np.abs(assembled[0]).max() > 0.0, "the contact must be active"
+    np.testing.assert_array_equal(assembled[1], assembled[0])
 
 
 def _nodeToDeformableSurfaceCase(tmp_path, deck: str, domainSize: int, options: str, tangential: float):
