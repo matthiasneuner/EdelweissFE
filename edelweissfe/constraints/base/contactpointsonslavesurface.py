@@ -36,6 +36,7 @@ distributed with the *parent* face's shape functions.
 """
 
 import numpy as np
+from scipy.sparse import csr_matrix
 
 from edelweissfe.constraints.base.contactpoints import ContactPoints
 from edelweissfe.models.femodel import FEModel
@@ -386,6 +387,26 @@ class ContactPointsOnSlaveSurface(ContactPoints):
 
         nDof = self.nParentNodes * self.nDim
         return np.arange(k * nDof, (k + 1) * nDof), self._shapeFunctionsOfLocated[k]
+
+    def interpolationMatrixOfLocatedPoints(self) -> csr_matrix:
+        """The shape functions :math:`N^s(\\xi_q)` of the located points, each over its own copy of the nodes of its
+        parent face; see :meth:`ContactPoints.interpolationMatrixOfLocatedPoints`.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The block diagonal matrix of the shape functions.
+        """
+
+        nLocated = len(self._shapeFunctionsOfLocated)
+        return csr_matrix(
+            (
+                self._shapeFunctionsOfLocated.ravel(),
+                np.arange(nLocated * self.nParentNodes),
+                np.arange(0, nLocated * self.nParentNodes + 1, self.nParentNodes),
+            ),
+            shape=(nLocated, nLocated * self.nParentNodes),
+        )
 
     def searchLayout(self) -> dict[str, np.ndarray]:
         """The slave facets and the quadrature rule identify the contact points in a checkpoint.

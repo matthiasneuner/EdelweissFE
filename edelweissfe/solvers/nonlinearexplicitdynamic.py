@@ -75,9 +75,13 @@ smallest of the elements' own bounds (``computeCriticalTimeStepForExplicitDynami
 two over the square root of an upper bound of the largest eigenvalue of its stiffness scaled by its lumped mass) --
 once per mesh, whenever the mesh changes and deliberately *not* when it has not, neither for a new numbering of the
 same mesh: as a material softens the true limit only grows, and re-deriving it costs a full element pass; the entities
-that carry their own inertia (below) when the margin of their last estimate may be used up. It is enforced where it is
+that carry their own inertia (below) when the margin of their last estimate may be used up. A penalty constraint
+(contact, a support or a tie held by a penalty) owns no degrees of freedom; it adds its stiffness to the frequencies of
+the degrees of freedom it couples: in every increment, the row sums of its stiffness scaled by the lumped mass are
+added to the parts' estimates there, from the stiffness its law gives it after the increment
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`). It is enforced where it is
 below the largest increment the step allows, and a step that asks for smaller increments keeps them. The increment is
-lowered only, never raised within a step. The stiffness of penalty constraints (contact, supports) enters no estimate.
+lowered only, never raised within a step.
 
 **Three cadences, all in increments.** ``output-frequency`` is how often progress is logged and
 field outputs are finalized (a divisor, so it must be at least 1). ``topology-check-frequency`` is
@@ -187,8 +191,8 @@ since, the kinetic energy, the internal (strain) energy, and what remains unacco
 one check that nothing else performs: the kinetic energy cannot exceed the energy at the start of the
 step plus the external work, because the terms omitted from the balance are all non-negative, so a
 violation means energy is appearing from nowhere and the time step is above the true stability limit
--- which the critical time step does not see in full, as it never sees contact penalty stiffness,
-and sees the nonlocal field only where that field carries a non-mechanical inertia. Such a field's
+-- which the critical time step does not see in full: it sees a penalty contact that closes only after the increment
+it closes in, and the nonlocal field only where that field carries a non-mechanical inertia. Such a field's
 own ``0.5 m_k rate^2`` is reported on a separate line and kept out of the balance: with a
 coefficient in seconds squared it has the units of a volume, not of an energy. ``E_0`` is read off
 the model's state, nothing evaluated: zero for a step from rest in a model without strain energy,
@@ -297,6 +301,7 @@ from edelweissfe.solvers.base.conservationchecks import (
 from edelweissfe.solvers.base.criticaltimestep import (
     CriticalTimeStepOfEntitiesWithOwnInertia,
     CriticalTimeStepOfTheElements,
+    CriticalTimeStepOfThePenaltyConstraints,
 )
 from edelweissfe.solvers.base.nonlinearsolverbase import NonlinearSolverBase
 from edelweissfe.timesteppers.timestep import TimeStep
@@ -532,13 +537,15 @@ class NED(NonlinearSolverBase):
         #: derived for: a property of the mesh, derived again when it changed, and at the start of every step, not for a
         #: new numbering of the same mesh. None until it is first derived in a step.
         self._meshOfTheClassification = None
-        #: The critical time steps of the two parts of a model, each estimated by its own policy (see
-        #: :mod:`~edelweissfe.solvers.base.criticaltimestep`): the finite elements once per mesh, the entities that
-        #: carry their own inertia when the margin of their last estimate may be used up.
+        #: The critical time steps of the two parts of a model and of the degrees of freedom the penalty constraints
+        #: couple, each estimated by its own policy (see :mod:`~edelweissfe.solvers.base.criticaltimestep`): the finite
+        #: elements once per mesh, the entities that carry their own inertia when the margin of their last estimate
+        #: may be used up, the penalty constraints in every increment.
         self._criticalTimeStepOfTheElements = CriticalTimeStepOfTheElements()
         self._criticalTimeStepOfTheEntities = CriticalTimeStepOfEntitiesWithOwnInertia(
             self.options["critical-time-step-decrease-per-increment"]
         )
+        self._criticalTimeStepOfThePenaltyConstraints = CriticalTimeStepOfThePenaltyConstraints()
         #: The internal (strain) energy the elements publish at the end of the last increment, for the energy balance.
         self._internalEnergy = 0.0
         #: The operators of the explicit update, arrays of the length of the numbering, assembled by
@@ -638,6 +645,7 @@ class NED(NonlinearSolverBase):
         self._meshOfTheClassification = None
         self._criticalTimeStepOfTheElements.reset()
         self._criticalTimeStepOfTheEntities.reset()
+        self._criticalTimeStepOfThePenaltyConstraints.reset()
         self._conservationCheck.reset()
         self._warnedAboutMissingInternalEnergy = False
         self._warnedAboutMissingExternalWork = False
@@ -718,6 +726,11 @@ class NED(NonlinearSolverBase):
                 # damping are evaluated (see _startTheMotionOfEntitiesWithOwnInertia).
                 self.formNetForceOfTheModelsState(step.actions["dirichlet"].values())
                 self._energyAtStepStart = self.energyOfTheModelsState()
+            if not self.system.entitiesWithOwnInertia:
+                # The penalty constraints as the step finds them, e.g. a contact closed at its start; with entities that
+                # carry their own inertia, in the zero increment, once their inertia is known.
+                self.locateConstrainedDofs(step.actions["dirichlet"].values())
+                self._estimateThePenaltyConstraints(self._U, self._dU, None)
             # The time stepper carries (and checkpoints) the time increment; a resumed step keeps its own.
             if step.timeStepper.enforcedTimeIncrement is None:
                 self._enforceTheCriticalTimeStep(step, "The critical time step", 1)
@@ -881,6 +894,12 @@ class NED(NonlinearSolverBase):
 
         self._U, self._V, self._netForce = U, V, netForce
 
+        if not self.system.entitiesWithOwnInertia:
+            # The penalty constraints with the stiffness they have at the end of the increment, for the next one; with
+            # entities that carry their own inertia, at acceptance, on the connectivity they reach.
+            self._estimateThePenaltyConstraints(self._U, self._dU, timeStep)
+            self._enforceTheCriticalTimeStep(step, "The penalty constraints", 2)
+
     def acceptIncrement(self, step, model: FEModel, timeStep: TimeStep):
         """Commit the increment to the model; see
         :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.acceptIncrement`. In a model with
@@ -1030,6 +1049,15 @@ class NED(NonlinearSolverBase):
             system.assembleLumpedMassOfEntitiesWithOwnInertia(self.forEachChunk),
             system.assembleLumpedDampingOfEntitiesWithOwnInertia(self.forEachChunk),
         )
+        self._internalForce += internalForceOfEntities
+        noIncrement = system.locations.constructDofVector()
+        self._netForce = self.assembleNetForce(
+            self._netForce, self._internalForce, self.collectLoads(step.actions), self._U, noIncrement, timeStep
+        )
+
+        # The critical time steps, after the forces: the penalty constraints bound the stiffness they were just
+        # evaluated with.
+        rowSumsOfThePenaltyConstraints = self._rowSumsOfThePenaltyConstraints(self._U, noIncrement, timeStep)
         criticalTimeStep = self._criticalTimeStepOfTheEntities
         if criticalTimeStep.isDue(
             system,
@@ -1037,18 +1065,21 @@ class NED(NonlinearSolverBase):
             self._inertiaOfEntities,
             self._dampingOfEntities,
             self._timeIncrementInUse(step) / self.options["courant-number"],
+            rowSumsOfThePenaltyConstraints,
         ):
             with performancetiming.timeit("critical time step of entities"):
                 criticalTimeStep.estimate(
                     system, self._inertiaOfEntities, self._dampingOfEntities, self.forEachChunk, timeStep.number
                 )
             self._enforceTheCriticalTimeStep(step, "The entities that carry their own inertia", 2)
-
-        self._internalForce += internalForceOfEntities
-        noIncrement = system.locations.constructDofVector()
-        self._netForce = self.assembleNetForce(
-            self._netForce, self._internalForce, self.collectLoads(step.actions), self._U, noIncrement, timeStep
-        )
+        if rowSumsOfThePenaltyConstraints is not None:
+            self._criticalTimeStepOfThePenaltyConstraints.estimate(
+                system,
+                rowSumsOfThePenaltyConstraints,
+                self._criticalTimeStepOfTheElements,
+                self._criticalTimeStepOfTheEntities,
+            )
+            self._enforceTheCriticalTimeStep(step, "The penalty constraints", 2)
 
         ids = self.ids_inertiaOfEntities
         if timeStep.timeIncrement == 0.0:
@@ -1149,9 +1180,90 @@ class NED(NonlinearSolverBase):
         enforced = timeStepper.enforcedTimeIncrement
         return enforced if enforced is not None else timeStepper.increment * step.length
 
+    def _rowSumsOfThePenaltyConstraints(
+        self, U: DofVector, dU: DofVector, timeStep: TimeStep | None
+    ) -> np.ndarray | None:
+        """The row sums of the absolute value of the penalty constraints' stiffness, scaled by the lumped mass on both
+        sides, :math:`r_i = \\sum_j |K^\\mathrm{c}_{ij}| / \\sqrt{M_i M_j}`: what the constraints add to the squared
+        frequency of every degree of freedom they couple (see :doc:`/theory/criticaltimestep`). Every constraint of the
+        discrete system bounds its own
+        (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`), at the
+        state it is evaluated in, with the column weights :math:`1/\\sqrt{M_j}`.
+
+        The masses are those the increment divides by, on the degrees of freedom integrated by central differences; a
+        degree of freedom without one, or with a prescribed motion, has no equation of motion and neither oscillates
+        nor lets a spring oscillate it: its weight and its row are zero. A multi-point-constraint slave moves with its
+        masters: its weight is the sum of theirs, by the absolute value of its coefficients, and its row is folded onto
+        them likewise.
+
+        Parameters
+        ----------
+        U
+            The solution the constraints are evaluated with.
+        dU
+            The increment they are evaluated with.
+        timeStep
+            The increment; None at the start of a step.
+
+        Returns
+        -------
+        numpy.ndarray | None
+            The row sums, one per degree of freedom; None if the discrete system has no constraints.
+        """
+
+        constraints = self.system.constraints
+        if not constraints:
+            return None
+
+        scaling = np.sqrt(self._Minv) * self._secondOrderMask
+        for dirichlet in self._stepActions["dirichlet"].values():
+            scaling[dirichlet.constrainedDofIndices] = 0.0
+
+        weights = scaling
+        if self.mpcTransformation is not None:
+            weights = self.mpcTransformation.slaveWeightsOfAbsoluteCoefficients(scaling)
+
+        rowSums = np.zeros_like(scaling)
+        with performancetiming.timeit("critical time step of penalty constraints"):
+            for constraint in constraints:
+                _, indices, _ = self._explicitEvaluationPlanOf(constraint)
+                bound = np.zeros(constraint.nDof)
+                constraint.computeBoundOfAbsoluteStiffnessTimes(
+                    U[constraint], dU[constraint], weights[indices], bound, timeStep
+                )
+                np.add.at(rowSums, indices, bound)
+
+        if self.mpcTransformation is not None:
+            rowSums = self.mpcTransformation.foldRowSumsOfAbsoluteCoefficients(rowSums)
+
+        return scaling * rowSums
+
+    def _estimateThePenaltyConstraints(self, U: DofVector, dU: DofVector, timeStep: TimeStep | None):
+        """Estimate the critical time step of the degrees of freedom the penalty constraints couple, at the state they
+        are evaluated in, with the last estimates of the parts
+        (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`); nothing if the
+        discrete system has no constraints.
+
+        Parameters
+        ----------
+        U
+            The solution the constraints are evaluated with.
+        dU
+            The increment they are evaluated with.
+        timeStep
+            The increment; None at the start of a step.
+        """
+
+        rowSums = self._rowSumsOfThePenaltyConstraints(U, dU, timeStep)
+        if rowSums is not None:
+            self._criticalTimeStepOfThePenaltyConstraints.estimate(
+                self.system, rowSums, self._criticalTimeStepOfTheElements, self._criticalTimeStepOfTheEntities
+            )
+
     def _enforceTheCriticalTimeStep(self, step, cause: str, journalLevel: int):
-        """Make the time increment of the step the critical time step of the model, the smaller of the elements' and the
-        entities' scaled by the courant number, if it is below the increment the step would take now
+        """Make the time increment of the step the critical time step of the model, the smallest of the elements', the
+        entities' and the one of the degrees of freedom the penalty constraints couple, scaled by the courant number,
+        if it is below the increment the step would take now
         (:meth:`_timeIncrementInUse`). The step takes the smaller of the two: a step that asks for smaller increments
         keeps them, and the increment is lowered only, never raised within a step. A finite element model whose step
         asks for the whole step length, as explicit steps usually do, takes the critical time step of its elements.
@@ -1167,7 +1279,9 @@ class NED(NonlinearSolverBase):
         """
 
         self._criticalTimeStep = self.options["courant-number"] * min(
-            self._criticalTimeStepOfTheElements.value, self._criticalTimeStepOfTheEntities.value
+            self._criticalTimeStepOfTheElements.value,
+            self._criticalTimeStepOfTheEntities.value,
+            self._criticalTimeStepOfThePenaltyConstraints.value,
         )
         timeStepper = step.timeStepper
         enforced = timeStepper.enforcedTimeIncrement
@@ -1201,7 +1315,11 @@ class NED(NonlinearSolverBase):
         if self.prevTimeStep is not None:
             model.advanceVelocity(0.5 * self.prevTimeStep.timeIncrement)
 
-        for criticalTimeStep in (self._criticalTimeStepOfTheElements, self._criticalTimeStepOfTheEntities):
+        for criticalTimeStep in (
+            self._criticalTimeStepOfTheElements,
+            self._criticalTimeStepOfTheEntities,
+            self._criticalTimeStepOfThePenaltyConstraints,
+        ):
             if criticalTimeStep.numberOfEstimates:
                 self.journal.message(
                     "The critical time step of {:} was estimated {:} times in the step, last {:e}".format(
@@ -1603,10 +1721,10 @@ class NED(NonlinearSolverBase):
                 "THE SOLUTION HAS DIVERGED in increment {:}: the energy balance is no longer a "
                 "finite number (external work {:e}, kinetic {:e}), which means the state itself "
                 "is not. The time step is above the true stability limit -- and dt_crit does not "
-                "see all of it: it never sees contact penalty stiffness, and it sees the nonlocal "
-                "field only where that field carries a non-mechanical inertia, a first-order one "
-                "having a forward-Euler limit that nothing checks. Resume from a checkpoint with "
-                "a smaller courant-number.".format(timeStep.number, Wext, Wkin)
+                "see all of it: it sees a penalty contact only from the increment after it closes, "
+                "and the nonlocal field only where that field carries a non-mechanical inertia, a "
+                "first-order one having a forward-Euler limit that nothing checks. Resume from a "
+                "checkpoint with a smaller courant-number.".format(timeStep.number, Wext, Wkin)
             )
 
         # Checked only while the prescribed degrees of freedom do work in this step: the work of the loads is not
@@ -1617,9 +1735,9 @@ class NED(NonlinearSolverBase):
                 "the step plus the external work, {:e}, by {:.1f} %. That is impossible -- the "
                 "unreported terms (strain energy, dissipation, damage) can only add to the balance. "
                 "The time step is above the true stability limit, which dt_crit does not see in "
-                "full: it ignores the nonlocal field entirely and never sees contact penalty "
-                "stiffness. Reduce courant-number, or resume from a checkpoint with a smaller "
-                "one.".format(Wkin, suppliedEnergy, (Wkin / suppliedEnergy - 1.0) * 100),
+                "full: it ignores the nonlocal field entirely and sees a penalty contact only from "
+                "the increment after it closes. Reduce courant-number, or resume from a checkpoint "
+                "with a smaller one.".format(Wkin, suppliedEnergy, (Wkin / suppliedEnergy - 1.0) * 100),
                 self.identification,
                 0,
             )
@@ -1947,7 +2065,9 @@ class NED(NonlinearSolverBase):
         if criticalTimeStep.isDue(system):
             criticalTimeStep.estimate(system, self._U)
             self._criticalTimeStep = self.options["courant-number"] * min(
-                criticalTimeStep.value, self._criticalTimeStepOfTheEntities.value
+                criticalTimeStep.value,
+                self._criticalTimeStepOfTheEntities.value,
+                self._criticalTimeStepOfThePenaltyConstraints.value,
             )
             self.journal.message(
                 "Critical time step of the elements for explicit dynamics: {:e}".format(
