@@ -138,3 +138,9 @@ use *is* courant-number times their last estimate, the margin is used up after o
 every increment -- as they must be, since their estimate is what limits the analysis. Where another part sets it, the
 estimate of the particles is above the increment in use by some factor :math:`m`, and it is taken anew only every
 :math:`\ln m / -\ln(1-\delta)` increments, unless their masses fall faster than expected.
+
+The code
+--------
+
+.. automodule:: edelweissfe.solvers.base.criticaltimestep
+   :members:
