@@ -4,7 +4,7 @@ Theory: the critical time step of an explicit analysis
 An explicit analysis (``NED``, :doc:`/analysis/solvers`) solves no system of equations: it divides the net force by a
 lumped mass and steps on. The price is that it is stable only below a time increment, the *critical time step*. This
 page explains where that limit comes from, why EdelweissFE estimates it instead of computing it, how the estimates of
-the parts of a model are combined, and when each estimate is taken anew. The code is
+the parts of a model are combined, what penalty constraints add to them, and when each estimate is taken anew. The code is
 :mod:`~edelweissfe.solvers.base.criticaltimestep`.
 
 Where the limit comes from
@@ -74,19 +74,93 @@ parts':
    \Delta t = \text{courant-number} \times \min\left(\Delta t_\mathrm{crit}^\mathrm{elements},\,
    \Delta t_\mathrm{crit}^\mathrm{particles}\right) .
 
-``courant-number`` is the one safety factor: the fraction of the estimated limit the analysis runs at.
+``courant-number`` is the one safety factor: the fraction of the estimated limit the analysis runs at. With penalty
+constraints, the critical time step of the degrees of freedom they couple joins the minimum (below).
 
 The particles' estimate has one factor of its own, below one, which is not a safety factor but part of what it
 estimates: their stabilization (NSNI) acts on the increment, so their explicit scheme is not exactly the central
 difference method with their tangent, and it was measured to be stable up to a fraction of the tangent's limit
 (EdelweissMeshfree, ``STABLE_FRACTION_OF_THE_TANGENT_LIMIT``).
 
-**What is not estimated.** A penalty constraint -- a contact, a support held by a penalty -- adds the stiffness
-:math:`k\,\boldsymbol{g}\boldsymbol{g}^T` at the nodes it couples, and with it raises :math:`\omega_\mathrm{max}^2`.
-It does not take a minimum with the parts: it *adds* to the frequencies of the nodes it couples, so its estimate would
-have to be combined with theirs, not compared. No estimate includes it. The penalty is chosen with the time increment in
-mind, and the energy balance of ``NED`` (the kinetic energy may not exceed the energy at the start of the step plus the
-external work) is the check that the increment is stable.
+Penalty constraints
+-------------------
+
+A penalty constraint -- a contact, a support held by a penalty, a tie -- is a set of springs: a point :math:`p` of it
+with the spring stiffness :math:`k_p` and the gradient :math:`\boldsymbol{w}_p` of its gap adds
+:math:`k_p\,\boldsymbol{w}_p\boldsymbol{w}_p^T` to the stiffness of the nodes it couples. For a contact point,
+:math:`\boldsymbol{w}_p = [c, -N^m] \otimes \boldsymbol{n}` (the interpolation vector of the point on the slave side,
+the shape functions of the master face, the normal), and :math:`k_p = \mathrm{d}f_n/\mathrm{d}g` is what the contact
+law gives the point at its gap: the penalty times the area of the point for the linear law, zero while the gap is open
+(:mod:`~edelweissfe.constraints.base.penaltylaw`). A friction or tie law later gives its own stiffness, and the estimate
+follows without a change.
+
+Such a constraint owns no degrees of freedom: it couples those of the parts. Taking the minimum with the parts would be
+wrong -- the spring *adds* to the frequencies of the nodes it couples. A mass :math:`m` on a spring :math:`k_1` (an
+element) and held by a penalty :math:`k_2` oscillates with :math:`\omega^2 = (k_1 + k_2)/m`, not with the larger of
+the two. Adding the constraint's largest frequency to the parts' largest one would be safe but blunt: a stiff contact
+far from the smallest element would lower the time increment of the whole model.
+
+**The estimate: the constraint adds where it acts.** For every degree of freedom :math:`i`, let :math:`\omega_i^2` be
+the bound of its part there -- for the elements the largest :math:`\lambda_e = (2/\Delta t_e)^2` of the elements at
+:math:`i`, for the particles the row sum of their bound -- and let
+
+.. math::
+
+   r_i = \frac{1}{\sqrt{M_i}} \sum_j |K^\mathrm{c}_{ij}| \frac{1}{\sqrt{M_j}}
+
+be the row sum of the absolute value of the constraints' stiffness, scaled by the lumped mass on both sides (every
+constraint gives it: ``computeBoundOfAbsoluteStiffnessTimes``). Then
+
+.. math::
+
+   \omega_\mathrm{max}^2 \le \Lambda = \max_i \left(\omega_i^2 + r_i\right) .
+
+At a degree of freedom no constraint couples, :math:`r_i = 0` and the part's estimate stands; a constraint lowers the
+critical time step only if the frequency it adds at its nodes, on top of the part's there, exceeds the largest one of
+the model. For a mass :math:`m` held by a penalty :math:`k` alone, :math:`r = k/m` and the estimate is the exact
+:math:`2\sqrt{m/k}`; for two equal masses joined by a penalty, :math:`r = 2k/m`, again exact.
+
+**Why it is safe: lend the constraint a part of the mass.** The argument of the element eigenvalue inequality holds for
+*any* split of the lumped mass among the pieces of the stiffness: if :math:`\boldsymbol{K} = \sum_a
+\boldsymbol{K}_a` and :math:`\boldsymbol{M} = \sum_a \boldsymbol{M}_a` (all diagonal, nonnegative), then
+
+.. math::
+
+   \boldsymbol{x}^T\boldsymbol{K}\boldsymbol{x} = \sum_a \boldsymbol{x}^T\boldsymbol{K}_a\boldsymbol{x}
+   \le \sum_a \lambda_a\, \boldsymbol{x}^T\boldsymbol{M}_a\boldsymbol{x}
+   \le \max_a \lambda_a \; \boldsymbol{x}^T\boldsymbol{M}\boldsymbol{x} ,
+   \qquad \lambda_a = \lambda_\mathrm{max}(\boldsymbol{M}_a^{-1}\boldsymbol{K}_a) .
+
+The constraint has no mass of its own, so it is lent the fraction :math:`\theta_i = r_i/\Lambda` of the mass of every
+degree of freedom it couples, and the parts keep the rest, :math:`(1 - \theta_i) M_i`.
+
+* The constraint with the masses :math:`\theta_i M_i`: by the row sums with the weights :math:`\sqrt{\theta_i}`
+  (Collatz-Wielandt), its largest eigenvalue is at most :math:`\max_i r_i/\theta_i = \Lambda`.
+* An element with the masses :math:`(1-\theta_i)` times its own: its eigenvalue grows at most by :math:`1/(1 -
+  \max_{i \in e}\theta_i)`, and :math:`\lambda_e \le \omega_i^2 \le \Lambda - r_i = \Lambda (1 - \theta_i)`
+  at each of its nodes, so it stays below :math:`\Lambda`.
+* The particles with the masses :math:`(1-\theta_i)M_i`: by their row sums with the weights scaled by
+  :math:`\sqrt{1-\theta_i}`, their row at :math:`i` grows by :math:`1/(1-\theta_i)`, and stays below :math:`\Lambda`
+  for the same reason.
+
+Every piece is below :math:`\Lambda` with its share of the mass, so the whole is. The argument is the Rayleigh
+quotient's, which needs a symmetric stiffness: the penalty springs are (a closed point with a frozen projection), and
+the elements' estimate bounds their elastic stiffness. The tangent of gradient-enhanced particles is not symmetric;
+for them, the constraint's rows are added to the particles' rows inside their field matrix
+(EdelweissMeshfree, ``CriticalTimeStepBoundOfEachFieldBlock``), and the bound of the field matrix holds for any matrix.
+Where a constraint couples particles and finite elements at once, the two arguments are combined; that the
+unsymmetric particles take part in the Rayleigh quotient of the elements is then an assumption.
+
+What the bound gives away is the Gershgorin step: the row sum is the exact frequency for springs between equal masses
+and above it otherwise, and a normal oblique to the axes spreads the spring over the components of a node.
+
+**What is not estimated.** The stiffness the constraints add enters from the state they have after an increment, for
+the next one: a point that closes *within* an increment adds its stiffness one increment late. An increment above the
+limit amplifies an oscillation by a bounded factor, and the time increment is never raised again within the step, so
+this is not an instability; the energy balance of ``NED`` (the kinetic energy may not exceed the energy at the start of
+the step plus the external work) remains the check. Not estimated either: the geometric stiffness of a contact with
+finite sliding (of the order of the normal force over the size of a facet, small against the penalty), and a penalty
+on a field integrated by forward Euler.
 
 When an estimate is taken anew
 ------------------------------
@@ -133,11 +207,23 @@ and takes a new estimate when :math:`\text{courant-number} \times L` falls below
   only an estimate sees, not the masses. A larger :math:`\delta` is more cautious and estimates more often; 1 estimates
   in every increment.
 
+Where penalty constraints couple the particles, the same lower bound is kept for the particles' rows with the
+constraints added: the particles' stiffness may have grown by :math:`1/f^2`, :math:`f = \min(1, \sqrt{\alpha},
+\beta)(1 - \delta)^n`, the constraints' rows are those of now. The particles are estimated anew also when that bound
+falls below the time increment in use -- the margin a contact at the particles' nodes leaves is smaller than their own.
+
 What the policy does in practice follows from the margin. Where the particles set the time increment, the increment in
 use *is* courant-number times their last estimate, the margin is used up after one increment, and they are estimated in
 every increment -- as they must be, since their estimate is what limits the analysis. Where another part sets it, the
 estimate of the particles is above the increment in use by some factor :math:`m`, and it is taken anew only every
 :math:`\ln m / -\ln(1-\delta)` increments, unless their masses fall faster than expected.
+
+**The penalty constraints: in every increment**
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`). Their stiffness follows
+the state of the contact -- which points are closed, and how deep, for a law whose stiffness grows with the
+penetration --, and changes from increment to increment; their row sums cost about as much as their force, so they are
+formed in every increment, from the state after it, and added to the parts' last estimates. Only this addition is
+renewed; the parts keep their own policies.
 
 The code
 --------
