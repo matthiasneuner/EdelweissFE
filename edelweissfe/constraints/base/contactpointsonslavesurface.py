@@ -351,25 +351,25 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         coordinates = self._referenceCoordinatesOfLocated + U.reshape(self._referenceCoordinatesOfLocated.shape)
         return np.einsum("ai,aij->aj", self._shapeFunctionsOfLocated, coordinates)
 
-    def addNormalForceResidual(self, P: np.ndarray, closed: np.ndarray, normalForces: np.ndarray, normals: np.ndarray):
-        """Add :math:`f_n\\, N^s \\otimes n` to the parent face nodes of each closed point; see
-        :meth:`ContactPoints.addNormalForceResidual`.
+    def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
+        """Add :math:`f\\, N^s \\otimes n` to the parent face nodes of each given point; see
+        :meth:`ContactPoints.addForceResidual`.
 
         Parameters
         ----------
         P
             The slave part of the residual contribution; augmented.
-        closed
+        points
             The located points that carry a force.
-        normalForces
-            Their normal forces.
-        normals
-            Their unit normals.
+        forces
+            The forces of their springs.
+        directions
+            The unit directions of their springs.
         """
 
-        Ns = self._shapeFunctionsOfLocated[closed]
-        w = (Ns[:, :, None] * normals[:, None, :]).reshape((len(closed), -1))
-        P.reshape((-1, self.nParentNodes * self.nDim))[closed] += normalForces[:, None] * w
+        Ns = self._shapeFunctionsOfLocated[points]
+        w = (Ns[:, :, None] * directions[:, None, :]).reshape((len(points), -1))
+        P.reshape((-1, self.nParentNodes * self.nDim))[points] += forces[:, None] * w
 
     def interpolationOfLocatedPoint(self, k: int) -> tuple[np.ndarray, np.ndarray]:
         """The degrees of freedom of the parent face nodes of a located point, and its shape functions there.
