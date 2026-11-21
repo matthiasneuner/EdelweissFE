@@ -68,6 +68,7 @@ from edelweissfe.numerics.systemmatrixcontributor import countEntriesOfBlock
 from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
+from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.meshtools import currentNodeCoordinates
 from edelweissfe.utils.residualtangentcheck import (
     finiteDifferenceTangent,
@@ -575,10 +576,214 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         np.testing.assert_array_equal(restored.stateOfPoints, constraint.stateOfPoints)
         np.testing.assert_array_equal(self._forces(restored, U), forces)
 
+    def test_an_initial_overlap_is_ramped_out_over_the_ramp_time(self):
+        """With ``initialOverlapRampTime``, the overlap at the first search is not counted at first and counted fully
+        after the ramp time, starting and ending at rest: no force at the start, half of it half way, all of it at
+        the end. The offset is a constant of the gap, so the tangent stays the derivative of the residual
+        contribution; and a checkpoint carries it."""
+
+        def at(time: float) -> TimeStep:
+            return TimeStep(1, 0.0, 0.0, 0.0, time, time)
+
+        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlapRampTime=2.0)
+        np.testing.assert_allclose(constraint._initialOverlap, -0.05, rtol=1e-12)
+        U = np.zeros(constraint.nDof)
+
+        fullForce = -1.0e4 * _SIDE**2 * 0.05
+        for time, fraction in ((0.0, 0.0), (0.5, 0.25 - 1.0 / (2.0 * np.pi)), (1.0, 0.5), (2.0, 1.0), (3.0, 1.0)):
+            P = np.zeros(constraint.nDof)
+            constraint.computeKernels(U, U, P, None, at(time))
+            self.assertAlmostEqual(constraint.totalNormalForce, fraction * fullForce, delta=1e-9, msg=f"t={time}")
+
+        # Overlapping further than at the start, the point is closed before the end of the ramp.
+        U = 1e-3 * np.random.default_rng(1).standard_normal(constraint.nDof)
+        K = residualContributionAndTangent(constraint, U, np.zeros_like(U), at(1.0))[1]
+        dP_dU = finiteDifferenceTangent(constraint, U, np.zeros_like(U), h=1e-8, timeStep=at(1.0))
+        np.testing.assert_allclose(K, dP_dU, atol=1e-5 * max(np.abs(K).max(), 1.0))
+
+        # Only the first search records the overlap.
+        constraint.updateConnectivity(model)
+        np.testing.assert_allclose(constraint._initialOverlap, -0.05, rtol=1e-12)
+
+        restored = self._constraint(model, slaveSurface, masterSurface, initialOverlapRampTime=2.0)
+        restored.setRestartData(constraint.getRestartData())
+        for c in (constraint, restored):
+            c.computeKernels(U, np.zeros_like(U), np.zeros(c.nDof), None, at(1.0))
+        self.assertEqual(restored.totalNormalForce, constraint.totalNormalForce)
+
     def test_refresh_ignores_changes_that_do_not_touch_the_surfaces(self):
         model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         self.assertFalse(constraint.refresh(model, ModelChange(kind=ModelChangeType.REFINEMENT)))
+
+
+class TestContactAtCornersOfTheMaster(unittest.TestCase):
+    """A contact point sliding over a plane strain master with corners, the slave a small square whose bottom left
+    node is moved along a path with a prescribed overlap: around the re-entrant root of a tooth, and off the convex
+    crest of a block. The contact points are the slave's nodes (``contactPoints=nodes``), so that the point followed
+    is a node of the model."""
+
+    #: The overlap of the moved node, a hundredth of the element size.
+    overlap = 0.01
+
+    def setUp(self):
+        self.journal = Journal()
+
+    def _model(self, masterBlocks: dict, masterFaces: dict) -> tuple:
+        """Plane strain CPE4 squares (lower left and upper right corner each), nodes shared where they coincide; the
+        master surface is the given faces (face 1 bottom, 2 right, 3 top, 4 left), the slave the bottom of a small
+        square far away, which a displacement field moves into place.
+
+        Returns
+        -------
+        tuple
+            ``(model, slaveSurface, masterSurface, field, slaveNodes)``.
+        """
+
+        model = FEModel(2)
+        nodeAt = {}
+        elements = {}
+        with model.topology.changes():
+            for name, ((x0, y0), (x1, y1)) in (masterBlocks | {"slave": ((5.0, 5.0), (5.01, 5.01))}).items():
+                nodes = []
+                for x in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+                    if x not in nodeAt:
+                        label = len(nodeAt) + 1
+                        nodeAt[x] = model.nodes[label] = Node(label, np.array(x))
+                    nodes.append(nodeAt[x])
+                (elNumber,) = model.topology.reserveElementNumbers(1)
+                element = DisplacementElement("CPE4", elNumber)
+                element.setNodes(nodes)
+                model.createElement(element)
+                elements[name] = element
+
+            model.surfaces["masterFaces"] = {
+                face: ElementSet(f"m{face}", [elements[name] for name in names]) for face, names in masterFaces.items()
+            }
+            model.surfaces["slaveFace"] = {1: ElementSet("s", [elements["slave"]])}
+            masterSetName, _ = buildContactFacets(
+                model, "masterFaces", "mst", "corner", "facetConsistent", self.journal
+            )
+            slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "corner", "facetConsistent", self.journal)
+
+        for node in model.nodes.values():
+            node.fields["displacement"] = 2
+        field = NodeField("displacement", 2, NodeSet("all", list(model.nodes.values())))
+        model.nodeFields["displacement"] = field
+        return (
+            model,
+            model.elementSets[slaveSetName],
+            model.elementSets[masterSetName],
+            field,
+            elements["slave"].nodes,
+        )
+
+    def _slide(self, model, slaveSurface, masterSurface, field, slaveNodes, path: np.ndarray) -> tuple:
+        """Move the slave square so that its bottom left node runs along ``path``, searching and evaluating at every
+        position.
+
+        Returns
+        -------
+        tuple
+            Per position the moved node's state, gap, normal force and the direction of its frozen gap; and the
+            constraint and its displacements at the end of the path.
+        """
+
+        def moveTo(point):
+            for node in slaveNodes:
+                field["U"][field._indicesOfNodesInArray[node]] = point - np.array([5.0, 5.0])
+
+        moveTo(path[0])
+        configuration = SurfaceToDeformableSurfacePenaltySchema(penalty=1.0e4, contactPoints="nodes")
+        constraint = IntegratedContact(
+            "theContact",
+            model,
+            ContactPointsAtSlaveNodes(slaveSurface, "theContact"),
+            masterSurface,
+            self.journal,
+            configuration=configuration,
+        )
+        followed = constraint.slave.surfaceNodes.index(slaveNodes[0])
+
+        states, gaps, forces, directions = [], [], [], []
+        for point in path:
+            moveTo(point)
+            constraint.updateConnectivity(model)
+            U = np.array([field["U"][field._indicesOfNodesInArray[node]] for node in constraint.nodes]).ravel()
+            constraint.computeKernels(U, np.zeros_like(U), np.zeros(constraint.nDof), None, None)
+            states.append(constraint.stateOfPoints[followed])
+            gaps.append(constraint.getGaps()[followed])
+            forces.append(constraint._normalForceCurrent[followed])
+            directions.append(constraint._frozenNormals[followed].copy())
+        return np.array(states), np.array(gaps), np.array(forces), np.array(directions), constraint, U
+
+    def test_a_point_slides_around_a_reentrant_root_without_sticking_or_jumping(self):
+        """The root of a tooth: the flank x = 1 (the tooth [0,1] x [0,2] on a core [0,3] x [-1,0]) meets the top of
+        the core y = 0 at a re-entrant corner. A point inside the master by ``overlap`` slides down the flank and on
+        along the core: it stays in contact, its gap is the signed distance to the master throughout -- the overlap
+        along the faces, the distance to the corner in between -- and it is pushed out along the flank's normal, then
+        diagonally, then along the core's normal."""
+
+        d = self.overlap
+        model, slaveSurface, masterSurface, field, slaveNodes = self._model(
+            {
+                "core1": ((0.0, -1.0), (1.0, 0.0)),
+                "core2": ((1.0, -1.0), (2.0, 0.0)),
+                "core3": ((2.0, -1.0), (3.0, 0.0)),
+                "tooth1": ((0.0, 0.0), (1.0, 1.0)),
+                "tooth2": ((0.0, 1.0), (1.0, 2.0)),
+            },
+            {2: ("tooth1", "tooth2"), 3: ("core2", "core3")},
+        )
+        down = np.column_stack((np.full(70, 1.0 - d), np.linspace(0.6, -d, 70)))
+        along = np.column_stack((np.linspace(1.0 - d, 1.6, 70), np.full(70, -d)))[1:]
+        path = np.vstack((down, along))
+
+        states, gaps, forces, directions, _, _ = self._slide(
+            model, slaveSurface, masterSurface, field, slaveNodes, path
+        )
+
+        self.assertTrue((states == ContactState.IN_CONTACT).all(), "the point must stay in contact")
+        expected = -np.where((path[:, 0] < 1.0) & (path[:, 1] < 0.0), np.hypot(1.0 - path[:, 0], path[:, 1]), d)
+        np.testing.assert_allclose(gaps, expected, rtol=1e-12)
+        self.assertTrue((forces < 0.0).all(), "the point must carry a force throughout")
+        np.testing.assert_allclose(directions[0], [1.0, 0.0], atol=1e-15)
+        np.testing.assert_allclose(directions[69], [np.sqrt(0.5), np.sqrt(0.5)], rtol=1e-12)
+        np.testing.assert_allclose(directions[-1], [0.0, 1.0], atol=1e-15)
+
+        # At the corner the gap is frozen along the diagonal; the tangent is still the derivative of the residual.
+        *_, constraint, U = self._slide(model, slaveSurface, masterSurface, field, slaveNodes, down)
+        K = residualContributionAndTangent(constraint, U, np.zeros_like(U))[1]
+        dP_dU = finiteDifferenceTangent(constraint, U, np.zeros_like(U), h=1e-8)
+        np.testing.assert_allclose(K, dP_dU, atol=1e-5 * max(np.abs(K).max(), 1.0))
+
+    def test_a_point_that_slides_off_a_convex_crest_is_released(self):
+        """The crest of a block [0,1] x [0,1], its top and its side the master: a point inside the block by
+        ``overlap`` below the top slides in +x. Near the edge, inside, it is still pushed up -- not out of the side,
+        which is closer, but across a convex crease from the top it entered through. Beyond the edge it is beside
+        the block, outside of it: it is released, with the distance to the side as its gap, where measuring along
+        the top's normal would have kept pushing it down."""
+
+        d = self.overlap
+        model, slaveSurface, masterSurface, field, slaveNodes = self._model(
+            {"block": ((0.0, 0.0), (1.0, 1.0))}, {2: ("block",), 3: ("block",)}
+        )
+        path = np.column_stack((np.linspace(0.7, 1.3, 61), np.full(61, 1.0 - d)))
+
+        states, gaps, forces, directions, _, _ = self._slide(
+            model, slaveSurface, masterSurface, field, slaveNodes, path
+        )
+
+        inside = path[:, 0] < 1.0 - 1e-12
+        self.assertTrue((states[inside] == ContactState.IN_CONTACT).all())
+        np.testing.assert_allclose(gaps[inside], -d, rtol=1e-12)
+        np.testing.assert_allclose(directions[inside], np.tile([0.0, 1.0], (inside.sum(), 1)), atol=1e-15)
+
+        beyond = path[:, 0] > 1.0 + 1e-12
+        self.assertTrue((states[beyond] == ContactState.APPROACHING).all())
+        np.testing.assert_allclose(gaps[beyond], path[beyond, 0] - 1.0, rtol=1e-12)
+        np.testing.assert_array_equal(forces[beyond], 0.0)
 
 
 if __name__ == "__main__":
