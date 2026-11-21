@@ -55,9 +55,9 @@ from edelweissfe.numerics.systemmatrixcontributor import localEntriesOfSubBlocks
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.facetcontactgeometry import (
+    FacetedSurface,
     closestFacetCandidates,
     closestFacets,
-    cosOfSmoothNormalChangeLimit,
     facetNormalAndMeasure,
     rowDot,
 )
@@ -192,6 +192,13 @@ class SurfaceToDeformableSurfacePenaltySchema(SurfaceContactPenaltySchema):
         dtype=str,
         default="quadraturePoints",
     )
+    initialOverlapRampTime: float = schemaField(
+        description="The time over which an overlap present at the first contact search -- an interference fit, or "
+        "the faceting of a curved surface -- is pushed apart: it is taken out of the gap at first and fed back in "
+        "smoothly (starting and ending at rest) over this time. 0: pushed apart at once.",
+        dtype=float,
+        default=0.0,
+    )
 
 
 class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBase, MeshDependent):
@@ -209,8 +216,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     the node-based formulation disappears as well.
 
     Under ``sliding=small`` the projection is frozen at every update of the connectivity: the assigned master facet,
-    the parametric location of the closest point *in that facet's parent face*, and the facet's unit normal
-    :math:`\\bar{n}`. The gap is then
+    the parametric location of the closest point *in that facet's parent face*, and the direction of the gap
+    :math:`\\bar{n}`, the facet's unit normal except at a crease of the master (see *The gap at the corners of the
+    master*). The gap is then
 
     .. math::
         g = \\bar{n} \\cdot \\left( \\boldsymbol{x}_p - N^m(\\xi_m) \\cdot x^m \\right) ,
@@ -232,24 +240,42 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     geometry itself is the curved parent surface. For straight-edged faces the two points coincide
     identically, so nothing is lost in the common case.
 
+    The gap at the corners of the master
+    ------------------------------------
+    The gap is frozen as the first-order expansion of the *signed distance* of the point to the master surface at the
+    update (:meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.signedDistances`): :math:`\\bar{n}` is the
+    direction in which that distance grows. Where the closest point lies inside a facet, or on a seam of a smooth
+    surface, that is the facet's normal. Where it lies on a *crease* -- an edge or a vertex where the facets meet at
+    more than the angle of
+    :data:`~edelweissfe.utils.facetcontactgeometry.cosOfSmoothNormalChangeLimit`, such as the crest and the root of a
+    thread -- it is the line from the closest point to the contact point, and whether the point is inside or outside
+    is told by the angle-weighted pseudonormal of the crease, which is right at convex and re-entrant corners alike.
+    So a point beside a crest is outside, with the distance to the crest as its gap, and a point inside a root is
+    pushed out the shortest way. On the boundary of a master surface that ends, the plane of its last facet goes on.
+
     The pairing
     -----------
     In every update of the connectivity, the contact points within ``searchDistance`` of the master surface (all of
     them, if no search distance is given) are paired with their closest facet, but only while they are outside the
     master body (:attr:`ContactState.APPROACHING`). Once a point is in contact (:attr:`ContactState.IN_CONTACT`), it
-    is paired anew in every update with its closest facet, however deep it is, as it slides along the surface and
-    from one face of the master onto the next where the surface is smooth -- but never across a crease, with a facet
-    whose normal differs from the one it was pushed along until then by more than
-    :data:`~edelweissfe.utils.facetcontactgeometry.cosOfSmoothNormalChangeLimit` allows: the closest facet of a point
-    near a corner of the master may be on its side, of a point deep inside a thin body on its far side, and its normal
-    would push the point out of the wrong side. A point that was out of reach at the previous update and is found inside the master body has
+    is paired anew in every update with its closest facet, however deep it is, as it slides along the surface, from
+    one face of the master onto the next and around a re-entrant corner -- but never across a convex crease (see
+    :meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.acrossAConvexCrease`): the closest facet of a point
+    near a convex corner of the master may be on its side, of a point deep inside a thin body on its far side, and
+    would push the point out of the wrong side. A point that leaves the master body is released at once, also
+    beside a crest. A point that was out of reach at the previous update and is found inside the master body has
     tunnelled through the search distance in one increment (:attr:`ContactState.FOUND_INSIDE`): it gets no force and
     is reported, and the search distance must exceed the distance a point travels towards the surface in one
-    increment -- the constraint warns when a point enters deeper than half of it. At the first update, the bodies are
-    as the model gives them: a point found inside then is in contact (an initial overlap is pushed apart).
+    increment -- the constraint warns when a point enters deeper than half of it.
 
-    The pairing is checked for a master surface that is convex where it is touched: at a re-entrant corner, the sign
-    of the gap of the closest facet does not tell inside from outside.
+    The first update
+    ----------------
+    At the first update, the bodies are as the model gives them: a point found inside then is in contact, and the
+    overlap is pushed apart. By default at once; with ``initialOverlapRampTime`` gradually: the gap of every paired
+    point at the first update, where it is closed (an interference fit, or the faceting of a curved surface that
+    makes even a perfect fit overlap), is subtracted from its gap at first, and fed back in over that time, smoothly,
+    starting and ending at rest. The offset is a constant of the gap, so the tangent does not change. A refinement
+    of a contact surface during the ramp regenerates its points without their offsets.
 
     ``sliding=finite`` is rejected rather than approximated. It would require the exact gap gradient
     and Hessian of a point against a *curved* quadratic surface, whose closest-point projection is
@@ -329,6 +355,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         self.searchDistance = configuration.searchDistance
 
+        self.initialOverlapRampTime = configuration.initialOverlapRampTime
+        if self.initialOverlapRampTime < 0.0:
+            raise ValueError("The initial overlap ramp time must not be negative.")
+        # The time of the first contact search, from which the initial overlap is ramped out; None before it.
+        self._initialOverlapTime = None
+
         self.slave = contactPoints
         self._buildMaster(masterSurface)
         self._resetContactPoints()
@@ -400,7 +432,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._referenceCoordinatesOfMasterNodes = np.array([node.coordinates for node in self._masterNodes])
         self._masterNodesOfFacet = np.array(
             [[indexOfMasterNode[node] for node in facet.nodes] for facet in self.facetElements], dtype=np.intp
-        )
+        ).reshape((len(self.facetElements), self.nDim))
+        self._masterFacets = FacetedSurface(self._masterNodesOfFacet)
 
         self._vertexParametricCoordsOfFacet = np.array([facet.vertexParametricCoords for facet in self.facetElements])
         self._masterParentRefCoords = np.array(
@@ -423,6 +456,11 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._assignedFacetIdx = np.full(nPoints, -1, dtype=np.intp)
         self._frozenMasterShapeFunctions = np.zeros((nPoints, self.nMasterParentNodes))
         self._frozenNormals = np.zeros((nPoints, self.nDim))
+
+        # The overlap of each point at the first contact search (zero or negative), which the gap does not count at
+        # first and counts fully after the ramp time; the fraction of it not counted at the last evaluation.
+        self._initialOverlap = np.zeros(nPoints)
+        self._uncountedFractionOfInitialOverlap = 0.0
 
         # Per-point results of the current evaluation, for output.
         self._normalForceCurrent = np.zeros(nPoints)
@@ -505,6 +543,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         ]
         facetCoords = list(coordinatesOfFacet)
         normalOfFacet, _ = facetNormalAndMeasure(coordinatesOfFacet)
+        features = self._masterFacets.features(coordinatesOfFacet, normalOfFacet)
 
         previousState = self._stateOfPoint
         wasInContact = previousState == ContactState.IN_CONTACT
@@ -524,37 +563,54 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                     candidatesOfPoint[point] = candidates
         closestFacet, weights, distance = closestFacets(coordinatesOfPoint, facetCoords, candidatesOfPoint)
 
-        # A point in contact is pushed back out the way it came: it slides on over the master surface where that is
-        # smooth, but does not move across a crease, onto a facet whose normal differs from the one it was pushed
-        # along by more than the limit -- the side of a corner it is near, or the far side of a thin master body.
-        acrossACrease = np.flatnonzero(
-            wasInContact
-            & (closestFacet >= 0)
-            & (rowDot(normalOfFacet[closestFacet], self._frozenNormals) < cosOfSmoothNormalChangeLimit)
-        )
-        if len(acrossACrease):
-            sameWay = [
-                [
-                    f
-                    for f in candidatesOfPoint[point]
-                    if normalOfFacet[f] @ self._frozenNormals[point] >= cosOfSmoothNormalChangeLimit
-                ]
-                for point in acrossACrease
-            ]
-            closestFacet[acrossACrease], weights[acrossACrease], distance[acrossACrease] = closestFacets(
-                coordinatesOfPoint[acrossACrease], facetCoords, sameWay
-            )
-
         reached = closestFacet >= 0
         if self.searchDistance is not None:
             reached &= wasInContact | (distance <= self.searchDistance)
 
-        facetOfReached = closestFacet[reached]
-        closestPoint = np.einsum("pa,pad->pd", weights[reached], coordinatesOfFacet[facetOfReached])
+        # The signed distance to the closest facet tells inside from outside, also at the edges and the vertices of a
+        # master that is not convex.
         gap = np.zeros(self.nPoints)
-        gap[reached] = rowDot(normalOfFacet[facetOfReached], coordinatesOfPoint[reached] - closestPoint)
-
+        direction = np.zeros((self.nPoints, self.nDim))
+        gap[reached], direction[reached] = self._masterFacets.signedDistances(
+            coordinatesOfPoint[reached],
+            closestFacet[reached],
+            weights[reached],
+            coordinatesOfFacet,
+            normalOfFacet,
+            features,
+        )
         penetrating = reached & (gap < 0.0)
+
+        # A point in contact is pushed back out the way it came: it slides on over the master surface where that is
+        # smooth and around a re-entrant crease, but does not move across a convex crease, onto the side of a corner
+        # it is near or the far side of a thin master body.
+        previousFacet = self._assignedFacetIdx
+        mustStay = np.flatnonzero(penetrating & wasInContact)
+        mustStay = mustStay[
+            self._masterFacets.acrossAConvexCrease(
+                previousFacet[mustStay], closestFacet[mustStay], coordinatesOfFacet, normalOfFacet
+            )
+        ]
+        if len(mustStay):
+            sameWay = []
+            for point in mustStay:
+                candidates = np.union1d(candidatesOfPoint[point], [previousFacet[point]]).astype(np.intp)
+                across = self._masterFacets.acrossAConvexCrease(
+                    np.full(len(candidates), previousFacet[point]), candidates, coordinatesOfFacet, normalOfFacet
+                )
+                sameWay.append(candidates[~across].tolist())
+            closestFacet[mustStay], weights[mustStay], _ = closestFacets(
+                coordinatesOfPoint[mustStay], facetCoords, sameWay
+            )
+            gap[mustStay], direction[mustStay] = self._masterFacets.signedDistances(
+                coordinatesOfPoint[mustStay],
+                closestFacet[mustStay],
+                weights[mustStay],
+                coordinatesOfFacet,
+                normalOfFacet,
+                features,
+            )
+
         state = np.full(self.nPoints, ContactState.FREE, dtype=np.int8)
         state[reached & ~penetrating] = ContactState.APPROACHING
         state[penetrating & wasSeen] = ContactState.IN_CONTACT
@@ -562,20 +618,28 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         self._reportEntriesAndPointsFoundInside(previousState, state, gap)
         self._stateOfPoint = state
+        firstSearch = not self._searchedBefore
         self._searchedBefore = True
 
         paired = (state == ContactState.APPROACHING) | (state == ContactState.IN_CONTACT)
         newAssignment = np.where(paired, closestFacet, -1)
 
         # The clamped barycentric weights locate the closest point in the flat facet; map that location into the
-        # parent face's parametric space and evaluate the parent face's shape functions there.
+        # parent face's parametric space and evaluate the parent face's shape functions there. Frozen with them is the
+        # direction in which the gap grows.
         pairedFacet = newAssignment[paired]
         parametric = np.einsum("pa,pad->pd", weights[paired], self._vertexParametricCoordsOfFacet[pairedFacet])
         self._frozenMasterShapeFunctions[:] = 0.0
         self._frozenNormals[:] = 0.0
         if len(pairedFacet):
             self._frozenMasterShapeFunctions[paired] = parentFaceShapeFunctions(self._masterParentFaceType, parametric)
-            self._frozenNormals[paired] = normalOfFacet[pairedFacet]
+            self._frozenNormals[paired] = direction[paired]
+
+        if firstSearch and self._initialOverlapTime is None and self.initialOverlapRampTime > 0.0:
+            self._initialOverlapTime = model.time
+            self._initialOverlap[paired] = np.minimum(
+                self._parentFaceGaps(model, coordinatesOfPoint[paired], pairedFacet, paired), 0.0
+            )
 
         return self._assignMasterFacets(newAssignment)
 
@@ -619,6 +683,58 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                     self.identification,
                     level=1,
                 )
+
+    def _parentFaceGaps(
+        self, model: FEModel, coordinatesOfPoints: np.ndarray, facets: np.ndarray, points: np.ndarray
+    ) -> np.ndarray:
+        """The gaps of paired points as an evaluation measures them, to the point of the master's parent face, in the
+        configuration of the model.
+
+        Parameters
+        ----------
+        model
+            The model, whose node field ``displacement`` places the master surface.
+        coordinatesOfPoints
+            The current coordinates of the points.
+        facets
+            The master facet of each point.
+        points
+            The indices of the points, whose frozen projection is used.
+
+        Returns
+        -------
+        numpy.ndarray
+            The gaps.
+        """
+
+        parentNodes = [node for f in facets for node in self.facetElements[f].parentFaceNodes]
+        reference = self._masterParentRefCoords[facets]
+        parentCoordinates = currentNodeCoordinates(parentNodes, model, reference.reshape((-1, self.nDim))).reshape(
+            reference.shape
+        )
+        masterPoints = np.einsum("pa,pad->pd", self._frozenMasterShapeFunctions[points], parentCoordinates)
+        return np.einsum("pd,pd->p", self._frozenNormals[points], coordinatesOfPoints - masterPoints)
+
+    def _uncountedFractionOfInitialOverlapAt(self, timeStep: TimeStep | None) -> float:
+        """The fraction of the initial overlap the gap does not count at the time of ``timeStep``: one at the first
+        contact search, zero after the ramp time, in between :math:`1 - s + \\sin(2 \\pi s) / (2 \\pi)` of the
+        elapsed fraction :math:`s` of the ramp time, which starts and ends at rest.
+
+        Parameters
+        ----------
+        timeStep
+            The time step of the evaluation; without an initial overlap to ramp, it may be None.
+
+        Returns
+        -------
+        float
+            The fraction.
+        """
+
+        if self._initialOverlapTime is None or timeStep is None:
+            return 0.0
+        s = min(max((timeStep.totalTime - self._initialOverlapTime) / self.initialOverlapRampTime, 0.0), 1.0)
+        return 1.0 - s + np.sin(2.0 * np.pi * s) / (2.0 * np.pi)
 
     def _assignMasterFacets(self, newAssignment: np.ndarray) -> bool:
         """Assign each contact point its master facet (searched or restored), and locate the paired points."""
@@ -667,6 +783,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         self._masterShapeFunctionsOfLocated = self._frozenMasterShapeFunctions[located]
         self._normalsOfLocated = self._frozenNormals[located]
+        self._initialOverlapOfLocated = self._initialOverlap[located]
         self._masterRefOfLocated = self._masterParentRefCoords[facets].reshape(
             (len(located), self.nMasterParentNodes, self.nDim)
         )
@@ -685,6 +802,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             "stateOfPoint": self._stateOfPoint,
             "masterShapeFunctions": self._frozenMasterShapeFunctions,
             "normals": self._frozenNormals,
+            "initialOverlap": self._initialOverlap,
+            # Empty before the first search.
+            "initialOverlapTime": np.array([] if self._initialOverlapTime is None else [self._initialOverlapTime]),
         }
 
     def _adoptFrozenProjection(self, projection: dict[str, np.ndarray]) -> bool:
@@ -694,6 +814,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             self._frozenMasterShapeFunctions.shape
         )
         self._frozenNormals = np.array(projection["normals"]).reshape(self._frozenNormals.shape)
+        self._initialOverlap = np.array(projection["initialOverlap"]).reshape(self._initialOverlap.shape)
+        initialOverlapTime = np.asarray(projection["initialOverlapTime"]).ravel()
+        self._initialOverlapTime = float(initialOverlapTime[0]) if len(initialOverlapTime) else None
         return self._assignMasterFacets(np.array(projection["assignedFacetIdx"], dtype=np.intp))
 
     def refresh(self, model: FEModel, change) -> bool:
@@ -779,6 +902,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         gaps = self._gapsOfLocatedPoints(U_np, dU)
         self._gapCurrent[located] = gaps
 
+        self._uncountedFractionOfInitialOverlap = self._uncountedFractionOfInitialOverlapAt(timeStep)
+        gaps = self._countedGaps(gaps, self._uncountedFractionOfInitialOverlap)
+
         closed = np.flatnonzero(self.law.isClosed(gaps))
         self._closed = closed
         if not len(closed):
@@ -828,6 +954,27 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         relative = xS - np.einsum("ai,aij->aj", self._masterShapeFunctionsOfLocated, xM)
         return np.einsum("aj,aj->a", self._normalsOfLocated, relative)
 
+    def _countedGaps(self, gaps: np.ndarray, uncountedFraction: float) -> np.ndarray:
+        """The gaps of the located points as the law sees them: less the part of the initial overlap that is not
+        counted yet, a constant offset of the gap, which leaves its gradient, and so the tangent, as it is.
+
+        Parameters
+        ----------
+        gaps
+            The gap of each located point.
+        uncountedFraction
+            The fraction of the initial overlap not counted yet, see :meth:`_uncountedFractionOfInitialOverlapAt`.
+
+        Returns
+        -------
+        numpy.ndarray
+            The counted gaps.
+        """
+
+        if uncountedFraction:
+            return gaps - uncountedFraction * self._initialOverlapOfLocated
+        return gaps
+
     def computeBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
@@ -841,7 +988,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         A closed point :math:`p` has the stiffness :math:`k_p\\, w_p \\otimes w_p`, with :math:`w_p = [c, -N^m] \\otimes
         \\bar{n}` and the stiffness :math:`k_p = \\mathrm{d}f_n/\\mathrm{d}g` its law gives it at its gap (the one of the
-        tangent). The absolute value of a sum is at most the sum of the absolute values, so
+        tangent). Gap and direction are the force's: the gap counts the initial overlap as far as the ramp has fed it
+        in, and :math:`\\bar{n}` is the frozen direction of the gap, the facet normal or, at a crease of the master, the
+        direction to the closest point. The absolute value of a sum is at most the sum of the absolute values, so
 
         .. math::
 
@@ -855,7 +1004,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not len(located):
             return
 
-        gaps = self._gapsOfLocatedPoints(U_np, dU)
+        gaps = self._countedGaps(
+            self._gapsOfLocatedPoints(U_np, dU), self._uncountedFractionOfInitialOverlapAt(timeStep)
+        )
         closed = np.flatnonzero(self.law.isClosed(gaps))
         if not len(closed):
             return
@@ -927,7 +1078,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """
 
         points = self._locatedPoints[self._closed]
-        return float(self.law.storedEnergy(self.penalty * self.slave.areas[points], self._gapCurrent[points]).sum())
+        gaps = self._gapCurrent[points] - self._uncountedFractionOfInitialOverlap * self._initialOverlap[points]
+        return float(self.law.storedEnergy(self.penalty * self.slave.areas[points], gaps).sum())
 
     @property
     def deepestPenetration(self) -> float:
