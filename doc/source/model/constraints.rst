@@ -348,8 +348,14 @@ closed surface of a :doc:`discrete rigid body </model/rigidbodies>`. The theory 
 :ref:`integrated-contact-rigid-body`. Use it for any contact against rigid supports or indenters,
 in particular with quadratic slave faces.
 
-Scope: normal penalty contact under ``sliding=small``, 3D, implicit and explicit solver paths, live
-AMR of the slave side. The slave surface must consist of a single element type.
+Its slave side is the same as that of ``surfacetodeformablesurfacepenalty`` (:ref:`contact-points`): the
+quadrature points of the slave facets (``contactPoints=quadraturePoints``, the default), the slave nodes, each
+standing for its tributary area (``contactPoints=nodes``), and, from EdelweissMeshfree, points on the faces of
+particles -- so finite element nodes and faces and particles hit a rigid body through one constraint. Points
+farther than ``searchDistance`` from the rigid surface take no part until they approach.
+
+Scope: frictionless normal penalty contact under ``sliding=small``, 3D, implicit and explicit solver paths, live
+AMR of the slave side. A slave surface of finite elements must consist of a single element type.
 
 Module ``edelweissfe.constraints.surfacetodiscreterigidbodypenalty``
 

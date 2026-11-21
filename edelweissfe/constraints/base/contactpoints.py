@@ -47,8 +47,9 @@ the increment from the configuration of the last update (they are updated-Lagran
 from where each kind of point is known.
 
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
-the master surface, the gap, the law -- is written once for all of them
-(:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`).
+the master, the gap, the law -- is written once for all of them, for a deformable master surface
+(:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`) and for a discrete rigid body
+(:mod:`~edelweissfe.constraints.surfacetodiscreterigidbodypenalty`).
 """
 
 from abc import ABC, abstractmethod
@@ -83,6 +84,12 @@ class ContactPoints(ABC):
 
     nPoints: int
     areas: np.ndarray
+
+    #: Whether the points can be located only once the model has connected the entities they belong to, at an update
+    #: of the connectivity: the points of particles, whose kernel functions follow from where the particles are. A
+    #: checkpoint does not hold that connectivity, so a constraint restored from one keeps their projection and locates
+    #: them at the next update of the connectivity, which the resumed run makes before its first increment.
+    locatedOnlyWhenConnected: bool = False
 
     @abstractmethod
     def currentPointCoordinates(self, model: FEModel) -> np.ndarray:

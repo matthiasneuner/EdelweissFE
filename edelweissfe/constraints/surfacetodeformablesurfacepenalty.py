@@ -34,11 +34,7 @@ from scipy.spatial import cKDTree
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.constraints.base.contactpoints import ContactPoints
-from edelweissfe.constraints.base.contactpointsatslavenodes import (
-    ContactPointsAtSlaveNodes,
-)
 from edelweissfe.constraints.base.contactpointsonslavesurface import (
-    ContactPointsOnSlaveSurface,
     checkFacetsCarryParentFaces,
 )
 from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
@@ -48,6 +44,7 @@ from edelweissfe.constraints.base.frozencontactsearch import FrozenContactSearch
 from edelweissfe.constraints.base.penaltylaw import penaltyLaw, penaltyLawsAndTheTie
 from edelweissfe.constraints.base.surfacecontactpenaltyschema import (
     SurfaceContactPenaltySchema,
+    contactPointsOfTheSlaveSurface,
 )
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
@@ -181,15 +178,6 @@ class PenaltySprings:
     stiffness: np.ndarray
 
 
-#: The kinds of contact points an input file can choose, by the value of the ``contactPoints`` option.
-_contactPointsFromInput = {
-    "quadraturepoints": lambda configuration, slaveSurface, name: ContactPointsOnSlaveSurface(
-        slaveSurface, configuration.nQuadraturePoints, name
-    ),
-    "nodes": lambda configuration, slaveSurface, name: ContactPointsAtSlaveNodes(slaveSurface, name),
-}
-
-
 @dataclass(frozen=True)
 class SurfaceToDeformableSurfacePenaltySchema(SurfaceContactPenaltySchema):
     """The options this constraint accepts: the shared slave-side and penalty options of
@@ -204,13 +192,6 @@ class SurfaceToDeformableSurfacePenaltySchema(SurfaceContactPenaltySchema):
         dtype=str,
         default=None,
         required=True,
-    )
-    contactPoints: str = schemaField(
-        description="The contact points of the slave surface: 'quadraturePoints' (nQuadraturePoints quadrature "
-        "points on each slave facet, distributed with the slave parent face's shape functions) or 'nodes' (the "
-        "slave nodes, each standing for its tributary area).",
-        dtype=str,
-        default="quadraturePoints",
     )
     initialOverlap: str = schemaField(
         description="What an overlap of a contact point found at the first contact search stands for. 'pushApart': a "
@@ -485,16 +466,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         :class:`~edelweissfe.constraints.base.constraintbase.ConstraintBase` for why this is
         separate from ``__init__``."""
         configuration = buildSchemaFromOptions(cls.schema, definition)
-        contactPointsOfSurface = _contactPointsFromInput.get(configuration.contactPoints.lower())
-        if contactPointsOfSurface is None:
-            raise ValueError(
-                f"Constraint '{name}': contactPoints '{configuration.contactPoints}' is not supported. Use "
-                "'quadraturePoints' or 'nodes'."
-            )
         return cls(
             name,
             model,
-            contactPointsOfSurface(configuration, model.elementSets[configuration.slaveSurface], name),
+            contactPointsOfTheSlaveSurface(configuration, model, name),
             model.elementSets[configuration.masterSurface],
             journal,
             configuration=configuration,
@@ -1103,7 +1078,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._restingOffset = np.array(projection["restingOffset"]).reshape(self._restingOffset.shape)
         initialOverlapTime = np.asarray(projection["initialOverlapTime"]).ravel()
         self._initialOverlapTime = float(initialOverlapTime[0]) if len(initialOverlapTime) else None
-        return self._assignMasterFacets(np.array(projection["assignedFacetIdx"], dtype=np.intp))
+        assignment = np.array(projection["assignedFacetIdx"], dtype=np.intp)
+        if self.slave.locatedOnlyWhenConnected:
+            # Located at the next update of the connectivity, once the entities of the points are connected.
+            self._assignedFacetIdx = assignment
+            return False
+        return self._assignMasterFacets(assignment)
 
     def refresh(self, model: FEModel, change) -> bool:
         """Rebuild both sides if ``change`` touched the source elements of either: the contact points are

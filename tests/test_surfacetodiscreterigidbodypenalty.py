@@ -40,6 +40,12 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
+from edelweissfe.constraints.base.contactpointsatslavenodes import (
+    ContactPointsAtSlaveNodes,
+)
+from edelweissfe.constraints.base.contactpointsonslavesurface import (
+    ContactPointsOnSlaveSurface,
+)
 from edelweissfe.constraints.surfacetodiscreterigidbodypenalty import (
     Constraint as RigidSurfaceContact,
 )
@@ -146,11 +152,18 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
         return model, model.elementSets[slaveSetName], rigidBody
 
     def _constraint(self, model, slaveSurface, rigidBody, **options) -> RigidSurfaceContact:
+        """The contact of the slave surface's quadrature points, or of its nodes with ``contactPoints="nodes"``,
+        searched once in the configuration of the model."""
+
         configuration = SurfaceToDiscreteRigidBodyPenaltySchema(
             penalty=options.pop("penalty", 1.0e4), searchDistance=options.pop("searchDistance", 1.0), **options
         )
+        if configuration.contactPoints == "nodes":
+            contactPoints = ContactPointsAtSlaveNodes(slaveSurface, "theContact")
+        else:
+            contactPoints = ContactPointsOnSlaveSurface(slaveSurface, configuration.nQuadraturePoints, "theContact")
         constraint = RigidSurfaceContact(
-            "theContact", model, slaveSurface, rigidBody, self.journal, configuration=configuration
+            "theContact", model, contactPoints, rigidBody, self.journal, configuration=configuration
         )
         constraint.updateConnectivity(model)
         return constraint
@@ -166,9 +179,15 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
         """``K == dP/dU`` by central differences, for a moved and rotated rigid body and both
         penalty laws -- except for the documented, omitted rotation-rotation block of the RP."""
 
-        for contactType in ("linear", "quadratic"):
+        for contactType, contactPoints in (
+            ("linear", "quadraturePoints"),
+            ("quadratic", "quadraturePoints"),
+            ("linear", "nodes"),
+        ):
             model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=0.05)
-            constraint = self._constraint(model, slaveSurface, rigidBody, contactType=contactType)
+            constraint = self._constraint(
+                model, slaveSurface, rigidBody, contactType=contactType, contactPoints=contactPoints
+            )
 
             rng = np.random.default_rng(0)
             U = 1e-3 * rng.standard_normal(constraint.nDof)
@@ -183,7 +202,9 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
 
             self.assertTrue(np.all(constraint.getGaps() < 0.0), "every contact point must stay closed")
             scale = np.abs(K).max()
-            np.testing.assert_allclose(K, dP_dU, rtol=0, atol=1e-6 * scale, err_msg=f"type={contactType}")
+            np.testing.assert_allclose(
+                K, dP_dU, rtol=0, atol=1e-6 * scale, err_msg=f"type={contactType}, contactPoints={contactPoints}"
+            )
 
     def test_forces_balance_and_corners_are_pulled(self):
         """The contact forces on the block and on the rigid body are in equilibrium, and the corner
@@ -206,6 +227,23 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
         self.assertEqual(np.sum(nodalForces < 0.0), 4, "the 4 corner nodes must be pulled")
         self.assertAlmostEqual(nodalForces.sum(), slaveForce[1], places=10)
 
+    def test_nodes_as_contact_points_carry_the_force_of_their_tributary_areas(self):
+        """The slave nodes as contact points: each pushed by the penalty times its tributary area, the total is that of
+        the quadrature points, and the block holds each node once, then the RP."""
+
+        model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=0.01)
+        constraint = self._constraint(model, slaveSurface, rigidBody, contactPoints="nodes")
+        self.assertEqual(constraint.nDof, 8 * 3 + 6)
+        forces = self._forces(constraint, np.zeros(constraint.nDof))
+
+        slaveForce = forces[: constraint.nSlaveDof].reshape((-1, 3)).sum(axis=0)
+        rigidBodyForce = forces[constraint.nSlaveDof : constraint.nSlaveDof + 3]
+        np.testing.assert_allclose(slaveForce + rigidBodyForce, 0.0, rtol=0, atol=1e-10)
+        self.assertAlmostEqual(slaveForce[1] / (1.0e4 * 0.01 * _SIDE**2), 1.0, places=6)
+        np.testing.assert_allclose(
+            constraint.getSlaveNodalNormalForces(), 1.0e4 * 0.01 * constraint.slave.areas, rtol=1e-6
+        )
+
     def test_open_rigid_surface_is_rejected(self):
         model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=0.01, openSurface=True)
         with self.assertRaises(ValueError):
@@ -222,7 +260,13 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
         self.assertIn("only 'small' is implemented", str(context.exception))
 
         with self.assertRaises(ValueError) as context:
-            RigidSurfaceContact("theContact", FEModel(2), slaveSurface, rigidBody, self.journal)
+            RigidSurfaceContact(
+                "theContact",
+                FEModel(2),
+                ContactPointsOnSlaveSurface(slaveSurface, 3, "theContact"),
+                rigidBody,
+                self.journal,
+            )
         self.assertIn("only implemented for 3D", str(context.exception))
 
     def test_mixed_element_types_are_rejected(self):
@@ -239,6 +283,7 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
             model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=-gap)
             constraint = self._constraint(model, slaveSurface, rigidBody, searchDistance=1.0)
             np.testing.assert_array_equal(constraint._frozenBodyNormals, 0.0)
+            self.assertEqual(constraint.nDof, 6, "a point out of reach takes no part, only the RP is left")
             self._forces(constraint, np.zeros(constraint.nDof))
             np.testing.assert_array_equal(constraint.getGaps(), 0.0)
 
