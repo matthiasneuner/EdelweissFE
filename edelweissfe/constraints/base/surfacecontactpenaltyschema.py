@@ -26,11 +26,20 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 """
-The options shared by the integrated (surface-to-surface) penalty contact constraints.
+The options shared by the integrated (surface-to-surface) penalty contact constraints, and the contact points of the
+slave surface they choose.
 """
 
 from dataclasses import dataclass
 
+from edelweissfe.constraints.base.contactpoints import ContactPoints
+from edelweissfe.constraints.base.contactpointsatslavenodes import (
+    ContactPointsAtSlaveNodes,
+)
+from edelweissfe.constraints.base.contactpointsonslavesurface import (
+    ContactPointsOnSlaveSurface,
+)
+from edelweissfe.models.femodel import FEModel
 from edelweissfe.utils.schema import schemaField
 
 
@@ -38,7 +47,9 @@ from edelweissfe.utils.schema import schemaField
 class SurfaceContactPenaltySchema:
     """The options of the slave side and the penalty law, shared by
     :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty` and
-    :mod:`~edelweissfe.constraints.surfacetodiscreterigidbodypenalty`, which add their master side.
+    :mod:`~edelweissfe.constraints.surfacetodiscreterigidbodypenalty`, which add their master side. The slave side
+    is a :class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`, built from these options by
+    :func:`contactPointsOfTheSlaveSurface`.
 
     The update-type option is spelled ``type`` in the input file but the field is named
     ``contactType`` here -- a dataclass field literally called ``type`` would shadow the builtin,
@@ -82,6 +93,13 @@ class SurfaceContactPenaltySchema:
         dtype=float,
         default=None,
     )
+    contactPoints: str = schemaField(
+        description="The contact points of the slave surface: 'quadraturePoints' (nQuadraturePoints quadrature "
+        "points on each slave facet, distributed with the slave parent face's shape functions) or 'nodes' (the "
+        "slave nodes, each standing for its tributary area).",
+        dtype=str,
+        default="quadraturePoints",
+    )
     sliding: str = schemaField(
         description="The kinematic treatment of the contact geometry. Only 'small' (Abaqus-style "
         "small sliding: the closest-point projection -- master facet, parametric location and "
@@ -90,3 +108,43 @@ class SurfaceContactPenaltySchema:
         dtype=str,
         default="small",
     )
+
+
+#: The kinds of contact points an input file can choose, by the value of the ``contactPoints`` option.
+_contactPointsFromInput = {
+    "quadraturepoints": lambda configuration, slaveSurface, name: ContactPointsOnSlaveSurface(
+        slaveSurface, configuration.nQuadraturePoints, name
+    ),
+    "nodes": lambda configuration, slaveSurface, name: ContactPointsAtSlaveNodes(slaveSurface, name),
+}
+
+
+def contactPointsOfTheSlaveSurface(
+    configuration: SurfaceContactPenaltySchema, model: FEModel, constraintName: str
+) -> ContactPoints:
+    """The contact points an input file chooses on the slave surface of a contact constraint: its quadrature points or
+    its nodes (option ``contactPoints``). The points of the faces of particles are given to a constraint by
+    EdelweissMeshfree, not chosen in an input file.
+
+    Parameters
+    ----------
+    configuration
+        The options of the constraint.
+    model
+        The model, holding the slave surface's element set.
+    constraintName
+        The name of the constraint, for error messages.
+
+    Returns
+    -------
+    ContactPoints
+        The contact points.
+    """
+
+    contactPointsOfSurface = _contactPointsFromInput.get(configuration.contactPoints.lower())
+    if contactPointsOfSurface is None:
+        raise ValueError(
+            f"Constraint '{constraintName}': contactPoints '{configuration.contactPoints}' is not supported. Use "
+            "'quadraturePoints' or 'nodes'."
+        )
+    return contactPointsOfSurface(configuration, model.elementSets[configuration.slaveSurface], constraintName)

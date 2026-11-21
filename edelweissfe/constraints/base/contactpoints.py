@@ -47,8 +47,9 @@ the increment from the configuration of the last update (they are updated-Lagran
 from where each kind of point is known.
 
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
-the master surface, the gap, the law -- is written once for all of them
-(:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`).
+the master, the gap, the law -- is written once for all of them, for a deformable master surface
+(:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`) and for a discrete rigid body
+(:mod:`~edelweissfe.constraints.surfacetodiscreterigidbodypenalty`).
 """
 
 from abc import ABC, abstractmethod
