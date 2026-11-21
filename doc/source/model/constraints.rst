@@ -302,7 +302,15 @@ distance to the crease, signed by its pseudonormal (:ref:`contact-corners`). An 
 interference fit or the faceting of a curved surface, is pushed apart at once, or over
 ``initialOverlapRampTime`` (:ref:`contact-initial-overlap`).
 
-Scope: frictionless normal penalty contact under ``sliding=small``, on both the implicit and the
+With ``type=tied`` the constraint ties its points to the master surface instead (:ref:`contact-tie`): each
+point is paired once, with the closest point of the master, and held there in every direction, in tension
+and compression, by penalty springs; a gap or an overlap at the pairing is part of the state at rest. It
+joins independently meshed bodies -- particles to the finite elements of a far field, or two meshes of
+finite elements -- in implicit and explicit analyses, and keeps its state when either side is refined.
+Unlike the ``tie`` constraint below, it is a penalty, works for every kind of contact point, and does not
+close a gap.
+
+Scope: frictionless normal penalty contact, or a tie, under ``sliding=small``, on both the implicit and the
 explicit solver path. Coulomb friction and augmented Lagrange are **not** implemented here (the
 node-based constraint has both), and ``sliding=finite`` is rejected rather than approximated.
 
@@ -323,6 +331,11 @@ Module ``edelweissfe.constraints.surfacetodeformablesurfacepenalty``
     :language: edelweiss
     :caption: Example (explicit dynamics):
               ``testfiles/edelweiss-only/NEDSurfaceContact/test.inp``
+
+.. literalinclude:: ../../../testfiles/edelweiss-only/SurfaceTieHexa20AMR/test.inp
+    :language: edelweiss
+    :caption: Example (a tie with a gap at rest, across a refinement of its master side):
+              ``testfiles/edelweiss-only/SurfaceTieHexa20AMR/test.inp``
 
 ``surfacetodiscreterigidbodypenalty`` - Integrated contact against a discrete rigid body
 -----------------------------------------------------------------------------------------------
