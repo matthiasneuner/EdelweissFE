@@ -859,19 +859,92 @@ tie that also pulls, take its place without touching the contact points, the sea
 **The pairing.** In every update of the connectivity, a point within ``searchDistance`` of the master
 surface (every point, without a search distance) is paired with its closest facet while it is outside
 (*approaching*). A point in contact is paired anew in every update with its closest facet, however deep
-it is, so that it slides from facet to facet and from one face of the master onto the next where the
-surface is smooth -- but never across a crease, with a facet whose normal differs from the one it was
-pushed along until then by more than 30 degrees (the limit at which the node-based constraint restarts
-its frictional history): the closest facet of a point that has entered near a corner of the master may
-be on its side, and of a point deep inside a thin master on its far side, and either would push the
-point out of the wrong side. A point that was out of reach at the previous update and is now inside has tunnelled
+it is, so that it slides from facet to facet, from one face of the master onto the next and around a
+re-entrant corner -- but never across a *convex crease* (below): the closest facet of a point that has
+entered near a convex corner of the master may be on its side, and of a point deep inside a thin master on
+its far side, and either would push the point out of the wrong side. A point that leaves the master body is
+released at once. A point that was out of reach at the previous update and is now inside has tunnelled
 through the search distance in one increment; it is *found inside*, gets no force, and is reported. The
 search distance must therefore exceed the distance a point travels towards the surface in one increment,
-and the constraint warns when a point enters deeper than half of it. At the first update, the bodies are
-as the model gives them: a point that overlaps then is in contact, so that an initial overlap -- such as
-the faceting of a curved surface makes even for a perfect fit -- is pushed apart. The pairing is checked
-for a master that is convex where it is touched; at a re-entrant corner the sign of the gap of the
-closest facet does not tell inside from outside.
+and the constraint warns when a point enters deeper than half of it. At the first update, the bodies are as
+the model gives them: a point that overlaps then is in contact (:ref:`contact-initial-overlap`).
+
+.. _contact-corners:
+
+Corners of the master: creases, the signed distance and the pseudonormal
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A thread is all corners: the crest of a tooth is a convex edge, its root, where the flank meets the
+core, a re-entrant one. What the frozen gap freezes there decides whether the contact is right.
+
+**The gap is the signed distance, expanded to first order.** At the update, the point's distance to the
+master surface is :math:`d = |\boldsymbol{x}_p - \boldsymbol{x}_c|`, with :math:`\boldsymbol{x}_c` the
+closest point of the closest facet, and its sign says inside or outside. The frozen gap
+:math:`g = \bar{\boldsymbol{n}} \cdot (\boldsymbol{x}_p - N^m \cdot \boldsymbol{x}^m)` is that signed
+distance expanded to first order about the update, so :math:`\bar{\boldsymbol{n}}` is the direction in which
+the distance grows -- the gradient of the distance:
+
+- where :math:`\boldsymbol{x}_c` lies inside its facet, the facet's normal;
+- where it lies on a **crease** -- an edge (or, in 2D, a vertex) where two facets meet with normals more
+  than 30 degrees apart, or a vertex on such an edge -- the line from the closest point to the point,
+  :math:`\bar{\boldsymbol{n}} = \pm(\boldsymbol{x}_p - \boldsymbol{x}_c)/d`, and :math:`g = \pm d`;
+- where it lies on a seam of a *smooth* surface (the facets of a curved face meet at small angles), or on
+  the boundary of a master surface that ends, the facet's normal again: the corners of a smooth tiling are
+  artefacts, and beyond its boundary a surface does not say what lies, so the plane of its last facet goes
+  on.
+
+Measured along a facet normal, a point *beside* a crest -- beyond the edge of the crest's flat, below its
+plane, but outside the tooth -- has a negative gap and is pushed into the concrete by a crest that is not
+there. Measured as the distance to the edge, its gap is positive. Inside a re-entrant root, the distance to
+the root's edge is the shortest way out.
+
+**The sign: the angle-weighted pseudonormal.** At a crease, the facet's normal does not tell inside from
+outside: next to an acute crest, a point outside lies behind the plane of the flank whose edge is closest
+to it. The pseudonormal of the closest feature does (Bærentzen and Aanæs, *Signed distance computation
+using the angle weighted pseudonormal*, IEEE TVCG 11, 2005): the sum of the normals of the facets that
+meet at an edge, or at a vertex, each weighted with the facet's angle there. For the closest feature of a
+closed surface, :math:`\boldsymbol{x}_p - \boldsymbol{x}_c` points along it outside the body and against it
+inside, at convex and re-entrant features alike. The search finds the globally closest facet, so the sign
+is exact for a closed master; for a master surface that ends, exact away from its boundary.
+
+**Convex creases in the pairing.** A point in contact keeps away from the facets across a *convex*
+crease from the facet it was paired with: their normals differ by more than 30 degrees, and they lie
+behind its plane (the surface turns away, from the top of a block to its side, or from one side of a thin
+body to the other). Across a re-entrant crease the surface turns towards the point, and the point moves on
+to the facet that is closest: it slides around a root as it slides along a flank.
+
+The geometry is :class:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface`; the tests
+``tests/test_facet_pseudonormals.py`` (inside and outside of a closed tooth with an acute crest and two
+roots, in 2D and 3D) and the class ``TestContactAtCornersOfTheMaster`` of
+``tests/test_surfacetodeformablesurfacepenalty.py`` (a point sliding around a root stays in contact with the
+signed distance as its gap; a point sliding off a crest is released) show it. The tangent keeps its form:
+:math:`\bar{\boldsymbol{n}}` is frozen, whichever it is.
+
+.. _contact-initial-overlap:
+
+An initial overlap
+~~~~~~~~~~~~~~~~~~
+
+At the first update the bodies are as the model gives them, and a point that overlaps is in contact. Two
+things make an overlap at the start: an **interference fit** (a groove cut smaller than the thread), and the
+**faceting of a curved surface**, which makes even a perfect fit overlap -- the gap is measured from a slave
+point on its curved face along the normal of a flat master facet to a point of the master's curved face,
+and for a twisted surface such as a helical flank that is not zero. Pushed apart at once, either overlap is a
+prestress in the first increment, and a shock in an explicit analysis.
+
+With ``initialOverlapRampTime`` :math:`T`, the gap :math:`g_0 \le 0` of every paired point at the first
+update (where it is closed) is taken out of its gap at first and fed back in over :math:`T`:
+
+.. math::
+    g_\text{law} = g - \lambda(t) \, g_0 , \qquad
+    \lambda = 1 - s + \frac{\sin 2 \pi s}{2 \pi} , \qquad s = \frac{t - t_0}{T} \in [0, 1] ,
+
+with :math:`t_0` the time of the first update. :math:`\lambda` falls from one to zero starting and ending at
+rest, as the pull of a quasi-static explicit analysis does; after :math:`T` the full overlap is pushed apart.
+:math:`g_0` is a constant, so the gap's gradient and the tangent are as before, and the penalty law sees
+:math:`g_\text{law}`. The offsets belong to the points and are written to a checkpoint; a refinement of a
+contact surface during the ramp regenerates its points without them. ``initialOverlapRampTime=0`` (the
+default) pushes the overlap apart at once.
 
 .. _integrated-contact-algorithm:
 
@@ -914,8 +987,8 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
 #. What is frozen from the winner is *not* the flat-facet interpolation: the clamped barycentric
    weights are mapped through that facet's ``vertexParametricCoords`` into its parent face's
    parametric space, and the parent-face shape functions :math:`N^m` are evaluated there. The
-   facet's unit normal :math:`\bar{\boldsymbol{n}}` is frozen alongside them, per facet rather than
-   per point.
+   direction of the gap :math:`\bar{\boldsymbol{n}}` is frozen alongside them: the facet's unit normal, or
+   at a crease the line from the closest point to the point (:ref:`contact-corners`).
 #. Only *assigned* points contribute DOFs. The block of the constraint holds first the nodes the
    assigned contact points act on (for a quadrature point, a copy of its slave parent face's nodes;
    for the points of particles, the nodes of their kernel functions, each once), then, point after

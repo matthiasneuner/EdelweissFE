@@ -297,7 +297,10 @@ quadrature points of the slave facets (``contactPoints=quadraturePoints``, the d
 nodes, each standing for its tributary area (``contactPoints=nodes``), and, from EdelweissMeshfree,
 points on the faces of particles. Points that approach the master within ``searchDistance`` are
 paired with it; a point found inside without having been seen approaching gets no force and is
-reported.
+reported. The master may have corners: at its creases -- a crest, a re-entrant root -- the gap is the
+distance to the crease, signed by its pseudonormal (:ref:`contact-corners`). An overlap at the start, from an
+interference fit or the faceting of a curved surface, is pushed apart at once, or over
+``initialOverlapRampTime`` (:ref:`contact-initial-overlap`).
 
 Scope: frictionless normal penalty contact under ``sliding=small``, on both the implicit and the
 explicit solver path. Coulomb friction and augmented Lagrange are **not** implemented here (the
