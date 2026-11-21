@@ -118,7 +118,7 @@ class DiscreteSystem:
 
     @property
     def elementsWithNodalInertia(self) -> list:
-        """The entities whose inertia, damping and stable time increment a solver assembles element by element, at the
+        """The entities whose inertia, damping and critical time step a solver assembles element by element, at the
         nodes (``NID``, ``NED``), and whose forces ``NED`` computes in its pass over the elements. In a finite element
         model, these are the :attr:`elements`; a meshfree model names its finite elements only, since its cells and
         particles contribute nothing there, and the particles integrate their own inertia (see
@@ -436,7 +436,7 @@ class DiscreteSystem:
         force, their lumped mass and their lumped momentum on the nodes they couple then
         (:meth:`assembleInternalForceAndMomentumOfEntitiesWithOwnInertia`,
         :meth:`assembleLumpedMassOfEntitiesWithOwnInertia`, :meth:`assembleLumpedDampingOfEntitiesWithOwnInertia`,
-        :meth:`stableTimeIncrementOfEntitiesWithOwnInertia`). The nodes they couple carry no total solution: their
+        :meth:`criticalTimeStepOfEntitiesWithOwnInertia`). The nodes they couple carry no total solution: their
         values are the coefficients of one increment, and no element assembles a mass there (see
         :meth:`dofsWithNodalInertia`).
 
@@ -480,8 +480,8 @@ class DiscreteSystem:
         residual contribution at the state they accepted, and their lumped momentum, both at the nodes they couple now:
         what ``NED`` evaluates after every increment, once the model has reconnected them, with their lumped mass
         (:meth:`assembleLumpedMassOfEntitiesWithOwnInertia`), their lumped damping
-        (:meth:`assembleLumpedDampingOfEntitiesWithOwnInertia`) and the stable time increment of their assembled system
-        (:meth:`stableTimeIncrementOfEntitiesWithOwnInertia`). The momentum is what the velocity of these nodes is
+        (:meth:`assembleLumpedDampingOfEntitiesWithOwnInertia`) and the critical time step of their assembled system
+        (:meth:`criticalTimeStepOfEntitiesWithOwnInertia`). The momentum is what the velocity of these nodes is
         projected from where the model does not hold it (see :meth:`carriersOfTheMotion`).
 
         A finite element model has no such entity: None.
@@ -524,16 +524,17 @@ class DiscreteSystem:
 
         return None
 
-    def stableTimeIncrementOfEntitiesWithOwnInertia(
+    def criticalTimeStepOfEntitiesWithOwnInertia(
         self,
         lumpedMass: DofVector,
         lumpedDamping: DofVector,
         forEachChunk: Callable[[list, Callable], None],
     ) -> float | None:
-        """A bound of the stable time increment of the explicit scheme for the entities that carry their own inertia
-        (:attr:`entitiesWithOwnInertia`) at their current configuration. A property of their assembled system, not of
-        one entity: an entity's stiffness may couple nodes at which its own lumped mass vanishes. ``NED`` takes the
-        smaller of it and the elements' critical time step.
+        """An estimate of the critical time step of the explicit scheme for the entities that carry their own inertia
+        (:attr:`entitiesWithOwnInertia`) at their current configuration, a lower bound of it. A property of their
+        assembled system, not of one entity: an entity's stiffness may couple nodes at which its own lumped mass
+        vanishes. ``NED`` takes the smaller of it and the elements' critical time step, and decides when it is estimated
+        anew (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`).
 
         A finite element model has no such entity: None.
 
@@ -550,28 +551,10 @@ class DiscreteSystem:
         Returns
         -------
         float | None
-            The stable time increment, unscaled by a courant number; None if the model has no such entity.
+            The critical time step, unscaled by a courant number; None if the model has no such entity.
         """
 
         return None
-
-    def entitiesWithOwnInertiaCoupleOtherNodes(self) -> bool:
-        """Whether the last connectivity update of the model
-        (:meth:`~edelweissfe.models.femodel.FEModel.updateConnectivity`) changed the nodes that an entity that carries
-        its own inertia (:attr:`entitiesWithOwnInertia`) couples. Only that changes their assembled system and with it
-        the bound of its stable time increment (:meth:`stableTimeIncrementOfEntitiesWithOwnInertia`): a constraint
-        that couples other nodes, e.g. a contact paired anew, changes the locations of the discrete system, but not the
-        entities' stiffness, mass or damping. ``NED`` bounds the stable time increment anew when it is True.
-
-        A finite element model has no such entity: False.
-
-        Returns
-        -------
-        bool
-            True if an entity that carries its own inertia couples other nodes since the last connectivity update.
-        """
-
-        return False
 
     def updateMaterialPoints(self, dU: DofVector, timeStep: TimeStep, forEachChunk: Callable[[list, Callable], None]):
         """Bring the material points that belong to no element up to date with the trial solution increment, right

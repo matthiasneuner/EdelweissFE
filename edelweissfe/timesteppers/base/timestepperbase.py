@@ -150,7 +150,7 @@ class TimeStepperBase(ABC):
     def enforceTimeIncrement(self, timeIncrement: float):
         """Use ``timeIncrement`` for every following increment, instead of adapting it.
 
-        The caller is an explicit solver, whose stable time increment is a property of the mesh: set
+        The caller is an explicit solver, whose critical time step is a property of the mesh: set
         at the start of the step, and lowered when a refinement shrinks the smallest element.
 
         Parameters

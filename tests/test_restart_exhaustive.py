@@ -500,7 +500,7 @@ _SCENARIOS = {
         steps=[_LOADS_PUSH, _LOADS_HOLD],
         check=lambda model, run: "",
     ),
-    # (k) Explicit dynamics with a von Mises material and live AMR: the stable time increment depends
+    # (k) Explicit dynamics with a von Mises material and live AMR: the critical time step depends
     # on the state (refinement lowers it, mid-run, lower-only).
     "amrPlasticExplicit": dict(
         solvers=["explicit"],
