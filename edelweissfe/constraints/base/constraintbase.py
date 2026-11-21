@@ -50,6 +50,9 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
     #: the constraint has in the discrete system it is evaluated in; None until its first evaluation there (see
     #: :meth:`prepareExplicitEvaluation`).
     _discardedTangentScratch = None
+    #: The local rows and columns of the entries of that scratch, for a constraint that lists them; None until
+    #: :meth:`computeBoundOfAbsoluteStiffnessTimes` first needs them in the discrete system.
+    _localEntriesOfTheDiscardedTangent = None
 
     #: The state this constraint carries from one increment to the next, by attribute name and type;
     #: see :mod:`~edelweissfe.utils.checkpointedstate`. Every constraint declares it (empty if it carries
@@ -302,8 +305,9 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
         one, or one whose constraints are re-located), before it evaluates the constraint there with
         :meth:`computeKernelsExplicit`.
 
-        This default forgets the tangent that :meth:`computeKernelsExplicit` throws away, so that the next evaluation
-        sizes it, once, for the block the constraint has now. The size is the number of entries of the block
+        This default forgets the tangent that :meth:`computeKernelsExplicit` throws away (and
+        :meth:`computeBoundOfAbsoluteStiffnessTimes` bounds), so that the next evaluation sizes it, once, for the block
+        the constraint has now. The size is the number of entries of the block
         (:func:`~edelweissfe.numerics.systemmatrixcontributor.countEntriesOfBlock`), which for a constraint that lists
         its entries means building the list: once per discrete system, not in every increment. A constraint that
         evaluates its forces without a tangent needs nothing here.
@@ -315,6 +319,7 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
         """
 
         self._discardedTangentScratch = None
+        self._localEntriesOfTheDiscardedTangent = None
 
     def computeKernelsExplicit(
         self,
@@ -354,6 +359,55 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
 
         K = self.shapeBlock(scratch)
         self.computeKernels(U_np, dU, P, K, timeStep)
+
+    def computeBoundOfAbsoluteStiffnessTimes(
+        self,
+        U_np: np.ndarray,
+        dU: np.ndarray,
+        weights: np.ndarray,
+        bound: np.ndarray,
+        timeStep: TimeStep,
+    ):
+        """Add an upper bound of the row sums of the absolute value of this constraint's stiffness, weighted by column,
+        :math:`b_a \\mathrel{+}= \\sum_b |K_{ab}|\\, w_b`, at the state an explicit solver evaluates it in. The
+        explicit dynamic solver ``NED`` takes the weights :math:`w_b = 1/\\sqrt{M_b}` and adds what the constraints
+        couple to the frequencies of their degrees of freedom: the critical time step of a model with penalty
+        constraints (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`).
+
+        This default takes the tangent :meth:`computeKernels` gives, the stiffness of the constraint at the state given,
+        in the scratch :meth:`computeKernelsExplicit` uses. A constraint whose tangent is costly overrides it with the
+        bound of what its law supplies, and so does one whose explicit forces are not the ones :meth:`computeKernels`
+        gives the tangent of.
+
+        Parameters
+        ----------
+        U_np
+            The current solution, restricted to this constraint's degrees of freedom.
+        dU
+            The current solution increment, likewise restricted.
+        weights
+            The weight of each column, likewise restricted.
+        bound
+            The row sums to augment, one per degree of freedom of this constraint.
+        timeStep
+            The current time step.
+        """
+
+        scratch = self._discardedTangentScratch
+        if scratch is None:
+            scratch = self._discardedTangentScratch = np.zeros(countEntriesOfBlock(self))
+        else:
+            scratch[:] = 0.0
+
+        self.computeKernels(U_np, dU, np.zeros(self.nDof), self.shapeBlock(scratch), timeStep)
+
+        if self.couplesAllItsDofs:
+            bound += np.abs(scratch.reshape((self.nDof, self.nDof), order="F")) @ weights
+        else:
+            if self._localEntriesOfTheDiscardedTangent is None:
+                self._localEntriesOfTheDiscardedTangent = self.localEntriesOfBlock()
+            rows, columns = self._localEntriesOfTheDiscardedTangent
+            np.add.at(bound, rows, np.abs(scratch) * weights[columns])
 
     @abstractmethod
     def computeKernels(

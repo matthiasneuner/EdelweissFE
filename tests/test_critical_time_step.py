@@ -34,8 +34,10 @@ import numpy as np
 import pytest
 
 from edelweissfe.solvers.base.criticaltimestep import (
+    CriticalTimeStepBoundOfEachDof,
     CriticalTimeStepOfEntitiesWithOwnInertia,
     CriticalTimeStepOfTheElements,
+    CriticalTimeStepOfThePenaltyConstraints,
 )
 
 DELTA = 0.1
@@ -83,14 +85,19 @@ def test_a_model_without_elements_has_no_critical_time_step_of_elements():
     assert criticalTimeStep.value == np.inf
 
 
+def _rowSums(K: np.ndarray, M: np.ndarray) -> np.ndarray:
+    """The absolute row sums of the mass-scaled stiffness."""
+
+    s = np.zeros_like(M)
+    s[M > 0] = 1 / np.sqrt(M[M > 0])
+    return s * (np.abs(K) @ s)
+
+
 def _gershgorinEstimate(K: np.ndarray, M: np.ndarray) -> float:
     """The critical time step of one second-order field from the largest absolute row sum of the mass-scaled stiffness:
     the estimate of the particles with a single field."""
 
-    s = np.zeros_like(M)
-    s[M > 0] = 1 / np.sqrt(M[M > 0])
-    rowSums = s * (np.abs(K) @ s)
-    return 2 / np.sqrt(np.max(rowSums))
+    return 2 / np.sqrt(np.max(_rowSums(K, M)))
 
 
 class _Entities:
@@ -101,7 +108,8 @@ class _Entities:
         self.numbering = object()
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk):
-        return _gershgorinEstimate(self.K, np.asarray(M))
+        M = np.asarray(M)
+        return CriticalTimeStepBoundOfEachDof(_gershgorinEstimate(self.K, M), np.arange(len(M)), _rowSums(self.K, M))
 
 
 def _entities(nDof=6, seed=0):
@@ -225,3 +233,125 @@ def test_a_decrease_of_one_estimates_in_every_increment():
     criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(1.0)
     criticalTimeStep.estimate(system, M, C, None, 0)
     assert criticalTimeStep.isDue(system, 1, M, C, 1e-3 * criticalTimeStep.value)
+
+
+class _ElementWithItsEigenvalue:
+    """An element with a stiffness on some degrees of freedom and its own lumped mass there, whose critical time step is
+    the exact one of the element alone, :math:`2/\\sqrt{\\lambda_\\mathrm{max}(\\boldsymbol{M}_e^{-1}\\boldsymbol{K}_e)}`:
+    the element eigenvalue inequality."""
+
+    def __init__(self, dofs, K, M):
+        self.dofs, self.K, self.M = dofs, K, M
+        s = 1 / np.sqrt(M)
+        largest = np.max(np.linalg.eigvalsh(s[:, None] * K * s[None, :]))
+        self.criticalTimeStep = 2 / np.sqrt(largest) if largest > 0 else np.inf
+
+    def computeCriticalTimeStepForExplicitDynamics(self, U) -> float:
+        return self.criticalTimeStep
+
+
+def _randomModelWithPenaltySprings(rng, nDof=12, nElements=5, nSprings=4, stiffnessOfTheSprings=1.0):
+    """Elements with random symmetric positive semi-definite stiffnesses and positive lumped masses on overlapping sets of
+    degrees of freedom, and penalty springs :math:`k\\, w w^T` between random degrees of freedom: the assembled stiffness,
+    the assembled mass, the elements, and the stiffness of the springs."""
+
+    K, M = np.zeros((nDof, nDof)), np.zeros(nDof)
+    elements = []
+    for _ in range(nElements):
+        dofs = rng.choice(nDof, size=4, replace=False)
+        A = rng.normal(size=(4, 4))
+        Ke, Me = A @ A.T, rng.uniform(0.5, 2.0, 4)
+        K[np.ix_(dofs, dofs)] += Ke
+        M[dofs] += Me
+        elements.append(_ElementWithItsEigenvalue(dofs, Ke, Me))
+    for dof in np.flatnonzero(M == 0.0):  # every degree of freedom has a mass: a point mass, no stiffness
+        elements.append(_ElementWithItsEigenvalue(np.array([dof]), np.zeros((1, 1)), np.ones(1)))
+        M[dof] = 1.0
+    Kc = np.zeros((nDof, nDof))
+    for _ in range(nSprings):
+        w = np.zeros(nDof)
+        dofs = rng.choice(nDof, size=3, replace=False)
+        w[dofs] = rng.normal(size=3)
+        Kc += stiffnessOfTheSprings * rng.uniform(0.5, 2.0) * np.outer(w, w)
+    return K, M, elements, Kc
+
+
+def _systemOf(elements, nDof):
+    return SimpleNamespace(
+        model=SimpleNamespace(topology=SimpleNamespace(version=0)),
+        elementsWithNodalInertia=elements,
+        numbering=SimpleNamespace(nDof=nDof),
+        locations={element: element.dofs for element in elements},
+    )
+
+
+@pytest.mark.parametrize("stiffnessOfTheSprings", [0.01, 1.0, 100.0])
+def test_the_penalty_springs_added_where_they_act_bound_the_exact_eigenvalue(stiffnessOfTheSprings, seed=3):
+    """For elements and penalty springs, the critical time step of the degrees of freedom the springs couple -- the
+    largest squared frequency of the elements at a degree of freedom plus the row sum of the springs' mass-scaled
+    stiffness there -- is below the exact critical time step of the assembled system: the argument of the theory page,
+    which lends the springs a share of the mass, checked on random systems, from soft springs that do not limit to
+    stiff ones that do."""
+
+    rng = np.random.default_rng(seed)
+    elementsOnly, limiting = 0, 0
+    for _ in range(300):
+        K, M, elements, Kc = _randomModelWithPenaltySprings(rng, stiffnessOfTheSprings=stiffnessOfTheSprings)
+        nDof = len(M)
+        system = _systemOf(elements, nDof)
+        s = 1 / np.sqrt(M)
+        exact = 2 / np.sqrt(np.max(np.linalg.eigvalsh(s[:, None] * (K + Kc) * s[None, :])))
+
+        ofTheElements = CriticalTimeStepOfTheElements()
+        ofTheElements.estimate(system, {element: None for element in elements})
+        ofTheEntities = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
+        ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
+        ofTheConstraints.estimate(system, s * (np.abs(Kc) @ s), ofTheElements, ofTheEntities)
+
+        estimate = min(ofTheElements.value, ofTheConstraints.value)
+        assert estimate <= exact * (1 + 1e-12)
+        elementsOnly += ofTheElements.value <= exact * (1 + 1e-12)
+        limiting += ofTheConstraints.value < ofTheElements.value
+    assert elementsOnly < 300, "the springs raise the frequencies: the elements alone are not always a bound"
+    assert limiting > 0
+
+
+def test_a_constraint_at_degrees_of_freedom_of_slow_elements_does_not_lower_the_critical_time_step():
+    """The springs add to the frequencies of the degrees of freedom they couple, not to the largest frequency of the
+    model: a spring between the nodes of soft elements leaves the critical time step of a stiff element elsewhere, and
+    the estimate is the elements' own, bit for bit."""
+
+    stiff = _ElementWithItsEigenvalue(np.array([0, 1]), np.array([[100.0, -100.0], [-100.0, 100.0]]), np.ones(2))
+    soft = _ElementWithItsEigenvalue(np.array([2, 3]), np.array([[1.0, -1.0], [-1.0, 1.0]]), np.ones(2))
+    system = _systemOf([stiff, soft], 4)
+    ofTheElements = CriticalTimeStepOfTheElements()
+    ofTheElements.estimate(system, {stiff: None, soft: None})
+
+    rowSums = np.array([0.0, 0.0, 10.0, 10.0])
+    ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
+    ofTheConstraints.estimate(system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA))
+    assert ofTheConstraints.value == ofTheElements.value == stiff.criticalTimeStep
+
+    rowSums[1] = 10.0
+    ofTheConstraints.estimate(system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA))
+    assert ofTheConstraints.value == pytest.approx(2 / np.sqrt((2 / stiff.criticalTimeStep) ** 2 + 10.0), rel=1e-14)
+
+
+def test_the_entities_with_the_penalty_constraints_are_estimated_anew_when_their_combined_margin_may_be_used_up():
+    """Where a penalty constraint couples the entities' degrees of freedom, the margin of their last estimate is the one
+    with the constraint's row sums of now added: with the rows of a stiff constraint the estimate is due at once, with
+    no rows as long as their own margin lasts."""
+
+    system, M = _entities()
+    C = np.zeros_like(M)
+    criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
+    criticalTimeStep.estimate(system, M, C, None, 0)
+    inUse = 0.5 * criticalTimeStep.value
+
+    noRows = np.zeros_like(M)
+    assert not criticalTimeStep.isDue(system, 1, M, C, inUse, noRows)
+
+    stiffRows = noRows.copy()
+    stiffRows[2] = 100 * (2 / inUse) ** 2
+    assert criticalTimeStep.withThePenaltyConstraints(stiffRows) < inUse
+    assert criticalTimeStep.isDue(system, 1, M, C, inUse, stiffRows)

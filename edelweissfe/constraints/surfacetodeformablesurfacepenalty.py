@@ -776,11 +776,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         Nm = self._masterShapeFunctionsOfLocated
         nBar = self._normalsOfLocated
 
-        xS = self.slave.coordinatesOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
-        xM = self._masterRefOfLocated + U_np[nSlaveDof:].reshape(self._masterRefOfLocated.shape)
-        relative = xS - np.einsum("ai,aij->aj", Nm, xM)
-        gaps = np.einsum("aj,aj->a", nBar, relative)
-
+        gaps = self._gapsOfLocatedPoints(U_np, dU)
         self._gapCurrent[located] = gaps
 
         closed = np.flatnonzero(self.law.isClosed(gaps))
@@ -807,6 +803,86 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                 c = self.slave.interpolationOfLocatedPoint(k)[1]
                 w = np.concatenate(((c[:, None] * nBar[k][None, :]).ravel(), wMaster[i]))
                 K.blocks[k] += stiffness[i] * np.outer(w, w)
+
+    def _gapsOfLocatedPoints(self, U_np: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """The gaps of all located points at once: the contact points say where they are, the master points ride the
+        *curved* parent surfaces (see the class docstring on why the master point must not be taken on the flat facet
+        instead).
+
+        Parameters
+        ----------
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+
+        Returns
+        -------
+        numpy.ndarray
+            The gap of each located point, negative in contact.
+        """
+
+        nSlaveDof = self._nSlaveDof
+        xS = self.slave.coordinatesOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
+        xM = self._masterRefOfLocated + U_np[nSlaveDof:].reshape(self._masterRefOfLocated.shape)
+        relative = xS - np.einsum("ai,aij->aj", self._masterShapeFunctionsOfLocated, xM)
+        return np.einsum("aj,aj->a", self._normalsOfLocated, relative)
+
+    def computeBoundOfAbsoluteStiffnessTimes(
+        self,
+        U_np: np.ndarray,
+        dU: np.ndarray,
+        weights: np.ndarray,
+        bound: np.ndarray,
+        timeStep: TimeStep,
+    ):
+        """Add the row sums of the absolute value of the stiffness of the closed points, weighted by column; see
+        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`.
+
+        A closed point :math:`p` has the stiffness :math:`k_p\\, w_p \\otimes w_p`, with :math:`w_p = [c, -N^m] \\otimes
+        \\bar{n}` and the stiffness :math:`k_p = \\mathrm{d}f_n/\\mathrm{d}g` its law gives it at its gap (the one of the
+        tangent). The absolute value of a sum is at most the sum of the absolute values, so
+
+        .. math::
+
+            b_a \\mathrel{+}= \\sum_p k_p\\, |w_{p,a}| \\, \\big(|w_p| \\cdot \\boldsymbol{w}\\big) :
+
+        one product of the absolute interpolation vectors with the weights per point, and one distribution back, as the
+        force is distributed.
+        """
+
+        located = self._locatedPoints
+        if not len(located):
+            return
+
+        gaps = self._gapsOfLocatedPoints(U_np, dU)
+        closed = np.flatnonzero(self.law.isClosed(gaps))
+        if not len(closed):
+            return
+
+        _, stiffness = self.law.normalForce(self.penalty * self._areasOfLocated[closed], gaps[closed])
+
+        nSlaveDof = self._nSlaveDof
+        absoluteNormals = np.abs(self._normalsOfLocated[closed])
+        absoluteSlaveInterpolation = abs(self.slave.interpolationMatrixOfLocatedPoints())[closed]
+        absoluteMasterShapeFunctions = np.abs(self._masterShapeFunctionsOfLocated[closed])
+        slaveWeights = weights[:nSlaveDof].reshape((-1, self.nDim))
+        masterWeights = weights[nSlaveDof:].reshape((len(located), self.nMasterParentNodes, self.nDim))[closed]
+
+        # |w_p| . weights, then k_p times it
+        weightedByPoint = rowDot(absoluteNormals, absoluteSlaveInterpolation @ slaveWeights) + np.einsum(
+            "ai,aij,aj->a", absoluteMasterShapeFunctions, masterWeights, absoluteNormals
+        )
+        stiffnessTimesWeighted = stiffness * weightedByPoint
+
+        bound[:nSlaveDof].reshape((-1, self.nDim))[:] += absoluteSlaveInterpolation.T @ (
+            stiffnessTimesWeighted[:, None] * absoluteNormals
+        )
+        bound[nSlaveDof:].reshape((len(located), self.nMasterParentNodes, self.nDim))[closed] += (
+            stiffnessTimesWeighted[:, None, None]
+            * absoluteMasterShapeFunctions[:, :, None]
+            * absoluteNormals[:, None, :]
+        )
 
     @property
     def contactForceOnSlave(self) -> np.ndarray:

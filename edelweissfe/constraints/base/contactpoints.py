@@ -54,6 +54,7 @@ the master surface, the gap, the law -- is written once for all of them
 from abc import ABC, abstractmethod
 
 import numpy as np
+from scipy.sparse import csr_matrix
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
@@ -68,7 +69,8 @@ class ContactPoints(ABC):
     block. Within the increment the constraint evaluates the located points only: where they are
     (:meth:`coordinatesOfLocatedPoints`), the residual contribution of their normal forces
     (:meth:`addNormalForceResidual`) and, for the tangent, their interpolation vectors
-    (:meth:`interpolationOfLocatedPoint`).
+    (:meth:`interpolationOfLocatedPoint`), all at once for the bound of the stiffness
+    (:meth:`interpolationMatrixOfLocatedPoints`).
 
     Attributes
     ----------
@@ -162,6 +164,17 @@ class ContactPoints(ABC):
         tuple[numpy.ndarray, numpy.ndarray]
             Its degrees of freedom in the slave part of the block, node by node, and its interpolation vector :math:`c`
             over these nodes.
+        """
+
+    @abstractmethod
+    def interpolationMatrixOfLocatedPoints(self) -> csr_matrix:
+        """The interpolation vectors :math:`c` of all located points, one row per point, over the nodes of the slave
+        part of the block: the matrix :math:`C` with :math:`\\boldsymbol{x}_p = (C \\boldsymbol{x})_p`.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The matrix, of shape (nLocated, number of nodes of the slave part of the block).
         """
 
     @abstractmethod

@@ -44,6 +44,7 @@ from edelweissfe.timesteppers.timestep import TimeStep
 if TYPE_CHECKING:
     from edelweissfe.fields.nodefield import NodeField
     from edelweissfe.models.femodel import FEModel
+    from edelweissfe.solvers.base.criticaltimestep import CriticalTimeStepBound
 
 
 class DiscreteSystem:
@@ -529,12 +530,14 @@ class DiscreteSystem:
         lumpedMass: DofVector,
         lumpedDamping: DofVector,
         forEachChunk: Callable[[list, Callable], None],
-    ) -> float | None:
+    ) -> "CriticalTimeStepBound | None":
         """An estimate of the critical time step of the explicit scheme for the entities that carry their own inertia
         (:attr:`entitiesWithOwnInertia`) at their current configuration, a lower bound of it. A property of their
         assembled system, not of one entity: an entity's stiffness may couple nodes at which its own lumped mass
         vanishes. ``NED`` takes the smaller of it and the elements' critical time step, and decides when it is estimated
-        anew (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`).
+        anew (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`). It is
+        given in the form the penalty constraints that couple the entities' degrees of freedom add to
+        (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepBound`).
 
         A finite element model has no such entity: None.
 
@@ -550,8 +553,9 @@ class DiscreteSystem:
 
         Returns
         -------
-        float | None
-            The critical time step, unscaled by a courant number; None if the model has no such entity.
+        CriticalTimeStepBound | None
+            The estimate, its critical time step, unscaled by a courant number, its ``value``; None if the model has no
+            such entity.
         """
 
         return None

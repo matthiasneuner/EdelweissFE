@@ -457,6 +457,44 @@ class MultiPointConstraintTransformation:
 
         return self._T.T @ P
 
+    def slaveWeightsOfAbsoluteCoefficients(self, weights: np.ndarray) -> np.ndarray:
+        """The column weights of a bound of the row sums of a stiffness on the slave DOFs:
+        :math:`|T|\\, w`, i.e. :math:`w_s = \\sum_a |N_a| \\, w_{m_a}` on a slave, unchanged elsewhere. With
+        :meth:`foldRowSumsOfAbsoluteCoefficients`, :math:`|T|^T |K| \\, |T| w` bounds the row sums of the absolute value
+        of the folded stiffness :math:`T^T K T` the masters see.
+
+        Parameters
+        ----------
+        weights
+            The weights of the independent DOFs; the entries of the slaves are not read.
+
+        Returns
+        -------
+        np.ndarray
+            The weights with those of the slaves.
+        """
+
+        weights = np.array(weights)
+        weights[self.slaveDofIndices] = abs(self._W) @ weights
+        return weights
+
+    def foldRowSumsOfAbsoluteCoefficients(self, rowSums: np.ndarray) -> np.ndarray:
+        """Fold row sums of the absolute value of a stiffness from the slave DOFs onto their masters, by the absolute
+        value of the coefficients: :math:`|T|^T b` (slave rows zero); see :meth:`slaveWeightsOfAbsoluteCoefficients`.
+
+        Parameters
+        ----------
+        rowSums
+            The row sums on all DOFs.
+
+        Returns
+        -------
+        np.ndarray
+            The folded row sums.
+        """
+
+        return abs(self._T).T @ rowSums
+
     def applySlaveKinematics(self, V: np.ndarray):
         """Assign the slave DOFs their master-interpolated values (in place):
         :math:`V_s = \\sum_a N_a \\, V_{m_a}`. Used on the velocity vector in explicit dynamics;

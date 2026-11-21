@@ -31,6 +31,7 @@ area.
 """
 
 import numpy as np
+from scipy.sparse import csr_matrix, identity
 
 from edelweissfe.constraints.base.contactpoints import ContactPoints
 from edelweissfe.models.femodel import FEModel
@@ -204,6 +205,18 @@ class ContactPointsAtSlaveNodes(ContactPoints):
 
         nDim = self._referenceCoordinates.shape[1]
         return np.arange(k * nDim, (k + 1) * nDim), np.ones(1)
+
+    def interpolationMatrixOfLocatedPoints(self) -> csr_matrix:
+        """The identity: every located node is its own point; see
+        :meth:`ContactPoints.interpolationMatrixOfLocatedPoints`.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            The identity over the located nodes.
+        """
+
+        return identity(len(self._referenceCoordinatesOfLocated), format="csr")
 
     def searchLayout(self) -> dict[str, np.ndarray]:
         """The labels of the slave nodes identify the contact points in a checkpoint.

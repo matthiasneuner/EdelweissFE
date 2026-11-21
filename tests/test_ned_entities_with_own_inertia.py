@@ -54,6 +54,7 @@ from edelweissfe.numerics.dofvector import DofVector
 from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
+from edelweissfe.solvers.base.criticaltimestep import CriticalTimeStepBoundOfEachDof
 from edelweissfe.solvers.nonlinearexplicitdynamic import NED
 from edelweissfe.steps.adaptivestepforexplicitsimulations import (
     AdaptiveStepForExplicitSimulations,
@@ -130,8 +131,13 @@ class SystemOfMassesOnSprings(DiscreteSystem):
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
         self.model.calls.append("estimate")
-        # each mass on its spring alone: 2 / omega, from the mass the solver has just assembled
-        return min(2.0 * np.sqrt(lumpedMass[mass][0] / STIFFNESS) for mass in self.entitiesWithOwnInertia)
+        # each mass on its spring alone: omega^2 = k / m, from the mass the solver has just assembled
+        masses = self.entitiesWithOwnInertia
+        return CriticalTimeStepBoundOfEachDof(
+            min(2.0 * np.sqrt(lumpedMass[mass][0] / STIFFNESS) for mass in masses),
+            np.concatenate([self.locations[mass] for mass in masses]),
+            np.concatenate([STIFFNESS / np.asarray(lumpedMass[mass]) for mass in masses]),
+        )
 
     def _onTheNodes(self, valueOf) -> DofVector:
         vector = self.locations.constructDofVector()
