@@ -43,10 +43,17 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
+from edelweissfe.constraints.base.contactpointsatslavenodes import (
+    ContactPointsAtSlaveNodes,
+)
+from edelweissfe.constraints.base.contactpointsonslavesurface import (
+    ContactPointsOnSlaveSurface,
+)
 from edelweissfe.constraints.surfacetodeformablesurfacepenalty import (
     Constraint as IntegratedContact,
 )
 from edelweissfe.constraints.surfacetodeformablesurfacepenalty import (
+    ContactState,
     SurfaceToDeformableSurfacePenaltySchema,
 )
 from edelweissfe.elements.contactsurfaceelement import Tria3ContactFacet
@@ -114,8 +121,12 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             searchDistance=options.pop("searchDistance", 1.0),
             **options,
         )
+        if configuration.contactPoints == "nodes":
+            contactPoints = ContactPointsAtSlaveNodes(slaveSurface, "theContact")
+        else:
+            contactPoints = ContactPointsOnSlaveSurface(slaveSurface, configuration.nQuadraturePoints, "theContact")
         constraint = IntegratedContact(
-            "theContact", model, slaveSurface, masterSurface, self.journal, configuration=configuration
+            "theContact", model, contactPoints, masterSurface, self.journal, configuration=configuration
         )
         constraint.updateConnectivity(model)
         return constraint
@@ -139,9 +150,16 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         switch never fires and the comparison is against a smooth branch.
         """
 
-        for contactType in ("linear", "quadratic"):
+        for contactType, contactPoints in (
+            ("linear", "quadraturePoints"),
+            ("quadratic", "quadraturePoints"),
+            ("linear", "nodes"),
+            ("quadratic", "nodes"),
+        ):
             model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
-            constraint = self._constraint(model, slaveSurface, masterSurface, contactType=contactType)
+            constraint = self._constraint(
+                model, slaveSurface, masterSurface, contactType=contactType, contactPoints=contactPoints
+            )
 
             rng = np.random.default_rng(0)
             U = 1e-3 * rng.standard_normal(constraint.nDof)
@@ -150,7 +168,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             dP_dU = finiteDifferenceTangent(constraint, U, np.zeros_like(U), h=1e-8)
 
             scale = max(np.abs(K).max(), 1.0)
-            np.testing.assert_allclose(K, dP_dU, atol=1e-5 * scale, err_msg=f"type={contactType}")
+            np.testing.assert_allclose(K, dP_dU, atol=1e-5 * scale, err_msg=f"type={contactType}, {contactPoints}")
 
             # The check above passes a P and a K negated together, so the direction is checked as well: the contact
             # pushes the faces apart, the slave face (the lower block's, at y = 0.05) down and the master face up.
@@ -158,45 +176,6 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             onTheSlaveFace = np.array([node.coordinates[1] > 0.025 for node in constraint.nodes])
             self.assertLess(forces[onTheSlaveFace, 1].sum(), 0.0, f"type={contactType}")
             self.assertGreater(forces[~onTheSlaveFace, 1].sum(), 0.0, f"type={contactType}")
-
-    def test_batched_and_per_point_paths_agree(self):
-        """The batched evaluation must reproduce the per-point loop, which is the reference
-        implementation. Without this the loop is unreachable in tests -- every ordinary model takes
-        the batched path -- and the two could drift apart unnoticed.
-
-        Checked for both penalty laws, on forces and on the assembled tangent, at a displacement
-        state where some points are closed and some are open.
-        """
-
-        for contactType in ("linear", "quadratic"):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.02)
-            constraint = self._constraint(model, slaveSurface, masterSurface, contactType=contactType)
-
-            rng = np.random.default_rng(7)
-            U = 2e-2 * rng.standard_normal(constraint.nDof)
-
-            self.assertIsNotNone(constraint._batched, "this model should take the batched path")
-            gaps = None
-
-            results = {}
-            for label in ("batched", "loop"):
-                if label == "loop":
-                    constraint._batched = None
-                P = self._forces(constraint, U)
-                K = self._assembledTangent(constraint, U)
-                results[label] = (P.copy(), K.copy(), constraint.getGaps().copy(), constraint.totalNormalForce)
-                if gaps is None:
-                    gaps = constraint.getGaps().copy()
-
-            # a mixed active set, or the comparison proves little
-            self.assertTrue((gaps < 0.0).any() and (gaps >= 0.0).any(), "expected a mixed active set")
-
-            pB, kB, gB, fB = results["batched"]
-            pL, kL, gL, fL = results["loop"]
-            np.testing.assert_allclose(gB, gL, rtol=1e-13, atol=1e-15, err_msg=f"gaps, {contactType}")
-            np.testing.assert_allclose(pB, pL, rtol=1e-11, atol=1e-13, err_msg=f"forces, {contactType}")
-            np.testing.assert_allclose(kB, kL, rtol=1e-11, atol=1e-13, err_msg=f"tangent, {contactType}")
-            self.assertAlmostEqual(fB, fL, delta=1e-10 * max(abs(fL), 1.0))
 
     def test_tangent_is_symmetric(self):
         """The frozen-projection formulation must produce a symmetric operator; a weight
@@ -260,16 +239,22 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         """
 
         model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        field = self._addDisplacementField(model)
         constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=1.0)
         self._forces(constraint, np.zeros(constraint.nDof))
 
         self.assertTrue((constraint.getGaps() < 0.0).any(), "expected penetrating points to start")
 
-        # Shrink the search radius so nothing can be assigned, and re-run the connectivity update.
-        constraint.searchDistance = 1e-12
+        # Pull the slave block away, beyond the search distance. A point in contact never leaves the search at once:
+        # the first update finds it outside (approaching), the second out of reach.
+        for node in slaveSurface.extractNodeSet():
+            field["U"][field._indicesOfNodesInArray[node]] = [0.0, -2.0, 0.0]
+        constraint.updateConnectivity(model)
+        self.assertTrue((constraint.stateOfPoints == ContactState.APPROACHING).all())
         constraint.updateConnectivity(model)
 
-        self.assertTrue(all(f is None for f in constraint._assignedFacetIdx), "expected no assignments")
+        self.assertTrue((constraint._assignedFacetIdx < 0).all(), "expected no assignments")
+        self.assertFalse(constraint.withinReach)
         np.testing.assert_array_equal(
             constraint.getGaps(), 0.0, err_msg="unassigned points must not retain a stale gap"
         )
@@ -345,7 +330,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         gaps = np.full(constraint.nPoints, np.nan)
         for p in range(constraint.nPoints):
             facetIdx = constraint._assignedFacetIdx[p]
-            if facetIdx is None:
+            if facetIdx < 0:
                 continue
             masterCoords = currentNodeCoordinates(
                 constraint.facetElements[facetIdx].parentFaceNodes,
@@ -542,6 +527,53 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self._constraint(model, slaveSurface, masterSurface, contactType="cubic")
         self.assertIn("is not supported", str(ctx.exception))
+
+    def test_nodes_and_quadrature_points_transmit_the_same_resultant(self):
+        """A uniform overlap of two flat faces: the slave nodes, each standing for its tributary area, and the
+        quadrature points transmit the same resultant, the penalty times the area times the overlap."""
+
+        resultants = {}
+        for contactPoints in ("nodes", "quadraturePoints"):
+            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            constraint = self._constraint(model, slaveSurface, masterSurface, contactPoints=contactPoints)
+            self._forces(constraint, np.zeros(constraint.nDof))
+            resultants[contactPoints] = constraint.totalNormalForce
+            np.testing.assert_allclose(
+                constraint.contactForceOnSlave + constraint.contactForceOnMaster, 0.0, atol=1e-10
+            )
+        self.assertAlmostEqual(resultants["nodes"], -1.0e4 * _SIDE**2 * 0.05, delta=1e-8)
+        self.assertAlmostEqual(resultants["quadraturePoints"], resultants["nodes"], delta=1e-8)
+
+    def test_a_point_that_tunnels_through_the_search_distance_gets_no_force(self):
+        """A point out of reach at one update and inside the master body at the next has not been seen
+        approaching: it is found inside, gets no force, and is reported -- the closest facet of a point inside a
+        body is no indication of the way out. At the first update, an overlap as given is contact."""
+
+        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=-0.5)
+        field = self._addDisplacementField(model)
+        constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=0.1)
+        self.assertTrue((constraint.stateOfPoints == ContactState.FREE).all())
+
+        for node in slaveSurface.extractNodeSet():
+            field["U"][field._indicesOfNodesInArray[node]] = [0.0, 0.52, 0.0]
+        constraint.updateConnectivity(model)
+        self.assertEqual(constraint.numberOfPointsFoundInside, constraint.nPoints)
+        self.assertFalse(constraint.withinReach)
+        self.assertEqual(constraint.nDof, 0)
+
+    def test_restart_data_continues_the_pairing(self):
+        """The frozen projection and the pairing states written to a checkpoint are adopted by a constraint on the
+        same model."""
+
+        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        constraint = self._constraint(model, slaveSurface, masterSurface)
+        U = 1e-3 * np.random.default_rng(3).standard_normal(constraint.nDof)
+        forces = self._forces(constraint, U)
+
+        restored = self._constraint(model, slaveSurface, masterSurface, searchDistance=1e-12)
+        restored.setRestartData(constraint.getRestartData())
+        np.testing.assert_array_equal(restored.stateOfPoints, constraint.stateOfPoints)
+        np.testing.assert_array_equal(self._forces(restored, U), forces)
 
     def test_refresh_ignores_changes_that_do_not_touch_the_surfaces(self):
         model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)

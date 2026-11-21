@@ -31,6 +31,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.contactpointsatslavenodes import (
+    tributaryAreasOfSlaveNodes,
+)
 from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
     ForcesOnlyExplicitEvaluation,
 )
@@ -41,10 +44,7 @@ from edelweissfe.constraints.base.frozencontactsearch import (
     unpackAssignment,
     unpackPerPointArrays,
 )
-from edelweissfe.constraints.base.penaltylaw import (
-    normalPenaltyForce,
-    validatedContactType,
-)
+from edelweissfe.constraints.base.penaltylaw import penaltyLaw
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.meshdependent import MeshDependent
@@ -54,6 +54,7 @@ from edelweissfe.timesteppers.timestep import TimeStep
 from edelweissfe.utils.facetcontactgeometry import (
     closestFacetCandidates,
     closestFacets,
+    cosOfSmoothNormalChangeLimit,
     facetNormalAndMeasure,
     line2GapGradientHessian,
     line2Projection,
@@ -80,10 +81,6 @@ tick -- no separate wiring needed. A retained slave node (same across the rebuil
 identity) keeps its frictional history and augmented-Lagrange multiplier; a newly exposed one
 starts at rest.
 """
-
-# Normal change between increments beyond which the master surface is treated as creased, and the
-# frictional history is discarded rather than rotated into the new tangent plane (see updateConnectivity).
-_cosOfSmoothNormalChangeLimit = np.cos(np.deg2rad(30.0))
 
 
 @dataclass(frozen=True)
@@ -293,8 +290,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     ``type=quadratic`` (see the ``mu`` option documentation). Rotating the history is only
     admissible as long as the frozen tangent plane changes continuously between the increments;
     a slave sliding over a genuine crease of the master surface (normal change beyond
-    ``_cosOfSmoothNormalChangeLimit``) restarts its frictional history instead, keeping its normal
-    traction multiplier.
+    :data:`~edelweissfe.utils.facetcontactgeometry.cosOfSmoothNormalChangeLimit`) restarts its
+    frictional history instead, keeping its normal traction multiplier.
 
     With ``augmentedLagrange=True`` (requires ``sliding=small``), a per-slave normal traction
     multiplier augments the penalty force. It is constant within an increment (zero tangent
@@ -347,16 +344,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self.slaveFacetElements = list(slaveSurface)
         self.facetElements = list(masterSurface)
 
-        # The contact points are the unique slave surface nodes, each weighted by its tributary area (sum
-        # of its area shares over its incident slave facets, in the reference configuration). Nodes with a
-        # zero share (nodalWeights=serendipityOptimal) are kept, inert, to preserve the slave node ordering.
-        tributaryAreaOfSlaveNode = {}
-        for slaveFacet in self.slaveFacetElements:
-            for node, share in zip(slaveFacet.nodes, slaveFacet.nodalAreaShares):
-                tributaryAreaOfSlaveNode[node] = tributaryAreaOfSlaveNode.get(node, 0.0) + share
-
-        self.slaveNodes = list(tributaryAreaOfSlaveNode.keys())
-        self.tributaryAreas = np.array(list(tributaryAreaOfSlaveNode.values()))
+        # The contact points are the unique slave surface nodes, each weighted by its tributary area.
+        self.slaveNodes, self.tributaryAreas = tributaryAreasOfSlaveNodes(self.slaveFacetElements)
         self.nSlaves = len(self.slaveNodes)
 
         masterNodes = {node for el in self.facetElements for node in el.nodes}
@@ -370,7 +359,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self.penalty = configuration.penalty
         if self.penalty <= 0.0:
             raise ValueError("The penalty must be positive: a non-positive penalty silently disables contact.")
-        self.type = validatedContactType(configuration.contactType)
+        self.law = penaltyLaw(configuration.contactType)
         self.searchDistance = configuration.searchDistance
 
         self.sliding = configuration.sliding.lower()
@@ -433,7 +422,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         self.journal.message(
             f"{self.nSlaves} slave nodes, {len(self.facetElements)} master facets, "
-            f"sliding={self.sliding}, type={self.type}, friction={'on' if self.mu > 0.0 else 'off'}, "
+            f"sliding={self.sliding}, type={self.law.name}, friction={'on' if self.mu > 0.0 else 'off'}, "
             f"augmentedLagrange={self.augmentedLagrange}",
             name,
         )
@@ -499,7 +488,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                     previousNormal = self._frozenNormals[s]
                     self._frozenNormals[s] = normal
 
-                    if previousNormal is None or previousNormal.dot(normal) >= _cosOfSmoothNormalChangeLimit:
+                    if previousNormal is None or previousNormal.dot(normal) >= cosOfSmoothNormalChangeLimit:
                         # Rotate the frictional history into the new frozen tangent plane (nothing to
                         # rotate without a previous normal: the history is zero then).
                         projectorOntoTangentPlane = np.eye(self.nDim) - np.outer(normal, normal)
@@ -628,13 +617,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         oldLambda = dict(zip(self.slaveNodes, self._lambdaN))
 
         self.slaveFacetElements = list(model.elementSets[self._slaveSurfaceSetName])
-        tributaryAreaOfSlaveNode = {}
-        for slaveFacet in self.slaveFacetElements:
-            for node, share in zip(slaveFacet.nodes, slaveFacet.nodalAreaShares):
-                tributaryAreaOfSlaveNode[node] = tributaryAreaOfSlaveNode.get(node, 0.0) + share
-
-        self.slaveNodes = list(tributaryAreaOfSlaveNode.keys())
-        self.tributaryAreas = np.array(list(tributaryAreaOfSlaveNode.values()))
+        self.slaveNodes, self.tributaryAreas = tributaryAreasOfSlaveNodes(self.slaveFacetElements)
         self.nSlaves = len(self.slaveNodes)
         self._referenceCoordsSlaves = np.array([n.coordinates for n in self.slaveNodes])
 
@@ -772,7 +755,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             else:
                 # f_n carries the sign of g (negative in contact), so that the contact force on the nodes,
                 # -f_n * w, pushes the slave outward; see edelweissfe.constraints.base.penaltylaw.
-                penaltyForce, stiffness = normalPenaltyForce(self.type, penaltyTimesArea, g)
+                penaltyForce, stiffness = self.law.normalForce(penaltyTimesArea, g)
                 f_n = lambdaForce + penaltyForce
 
             # the residual contribution is the negative of the contact force on the nodes
@@ -923,7 +906,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                 if g >= 0.0:
                     penaltyForcePart = penaltyTimesArea * g
                 else:
-                    penaltyForcePart, _ = normalPenaltyForce(self.type, penaltyTimesArea, g)
+                    penaltyForcePart, _ = self.law.normalForce(penaltyTimesArea, g)
 
                 self._lambdaN[s] = min(0.0, self._lambdaN[s] + penaltyForcePart)
 
