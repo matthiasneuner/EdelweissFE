@@ -292,9 +292,16 @@ basis, so the two constraints agree to 13 digits and there is nothing to gain --
 **non-matching** meshes the integrated formulation is a substantial improvement at any element
 order, linear included, as the figure in :ref:`integrated-contact` shows.
 
-Scope: normal penalty contact under ``sliding=small``, on both the implicit and the explicit solver
-path. Coulomb friction and augmented Lagrange are **not** implemented here (the node-based
-constraint has both), and ``sliding=finite`` is rejected rather than approximated.
+The constraint is one contact for every kind of contact point (:ref:`contact-points`): the
+quadrature points of the slave facets (``contactPoints=quadraturePoints``, the default), the slave
+nodes, each standing for its tributary area (``contactPoints=nodes``), and, from EdelweissMeshfree,
+points on the faces of particles. Points that approach the master within ``searchDistance`` are
+paired with it; a point found inside without having been seen approaching gets no force and is
+reported.
+
+Scope: frictionless normal penalty contact under ``sliding=small``, on both the implicit and the
+explicit solver path. Coulomb friction and augmented Lagrange are **not** implemented here (the
+node-based constraint has both), and ``sliding=finite`` is rejected rather than approximated.
 
 Module ``edelweissfe.constraints.surfacetodeformablesurfacepenalty``
 
@@ -576,6 +583,18 @@ they can find themselves within reach again. A constraint that is not active acc
 were. A solver that cannot handle a constraint, e.g. ``NEST`` a contact, refuses it only while it is switched on.
 
 .. automodule:: edelweissfe.constraints.base.constraintbase
+    :members:
+
+The penalty contacts are assembled from two pieces of their own: the *contact points* of the slave side
+(:ref:`contact-points`) and the *contact law* that turns a gap into a force. A new kind of contact point
+-- EdelweissMeshfree's points on the faces of particles are one -- implements
+:class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`; a new law derives from
+:class:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw`.
+
+.. automodule:: edelweissfe.constraints.base.contactpoints
+    :members:
+
+.. automodule:: edelweissfe.constraints.base.penaltylaw
     :members:
 
 Multi-point (DOF-elimination) constraints subclass from

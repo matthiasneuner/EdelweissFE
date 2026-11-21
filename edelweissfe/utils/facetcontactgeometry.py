@@ -52,6 +52,11 @@ from scipy.spatial import cKDTree
 
 from edelweissfe.utils.rotations import skewMatrix
 
+#: The cosine of the largest change of the normal between two updates of a contact search that still counts as sliding
+#: over a smooth surface: a larger change is a crease of the master surface. A contact point in contact does not
+#: move across a crease (the integrated contact), or restarts its frictional history there (the node-based one).
+cosOfSmoothNormalChangeLimit = np.cos(np.deg2rad(30.0))
+
 
 def tria3GapGradientHessian(
     xs: np.ndarray, x1: np.ndarray, x2: np.ndarray, x3: np.ndarray
