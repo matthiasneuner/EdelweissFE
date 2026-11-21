@@ -91,8 +91,10 @@ with the spring stiffness :math:`k_p` and the gradient :math:`\boldsymbol{w}_p` 
 :math:`\boldsymbol{w}_p = [c, -N^m] \otimes \boldsymbol{n}` (the interpolation vector of the point on the slave side,
 the shape functions of the master face, the normal), and :math:`k_p = \mathrm{d}f_n/\mathrm{d}g` is what the contact
 law gives the point at its gap: the penalty times the area of the point for the linear law, zero while the gap is open
-(:mod:`~edelweissfe.constraints.base.penaltylaw`). A friction or tie law later gives its own stiffness, and the estimate
-follows without a change.
+(:mod:`~edelweissfe.constraints.base.penaltylaw`). A tie holds every point with one such spring along every axis
+:math:`\boldsymbol{e}_i`, :math:`\boldsymbol{w}_p = [c, -N^m] \otimes \boldsymbol{e}_i` and :math:`k_p` the penalty
+times the area, open or closed (:doc:`/theory/contact`, "A tie"). The force and the estimate go through the same springs
+of the law, so a friction law later gives its own stiffness, and the estimate follows without a change.
 
 Such a constraint owns no degrees of freedom: it couples those of the parts. Taking the minimum with the parts would be
 wrong -- the spring *adds* to the frequencies of the nodes it couples. A mass :math:`m` on a spring :math:`k_1` (an
