@@ -448,8 +448,10 @@ Contact searches during a step
 An explicit analysis with contact searches while it runs, every ``contact-update-frequency`` increments. A search
 re-assigns which nodes a contact constraint couples, and touches no node, no field, no scalar variable and no element:
 the change is ``LOCATIONS``, ``NED`` only wraps its vectors with the new locations, and the lumped inertia, the
-mass-proportional damping rate, the multi-point-constraint condensation and the critical time step are kept
-(:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.onNewLocations`, and :ref:`how-a-change-selects-the-path`).
+mass-proportional damping rate, the multi-point-constraint condensation and the critical time step of the elements are
+kept (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.onNewLocations`, and
+:ref:`how-a-change-selects-the-path`). The stiffness of the contact enters the critical time step in every increment,
+added to the frequencies of the nodes it couples (:doc:`/theory/criticaltimestep`, "Penalty constraints").
 
 A change of the mesh -- a refinement -- gives a new numbering
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.onNewNumbering`): the operators are assembled anew over the
@@ -468,7 +470,8 @@ nodes, a body of particles from the velocity of its particles. The particles' lu
 so a nonlocal field of gradient-enhanced particles is integrated by its own scheme. Their critical time step enters the
 critical time step with the elements'; it is estimated in the zero increment, and anew whenever the margin of its last
 estimate over the time increment in use may be used up (option ``critical-time-step-decrease-per-increment``, see
-:doc:`/theory/criticaltimestep`). With
+:doc:`/theory/criticaltimestep`). A penalty constraint on the particles -- a support, the contact with a projectile --
+adds its stiffness to their rows in every increment. With
 ``project-velocity-every-increment``, the velocity of the particles' nodes is projected from their momentum in every
 increment.
 

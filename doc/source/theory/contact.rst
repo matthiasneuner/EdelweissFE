@@ -1107,8 +1107,10 @@ Explicit dynamics
 Under ``NED`` (:doc:`/analysis/solvers`) the same formulation is used, with two differences that follow from
 what an explicit increment is.
 
-**No tangent is assembled.** An explicit increment solves no linear system, so a constraint
-stiffness enters nothing. The solver calls
+**No tangent is assembled.** An explicit increment solves no linear system, so a constraint's
+stiffness enters only the critical time step, which bounds it without a tangent: the contact adds the row sums of its
+stiffness, scaled by the lumped mass, to the frequencies of the nodes it couples, from the stiffness its law gives the
+closed points (:doc:`/theory/criticaltimestep`, "Penalty constraints"). The solver calls
 :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeKernelsExplicit`
 instead of ``computeKernels``, and this constraint overrides it to evaluate the contact forces
 without building a tangent at all. The base-class default forwards to ``computeKernels`` with a
@@ -1131,7 +1133,7 @@ magnitude below a facet dimension. This is reported rather than assumed -- on ev
 changes the connectivity the solver prints the largest nodal motion accumulated since the previous
 one, so the configured frequency can be checked against a given model's facet size instead of
 trusted. A connectivity change gives new locations on the same numbering, and reuses the lumped
-operators and the critical time step: the mesh is unchanged, so they are unchanged, and
+operators and the critical time step of the elements: the mesh is unchanged, so they are unchanged, and
 recomputing them would cost a full element pass.
 
 A candidate-facet pre-filter (a centroid k-d tree with a triangle-inequality radius bound) reduces
