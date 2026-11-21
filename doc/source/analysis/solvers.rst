@@ -448,13 +448,13 @@ Contact searches during a step
 An explicit analysis with contact searches while it runs, every ``contact-update-frequency`` increments. A search
 re-assigns which nodes a contact constraint couples, and touches no node, no field, no scalar variable and no element:
 the change is ``LOCATIONS``, ``NED`` only wraps its vectors with the new locations, and the lumped inertia, the
-mass-proportional damping rate, the multi-point-constraint condensation and the stable time increment are kept
+mass-proportional damping rate, the multi-point-constraint condensation and the critical time step are kept
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.onNewLocations`, and :ref:`how-a-change-selects-the-path`).
 
 A change of the mesh -- a refinement -- gives a new numbering
 (:meth:`~edelweissfe.solvers.nonlinearexplicitdynamic.NED.onNewNumbering`): the operators are assembled anew over the
 elements of the new discrete system, the solution, the velocity and the acceleration are read from the model, which
-interpolated them onto the new nodes, and the stable time increment is computed again.
+interpolated them onto the new nodes, and the critical time step is computed again.
 
 Finite elements and particles
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -466,9 +466,9 @@ particles, and evaluates them on the new kernel functions; their lumped mass is 
 elements' in every numbering. A projectile of finite elements gets its initial velocity from the model's velocity at its
 nodes, a body of particles from the velocity of its particles. The particles' lumped damping is taken like their mass,
 so a nonlocal field of gradient-enhanced particles is integrated by its own scheme. Their critical time step enters the
-critical time step with the elements'; it is bounded in the zero increment, whenever the particles couple other nodes
-(not when only a contact is paired anew), and every ``stable-increment-frequency`` increments (0 switches the bound
-off). With
+critical time step with the elements'; it is estimated in the zero increment, and anew whenever the margin of its last
+estimate over the time increment in use may be used up (option ``critical-time-step-decrease-per-increment``, see
+:doc:`/theory/criticaltimestep`). With
 ``project-velocity-every-increment``, the velocity of the particles' nodes is projected from their momentum in every
 increment.
 
