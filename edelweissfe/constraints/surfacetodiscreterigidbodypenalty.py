@@ -448,6 +448,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     def _adoptFrozenProjection(self, projection: dict[str, np.ndarray]) -> bool:
         self._frozenBodyNormals[:] = np.reshape(projection["bodyNormals"], self._frozenBodyNormals.shape)
         self._frozenPlaneOffsets[:] = projection["planeOffsets"]
+        if self.slave.locatedOnlyWhenConnected:
+            # Located at the next update of the connectivity, once the entities of the points are connected.
+            return False
         return self._locatePointsWithATriangle()
 
     def refresh(self, model: FEModel, change) -> bool:
