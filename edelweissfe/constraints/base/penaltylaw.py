@@ -32,7 +32,7 @@ A contact constraint is made of three pieces: its *contact points* (where the sl
 :mod:`~edelweissfe.constraints.base.contactpoints`), the *geometry* that pairs each of them with the master surface and
 measures its gap, and the *contact law* that turns the gap into a force. The law is a separate object, held by the
 constraint and asked for the force point by point, so that another law -- friction on top of the normal law, or a tie
-that also pulls -- takes its place without touching the geometry or the search.
+that also pulls (:class:`TiedPenaltyLaw`) -- takes its place without touching the contact points or the geometry.
 
 Sign convention: the gap :math:`g` is negative when the surfaces penetrate, and the normal force
 :math:`f_n` carries the sign of :math:`g`, i.e. :math:`f_n \\le 0` in contact. The stiffness
@@ -55,6 +55,10 @@ class PenaltyLaw(ABC):
 
     #: The name of the law, as the input file spells it (the ``type`` option of the contact constraints).
     name: str
+
+    #: Whether the law ties the contact points to the master surface (:class:`TiedPenaltyLaw`) instead of letting
+    #: them touch it: then a constraint pairs each point once, holds it in every direction, and never releases it.
+    tiesThePoints: bool = False
 
     def isClosed(self, gap: float | np.ndarray) -> bool | np.ndarray:
         """Whether the contact points with these gaps transmit a force: while they penetrate.
@@ -136,17 +140,50 @@ class QuadraticPenaltyLaw(PenaltyLaw):
         return -penaltyTimesArea * gap**3 / 6.0
 
 
-#: The penalty laws, by the name the input file gives them.
+class TiedPenaltyLaw(PenaltyLaw):
+    """A tie: :math:`f = k A \\, g` in tension and in compression, a linear spring that never opens.
+
+    A constraint with this law does not let its contact points touch the master surface, it ties them to it: it pairs
+    each point once with the point of the master it is closest to, and holds it there in *every* direction, by one such
+    spring along each axis, whose "gap" is the displacement of the point from where it was paired, in that direction.
+    Together the springs pull the point back along its whole displacement with the stiffness :math:`k A`, whichever
+    way it moves: a linear spring of the same stiffness in every direction. A gap or an overlap the two surfaces have at
+    the pairing is where the springs rest.
+
+    It is a contact that never opens and never slides, the stick of a friction law that never slips.
+    """
+
+    name = "tied"
+
+    tiesThePoints = True
+
+    def isClosed(self, gap):
+        return np.full(np.shape(gap), True)
+
+    def normalForce(self, penaltyTimesArea, gap):
+        return penaltyTimesArea * gap, penaltyTimesArea
+
+    def storedEnergy(self, penaltyTimesArea, gap):
+        return 0.5 * penaltyTimesArea * gap**2
+
+
+#: The penalty laws of contact, by the name the input file gives them.
 penaltyLaws = {law.name: law for law in (LinearPenaltyLaw, QuadraticPenaltyLaw)}
 
+#: The penalty laws of a constraint that can also tie its points to the master surface
+#: (:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`): those of contact, and the tie.
+penaltyLawsAndTheTie = penaltyLaws | {TiedPenaltyLaw.name: TiedPenaltyLaw}
 
-def penaltyLaw(contactType: str) -> PenaltyLaw:
+
+def penaltyLaw(contactType: str, laws: dict = penaltyLaws) -> PenaltyLaw:
     """The penalty law an input file names, case-insensitively.
 
     Parameters
     ----------
     contactType
-        The ``type`` option of a contact constraint: 'linear' or 'quadratic'.
+        The ``type`` option of a contact constraint: 'linear' or 'quadratic', or 'tied' where a constraint can tie.
+    laws
+        The laws the constraint accepts, by name: :data:`penaltyLaws`, or :data:`penaltyLawsAndTheTie`.
 
     Returns
     -------
@@ -154,7 +191,11 @@ def penaltyLaw(contactType: str) -> PenaltyLaw:
         The law.
     """
 
-    law = penaltyLaws.get(contactType.lower())
+    law = laws.get(contactType.lower())
     if law is None:
-        raise ValueError(f"Constraint type '{contactType.lower()}' is not supported. Use 'linear' or 'quadratic'.")
+        raise ValueError(
+            f"Constraint type '{contactType.lower()}' is not supported. Use "
+            + " or ".join(f"'{name}'" for name in laws)
+            + "."
+        )
     return law()
