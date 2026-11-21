@@ -85,6 +85,12 @@ class ContactPoints(ABC):
     nPoints: int
     areas: np.ndarray
 
+    #: Whether the points can be located only once the model has connected the entities they belong to, at an update
+    #: of the connectivity: the points of particles, whose kernel functions follow from where the particles are. A
+    #: checkpoint does not hold that connectivity, so a constraint restored from one keeps their projection and locates
+    #: them at the next update of the connectivity, which the resumed run makes before its first increment.
+    locatedOnlyWhenConnected: bool = False
+
     @abstractmethod
     def currentPointCoordinates(self, model: FEModel) -> np.ndarray:
         """The coordinates of all contact points in the configuration of the model, for the contact search.

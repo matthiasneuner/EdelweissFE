@@ -1009,7 +1009,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._restingOffset = np.array(projection["restingOffset"]).reshape(self._restingOffset.shape)
         initialOverlapTime = np.asarray(projection["initialOverlapTime"]).ravel()
         self._initialOverlapTime = float(initialOverlapTime[0]) if len(initialOverlapTime) else None
-        return self._assignMasterFacets(np.array(projection["assignedFacetIdx"], dtype=np.intp))
+        assignment = np.array(projection["assignedFacetIdx"], dtype=np.intp)
+        if self.slave.locatedOnlyWhenConnected:
+            # Located at the next update of the connectivity, once the entities of the points are connected.
+            self._assignedFacetIdx = assignment
+            return False
+        return self._assignMasterFacets(assignment)
 
     def refresh(self, model: FEModel, change) -> bool:
         """Rebuild both sides if ``change`` touched the source elements of either: the contact points are
