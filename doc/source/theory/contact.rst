@@ -804,6 +804,75 @@ contact-assembly entries. Whether that matters depends on contact's share of the
 worth measuring on a given model before adopting it in an explicit run.
 
 
+.. _contact-points:
+
+One contact for every kind of contact point
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The algebra of the integrated formulation does not care *what* the slave point is. A contact point
+:math:`p` moves with an interpolation vector :math:`\boldsymbol{c}` over the nodes it acts on, stands
+for an area :math:`A_p`, and its gap, gradient and tangent are
+
+.. math::
+    g = \bar{\boldsymbol{n}} \cdot \left( \boldsymbol{x}_p - N^m(\xi_m) \cdot \boldsymbol{x}^m \right) , \qquad
+    \boldsymbol{w} = \bar{\boldsymbol{n}} \otimes [\boldsymbol{c}, -N^m] , \qquad
+    \boldsymbol{K} = \frac{\mathrm{d}f_n}{\mathrm{d}g} \, \boldsymbol{w} \otimes \boldsymbol{w} ,
+
+with :math:`f_n` the penalty law at the stiffness ``penalty`` times :math:`A_p`. Three kinds of point
+are in use:
+
+.. list-table::
+    :header-rows: 1
+
+    * - contact point
+      - :math:`\boldsymbol{c}`
+      - :math:`\boldsymbol{x}_p`
+      - :math:`A_p`
+    * - quadrature point of a slave element face (``contactPoints=quadraturePoints``)
+      - :math:`N^s(\xi_q)`
+      - :math:`N^s(\xi_q) \cdot (\boldsymbol{X}^s + \boldsymbol{U}^s)`
+      - :math:`w_q J_q`
+    * - slave node (``contactPoints=nodes``)
+      - :math:`[1]`
+      - :math:`\boldsymbol{X} + \boldsymbol{U}`
+      - tributary area (:ref:`tributary-areas`)
+    * - point on a face of a particle (EdelweissMeshfree)
+      - :math:`G(\boldsymbol{x}_q)`
+      - :math:`\boldsymbol{x}_q^n + G(\boldsymbol{x}_q) \cdot \Delta\boldsymbol{U}`
+      - its share of the face, at the start of the contact
+
+So one constraint, :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`, serves all of them;
+what a kind of point contributes is its
+:class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`. A finite element carries its total
+displacement from the reference configuration, a particle the increment since the last update of the
+connectivity (it is updated-Lagrangian), so each kind of point measures its position from where it is
+known. A particle moves a point attached to it with :math:`G`, the interpolation vector of an attached
+point, which is affine in the point; distributing the force with the same :math:`G` makes the penalty
+spring conservative. The slave nodes against the parent faces of the master differ from
+:mod:`~edelweissfe.constraints.nodetodeformablesurfacepenalty` with ``sliding=small`` in the master side
+only: the force reaches the master with :math:`N^m`, not with the flat facet's weights.
+
+The contact law is a separate piece as well (:mod:`~edelweissfe.constraints.base.penaltylaw`): the
+constraint asks it which points are closed and for their normal force and stiffness. Friction, and a
+tie that also pulls, take its place without touching the contact points, the search or the gap.
+
+**The pairing.** In every update of the connectivity, a point within ``searchDistance`` of the master
+surface (every point, without a search distance) is paired with its closest facet while it is outside
+(*approaching*). A point in contact is paired anew in every update with its closest facet, however deep
+it is, so that it slides from facet to facet and from one face of the master onto the next where the
+surface is smooth -- but never across a crease, with a facet whose normal differs from the one it was
+pushed along until then by more than 30 degrees (the limit at which the node-based constraint restarts
+its frictional history): the closest facet of a point that has entered near a corner of the master may
+be on its side, and of a point deep inside a thin master on its far side, and either would push the
+point out of the wrong side. A point that was out of reach at the previous update and is now inside has tunnelled
+through the search distance in one increment; it is *found inside*, gets no force, and is reported. The
+search distance must therefore exceed the distance a point travels towards the surface in one increment,
+and the constraint warns when a point enters deeper than half of it. At the first update, the bodies are
+as the model gives them: a point that overlaps then is in contact, so that an initial overlap -- such as
+the faceting of a curved surface makes even for a perfect fit -- is pushed apart. The pairing is checked
+for a master that is convex where it is touched; at a re-entrant corner the sign of the gap of the
+closest facet does not tell inside from outside.
+
 .. _integrated-contact-algorithm:
 
 The integrated formulation, step by step
@@ -811,8 +880,9 @@ The integrated formulation, step by step
 
 The argument above says what is computed and why; this is the order in which it happens, which is
 what a reader modifying :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty` needs. The
-slave side of the steps below lives in
-:class:`~edelweissfe.constraints.base.contactpointsonslavesurface.ContactPointsOnSlaveSurface`, and
+slave side of the steps below lives in the contact points (:ref:`contact-points`), for quadrature
+points in
+:class:`~edelweissfe.constraints.base.contactpointsonslavesurface.ContactPointsOnSlaveSurface`, which
 is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
 
 **Once, at construction** (and again after an AMR retiling, through ``refresh``):
@@ -839,14 +909,18 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
 #. Candidate master facets come from the shared broadphase (a centroid k-d tree with a
    triangle-inequality radius bound, a superset of the exhaustive sweep iterated in ascending facet
    index, so it reproduces the exhaustive tie-break). The clamped closest point is computed on each
-   candidate **flat** facet and the nearest wins, subject to ``searchDistance`` where one is given.
+   candidate **flat** facet and the nearest wins, subject to ``searchDistance`` where one is given
+   and to the pairing rules of :ref:`contact-points`.
 #. What is frozen from the winner is *not* the flat-facet interpolation: the clamped barycentric
    weights are mapped through that facet's ``vertexParametricCoords`` into its parent face's
    parametric space, and the parent-face shape functions :math:`N^m` are evaluated there. The
    facet's unit normal :math:`\bar{\boldsymbol{n}}` is frozen alongside them, per facet rather than
    per point.
-#. Only *assigned* points contribute DOFs, and each contributes one dense block over its slave
-   parent face's nodes plus its assigned master parent face's nodes. Gap activation is deliberately
+#. Only *assigned* points contribute DOFs. The block of the constraint holds first the nodes the
+   assigned contact points act on (for a quadrature point, a copy of its slave parent face's nodes;
+   for the points of particles, the nodes of their kernel functions, each once), then, point after
+   point, the nodes of the assigned master parent faces; each assigned point contributes one dense
+   tangent block over its own slave and master nodes. Gap activation is deliberately
    **not** part of this: an assigned point that happens to be open still owns its block, which is
    then left at zero, so the sparsity pattern is stable across the Newton loop and only a genuine
    reassignment forces a rebuild.
@@ -867,9 +941,9 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
    ever allocated.
 
 Open points are skipped entirely rather than contributing a zero, and the whole evaluation is
-batched over the active set, falling back to a per-point loop where parent-node counts are not
-uniform across points. The two paths are held to each other by a dedicated equivalence test, since
-every ordinary model takes the batched one.
+batched over the assigned points: a fixed handful of array operations, gathered once per update of
+the connectivity. That is why each surface must consist of faces of one type (one number of parent
+face nodes).
 
 
 .. _integrated-contact-rigid-body:

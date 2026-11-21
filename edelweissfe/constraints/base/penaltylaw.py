@@ -26,7 +26,13 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 """
-The normal penalty force laws shared by the penalty contact constraints.
+The normal penalty laws of the penalty contact constraints: how the normal force at a contact point follows from its gap.
+
+A contact constraint is made of three pieces: its *contact points* (where the slave surface is, see
+:mod:`~edelweissfe.constraints.base.contactpoints`), the *geometry* that pairs each of them with the master surface and
+measures its gap, and the *contact law* that turns the gap into a force. The law is a separate object, held by the
+constraint and asked for the force point by point, so that another law -- friction on top of the normal law, or a tie
+that also pulls -- takes its place without touching the geometry or the search.
 
 Sign convention: the gap :math:`g` is negative when the surfaces penetrate, and the normal force
 :math:`f_n` carries the sign of :math:`g`, i.e. :math:`f_n \\le 0` in contact. The stiffness
@@ -36,59 +42,119 @@ Sign convention: the gap :math:`g` is negative when the surfaces penetrate, and 
 tributary area in node-based formulations, a quadrature weight in integrated ones.
 """
 
+from abc import ABC, abstractmethod
+
 import numpy as np
 
-#: The supported penalty force laws.
-contactTypes = ("linear", "quadratic")
+
+class PenaltyLaw(ABC):
+    """A unilateral normal penalty law: a contact point transmits a force only while its gap is closed (negative).
+
+    Every method works element-wise on arrays of points as well as on single points.
+    """
+
+    #: The name of the law, as the input file spells it (the ``type`` option of the contact constraints).
+    name: str
+
+    def isClosed(self, gap: float | np.ndarray) -> bool | np.ndarray:
+        """Whether the contact points with these gaps transmit a force: while they penetrate.
+
+        Parameters
+        ----------
+        gap
+            The gap(s), negative in contact.
+
+        Returns
+        -------
+        bool or numpy.ndarray
+            True where the gap is closed.
+        """
+
+        return gap < 0.0
+
+    @abstractmethod
+    def normalForce(
+        self, penaltyTimesArea: float | np.ndarray, gap: float | np.ndarray
+    ) -> tuple[float | np.ndarray, float | np.ndarray]:
+        """The normal force at closed contact points and its derivative with respect to the gap.
+
+        Parameters
+        ----------
+        penaltyTimesArea
+            The penalty modulus times the area of the contact point(s).
+        gap
+            The gap(s), negative in contact.
+
+        Returns
+        -------
+        tuple
+            The normal force(s) :math:`f_n` and the stiffness :math:`\\mathrm{d}f_n/\\mathrm{d}g`.
+        """
+
+    @abstractmethod
+    def storedEnergy(self, penaltyTimesArea: float | np.ndarray, gap: float | np.ndarray) -> float | np.ndarray:
+        """The energy stored in the penalty springs of closed contact points, :math:`\\Pi(g)` with
+        :math:`\\mathrm{d}\\Pi/\\mathrm{d}g = f_n`: the potential whose gradient is the contact force.
+
+        Parameters
+        ----------
+        penaltyTimesArea
+            The penalty modulus times the area of the contact point(s).
+        gap
+            The gap(s), negative in contact.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            The stored energy, non-negative.
+        """
 
 
-def validatedContactType(contactType: str) -> str:
-    """Normalize a contact type option to lower case, and reject unsupported laws.
+class LinearPenaltyLaw(PenaltyLaw):
+    """:math:`f_n = k A \\, g`: a linear spring with the constant stiffness :math:`k A`, which jumps from zero when the
+    gap closes."""
+
+    name = "linear"
+
+    def normalForce(self, penaltyTimesArea, gap):
+        return penaltyTimesArea * gap, penaltyTimesArea
+
+    def storedEnergy(self, penaltyTimesArea, gap):
+        return 0.5 * penaltyTimesArea * gap**2
+
+
+class QuadraticPenaltyLaw(PenaltyLaw):
+    """:math:`f_n = -\\tfrac{1}{2} k A \\, g^2`: a spring that stiffens with the penetration, its stiffness
+    :math:`-k A \\, g` rising continuously from zero when the gap closes."""
+
+    name = "quadratic"
+
+    def normalForce(self, penaltyTimesArea, gap):
+        return -0.5 * penaltyTimesArea * gap**2, -penaltyTimesArea * gap
+
+    def storedEnergy(self, penaltyTimesArea, gap):
+        return -penaltyTimesArea * gap**3 / 6.0
+
+
+#: The penalty laws, by the name the input file gives them.
+penaltyLaws = {law.name: law for law in (LinearPenaltyLaw, QuadraticPenaltyLaw)}
+
+
+def penaltyLaw(contactType: str) -> PenaltyLaw:
+    """The penalty law an input file names, case-insensitively.
 
     Parameters
     ----------
     contactType
-        The contact type as given in the input file.
+        The ``type`` option of a contact constraint: 'linear' or 'quadratic'.
 
     Returns
     -------
-    str
-        The lower-case contact type.
+    PenaltyLaw
+        The law.
     """
-    contactType = contactType.lower()
-    if contactType not in contactTypes:
-        raise ValueError(f"Constraint type '{contactType}' is not supported. Use 'linear' or 'quadratic'.")
-    return contactType
 
-
-def normalPenaltyForce(
-    contactType: str, penaltyTimesArea: float | np.ndarray, gap: float | np.ndarray
-) -> tuple[float | np.ndarray, float | np.ndarray]:
-    """The normal penalty force and its derivative with respect to the gap, at a closed contact point.
-
-    Works element-wise on arrays of points as well as on single points.
-
-    - ``linear``: :math:`f_n = k A \\, g`, with constant stiffness :math:`k A`.
-    - ``quadratic``: :math:`f_n = -\\tfrac{1}{2} k A \\, g^2`, with stiffness :math:`-k A \\, g`.
-
-    Parameters
-    ----------
-    contactType
-        'linear' or 'quadratic', see :func:`validatedContactType`.
-    penaltyTimesArea
-        The penalty modulus times the area of the contact point(s).
-    gap
-        The gap(s), negative in contact.
-
-    Returns
-    -------
-    tuple
-        The normal force(s) :math:`f_n` and the stiffness :math:`\\mathrm{d}f_n/\\mathrm{d}g`.
-    """
-    if contactType == "linear":
-        normalForce = penaltyTimesArea * gap
-        dNormalForce_dGap = penaltyTimesArea
-    else:
-        normalForce = -0.5 * penaltyTimesArea * gap**2
-        dNormalForce_dGap = -penaltyTimesArea * gap
-    return normalForce, dNormalForce_dGap
+    law = penaltyLaws.get(contactType.lower())
+    if law is None:
+        raise ValueError(f"Constraint type '{contactType.lower()}' is not supported. Use 'linear' or 'quadratic'.")
+    return law()

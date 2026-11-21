@@ -48,7 +48,7 @@ class SurfaceContactPenaltySchema:
 
     slaveSurface: str | None = schemaField(
         description="The element set of contact facet elements (Tria3ContactFacet/Line2ContactFacet) "
-        "forming the slave surface; contact is integrated over these facets at quadrature points. "
+        "forming the slave surface; the contact points lie on these facets, by default at quadrature points. "
         "The facets must come from the surface element generator, which stamps their parent faces.",
         dtype=str,
         default=None,
