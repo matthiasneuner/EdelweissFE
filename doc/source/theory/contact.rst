@@ -854,7 +854,7 @@ only: the force reaches the master with :math:`N^m`, not with the flat facet's w
 
 The contact law is a separate piece as well (:mod:`~edelweissfe.constraints.base.penaltylaw`): the
 constraint asks it which points are closed and for their normal force and stiffness. Friction, and a
-tie that also pulls, take its place without touching the contact points, the search or the gap.
+tie that also pulls (:ref:`contact-tie`), take its place without touching the contact points or the gap.
 
 **The pairing.** In every update of the connectivity, a point within ``searchDistance`` of the master
 surface (every point, without a search distance) is paired with its closest facet while it is outside
@@ -945,6 +945,70 @@ rest, as the pull of a quasi-static explicit analysis does; after :math:`T` the 
 :math:`g_\text{law}`. The offsets belong to the points and are written to a checkpoint; a refinement of a
 contact surface during the ramp regenerates its points without them. ``initialOverlapRampTime=0`` (the
 default) pushes the overlap apart at once.
+
+.. _contact-tie:
+
+A tie: contact that never opens and never slides
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To model only a thin layer around a screw with particles and the rest of the concrete with finite elements,
+the two must be joined along a surface whose two sides are meshed independently: the faces of the particles
+on one side, the faces of the elements on the other. That is a **tie**, and it is the same constraint with
+another law, ``type=tied`` (:class:`~edelweissfe.constraints.base.penaltylaw.TiedPenaltyLaw`). The contact
+points, the parent faces of the master and the frozen projection are those of contact; three things differ.
+
+**Paired once.** At the first update, every contact point within ``searchDistance`` of the master surface
+(every point, without a search distance) is paired with the closest point of its closest facet, mapped onto
+the facet's parent face, :math:`N^m(\xi_m) \cdot \boldsymbol{x}^m`. It stays paired with that *material*
+point of the master for good: tension does not release it, sliding does not move it on. In the language of
+contact, the tie is contact that never opens and never slides -- the stick of a friction law that never
+slips, which is why no search is needed after the first.
+
+**At rest where it is paired.** The vector from the master point to the contact point at the pairing,
+:math:`\boldsymbol{r}_0`, is where the point rests. Two meshes of one curved surface do not coincide: a
+coarse far field facets the surface with chords that lie inside the surface of fine particles, and the gap
+between them is a fraction of a millimetre where the elements are a few millimetres. Closing that gap, or
+pushing an overlap apart, would be a prestress; the tie keeps it as part of the stress-free state.
+
+**Held in every direction.** A penalty spring along every axis :math:`\boldsymbol{e}_i` holds the point, in
+tension as in compression. With the displacement of the point from rest
+
+.. math::
+    \boldsymbol{d} = \boldsymbol{x}_p - N^m(\xi_m) \cdot \boldsymbol{x}^m - \boldsymbol{r}_0 ,
+
+the spring along :math:`\boldsymbol{e}_i` is exactly the spring of a contact point with the normal
+:math:`\bar{\boldsymbol{n}}` replaced by :math:`\boldsymbol{e}_i` and the gap by :math:`d_i`:
+
+.. math::
+    f_i = k A_p \, d_i , \qquad
+    \boldsymbol{w}_i = \boldsymbol{e}_i \otimes [\boldsymbol{c}, -N^m] , \qquad
+    \boldsymbol{K} = \sum_i k A_p \, \boldsymbol{w}_i \otimes \boldsymbol{w}_i
+      = k A_p \, [\boldsymbol{c}, -N^m] \otimes [\boldsymbol{c}, -N^m] \otimes \boldsymbol{I} .
+
+Together they pull the point back along :math:`\boldsymbol{d}` with the stiffness :math:`k A_p`, whatever
+the direction: the traction on the point is :math:`-k \boldsymbol{d}`, its normal part along the normal of
+the master at the pairing, the rest tangential. The force is linear in the displacements, the tangent
+constant and symmetric, the stored energy :math:`\tfrac{1}{2} k A_p |\boldsymbol{d}|^2`, and the explicit
+and the implicit solvers use it alike.
+
+**Its limits.** The interface is as compliant as its springs: a traction :math:`t` opens it by :math:`t/k`,
+so ``penalty`` is chosen well above the stiffness of the adjoining solids over the size of their elements
+or particles, :math:`E/h`, and within what the time step of an explicit analysis can carry. The offset
+:math:`\boldsymbol{r}_0` is a fixed vector, so a rotation :math:`\theta` of the interface is resisted by a
+traction :math:`k |\boldsymbol{r}_0| \theta`: nothing without a gap at rest, little for a small one. And the
+tie is enforced pointwise, like the contact: a homogeneous state is transmitted exactly where every slave
+face lies within one master face, while a slave face that straddles an edge of the master faces integrates
+a kink of the master's shape functions, and the traction varies by that quadrature error near the edge.
+Fine slave faces against coarse master faces -- particles against a far field -- confine it to the edges of
+the master faces.
+
+**A new mesh.** When either side is refined, the constraint is rebuilt, and the points are tied anew at the
+next update in the configuration of the model -- each displaced from rest as the tied point of before
+closest to it was at the last evaluation. If only the master was refined, every point keeps its own
+displacement from rest, and the forces of the tie are what they were (the deck
+``testfiles/edelweiss-only/SurfaceTieHexa20AMR`` and ``tests/test_surfacetodeformablesurfacepenalty.py``
+check both, and that the tie transmits a homogeneous state across the refinement). On a refined slave side,
+the new points take the displacements of their old neighbours.
 
 .. _integrated-contact-algorithm:
 
