@@ -926,25 +926,61 @@ An initial overlap
 ~~~~~~~~~~~~~~~~~~
 
 At the first update the bodies are as the model gives them, and a point that overlaps is in contact. Two
-things make an overlap at the start: an **interference fit** (a groove cut smaller than the thread), and the
-**faceting of a curved surface**, which makes even a perfect fit overlap -- the gap is measured from a slave
-point on its curved face along the normal of a flat master facet to a point of the master's curved face,
-and for a twisted surface such as a helical flank that is not zero. Pushed apart at once, either overlap is a
-prestress in the first increment, and a shock in an explicit analysis.
+things make an overlap at the start, and they mean opposite things:
 
-With ``initialOverlapRampTime`` :math:`T`, the gap :math:`g_0 \le 0` of every paired point at the first
-update (where it is closed) is taken out of its gap at first and fed back in over :math:`T`:
+- an **interference fit**: a groove cut smaller than the thread, a shaft pressed into a smaller hole. The
+  overlap is real; pushing it apart is what loads the parts, as it does in the workshop.
+- an **error of the geometry**: two discretizations of one surface that do not coincide. The gap is
+  measured from a slave point on its face to a point of the master's curved parent face; where the slave
+  face is flat and the master curved, the slave face is a chord of the master's arc and lies inside it, by
+  the sag :math:`r (1 - \cos(\Delta\theta / 2))` of an arc of radius :math:`r` spanned by
+  :math:`\Delta\theta` -- the flat faces of particles in the curved hole a screw fits: 10 degree faces at a
+  radius of 6 mm lie up to 23 micrometres inside the screw. A twisted master, such as a helical flank, makes
+  even matching faces overlap a little. Nothing in the body pushes that overlap apart: the faceted surface
+  only *stands for* the surface the two parts share.
+
+The option ``initialOverlap`` says which it is. With the gap :math:`g_0 \le 0` of every paired point at the
+first update (where it is closed), the penalty law sees
 
 .. math::
-    g_\text{law} = g - \lambda(t) \, g_0 , \qquad
+    g_\text{law} = g - \lambda(t) \, g_0 .
+
+**pushApart** (the default): the interference fit. By default :math:`\lambda = 0` at once: the overlap is a
+prestress from the first increment, and a shock in an explicit analysis. With ``initialOverlapRampTime``
+:math:`T` it is pushed apart gradually:
+
+.. math::
     \lambda = 1 - s + \frac{\sin 2 \pi s}{2 \pi} , \qquad s = \frac{t - t_0}{T} \in [0, 1] ,
 
 with :math:`t_0` the time of the first update. :math:`\lambda` falls from one to zero starting and ending at
-rest, as the pull of a quasi-static explicit analysis does; after :math:`T` the full overlap is pushed apart.
-:math:`g_0` is a constant, so the gap's gradient and the tangent are as before, and the penalty law sees
-:math:`g_\text{law}`. The offsets belong to the points and are written to a checkpoint; a refinement of a
-contact surface during the ramp regenerates its points without them. ``initialOverlapRampTime=0`` (the
-default) pushes the overlap apart at once.
+rest, as the pull of a quasi-static explicit analysis does; after :math:`T` the full overlap is pushed apart,
+and the parts are prestressed as the fit prescribes.
+
+**adjust**: the error of the geometry, like the strain-free adjustment of initial overclosures in commercial
+codes. :math:`\lambda = 1` for good: the master surface is taken as adjusted to touch each point where it
+was found, the point rests there without a force, and its gap is measured from there. A point that is
+pressed further in carries the force of a point that just touched at the start; a point that separates and
+comes back meets the surface where it touched it, not the faceted one. Nothing is prestressed, and nothing
+needs a ramp.
+
+Which one? Ask what the overlap is in the real parts. If the parts fit (the screw cut its own groove, the
+particles stand for the concrete around it), the overlap is an artefact of the meshes: **adjust**. If they
+do not fit (a press fit, a wedge driven in), the stress the overlap causes is the physics: **pushApart**, with
+a ramp in an explicit analysis. What adjust does not do is move any node: the offset belongs to the contact
+point, the size of the overlap is reported at the first update, and a point that slides far along a master
+whose curvature changes carries the offset of where it started (small sliding).
+
+Either way :math:`g_0` is a constant, so the gap's gradient and the tangent are as before. The law sees
+:math:`g_\text{law}`: it decides which points are closed and how hard they push, for the force, the tangent
+and the bound of the stiffness in the critical time step of an explicit analysis alike
+(:doc:`criticaltimestep`): an adjusted point at rest is open and adds no spring. The gaps the constraint
+reports (``getGaps``, ``deepestPenetration``) are :math:`g_\text{law}` too. The offsets belong to the points
+and are written to a checkpoint; a new mesh of the master keeps them, contact points regenerated by a
+refinement have none (reported). A tie (:ref:`contact-tie`) keeps any gap or overlap at the pairing as its
+state at rest, in every direction; ``initialOverlap`` is an option of contact. The tests are in
+``tests/test_surfacetodeformablesurfacepenalty.py`` (an overlap ramped out, an adjusted overlap at rest and
+pressed further, a point that separates and comes back) and, with particles, EdelweissMeshfree's
+``particlefacecontact_test.py``.
 
 .. _contact-tie:
 

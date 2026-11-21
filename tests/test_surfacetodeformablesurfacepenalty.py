@@ -652,6 +652,120 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 self.assertEqual(closed < constraint.nPoints, time == 0.0, f"{contactPoints}, t={time}: {closed}")
                 assertTheBoundIsTheOneOfTheTangent(constraint, U, at(time))
 
+    def _slaveDisplacedBy(self, constraint, displacement: np.ndarray) -> np.ndarray:
+        """The block's solution with the contact points' nodes displaced uniformly, the master at rest."""
+
+        U = np.zeros(constraint.nDof)
+        U[: constraint._nSlaveDof] = np.tile(displacement, constraint._nSlaveDof // 3)
+        return U
+
+    def test_an_adjusted_initial_overlap_is_the_state_at_rest(self):
+        """With ``initialOverlap=adjust``, points that overlap the master at the first search rest there without a
+        force, for good, and their gap is measured from there: pressed further in by ``d``, they carry exactly the
+        force of points that just touched the master at the start, with the same tangent (the derivative of the
+        residual contribution) and the same bound of the stiffness. For both kinds of contact points."""
+
+        approach = np.array([0.0, 0.01, 0.0])
+        for contactPoints in ("quadraturePoints", "nodes"):
+            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            adjusted = self._constraint(
+                model, slaveSurface, masterSurface, initialOverlap="adjust", contactPoints=contactPoints
+            )
+            self.assertTrue((adjusted.stateOfPoints == ContactState.IN_CONTACT).all())
+            np.testing.assert_allclose(adjusted._initialOverlap, -0.05, rtol=1e-12)
+            # at rest, also when both sides move together: touching, without a force (to round-off)
+            for U in (np.zeros(adjusted.nDof), np.tile([0.3, -0.2, 0.1], adjusted.nDof // 3)):
+                np.testing.assert_allclose(self._forces(adjusted, U), 0.0, atol=1e-10, err_msg=contactPoints)
+                np.testing.assert_allclose(adjusted.getGaps(), 0.0, atol=1e-14)
+                self.assertLess(adjusted.penaltyEnergy, 1e-20)
+
+            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.0)
+            touching = self._constraint(model, slaveSurface, masterSurface, contactPoints=contactPoints)
+            self.assertEqual(touching.nDof, adjusted.nDof)
+
+            U = self._slaveDisplacedBy(adjusted, approach)
+            forces, K = residualContributionAndTangent(adjusted, U, np.zeros_like(U))
+            forcesTouching, KTouching = residualContributionAndTangent(touching, U, np.zeros_like(U))
+            self.assertAlmostEqual(adjusted.totalNormalForce, -1.0e4 * _SIDE**2 * 0.01, delta=1e-9)
+            np.testing.assert_allclose(forces, forcesTouching, rtol=1e-10, atol=1e-10, err_msg=contactPoints)
+            np.testing.assert_allclose(K, KTouching, rtol=1e-12, atol=1e-12 * np.abs(K).max())
+            self.assertAlmostEqual(adjusted.deepestPenetration, 0.01, delta=1e-12)
+            self.assertAlmostEqual(adjusted.penaltyEnergy, touching.penaltyEnergy, delta=1e-12)
+
+            V = U + 1e-4 * np.random.default_rng(4).standard_normal(adjusted.nDof)
+            K = residualContributionAndTangent(adjusted, V, np.zeros_like(V))[1]
+            dP_dU = finiteDifferenceTangent(adjusted, V, np.zeros_like(V), h=1e-8)
+            np.testing.assert_allclose(K, dP_dU, atol=1e-5 * np.abs(K).max())
+            assertTheBoundIsTheOneOfTheTangent(adjusted, V)
+
+    def test_a_point_that_separates_comes_back_to_the_adjusted_surface(self):
+        """A point that leaves the master after an adjusted initial overlap and comes back meets the master where it
+        touched it at the start: no force until it is back there, the force of its further approach beyond."""
+
+        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        field = self._addDisplacementField(model)
+        constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
+
+        def movedTo(y: float) -> float:
+            for node in slaveSurface.extractNodeSet():
+                field["U"][field._indicesOfNodesInArray[node]] = [0.0, y, 0.0]
+            constraint.updateConnectivity(model)
+            U = np.concatenate([field["U"][field.indexOfNode(node)] for node in constraint.nodes])
+            self._forces(constraint, U)
+            return constraint.totalNormalForce
+
+        self.assertEqual(movedTo(-0.08), 0.0)  # out of the master, within the search distance
+        self.assertTrue((constraint.stateOfPoints == ContactState.APPROACHING).all())
+        self.assertEqual(movedTo(-0.01), 0.0)  # in the master again, short of where it touched
+        self.assertTrue((constraint.stateOfPoints == ContactState.IN_CONTACT).all())
+        self.assertAlmostEqual(movedTo(0.02), -1.0e4 * _SIDE**2 * 0.02, delta=1e-9)
+
+    def test_a_checkpoint_and_a_new_master_keep_the_adjusted_overlap(self):
+        """The offsets of an adjusted initial overlap are written to a checkpoint and restored, and they belong to the
+        contact points: a new mesh of the master keeps them, regenerated contact points lose them (reported)."""
+
+        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
+        U = self._slaveDisplacedBy(constraint, np.array([0.0, 0.01, 0.0]))
+        forces = self._forces(constraint, U)
+        self.assertLess(constraint.totalNormalForce, 0.0)
+
+        restored = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust", searchDistance=1e-12)
+        restored.setRestartData(constraint.getRestartData())
+        np.testing.assert_array_equal(restored._initialOverlap, constraint._initialOverlap)
+        np.testing.assert_array_equal(self._forces(restored, U), forces)
+        restored.updateConnectivity(model)  # not the first search: nothing is recorded anew
+        np.testing.assert_array_equal(restored._initialOverlap, constraint._initialOverlap)
+
+        for touched in ("master", "slave"):
+            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
+            facets = constraint._masterSurfaceSetName if touched == "master" else constraint.slave.setName
+            surface = model.contactFacetRecipes[facets][0]
+            change = ModelChange(kind=ModelChangeType.REFINEMENT, changedSurfaces={surface})
+            self.assertTrue(constraint.refresh(model, change))
+            constraint.updateConnectivity(model)
+            self._forces(constraint, np.zeros(constraint.nDof))
+            if touched == "master":
+                np.testing.assert_allclose(constraint._initialOverlap, -0.05, rtol=1e-12)
+                self.assertAlmostEqual(constraint.totalNormalForce, 0.0, delta=1e-10)
+            else:
+                np.testing.assert_array_equal(constraint._initialOverlap, 0.0)
+                self.assertAlmostEqual(constraint.totalNormalForce, -1.0e4 * _SIDE**2 * 0.05, delta=1e-9)
+
+    def test_an_initial_overlap_is_pushed_apart_or_adjusted_and_nothing_else(self):
+        model, slaveSurface, masterSurface = self._twoBlockModel(0.05)
+        for options in (
+            {"initialOverlap": "close"},
+            {"initialOverlap": "adjust", "initialOverlapRampTime": 1.0},
+            {"initialOverlap": "adjust", "contactType": "tied"},
+        ):
+            with self.assertRaises(ValueError, msg=str(options)):
+                self._constraint(model, slaveSurface, masterSurface, **options)
+        pushedApart = self._constraint(model, slaveSurface, masterSurface, initialOverlap="PUSHAPART")
+        self.assertFalse(pushedApart.adjustsTheInitialOverlap)
+        np.testing.assert_array_equal(pushedApart._initialOverlap, 0.0)  # at once: nothing to record
+
     def test_refresh_ignores_changes_that_do_not_touch_the_surfaces(self):
         model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
