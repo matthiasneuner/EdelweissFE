@@ -298,9 +298,10 @@ nodes, each standing for its tributary area (``contactPoints=nodes``), and, from
 points on the faces of particles. Points that approach the master within ``searchDistance`` are
 paired with it; a point found inside without having been seen approaching gets no force and is
 reported. The master may have corners: at its creases -- a crest, a re-entrant root -- the gap is the
-distance to the crease, signed by its pseudonormal (:ref:`contact-corners`). An overlap at the start, from an
-interference fit or the faceting of a curved surface, is pushed apart at once, or over
-``initialOverlapRampTime`` (:ref:`contact-initial-overlap`).
+distance to the crease, signed by its pseudonormal (:ref:`contact-corners`). An overlap at the start is either
+an interference fit, pushed apart at once or over ``initialOverlapRampTime`` (``initialOverlap=pushApart``, the
+default), or an error of the geometry, such as flat faces in a curved hole, kept as the stress-free state
+(``initialOverlap=adjust``; :ref:`contact-initial-overlap`).
 
 With ``type=tied`` the constraint ties its points to the master surface instead (:ref:`contact-tie`): each
 point is paired once, with the closest point of the master, and held there in every direction, in tension
