@@ -66,8 +66,8 @@ class ContactPoints(ABC):
     (:meth:`currentPointCoordinates`), pairs those within reach with the master surface, and then *locates* the paired
     ones (:meth:`locatePoints`): they name the nodes they act on, which become the slave part of the constraint's
     block. Within the increment the constraint evaluates the located points only: where they are
-    (:meth:`coordinatesOfLocatedPoints`), the residual contribution of their normal forces
-    (:meth:`addNormalForceResidual`) and, for the tangent, their interpolation vectors
+    (:meth:`coordinatesOfLocatedPoints`), the residual contribution of the forces on them
+    (:meth:`addForceResidual`) and, for the tangent, their interpolation vectors
     (:meth:`interpolationOfLocatedPoint`).
 
     Attributes
@@ -132,20 +132,21 @@ class ContactPoints(ABC):
         """
 
     @abstractmethod
-    def addNormalForceResidual(self, P: np.ndarray, closed: np.ndarray, normalForces: np.ndarray, normals: np.ndarray):
-        """Add the residual contribution of normal forces at located points, :math:`f_n\\, c \\otimes n` per point:
-        the negative of the force :math:`-f_n\\, n` on the point, distributed with its interpolation vector.
+    def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
+        """Add the residual contribution of the forces of penalty springs at located points, :math:`f\\, c \\otimes n`
+        per point: the negative of the force :math:`-f\\, n` on the point, distributed with its interpolation vector.
+        A spring acts along a unit direction :math:`n`: the normal of a contact, an axis of a tie.
 
         Parameters
         ----------
         P
             The slave part of the constraint's residual contribution; augmented.
-        closed
+        points
             The located points that carry a force (indices into the located points).
-        normalForces
-            Their normal forces :math:`f_n`, negative in contact.
-        normals
-            Their unit normals, of shape (len(closed), nDim).
+        forces
+            The forces :math:`f` of their springs, the normal forces of a contact (negative in contact).
+        directions
+            The unit directions of their springs, of shape (len(points), nDim).
         """
 
     @abstractmethod

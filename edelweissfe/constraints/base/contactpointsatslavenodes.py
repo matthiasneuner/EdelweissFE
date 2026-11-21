@@ -171,22 +171,22 @@ class ContactPointsAtSlaveNodes(ContactPoints):
 
         return self._referenceCoordinatesOfLocated + U.reshape(self._referenceCoordinatesOfLocated.shape)
 
-    def addNormalForceResidual(self, P: np.ndarray, closed: np.ndarray, normalForces: np.ndarray, normals: np.ndarray):
-        """Add :math:`f_n\\, n` at each closed node; see :meth:`ContactPoints.addNormalForceResidual`.
+    def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
+        """Add :math:`f\\, n` at each given node; see :meth:`ContactPoints.addForceResidual`.
 
         Parameters
         ----------
         P
             The slave part of the residual contribution; augmented.
-        closed
+        points
             The located nodes that carry a force.
-        normalForces
-            Their normal forces.
-        normals
-            Their unit normals.
+        forces
+            The forces of their springs.
+        directions
+            The unit directions of their springs.
         """
 
-        P.reshape(self._referenceCoordinatesOfLocated.shape)[closed] += normalForces[:, None] * normals
+        P.reshape(self._referenceCoordinatesOfLocated.shape)[points] += forces[:, None] * directions
 
     def interpolationOfLocatedPoint(self, k: int) -> tuple[np.ndarray, np.ndarray]:
         """The degrees of freedom of a located node, and :math:`c = [1]`.
