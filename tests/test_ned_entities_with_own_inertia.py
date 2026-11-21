@@ -31,14 +31,15 @@ An entity that carries its own inertia (:attr:`~edelweissfe.models.discretesyste
 keeps its state in itself -- here, the displacement and the velocity of a point mass on a spring to the ground. ``NED``
 hands it the increment of its node (``advanceEntitiesWithOwnInertia``), the model accepts the state and reconnects the
 entities, and the entity returns, on its node, its internal force and its lumped momentum, its lumped mass and damping
-and, when due, the bound of its stable time increment. The node holds the coefficients of one increment only. The RKPM
+and, when its estimate is due, its critical time step. The node holds the coefficients of one increment only. The RKPM
 particles of EdelweissMeshfree are such entities; :class:`MassOnASpring` and :class:`SystemOfMassesOnSprings` are the
 same contract in a few lines of Python, and the tests check ``NED``'s path for it in EdelweissFE itself:
 
 * the calls of an increment come in the order of the module documentation of ``NED``,
 * the motion starts from the velocity projected from the momentum, and the leapfrog then is the central difference
   recursion of the oscillator, to round-off; its period is the analytic one, to second order in the increment,
-* the bound of the entities' stable time increment sets the increment of a step that asks for a larger one.
+* the critical time step of the entities sets the increment of a step that asks for a larger one, and, since it sets
+  the increment, it is estimated in every increment.
 """
 
 import numpy as np
@@ -64,8 +65,8 @@ MASS, STIFFNESS = 2.0, 50.0
 #: The initial velocities of the masses, one per mass: each oscillates along x with the amplitude velocity / omega.
 VELOCITIES = (0.3, -0.1)
 OMEGA = np.sqrt(STIFFNESS / MASS)
-#: The bound of the stable time increment of one mass on its spring, 2 / omega.
-STABLE_TIME_INCREMENT = 2.0 / OMEGA
+#: The critical time step of one mass on its spring, 2 / omega.
+CRITICAL_TIME_STEP = 2.0 / OMEGA
 
 
 class MassOnASpring(PointMass):
@@ -127,8 +128,8 @@ class SystemOfMassesOnSprings(DiscreteSystem):
         self.model.calls.append("damping")
         return self._onTheNodes(lambda mass: np.zeros(mass.nDof))
 
-    def stableTimeIncrementOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
-        self.model.calls.append("bound")
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
+        self.model.calls.append("estimate")
         # each mass on its spring alone: 2 / omega, from the mass the solver has just assembled
         return min(2.0 * np.sqrt(lumpedMass[mass][0] / STIFFNESS) for mass in self.entitiesWithOwnInertia)
 
@@ -211,28 +212,30 @@ def _run(stepLength: float, **options) -> tuple[ModelOfMassesOnSprings, _Recordi
 def test_the_calls_of_an_increment_come_in_the_order_of_the_module_documentation():
     """The step starts with a reconnection (the step-start topology update). Then, in every increment: advance the
     entities on the connectivity of the start of the increment; accept the state and reconnect; then, on the new
-    connectivity, evaluate the force and the momentum, the mass, the damping, and the bound when it is due: in the zero
-    increment, and here after every third increment."""
+    connectivity, evaluate the force and the momentum, the mass, the damping, and the critical time step when its
+    estimate is due: here in every increment, since the entities set the time increment, so that the margin of an
+    estimate is used up after one increment
+    (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`)."""
 
-    model, solver = _run(10 * STABLE_TIME_INCREMENT, **{"stable-increment-frequency": 3})
+    model, solver = _run(10 * CRITICAL_TIME_STEP)
 
-    oneIncrement = ["advance", "accept", "reconnect", "force and momentum", "mass", "damping"]
+    oneIncrement = ["advance", "accept", "reconnect", "force and momentum", "mass", "damping", "estimate"]
     expected = ["reconnect"]
-    for number in range(len(solver.history)):
-        expected += oneIncrement + (["bound"] if number % 3 == 0 else [])
+    for _ in range(len(solver.history)):
+        expected += oneIncrement
     assert model.calls[: len(expected)] == expected
 
 
-def test_the_bound_of_the_entities_sets_the_increment_of_a_step_that_asks_for_more():
-    """The step asks for its whole length; the increment taken is the bound of the entities times the courant
-    number, from the first increment on (the last one ends the step)."""
+def test_the_critical_time_step_of_the_entities_sets_the_increment_of_a_step_that_asks_for_more():
+    """The step asks for its whole length; the increment taken is the critical time step of the entities times the
+    courant number, from the first increment on (the last one ends the step)."""
 
     courantNumber = 0.5
-    _, solver = _run(10 * STABLE_TIME_INCREMENT, **{"courant-number": courantNumber})
+    _, solver = _run(10 * CRITICAL_TIME_STEP, **{"courant-number": courantNumber})
 
     timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])
     assert timeIncrements[0] == 0.0
-    np.testing.assert_allclose(timeIncrements[1:-1], courantNumber * STABLE_TIME_INCREMENT, rtol=1e-14)
+    np.testing.assert_allclose(timeIncrements[1:-1], courantNumber * CRITICAL_TIME_STEP, rtol=1e-14)
 
 
 @pytest.mark.parametrize("courantNumber", [0.8, 0.05])
@@ -240,11 +243,12 @@ def test_the_motion_starts_from_the_projected_velocity_and_is_the_central_differ
     """The masses start at rest at the origin, with the velocity of their state: ``NED`` projects it from their
     momentum, :math:`v_0 = p / m`, and the first increment moves them by :math:`v_0 \\Delta t` (the spring force is zero
     there). From then on the leapfrog is the central difference recursion
-    :math:`x_{n+1} = 2 x_n - x_{n-1} - (\\omega \\Delta t)^2 x_n`, to round-off, at any increment below the bound."""
+    :math:`x_{n+1} = 2 x_n - x_{n-1} - (\\omega \\Delta t)^2 x_n`, to round-off, at any increment below the
+    critical time step."""
 
-    _, solver = _run(40 * STABLE_TIME_INCREMENT, **{"courant-number": courantNumber})
+    _, solver = _run(40 * CRITICAL_TIME_STEP, **{"courant-number": courantNumber})
 
-    timeIncrement = courantNumber * STABLE_TIME_INCREMENT
+    timeIncrement = courantNumber * CRITICAL_TIME_STEP
     displacements = np.array([x for _, x in solver.history])[:-1]  # the last increment ends the step: shorter
     expected = np.zeros_like(displacements)
     expected[1] = timeIncrement * np.array(VELOCITIES)
@@ -272,4 +276,4 @@ def test_the_period_is_the_one_of_the_oscillator_to_second_order_in_the_incremen
         halfPeriod = times[crossing] + x[crossing] / (x[crossing] - x[crossing + 1]) * (
             times[crossing + 1] - times[crossing]
         )
-        assert halfPeriod == pytest.approx(np.pi / OMEGA, rel=(OMEGA * courantNumber * STABLE_TIME_INCREMENT) ** 2 / 10)
+        assert halfPeriod == pytest.approx(np.pi / OMEGA, rel=(OMEGA * courantNumber * CRITICAL_TIME_STEP) ** 2 / 10)

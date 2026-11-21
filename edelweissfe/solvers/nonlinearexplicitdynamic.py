@@ -36,6 +36,13 @@ solver, no Newton loop, and no cutback: the time increment is set by stability, 
 so a material that fails to integrate at the stable step is reported as an error rather than
 answered with a smaller step.
 
+**Words, one per quantity.** The *critical time step* is the largest time increment the central difference method is
+stable for, :math:`2/\\omega_\\mathrm{max}` of the assembled system; every part of the model gives an *estimate* of its
+own, a lower bound of it (:doc:`/theory/criticaltimestep`). The *time increment* is what the step takes: at most the
+fraction ``courant-number`` of the critical time step. The *inertia* of a field is the coefficient of its second time
+derivative -- a mass on the displacement, a micro-inertia on a nonlocal field --, its *damping* the coefficient of the
+first; *lumped* means summed onto the diagonal, node by node.
+
 **Inertia and damping.** An element reports two diagonals: the coefficient of each field's second
 time derivative (its inertia) and of its first (its damping). The integrator divides by the one and
 relaxes with the other, and *which* scheme a field gets is read off them -- an inertia means central
