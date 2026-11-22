@@ -31,9 +31,17 @@ where :math:`\mathrm{skew}(\mathbf{v})` is the skew-symmetric matrix with
 :math:`\mathrm{skew}(\mathbf{v})\,\mathbf{x} = \mathbf{v}\times\mathbf{x}`. The stored DOF is the
 *raw total* pseudo-vector; because :math:`\exp(\boldsymbol{\theta}+\delta\boldsymbol{\theta}) \neq
 \exp(\boldsymbol{\theta})\exp(\delta\boldsymbol{\theta})` in general, linearizing any quantity with
-respect to :math:`\boldsymbol{\theta}_{RP}` requires the right Jacobian
-:math:`\mathbf{J}_r(\boldsymbol{\theta}_{RP})` of the exponential map (this is what makes the
-discrete-rigid-body contact tangent geometrically exact — see :doc:`/model/constraints`).
+respect to :math:`\boldsymbol{\theta}_{RP}` requires the right Jacobian of the exponential map,
+
+.. math::
+    \mathbf{J}_r(\boldsymbol{\theta}) = \mathbf{I}
+    - \frac{1-\cos\varphi}{\varphi^2}\,\mathrm{skew}(\boldsymbol{\theta})
+    + \frac{\varphi-\sin\varphi}{\varphi^3}\,\mathrm{skew}(\boldsymbol{\theta})^2 ,
+    \qquad \varphi = \lVert \boldsymbol{\theta} \rVert :
+
+:math:`\mathbf{R}\,\mathbf{J}_r` maps a perturbation of the stored pseudo-vector onto the spatial rotation it
+produces, the identity only at zero rotation (this is what makes the tangent of the contact against a discrete
+rigid body geometrically exact -- see :ref:`integrated-contact-rigid-body`).
 
 A surface node with initial position offset :math:`\boldsymbol{\rho}_i =
 \mathbf{X}_i - \mathbf{X}_{RP}` relative to the RP moves rigidly to the current configuration
@@ -47,8 +55,8 @@ managers read to draw the moving body. Because the surface nodes are not DOFs, t
 broadphase convenience, not part of the solve: every nonlinear solver invokes it through
 :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.updateRigidBodies`, so all
 solver variants (serial, parallel, arc-length, explicit) keep the visualization geometry consistent.
-Contact constraints do not rely on it — they query the surface with the RP pose taken directly from
-the current Newton iterate (see below).
+Contact constraints do not rely on it -- they take the RP pose directly from the current Newton iterate
+(see below).
 That pose is provided by
 :meth:`~edelweissfe.rigidbodies.discreterigidbody.DiscreteRigidBody.poseFromDofs`. The integrated
 contact constraint searches the body-frame triangles of

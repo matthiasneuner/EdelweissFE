@@ -1202,8 +1202,9 @@ contact point meets a rigid body as it meets a deformable master -- the quadratu
 the faces of particles (EdelweissMeshfree). Their positions, their areas and the distribution of their forces
 with their interpolation vectors :math:`\boldsymbol{c}` all come from the contact points, and the penalty law from
 :mod:`~edelweissfe.constraints.base.penaltylaw`. So a serendipity corner receives its tensile share exactly as
-above, and the node-based ``nodeToDiscreteRigidBodyPenalty`` -- whose corners lift off for the reason explained in
-:ref:`serendipity-liftoff` -- is deprecated in its favour.
+above. With ``contactPoints=nodes`` it is also the contact of nodes against a rigid body, with the small-sliding
+gap below; how an input of the removed node-based ``nodeToDiscreteRigidBodyPenalty`` (finite sliding, penalty per
+node) moves to it is described in :doc:`/model/constraints`.
 
 Only the master side differs. The rigid body moves with its reference point (RP): current position
 :math:`\boldsymbol{c} = \boldsymbol{X}_{RP} + \boldsymbol{u}_{RP}` and rotation
@@ -1238,8 +1239,8 @@ quadrature point) and :math:`\boldsymbol{S} = \boldsymbol{R}\,\boldsymbol{J}_r(\
 normal rotates with the body, :math:`\partial\boldsymbol{n}_q/\partial\boldsymbol{\theta} =
 -\mathrm{skew}(\boldsymbol{n}_q)\boldsymbol{S}`, which gives the geometric tangent terms coupling
 the rotation to the slave nodes and to :math:`\boldsymbol{u}_{RP}`. The
-:math:`\boldsymbol{\theta}\boldsymbol{\theta}` block is omitted, as for the node-based constraint;
-it plays no role for a fixed rigid body or in explicit runs.
+:math:`\boldsymbol{\theta}\boldsymbol{\theta}` block is omitted: it needs the second derivative of the
+exponential map. It plays no role for a fixed rigid body or in explicit runs.
 
 **Degrees of freedom.** The constraint acts on the nodes of the located contact points -- for a quadrature
 point a copy of its slave parent face's nodes, for a slave node itself, for the points of particles the nodes of
@@ -1250,25 +1251,10 @@ located point plus the RP block they all share (:mod:`~edelweissfe.constraints.b
 A fixed support is a rigid body whose RP carries Dirichlet conditions.
 
 **Penalty units.** In both integrated constraints ``penalty`` is a modulus per unit area (force per
-length cubed), multiplied by each point's integration weight. The node-based constraints use a
-force per length per node instead, so a node-based value converts approximately as
-:math:`p_\text{integrated} \approx p_\text{node} / A_\text{tributary}`:
-
-.. list-table::
-    :header-rows: 1
-
-    * - Constraint
-      - ``type=linear``
-      - ``type=quadratic``
-    * - ``surfaceToDeformableSurfacePenalty``, ``surfaceToDiscreteRigidBodyPenalty``
-      - force / length\ :sup:`3`
-      - force / length\ :sup:`4`
-    * - ``nodeToDiscreteRigidBodyPenalty``
-      - force / length
-      - force / length\ :sup:`2`
-
-The integrated penalty is therefore also independent of the mesh size, e.g. under AMR, whereas a
-per-node penalty stiffens the interface by the refinement factor.
+length cubed for ``type=linear``, per length to the fourth for ``type=quadratic``), multiplied by each point's
+area: its integration weight, or the tributary area of a node. A penalty per node converts as
+:math:`p_\text{area} = p_\text{node} / A_\text{tributary}`. The penalty per area is independent of the mesh
+size, e.g. under AMR, whereas a penalty per node stiffens the interface by the refinement factor.
 
 
 Framework integration and verification

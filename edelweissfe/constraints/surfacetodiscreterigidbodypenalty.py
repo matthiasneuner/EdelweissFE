@@ -73,12 +73,12 @@ faces of particles. What a kind of point contributes -- how it moves, which node
 for -- is its :class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`, as against a deformable master
 (:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`); only the master side differs.
 
-This is the rigid-body counterpart of :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`,
-and exists for the same reason: a node-based scheme such as
-:mod:`~edelweissfe.constraints.nodetodiscreterigidbodypenalty` cannot transmit a correct pressure
-across a serendipity (quad8/hexa20) face, whose consistent corner loads are tensile. Integrating the
-pressure at quadrature points and distributing it with the parent-face shape functions lets a corner
-node carry a tensile force from a non-negative pressure field.
+This is the rigid-body counterpart of :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`. Its default
+contact points are quadrature points for the same reason: nodes cannot transmit a correct pressure across a serendipity
+(quad8/hexa20) face, whose consistent corner loads are tensile. Integrating the pressure at quadrature points and
+distributing it with the parent-face shape functions lets a corner node carry a tensile force from a non-negative
+pressure field. With ``contactPoints=nodes`` it is the contact of nodes against a rigid body, with a penalty per unit
+area (times the tributary area of a node) and a small-sliding gap.
 """
 
 
@@ -159,9 +159,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         \\frac{\\partial^2 g_p}{\\partial \\boldsymbol{u}_{RP} \\partial \\boldsymbol{\\theta}}
         = \\mathrm{skew}(\\boldsymbol{n}_p)\\,S ,
 
-    and their transposes. The :math:`\\boldsymbol{\\theta}\\boldsymbol{\\theta}` block is omitted, as in
-    :mod:`~edelweissfe.constraints.nodetodiscreterigidbodypenalty`: it needs the second derivative of
-    the exponential map. It affects only the convergence rate of implicit runs with a rotating RP, not
+    and their transposes. The :math:`\\boldsymbol{\\theta}\\boldsymbol{\\theta}` block is omitted: it needs the
+    second derivative of the exponential map. It affects only the convergence rate of implicit runs with a rotating RP, not
     the residual; with a fixed RP, or in explicit runs, it plays no role.
 
     Forces and tangent

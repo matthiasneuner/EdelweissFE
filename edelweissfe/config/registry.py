@@ -188,7 +188,6 @@ _addBuiltins(
         "linearizedrigidbody",
         "linearizedrigidbodympc",
         "nodetodeformablesurfacepenalty",
-        "nodetodiscreterigidbodypenalty",
         "nodetorigidsurfacepenalty",
         "penaltyindirectcontrol",
         "rigidbody",
