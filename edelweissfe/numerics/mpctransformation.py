@@ -86,8 +86,10 @@ For explicit dynamics with a lumped (diagonal) mass vector, the consistent row-s
 :math:`T^T M T` stays diagonal: each master receives its own mass plus the :math:`N_a`-weighted
 mass of the slaves glued to it (total mass is conserved when :math:`\\sum_a N_a = 1`, which holds
 for interpolation-type constraints). Forces are folded as :math:`\\tilde{P} = T^T P`, and the slave
-kinematics are assigned directly from the masters, adding zero stiffness and hence leaving the
-critical time step untouched.
+kinematics are assigned directly from the masters, adding zero stiffness. The elements keep their critical time
+steps: with coefficients that are nonnegative and sum to one, a master carries at least the share of mass each element
+at its slaves lends it. Where a penalty constraint adds to the frequency of a master, the elements at its slaves count
+there too (:meth:`MultiPointConstraintTransformation.foldLargestOntoMasters`).
 """
 
 
@@ -494,6 +496,32 @@ class MultiPointConstraintTransformation:
         """
 
         return abs(self._T).T @ rowSums
+
+    def foldLargestOntoMasters(self, values: np.ndarray) -> np.ndarray:
+        """Fold values per DOF from the slave DOFs onto their masters by the largest: a master takes the largest of its
+        own value and those of the slaves that move with it (a nonzero coefficient),
+        :math:`v_m \\leftarrow \\max(v_m, \\max_{s:\\, N_{sm} \\ne 0} v_s)`; every other entry stays as it is.
+
+        The explicit dynamic solver folds the elements' bounds of the squared frequencies with it
+        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfTheElements.bound`): an element at a slave
+        acts on the masters of the slave, through :math:`T^T K T`.
+
+        Parameters
+        ----------
+        values
+            The values on all DOFs.
+
+        Returns
+        -------
+        np.ndarray
+            The folded values.
+        """
+
+        values = np.array(values)
+        W = self._W.tocoo()
+        moves = W.data != 0.0
+        np.maximum.at(values, W.col[moves], values[self.slaveDofIndices[W.row[moves]]])
+        return values
 
     def applySlaveKinematics(self, V: np.ndarray):
         """Assign the slave DOFs their master-interpolated values (in place):

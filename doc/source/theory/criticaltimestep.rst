@@ -146,13 +146,25 @@ degree of freedom it couples, and the parts keep the rest, :math:`(1 - \theta_i)
   :math:`\sqrt{1-\theta_i}`, their row at :math:`i` grows by :math:`1/(1-\theta_i)`, and stays below :math:`\Lambda`
   for the same reason.
 
-Every piece is below :math:`\Lambda` with its share of the mass, so the whole is. The argument is the Rayleigh
-quotient's, which needs a symmetric stiffness: the penalty springs are (a closed point with a frozen projection), and
-the elements' estimate bounds their elastic stiffness. The tangent of gradient-enhanced particles is not symmetric;
+Every piece is below :math:`\Lambda` with its share of the mass, so the whole is. The argument is only as safe as each
+:math:`\lambda_e` is a bound of its element: the estimate is each element's own, and the one of the Python elements
+lies above their exact critical time step (EdelweissFE#323). The argument is the Rayleigh quotient's, which needs a
+symmetric stiffness: the penalty springs are (a closed point with a frozen projection), and the elements' estimate
+bounds their elastic stiffness. The tangent of gradient-enhanced particles is not symmetric;
 for them, the constraint's rows are added to the particles' rows inside their field matrix
 (EdelweissMeshfree, ``CriticalTimeStepBoundOfEachFieldBlock``), and the bound of the field matrix holds for any matrix.
 Where a constraint couples particles and finite elements at once, the two arguments are combined; that the
 unsymmetric particles take part in the Rayleigh quotient of the elements is then an assumption.
+
+**With multi-point constraints** (a ``tie`` of a fine mesh to a coarse one, hanging nodes), a slave moves with its
+masters, :math:`u_s = \sum_a N_a u_{m_a}`, and the system that oscillates is the condensed one,
+:math:`\boldsymbol{T}^T \boldsymbol{K} \boldsymbol{T}` with the slave masses folded onto the masters. A spring at a
+slave acts on its masters: its row sums are taken with the weights of the masters and folded onto them by
+:math:`|\boldsymbol{T}|`. So does an element at a slave: a master takes the largest :math:`\lambda_e` of the elements
+at it *and at its slaves*. With coefficients that are nonnegative and sum to one, as an interpolation has, an element
+at a slave keeps its own bound with the shares of mass it lends the masters (Jensen's inequality,
+:math:`(\sum_a N_a x_a)^2 \le \sum_a N_a x_a^2`), and the argument above holds for the condensed system. Without the
+second fold, a stiff element at a slave would be missing at its master just where a penalty there adds the most.
 
 What the bound gives away is the Gershgorin step: the row sum is the exact frequency for springs between equal masses
 and above it otherwise, and a normal oblique to the axes spreads the spring over the components of a node.

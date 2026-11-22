@@ -1078,6 +1078,7 @@ class NED(NonlinearSolverBase):
                 rowSumsOfThePenaltyConstraints,
                 self._criticalTimeStepOfTheElements,
                 self._criticalTimeStepOfTheEntities,
+                self.mpcTransformation,
             )
             self._enforceTheCriticalTimeStep(step, "The penalty constraints", 2)
 
@@ -1257,7 +1258,11 @@ class NED(NonlinearSolverBase):
         rowSums = self._rowSumsOfThePenaltyConstraints(U, dU, timeStep)
         if rowSums is not None:
             self._criticalTimeStepOfThePenaltyConstraints.estimate(
-                self.system, rowSums, self._criticalTimeStepOfTheElements, self._criticalTimeStepOfTheEntities
+                self.system,
+                rowSums,
+                self._criticalTimeStepOfTheElements,
+                self._criticalTimeStepOfTheEntities,
+                self.mpcTransformation,
             )
 
     def _enforceTheCriticalTimeStep(self, step, cause: str, journalLevel: int):

@@ -182,9 +182,11 @@ class CriticalTimeStepOfTheElements(CriticalTimeStepEstimate):
         #: The elements and their critical time steps, as last estimated.
         self._elements = []
         self._criticalTimeStepOfElement = np.zeros(0)
-        #: The bound of each degree of freedom (:meth:`bound`), and the numbering it is of.
+        #: The bound of each degree of freedom (:meth:`bound`), and the numbering and the multi-point constraints it is
+        #: of.
         self._bound = None
         self._numberingOfTheBound = None
+        self._mpcTransformationOfTheBound = None
 
     def isDue(self, system) -> bool:
         """Whether the mesh is not the one of the last estimate.
@@ -222,15 +224,22 @@ class CriticalTimeStepOfTheElements(CriticalTimeStepEstimate):
         self._mesh = system.model.topology.version
         self._bound = None
 
-    def bound(self, system) -> CriticalTimeStepBoundOfEachDof:
+    def bound(self, system, mpcTransformation=None) -> CriticalTimeStepBoundOfEachDof:
         """The estimate in the form the penalty constraints add to: at each degree of freedom of the elements, the largest
         squared frequency of the elements there, :math:`\\omega_i^2 = \\max_{e \\ni i} (2 / \\Delta t_e)^2`. Formed anew
         for every numbering, from the elements' critical time steps of the last estimate.
+
+        With multi-point constraints, a slave moves with its masters, and an element at the slave acts on the masters
+        (through :math:`T^T K T`): a master takes the largest squared frequency of the elements at it and at its slaves
+        (:meth:`~edelweissfe.numerics.mpctransformation.MultiPointConstraintTransformation.foldLargestOntoMasters`).
+        The row sums of the penalty constraints are folded onto the masters as well, so the two meet there.
 
         Parameters
         ----------
         system
             The discrete system, whose numbering the bound is of.
+        mpcTransformation
+            The condensation of the multi-point constraints of the discrete system; None if it has none.
 
         Returns
         -------
@@ -238,7 +247,11 @@ class CriticalTimeStepOfTheElements(CriticalTimeStepEstimate):
             The bound.
         """
 
-        if self._numberingOfTheBound is not system.numbering or self._bound is None:
+        if (
+            self._bound is None
+            or self._numberingOfTheBound is not system.numbering
+            or self._mpcTransformationOfTheBound is not mpcTransformation
+        ):
             dofsOfElement = [np.asarray(system.locations[element]) for element in self._elements]
             dofs = np.concatenate([np.zeros(0, dtype=np.intp)] + dofsOfElement)
             squaredFrequencyOfElement = (2.0 / self._criticalTimeStepOfElement) ** 2
@@ -247,8 +260,14 @@ class CriticalTimeStepOfTheElements(CriticalTimeStepEstimate):
                 squaredFrequencies, dofs, np.repeat(squaredFrequencyOfElement, [len(d) for d in dofsOfElement])
             )
             dofs = np.unique(dofs)
+            if mpcTransformation is not None:
+                squaredFrequencies = mpcTransformation.foldLargestOntoMasters(squaredFrequencies)
+                ofTheElements = np.zeros(system.numbering.nDof)
+                ofTheElements[dofs] = 1.0
+                dofs = np.flatnonzero(mpcTransformation.foldLargestOntoMasters(ofTheElements))
             self._bound = CriticalTimeStepBoundOfEachDof(self.value, dofs, squaredFrequencies[dofs])
             self._numberingOfTheBound = system.numbering
+            self._mpcTransformationOfTheBound = mpcTransformation
         return self._bound
 
 
@@ -497,6 +516,7 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
         rowSumsOfThePenaltyConstraints: np.ndarray,
         elements: CriticalTimeStepOfTheElements,
         entities: CriticalTimeStepOfEntitiesWithOwnInertia,
+        mpcTransformation=None,
     ):
         """Estimate the critical time step of the degrees of freedom the penalty constraints couple, with the last
         estimates of the parts.
@@ -506,16 +526,20 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
         system
             The discrete system.
         rowSumsOfThePenaltyConstraints
-            The row sums :math:`r_i` of the penalty constraints, one per degree of freedom of the numbering.
+            The row sums :math:`r_i` of the penalty constraints, one per degree of freedom of the numbering, folded onto
+            the masters of multi-point constraints.
         elements
             The estimate of the finite elements.
         entities
             The estimate of the entities that carry their own inertia.
+        mpcTransformation
+            The condensation of the multi-point constraints of the discrete system; None if it has none
+            (:meth:`CriticalTimeStepOfTheElements.bound`).
         """
 
         self._take(
             min(
-                elements.bound(system).criticalTimeStep(rowSumsOfThePenaltyConstraints),
+                elements.bound(system, mpcTransformation).criticalTimeStep(rowSumsOfThePenaltyConstraints),
                 entities.withThePenaltyConstraints(rowSumsOfThePenaltyConstraints),
             )
         )

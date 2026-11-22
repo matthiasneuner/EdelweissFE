@@ -33,6 +33,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.solvers.base.criticaltimestep import (
     CriticalTimeStepBoundOfEachDof,
     CriticalTimeStepOfEntitiesWithOwnInertia,
@@ -355,3 +356,99 @@ def test_the_entities_with_the_penalty_constraints_are_estimated_anew_when_their
     stiffRows[2] = 100 * (2 / inUse) ** 2
     assert criticalTimeStep.withThePenaltyConstraints(stiffRows) < inUse
     assert criticalTimeStep.isDue(system, 1, M, C, inUse, stiffRows)
+
+
+def _rowSumsWithMultiPointConstraints(Kc: np.ndarray, M: np.ndarray, transformation) -> np.ndarray:
+    """The row sums of the penalty springs as ``NED`` forms them with multi-point constraints: the column weights
+    :math:`1/\\sqrt{M}` of the folded masses, a slave weighted by its masters, and the rows folded onto the masters."""
+
+    scaling = np.zeros_like(M)
+    scaling[M > 0] = 1 / np.sqrt(M[M > 0])
+    weights = transformation.slaveWeightsOfAbsoluteCoefficients(scaling)
+    return scaling * transformation.foldRowSumsOfAbsoluteCoefficients(np.abs(Kc) @ weights)
+
+
+def _exactCriticalTimeStepWithMultiPointConstraints(K: np.ndarray, M: np.ndarray, records: list) -> float:
+    """The exact critical time step of the condensed system: the largest eigenvalue of :math:`T^T K T` scaled by the
+    folded masses, over the independent degrees of freedom; :math:`T` from the records of the slaves."""
+
+    T = np.eye(len(M))
+    for slave, masters in records:
+        T[slave] = 0.0
+        for master, coefficient in masters:
+            T[slave, master] = coefficient
+    independent = np.setdiff1d(np.arange(len(M)), [slave for slave, _ in records])
+    s = 1 / np.sqrt(M[independent])
+    condensed = (T.T @ K @ T)[np.ix_(independent, independent)]
+    return 2 / np.sqrt(np.max(np.linalg.eigvalsh(s[:, None] * condensed * s[None, :])))
+
+
+def _penaltyEstimateWithMultiPointConstraints(elements, M, Kc, transformation) -> float:
+    system = _systemOf(elements, len(M))
+    ofTheElements = CriticalTimeStepOfTheElements()
+    ofTheElements.estimate(system, {element: None for element in elements})
+    ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
+    ofTheConstraints.estimate(
+        system,
+        _rowSumsWithMultiPointConstraints(Kc, M, transformation),
+        ofTheElements,
+        CriticalTimeStepOfEntitiesWithOwnInertia(DELTA),
+        transformation,
+    )
+    return min(ofTheElements.value, ofTheConstraints.value)
+
+
+def test_an_element_at_a_slave_counts_at_its_master_where_a_penalty_acts():
+    """Masters c, m and a slave s = m of a multi-point constraint; the element (c, m) of stiffness 1, the element (s, f)
+    of stiffness 5, a penalty of 15 at s, all lumped masses 1. The slave's element acts on m through :math:`T^T K T`,
+    and the penalty folded onto m adds 15/2 there: the bound at m is the largest squared frequency of the elements at m
+    *and at its slave*, 10, plus 7.5 -- not 2 + 7.5, which, with the 10 of the element (s, f) as the largest, would
+    estimate a critical time step 11 % above the exact one."""
+
+    def element(dofs, k):
+        return _ElementWithItsEigenvalue(np.array(dofs), k * np.array([[1.0, -1.0], [-1.0, 1.0]]), np.ones(2))
+
+    c, m, s, f = range(4)
+    elements = [element([c, m], 1.0), element([s, f], 5.0)]
+    K = np.zeros((4, 4))
+    for e in elements:
+        K[np.ix_(e.dofs, e.dofs)] += e.K
+    Kc = np.zeros((4, 4))
+    Kc[s, s] = 15.0
+    records = [(s, [(m, 1.0)])]
+    transformation = MultiPointConstraintTransformation(records, 4)
+    M = np.ones(4)
+    transformation.foldLumpedMass(M)
+
+    exact = _exactCriticalTimeStepWithMultiPointConstraints(K + Kc, M, records)
+    estimate = _penaltyEstimateWithMultiPointConstraints(elements, M, Kc, transformation)
+    assert exact == pytest.approx(2 / np.sqrt(12.265), rel=1e-4)
+    assert estimate == pytest.approx(2 / np.sqrt(10.0 + 7.5), rel=1e-14)
+    assert estimate <= exact
+
+
+def test_with_multi_point_constraints_the_penalty_springs_bound_the_exact_eigenvalue(seed=4):
+    """Random elements and penalty springs on degrees of freedom of which some are slaves of multi-point constraints
+    (one to three masters, nonnegative coefficients that sum to one, as an interpolation has): the estimate is below the
+    exact critical time step of the condensed system, :math:`T^T (K + K^c) T` with the folded masses."""
+
+    rng = np.random.default_rng(seed)
+    limiting = 0
+    for _ in range(300):
+        K, M, elements, Kc = _randomModelWithPenaltySprings(rng, stiffnessOfTheSprings=10.0)
+        nDof = len(M)
+        slaves = rng.choice(nDof, size=3, replace=False)
+        independent = np.setdiff1d(np.arange(nDof), slaves)
+        records = []
+        for slave in slaves:
+            masters = rng.choice(independent, size=rng.integers(1, 4), replace=False)
+            coefficients = rng.uniform(0.1, 1.0, len(masters))
+            records.append((int(slave), list(zip(masters.tolist(), (coefficients / coefficients.sum()).tolist()))))
+        transformation = MultiPointConstraintTransformation(records, nDof)
+        transformation.foldLumpedMass(M)
+
+        exact = _exactCriticalTimeStepWithMultiPointConstraints(K + Kc, M, records)
+        estimate = _penaltyEstimateWithMultiPointConstraints(elements, M, Kc, transformation)
+        assert estimate <= exact * (1 + 1e-12)
+        limiting += estimate < min(e.criticalTimeStep for e in elements)
+    assert limiting > 0, "the springs limit in some of the systems"
