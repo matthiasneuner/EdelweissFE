@@ -120,6 +120,14 @@ member of that family, and it is what the corner-liftoff defect actually calls f
 #: that enters that deep between two updates of the connectivity has almost outrun the search.
 _entryDepthWarningFraction = 0.5
 
+#: The most steps a point in contact walks over the master in one update of the connectivity, see
+#: :meth:`Constraint._closestFacetsOnThisSideOfTheConvexCreases`. Every step goes to a closer facet, so the walk ends
+#: anyway; it takes about as many steps as the point passed rings of facets since the last update, one or two when the
+#: connectivity is updated often enough. A point that needs more has moved over much of the master between two
+#: updates: it keeps the facet of the last step, and the update is reported, as it then pairs differently when it is
+#: repeated (a resumed step repeats it).
+maximumStepsOfThePairingWalk = 16
+
 
 class ContactState(IntEnum):
     """Where a contact point stands with respect to the master surface, as of the last update of the connectivity."""
@@ -275,7 +283,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     one face of the master onto the next and around a re-entrant corner -- but never across a convex crease (see
     :meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.acrossAConvexCrease`): the closest facet of a point
     near a convex corner of the master may be on its side, of a point deep inside a thin body on its far side, and
-    would push the point out of the wrong side. A point that leaves the master body is released at once, also
+    would push the point out of the wrong side. Such a point walks over the master instead: to the closest facet on
+    this side of the crease, and on from there, until its facet no longer changes -- so that an update repeated at
+    the same configuration, as a resumed step repeats one, pairs it the same, however far it slid since the last
+    update. A point that leaves the master body is released at once, also
     beside a crest. A point that was out of reach at the previous update and is found inside the master body has
     tunnelled through the search distance between two updates of the connectivity (:attr:`ContactState.FOUND_INSIDE`):
     it gets no force and is reported. The search distance must therefore exceed the distance a point travels towards
@@ -689,15 +700,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             )
         ]
         if len(mustStay):
-            sameWay = []
-            for point in mustStay:
-                candidates = np.union1d(candidatesOfPoint[point], [previousFacet[point]]).astype(np.intp)
-                across = self._masterFacets.acrossAConvexCrease(
-                    np.full(len(candidates), previousFacet[point]), candidates, coordinatesOfFacet, normalOfFacet
-                )
-                sameWay.append(candidates[~across].tolist())
-            closestFacet[mustStay], weights[mustStay], _ = closestFacets(
-                coordinatesOfPoint[mustStay], facetCoords, sameWay
+            closestFacet[mustStay], weights[mustStay] = self._closestFacetsOnThisSideOfTheConvexCreases(
+                coordinatesOfPoint[mustStay],
+                previousFacet[mustStay],
+                [candidatesOfPoint[point] for point in mustStay],
+                coordinatesOfFacet,
+                normalOfFacet,
             )
             gap[mustStay], direction[mustStay] = self._masterFacets.signedDistances(
                 coordinatesOfPoint[mustStay],
@@ -728,6 +736,78 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             self._recordTheInitialOverlap(model, coordinatesOfPoint[paired], pairedFacet, paired)
 
         return self._assignMasterFacets(newAssignment)
+
+    def _closestFacetsOnThisSideOfTheConvexCreases(
+        self,
+        coordinatesOfPoints: np.ndarray,
+        previousFacets: np.ndarray,
+        candidatesOfPoints: list,
+        coordinatesOfFacet: np.ndarray,
+        normalOfFacet: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The facets of points in contact whose closest facet lies across a convex crease from their facet: each
+        point walks over the master, step by step, until its facet no longer changes (see the class documentation,
+        *The pairing*). A step goes from the facet to the closest of the facets around it (its patch, see
+        :meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.patchOfFacet`) and of the point's candidates
+        that do not lie across a convex crease from it.
+
+        One step is not enough: a point that slid past several turns of the master since the last update reaches, in
+        one step, only the facets on this side of the first. It would move on by one more step in every update, also
+        in an update repeated at the same configuration -- a resumed step repeats one -- and pair differently from the
+        uninterrupted run. At the facet where the walk ends, it pairs the same however often the update is repeated.
+
+        Every step goes to a closer facet (or an equally close one listed earlier), so the walk ends; it is bounded by
+        :data:`maximumStepsOfThePairingWalk`, and reaching the bound is reported.
+
+        Parameters
+        ----------
+        coordinatesOfPoints
+            The current coordinates of the points.
+        previousFacets
+            The facet each point was paired with.
+        candidatesOfPoints
+            The candidate facets of each point, see
+            :func:`~edelweissfe.utils.facetcontactgeometry.closestFacetCandidates`.
+        coordinatesOfFacet
+            The coordinates of all master facets.
+        normalOfFacet
+            Their unit normals.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            The facet of each point and the weights of its closest point in that facet.
+        """
+
+        facetCoords = list(coordinatesOfFacet)
+        facets = previousFacets.copy()
+        weights = np.zeros((len(facets), coordinatesOfFacet.shape[1]))
+        walking = np.arange(len(facets))
+        for _ in range(maximumStepsOfThePairingWalk):
+            onThisSide = []
+            for k in walking:
+                candidates = np.union1d(candidatesOfPoints[k], self._masterFacets.patchOfFacet(facets[k])).astype(
+                    np.intp
+                )
+                across = self._masterFacets.acrossAConvexCrease(
+                    np.full(len(candidates), facets[k]), candidates, coordinatesOfFacet, normalOfFacet
+                )
+                onThisSide.append(candidates[~across].tolist())
+            nextFacets, weights[walking], _ = closestFacets(coordinatesOfPoints[walking], facetCoords, onThisSide)
+            moved = nextFacets != facets[walking]
+            facets[walking] = nextFacets
+            walking = walking[moved]
+            if not len(walking):
+                return facets, weights
+
+        self.journal.message(
+            f"contact '{self.name}': {len(walking)} contact point(s) still moved on over the master after "
+            f"{maximumStepsOfThePairingWalk} steps of the pairing; they keep the facet of the last step, and an update "
+            "repeated at this configuration may pair them differently. Update the connectivity more often.",
+            self.identification,
+            level=1,
+        )
+        return facets, weights
 
     def _recordTheInitialOverlap(
         self, model: FEModel, coordinatesOfPoints: np.ndarray, facets: np.ndarray, paired: np.ndarray

@@ -49,6 +49,7 @@ import itertools
 from typing import NamedTuple
 
 import numpy as np
+from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 
 from edelweissfe.utils.rotations import skewMatrix
@@ -129,6 +130,36 @@ class FacetedSurface:
             self.edgeOppositeVertex = np.zeros((nFacets, 0), dtype=np.intp)
             self.edgeIsInterior = np.zeros(0, dtype=bool)
             self.vertexIsInterior = np.bincount(self.nodesOfFacet.ravel(), minlength=self.nVertices) == 2
+
+        # The facets that share a vertex with a facet, itself included: one ring of facets around it, its patch.
+        facetsAtVertex = csr_matrix(
+            (
+                np.ones(self.nodesOfFacet.size),
+                self.nodesOfFacet.ravel(),
+                np.arange(0, self.nodesOfFacet.size + 1, nVerticesPerFacet),
+            ),
+            shape=(nFacets, self.nVertices),
+        )
+        patches = (facetsAtVertex @ facetsAtVertex.T).tocsr()
+        patches.sort_indices()
+        self._patchStart, self._facetsOfPatches = patches.indptr, patches.indices
+
+    def patchOfFacet(self, facet: int) -> np.ndarray:
+        """The facets that share a vertex with a facet, the facet itself included -- one ring of facets around it, the
+        facets a point on it slides onto first.
+
+        Parameters
+        ----------
+        facet
+            The facet.
+
+        Returns
+        -------
+        numpy.ndarray
+            The facets, in ascending order.
+        """
+
+        return self._facetsOfPatches[self._patchStart[facet] : self._patchStart[facet + 1]]
 
     def features(self, coordinatesOfFacet: np.ndarray, normalOfFacet: np.ndarray) -> SurfaceFeatures:
         """The pseudonormals of the edges and the vertices, and which of them lie on a crease, in the configuration

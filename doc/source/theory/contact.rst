@@ -917,12 +917,29 @@ behind its plane (the surface turns away, from the top of a block to its side, o
 body to the other). Across a re-entrant crease the surface turns towards the point, and the point moves on
 to the facet that is closest: it slides around a root as it slides along a flank.
 
+**The pairing walks to a fixed point.** Where the closest facet of a point in contact lies across a convex
+crease from its facet, the point steps to the closest facet on this side of that crease: of the facets around
+its facet (the ring of facets that share a vertex with it, its *patch*) and of the facets that could be closest
+to it. If it has slid past several rings of the master since the last update -- around a curved master tiled
+by facets that each turn less than 30 degrees, say -- one step does not bring it where it is: from the facet it
+reached, another, closer facet lies on this side of the next crease. One step per update would move the point
+on by one more in every update, also in an update repeated at the same configuration, as a resumed step
+repeats the update of the step it resumes, and the resumed run would pair differently from the uninterrupted
+one. So the point walks, step by step, until its facet no longer changes. Every step goes to a closer facet,
+so the walk ends; it takes about as many steps as the point passed rings of facets, one or two at the usual
+frequency of the updates. It is bounded
+(``maximumStepsOfThePairingWalk`` of :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`): a point
+that needs more has moved over much of the master between two updates, keeps the facet of the last step, and is
+reported. The pairing is then the same as that of a search from scratch wherever the walk can reach the
+closest facet, and an update repeated at the same configuration changes nothing.
+
 The geometry is :class:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface`; the tests
 ``tests/test_facet_pseudonormals.py`` (inside and outside of a closed tooth with an acute crest and two
 roots, in 2D and 3D) and the class ``TestContactAtCornersOfTheMaster`` of
 ``tests/test_surfacetodeformablesurfacepenalty.py`` (a point sliding around a root stays in contact with the
-signed distance as its gap; a point sliding off a crest is released) show it. The tangent keeps its form:
-:math:`\bar{\boldsymbol{n}}` is frozen, whichever it is.
+signed distance as its gap; a point sliding off a crest is released; a point that slid around a curved master in
+one update pairs as a search from scratch, and pairs the same after a checkpoint and a repeated update) show it.
+The tangent keeps its form: :math:`\bar{\boldsymbol{n}}` is frozen, whichever it is.
 
 .. _contact-initial-overlap:
 

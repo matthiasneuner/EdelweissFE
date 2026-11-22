@@ -758,9 +758,18 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
         self.journal = Journal()
 
     def _model(self, masterBlocks: dict, masterFaces: dict) -> tuple:
-        """Plane strain CPE4 squares (lower left and upper right corner each), nodes shared where they coincide; the
-        master surface is the given faces (face 1 bottom, 2 right, 3 top, 4 left), the slave the bottom of a small
-        square far away, which a displacement field moves into place.
+        """Plane strain CPE4 squares (lower left and upper right corner each); the master surface is the given faces
+        (face 1 bottom, 2 right, 3 top, 4 left). See :meth:`_modelOfQuadrilaterals`."""
+
+        return self._modelOfQuadrilaterals(
+            {name: ((x0, y0), (x1, y0), (x1, y1), (x0, y1)) for name, ((x0, y0), (x1, y1)) in masterBlocks.items()},
+            masterFaces,
+        )
+
+    def _modelOfQuadrilaterals(self, masterQuadrilaterals: dict, masterFaces: dict) -> tuple:
+        """Plane strain CPE4 elements (their four corners, counterclockwise), nodes shared where they coincide; the
+        master surface is the given faces (face 1 from the first corner to the second, and so on), the slave the
+        bottom of a small square far away, which a displacement field moves into place.
 
         Returns
         -------
@@ -771,10 +780,11 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
         model = FEModel(2)
         nodeAt = {}
         elements = {}
+        slave = ((5.0, 5.0), (5.01, 5.0), (5.01, 5.01), (5.0, 5.01))
         with model.topology.changes():
-            for name, ((x0, y0), (x1, y1)) in (masterBlocks | {"slave": ((5.0, 5.0), (5.01, 5.01))}).items():
+            for name, corners in (masterQuadrilaterals | {"slave": slave}).items():
                 nodes = []
-                for x in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+                for x in corners:
                     if x not in nodeAt:
                         label = len(nodeAt) + 1
                         nodeAt[x] = model.nodes[label] = Node(label, np.array(x))
@@ -913,6 +923,101 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
         self.assertTrue((states[beyond] == ContactState.APPROACHING).all())
         np.testing.assert_allclose(gaps[beyond], path[beyond, 0] - 1.0, rtol=1e-12)
         np.testing.assert_array_equal(forces[beyond], 0.0)
+
+    def _pointsAroundACurvedMaster(self, path: np.ndarray) -> tuple:
+        """A half ring (radii 0.5 and 1, its outer face the master) tiled by nine elements of 20 degrees: a curved
+        master whose facets turn by less than the crease angle from one to the next, but by more than it over two. The
+        bottom left node of the slave square is moved along ``path``, given as angles in degrees, by ``overlap`` inside
+        the facet it is in front of.
+
+        Returns
+        -------
+        tuple
+            As :meth:`_slide`.
+        """
+
+        def onCircle(radius: float, degrees: float) -> tuple:
+            return (radius * np.cos(np.deg2rad(degrees)), radius * np.sin(np.deg2rad(degrees)))
+
+        segments = {
+            f"ring{k}": (
+                onCircle(1.0, 20 * k),
+                onCircle(1.0, 20 * (k + 1)),
+                onCircle(0.5, 20 * (k + 1)),
+                onCircle(0.5, 20 * k),
+            )
+            for k in range(9)
+        }
+        model, slaveSurface, masterSurface, field, slaveNodes = self._modelOfQuadrilaterals(
+            segments, {1: tuple(segments)}
+        )
+        apothem = np.cos(np.deg2rad(10.0))
+        points = np.array([onCircle(apothem - self.overlap, degrees) for degrees in path])
+        return model, slaveSurface, masterSurface, field, slaveNodes, points
+
+    @staticmethod
+    def _normalAt(degrees: float) -> np.ndarray:
+        return np.array([np.cos(np.deg2rad(degrees)), np.sin(np.deg2rad(degrees))])
+
+    def test_a_point_that_slid_around_a_curved_master_in_one_update_pairs_as_a_search_from_scratch(self):
+        """A point in contact at the top of the half ring (90 degrees) slides to 10 degrees within one update: past
+        four facets, its closest facet across a convex crease from its facet. Walking over the master to a fixed point,
+        it pairs with the facet a search from scratch finds, the one it is in front of, with the overlap as its gap. A
+        single step would stop at 70 degrees, and move on by a facet in every repeated update."""
+
+        model, slaveSurface, masterSurface, field, slaveNodes, path = self._pointsAroundACurvedMaster([90.0, 10.0])
+        states, gaps, _, directions, constraint, _ = self._slide(
+            model, slaveSurface, masterSurface, field, slaveNodes, path
+        )
+        followed = constraint.slave.surfaceNodes.index(slaveNodes[0])
+
+        self.assertTrue((states == ContactState.IN_CONTACT).all())
+        np.testing.assert_allclose(directions[0], self._normalAt(90.0), atol=1e-15)
+        np.testing.assert_allclose(directions[1], self._normalAt(10.0), atol=1e-14)
+        np.testing.assert_allclose(gaps[1], -self.overlap, rtol=1e-10)
+
+        *_, fromScratch, _ = self._slide(model, slaveSurface, masterSurface, field, slaveNodes, path[1:])
+        self.assertEqual(constraint._assignedFacetIdx[followed], fromScratch._assignedFacetIdx[followed])
+
+    def test_an_update_repeated_after_a_checkpoint_pairs_the_same(self):
+        """A point in contact on the facet at 70 degrees slides to 37 degrees within one update, onto the facet at 30
+        degrees, across a convex crease from its facet; the facet at 50 degrees, between them, is not. One step goes
+        to 50 degrees, and an update repeated there to 30: the walk goes on to 30 at once. An update repeated at the
+        same configuration -- by the constraint itself, or by one restored from its checkpoint, as a resumed step
+        repeats it -- then changes neither the pairing nor the forces."""
+
+        model, slaveSurface, masterSurface, field, slaveNodes, path = self._pointsAroundACurvedMaster([70.0, 37.0])
+        _, _, _, directions, constraint, U = self._slide(model, slaveSurface, masterSurface, field, slaveNodes, path)
+        np.testing.assert_allclose(directions[1], self._normalAt(30.0), atol=1e-14)
+        assignment, forces = constraint._assignedFacetIdx.copy(), constraint._normalForcesOfPoints()
+
+        restored = IntegratedContact(
+            "theContact",
+            model,
+            ContactPointsAtSlaveNodes(slaveSurface, "theContact"),
+            masterSurface,
+            self.journal,
+            configuration=SurfaceToDeformableSurfacePenaltySchema(penalty=1.0e4, contactPoints="nodes"),
+        )
+        restored.setRestartData(constraint.getRestartData())
+        for repeated in (constraint, restored):
+            self.assertFalse(repeated.updateConnectivity(model), "the nodes of the constraint must not change")
+            np.testing.assert_array_equal(repeated._assignedFacetIdx, assignment)
+            repeated.computeKernels(U, np.zeros_like(U), np.zeros(repeated.nDof), None, None)
+            np.testing.assert_array_equal(repeated._normalForcesOfPoints(), forces)
+
+    def test_a_walk_beyond_its_bound_is_reported(self):
+        """With a bound of two steps, the point stops two facets on, at 50 degrees, and the update is reported."""
+
+        model, slaveSurface, masterSurface, field, slaveNodes, path = self._pointsAroundACurvedMaster([90.0, 10.0])
+        with (
+            mock.patch("edelweissfe.constraints.surfacetodeformablesurfacepenalty.maximumStepsOfThePairingWalk", 2),
+            mock.patch.object(self.journal, "message") as message,
+        ):
+            _, _, _, directions, _, _ = self._slide(model, slaveSurface, masterSurface, field, slaveNodes, path)
+
+        np.testing.assert_allclose(directions[1], self._normalAt(50.0), atol=1e-14)
+        self.assertTrue(any("after 2 steps of the pairing" in call.args[0] for call in message.call_args_list))
 
 
 class TestTie(unittest.TestCase):
