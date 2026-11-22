@@ -115,7 +115,7 @@ member of that family, and it is what the corner-liftoff defect actually calls f
 """
 
 #: The fraction of the search distance beyond which the depth at which a point enters contact is reported: a point
-#: that enters that deep in one increment has almost outrun the search.
+#: that enters that deep between two updates of the connectivity has almost outrun the search.
 _entryDepthWarningFraction = 0.5
 
 
@@ -129,8 +129,8 @@ class ContactState(IntEnum):
     #: The point has entered the master body through its paired facet, and is pushed back out through it.
     IN_CONTACT = 2
     #: The point lies inside the master body without having been seen outside of it before: it has tunnelled through
-    #: the search distance in one increment. It gets no force (the closest facet is no indication of the way out),
-    #: and the constraint reports it.
+    #: the search distance between two updates of the connectivity. It gets no force (the closest facet is no
+    #: indication of the way out), and the constraint reports it.
     FOUND_INSIDE = 3
     #: The point is tied to the point of the master surface it was paired with (the law ``tied``), for good.
     TIED = 4
@@ -274,9 +274,11 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     near a convex corner of the master may be on its side, of a point deep inside a thin body on its far side, and
     would push the point out of the wrong side. A point that leaves the master body is released at once, also
     beside a crest. A point that was out of reach at the previous update and is found inside the master body has
-    tunnelled through the search distance in one increment (:attr:`ContactState.FOUND_INSIDE`): it gets no force and
-    is reported, and the search distance must exceed the distance a point travels towards the surface in one
-    increment -- the constraint warns when a point enters deeper than half of it.
+    tunnelled through the search distance between two updates of the connectivity (:attr:`ContactState.FOUND_INSIDE`):
+    it gets no force and is reported. The search distance must therefore exceed the distance a point travels towards
+    the surface between two updates -- every ``contact-update-frequency`` increments of ``NED`` (by default 100), every
+    increment in a model with particles or in an implicit analysis -- and the constraint warns when a point enters
+    deeper than half of it.
 
     The first update
     ----------------
@@ -889,8 +891,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             ):
                 self._deepestEntryReported = entryDepth
                 self.journal.message(
-                    f"contact '{self.name}': a contact point entered {entryDepth:.3e} deep in one increment, more "
-                    f"than {_entryDepthWarningFraction:.0%} of the search distance ({self.searchDistance:.3e}): "
+                    f"contact '{self.name}': a contact point entered {entryDepth:.3e} deep since the last update of the "
+                    f"connectivity, more than {_entryDepthWarningFraction:.0%} of the search distance "
+                    f"({self.searchDistance:.3e}): "
                     "points may soon tunnel through it unseen.",
                     self.identification,
                     level=1,
