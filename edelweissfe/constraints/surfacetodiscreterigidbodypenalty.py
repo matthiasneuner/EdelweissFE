@@ -167,7 +167,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     Forces and tangent
     ------------------
     With the normal force :math:`f_n` and :math:`\\mathrm{d}f_n/\\mathrm{d}g` from
-    :meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.normalForce`, evaluated for
+    :meth:`~edelweissfe.constraints.base.penaltylaw.ContactPenaltyLaw.normalForce`, evaluated for
     :math:`p\\,A_p`, each closed point exerts the force
     :math:`-f_n \\, \\partial g_p / \\partial \\boldsymbol{q}` on the nodes, so it adds the residual
     contribution and its tangent
@@ -501,9 +501,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._gapCurrent[located] = gaps
 
         springs = self._springsOfClosedPoints(gaps, normals)
-        closed, normalForces = springs.points, springs.forces
-        if not len(closed):
+        if springs is None:
             return
+        closed, normalForces = springs.points, springs.forces
 
         self._normalForceCurrent[located[closed]] = normalForces
         self.totalNormalForce = float(normalForces.sum())
@@ -558,10 +558,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         gaps = np.einsum("pj,pj->p", normals, leverArms) - self._planeOffsetsOfLocated
         return gaps, normals, leverArms, dPhysicalSpin_dTheta
 
-    def _springsOfClosedPoints(self, gaps: np.ndarray, normals: np.ndarray) -> PenaltySprings:
-        """The penalty springs of the contact: one along the current normal at every closed point, with the force and
-        the stiffness the law gives it for :math:`p\\, A_p`. The force (:meth:`computeKernels`) and the bound of the
-        stiffness (:meth:`computeBoundOfAbsoluteStiffnessTimes`) go through these springs.
+    def _springsOfClosedPoints(self, gaps: np.ndarray, normals: np.ndarray) -> PenaltySprings | None:
+        """The penalty springs of the contact law (:meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.springs`):
+        one along the current normal at every closed point, with the force and the stiffness the law gives it for
+        :math:`p\\, A_p`. The force (:meth:`computeKernels`) and the bound of the stiffness
+        (:meth:`computeBoundOfAbsoluteStiffnessTimes`) go through these springs. The constraint measures gaps only and
+        takes contact laws only, whose springs are these, if any.
 
         Parameters
         ----------
@@ -572,13 +574,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         Returns
         -------
-        PenaltySprings
-            The springs; none if no point is closed.
+        PenaltySprings or None
+            The springs; None if no point is closed.
         """
 
-        closed = np.flatnonzero(self.law.isClosed(gaps))
-        forces, stiffness = self.law.normalForce(self.penalty * self._areasOfLocated[closed], gaps[closed])
-        return PenaltySprings(closed, normals[closed], forces, stiffness)
+        springs = self.law.springs(self.penalty * self._areasOfLocated, gaps, normals)
+        return springs[0] if springs else None
 
     def computeBoundOfAbsoluteStiffnessTimes(
         self,
@@ -605,9 +606,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         gaps, normals, leverArms, dPhysicalSpin_dTheta = self._locatedPointsAgainstTheRigidBody(U_np, dU)
         springs = self._springsOfClosedPoints(gaps, normals)
-        closed, n = springs.points, springs.directions
-        if not len(closed):
+        if springs is None:
             return
+        closed, n = springs.points, springs.directions
 
         nSlaveDof, nDim = self.nSlaveDof, self.nDim
         oneNodeEach = -np.ones((len(closed), 1))

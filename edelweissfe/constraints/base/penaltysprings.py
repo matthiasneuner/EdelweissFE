@@ -68,7 +68,9 @@ from edelweissfe.utils.facetcontactgeometry import rowDot
 @dataclass(frozen=True)
 class PenaltySprings:
     """Penalty springs at located contact points, one per point, each along a unit direction: the contact's spring
-    along the normal at a closed point, or a tie's spring along one axis."""
+    along the normal at a closed point, or a tie's spring along one axis. A law makes them
+    (:meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.springs`); the constraint takes from them its force,
+    its tangent, the bound of its stiffness and its outputs."""
 
     #: The located points with a spring (indices into the located points).
     points: np.ndarray
@@ -78,6 +80,8 @@ class PenaltySprings:
     forces: np.ndarray
     #: The stiffness of each spring, :math:`\\mathrm{d}f/\\mathrm{d}g`.
     stiffness: np.ndarray
+    #: The energy stored in each spring, :math:`\\Pi` with :math:`\\mathrm{d}\\Pi/\\mathrm{d}g = f`.
+    energies: np.ndarray
 
 
 class SpringGradientOnSharedNodes:

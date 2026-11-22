@@ -609,10 +609,11 @@ were. A solver that cannot handle a constraint, e.g. ``NEST`` a contact, refuses
     :members:
 
 The penalty contacts are assembled from two pieces of their own: the *contact points* of the slave side
-(:ref:`contact-points`) and the *contact law* that turns a gap into a force. A new kind of contact point
--- EdelweissMeshfree's points on the faces of particles are one -- implements
+(:ref:`contact-points`) and the *law* that puts penalty springs at the paired points (:ref:`contact-law`). A new kind
+of contact point -- EdelweissMeshfree's points on the faces of particles are one -- implements
 :class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`; a new law derives from
-:class:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw`.
+:class:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw` (its springs, and whether it pairs once), a new normal
+contact law from :class:`~edelweissfe.constraints.base.penaltylaw.ContactPenaltyLaw` (its normal force and energy).
 
 .. automodule:: edelweissfe.constraints.base.contactpoints
     :members:

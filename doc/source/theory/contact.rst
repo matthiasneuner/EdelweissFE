@@ -852,9 +852,11 @@ spring conservative. The slave nodes against the parent faces of the master diff
 :mod:`~edelweissfe.constraints.nodetodeformablesurfacepenalty` with ``sliding=small`` in the master side
 only: the force reaches the master with :math:`N^m`, not with the flat facet's weights.
 
-The contact law is a separate piece as well (:mod:`~edelweissfe.constraints.base.penaltylaw`): the
-constraint asks it which points are closed and for their normal force and stiffness. Friction, and a
-tie that also pulls (:ref:`contact-tie`), take its place without touching the contact points or the gap.
+The law is a separate piece as well (:mod:`~edelweissfe.constraints.base.penaltylaw`), and it owns what
+differs from one law to the next, and nothing else (:ref:`contact-law`): the penalty *springs* it puts at
+the paired points, and whether it pairs them *once* or anew in every search. The contact (``linear``,
+``quadratic``) puts one spring along the normal at every closed point; the tie (:ref:`contact-tie`) one
+along every axis at every point, and pairs once. Everything the laws share is the constraint's.
 
 **The pairing.** In every update of the connectivity, a point within ``searchDistance`` of the master
 surface (every point, without a search distance) is paired with its closest facet while it is outside
@@ -993,7 +995,8 @@ To model only a thin layer around a screw with particles and the rest of the con
 the two must be joined along a surface whose two sides are meshed independently: the faces of the particles
 on one side, the faces of the elements on the other. That is a **tie**, and it is the same constraint with
 another law, ``type=tied`` (:class:`~edelweissfe.constraints.base.penaltylaw.TiedPenaltyLaw`). The contact
-points, the parent faces of the master and the frozen projection are those of contact; three things differ.
+points, the parent faces of the master and the frozen projection are those of contact; what differs is the
+law: it pairs once (the first point below), and its springs (the other two).
 
 **Paired once.** At the first update, every contact point within ``searchDistance`` of the master surface
 (every point, without a search distance) is paired with the closest point of its closest facet, mapped onto
@@ -1053,6 +1056,58 @@ displacement from rest, and the forces of the tie are what they were (the deck
 check both, and that the tie transmits a homogeneous state across the refinement). On a refined slave side,
 the new points take the displacements of their old neighbours.
 
+.. _contact-law:
+
+The law: what differs, and the place of friction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Contact, the tie and, one day, friction are one constraint with three laws. What the constraint does is the
+same for all of them: it pairs each contact point with a point :math:`\boldsymbol{x}^m` of the master's
+parent face and freezes the normal :math:`\bar{\boldsymbol{n}}` there; at every evaluation it gives the
+law, for every paired point, the penalty times its area :math:`k A_p`, the normal, the displacement of the
+point from where it rests,
+
+.. math::
+    \boldsymbol{d} = \boldsymbol{x}_p - \boldsymbol{x}^m - \boldsymbol{r}_0 ,
+
+and the gap :math:`g = \bar{\boldsymbol{n}} \cdot \boldsymbol{d}`, less an initial overlap it does not
+count (:ref:`contact-initial-overlap`). The resting offset :math:`\boldsymbol{r}_0` is a state of the point:
+zero for a point that rests on its master point, the vector at the pairing for a tie. The law answers with
+its **springs** (:meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.springs`,
+:class:`~edelweissfe.constraints.base.penaltysprings.PenaltySprings`): for every spring its point, its unit
+direction :math:`\boldsymbol{n}_s`, its force :math:`f_s`, its stiffness :math:`\mathrm{d}f_s/\mathrm{d}g_s`
+and its stored energy. Each stretch is affine in the displacements with the gradient
+:math:`\boldsymbol{w}_s = [c, -N^m] \otimes \boldsymbol{n}_s`, so the constraint does the rest for every
+law alike: the force :math:`-f_s \boldsymbol{w}_s` on the nodes, the tangent
+:math:`\mathrm{d}f_s/\mathrm{d}g_s\, \boldsymbol{w}_s \otimes \boldsymbol{w}_s`, the bound of the
+stiffness for the critical time step (:doc:`criticaltimestep`), the checkpoint of the state of the points,
+and the outputs, which come from the springs alone: the force on a point :math:`-\sum_s f_s
+\boldsymbol{n}_s` (its traction, and its normal part, the pressure), the resultants on the two sides, the
+energy stored in the springs, the number of points with a spring. The law also says how it is paired
+(:attr:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.pairsOnce`): anew in every search, as a point
+slides along the master (contact), or once, for good (the tie). A new law is a class with these two members;
+``tests/test_surfacetodeformablesurfacepenalty.py`` plugs one in, defined in the test, without touching the
+constraint.
+
+**A friction law** (not implemented; plan decisions D2/D20) would be such a class. It pairs anew in every
+search, and its springs are
+
+- the normal spring of a contact law at every closed point, from :math:`g` as the contact's;
+- at those points, the tangential springs: the tangential part of the displacement from rest,
+  :math:`\boldsymbol{d}_t = (\boldsymbol{I} - \bar{\boldsymbol{n}} \otimes \bar{\boldsymbol{n}})\,
+  \boldsymbol{d}`, stretches springs of the tangential penalty :math:`k_t A_p` along the tangent directions;
+  where their force :math:`k_t A_p |\boldsymbol{d}_t|` exceeds :math:`\mu |f_n|` the point slips: the
+  radial return of *Coulomb friction* above limits the force and moves the point's rest tangentially, so that
+  :math:`\boldsymbol{r}_0` -- its stick point -- is its history.
+
+That history needs two things of the constraint, both the same for every law, neither there yet (no law has a
+history so far): the
+resting offsets the law returns for the last iterate are kept only when the increment is accepted
+(:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.acceptLastState`), and a point paired
+anew with another master point keeps its stick point where it is in space (:math:`\boldsymbol{r}_0` shifted
+by the move of its master point), so that the history follows the point as it slides. The search, the gap,
+the force, the tangent, the bound and the outputs stay as they are.
+
 .. _integrated-contact-algorithm:
 
 The integrated formulation, step by step
@@ -1111,20 +1166,21 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
 **Every evaluation**, in ``computeKernels`` (implicit) or ``computeKernelsExplicit``:
 
 #. Where each assigned point is relative to its master point, :math:`\boldsymbol{x}_p - N^m \cdot
-   \boldsymbol{x}^m`, from the frozen data (``_relativePositionsOfLocatedPoints``). Its component along
-   :math:`\bar{\boldsymbol{n}}` is the gap of the expression above (less the part of an initial overlap
-   not fed in yet); the point is closed where :math:`g < 0`.
-#. The law turns this into penalty **springs** (``_springsOfLocatedPoints``): for a contact, one along
-   :math:`\bar{\boldsymbol{n}}` at every closed point, its normal force the penalty law applied to
-   :math:`g`, scaled by that point's integration weight -- so ``penalty`` is a stiffness per unit
-   *area*, and the force of a point is the pressure it carries times the area it represents; for a tie,
-   one along every axis at every point (below).
+   \boldsymbol{x}^m`, from the frozen data (``_relativePositionsOfLocatedPoints``), less its resting offset:
+   its displacement from rest. Its component along :math:`\bar{\boldsymbol{n}}` is the gap of the expression
+   above (less the part of an initial overlap not fed in yet).
+#. The law turns this into penalty **springs** (``_springsOfLocatedPoints``, :ref:`contact-law`): for a
+   contact, one along :math:`\bar{\boldsymbol{n}}` at every closed point (:math:`g < 0`), its normal force
+   the penalty law applied to :math:`g`, scaled by that point's integration weight -- so ``penalty`` is a
+   stiffness per unit *area*, and the force of a point is the pressure it carries times the area it
+   represents; for a tie, one along every axis at every point.
 #. The force of every spring is distributed with :math:`\boldsymbol{w} = \bar{\boldsymbol{n}} \otimes
    [N^s, -N^m]`, its direction in place of :math:`\bar{\boldsymbol{n}}` (``_addForcesOfSprings``),
    which is where a serendipity corner receives its tensile share. The tangent is assembled only when
    one is asked for; the explicit path overrides the hook so that no tangent container is ever
    allocated. The bound of the stiffness in an explicit analysis's critical time step
    (``computeBoundOfAbsoluteStiffnessTimes``) goes through the same springs.
+#. The springs are kept: every output (tractions, pressures, resultants, energy) is taken from them.
 
 Open points are skipped entirely rather than contributing a zero, and the whole evaluation is
 batched over the assigned points: a fixed handful of array operations, gathered once per update of

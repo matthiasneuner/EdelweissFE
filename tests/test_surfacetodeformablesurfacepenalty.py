@@ -33,6 +33,7 @@ two iterations even with a wrong tangent and would not expose one.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
@@ -51,7 +52,12 @@ from edelweissfe.constraints.base.contactpointsatslavenodes import (
 from edelweissfe.constraints.base.contactpointsonslavesurface import (
     ContactPointsOnSlaveSurface,
 )
-from edelweissfe.constraints.base.penaltylaw import penaltyLaw
+from edelweissfe.constraints.base.penaltylaw import (
+    PenaltyLaw,
+    penaltyLaw,
+    penaltyLawsAndTheTie,
+)
+from edelweissfe.constraints.base.penaltysprings import PenaltySprings
 from edelweissfe.constraints.surfacetodeformablesurfacepenalty import (
     Constraint as IntegratedContact,
 )
@@ -835,7 +841,7 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
             constraint.computeKernels(U, np.zeros_like(U), np.zeros(constraint.nDof), None, None)
             states.append(constraint.stateOfPoints[followed])
             gaps.append(constraint.getGaps()[followed])
-            forces.append(constraint._normalForceCurrent[followed])
+            forces.append(constraint._normalForcesOfPoints()[followed])
             directions.append(constraint._frozenNormals[followed].copy())
         return np.array(states), np.array(gaps), np.array(forces), np.array(directions), constraint, U
 
@@ -907,10 +913,6 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
         self.assertTrue((states[beyond] == ContactState.APPROACHING).all())
         np.testing.assert_allclose(gaps[beyond], path[beyond, 0] - 1.0, rtol=1e-12)
         np.testing.assert_array_equal(forces[beyond], 0.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestTie(unittest.TestCase):
@@ -1147,3 +1149,97 @@ def test_a_refinement_of_the_master_keeps_the_state_of_the_tie(tmp_path, monkeyp
     tie = model.constraints["tie"]
     assert (tie.stateOfPoints == ContactState.TIED).all()
     np.testing.assert_allclose(tie._restingOffset[:, 2], 0.02, atol=1e-12)
+
+
+class BondedNormalLaw(PenaltyLaw):
+    """A toy law, defined here and nowhere in the library: each point is paired once and bonded to the master in the
+    direction of the normal only, free to slide along the surface -- one linear spring along the frozen normal at every
+    point, of the stretch :math:`\\bar{n} \\cdot \\boldsymbol{d}` (the gap from rest), in tension and in
+    compression."""
+
+    name = "bonded"
+
+    pairsOnce = True
+
+    def springs(self, penaltyTimesArea, gaps, normals, displacementsFromRest=None):
+        return [
+            PenaltySprings(
+                np.arange(len(gaps)),
+                normals,
+                penaltyTimesArea * gaps,
+                penaltyTimesArea,
+                0.5 * penaltyTimesArea * gaps**2,
+            )
+        ]
+
+
+class TestALawDefinedOutsideTheLibrary(unittest.TestCase):
+    """A law is a class with its springs and whether it pairs once (:class:`BondedNormalLaw`): it plugs into the
+    constraint through the registry of laws, and the constraint pairs, assembles, bounds and reports it without a
+    change."""
+
+    _constraint = TestIntegratedSurfaceContact._constraint
+    _forces = TestIntegratedSurfaceContact._forces
+    _addDisplacementField = TestIntegratedSurfaceContact._addDisplacementField
+    _slaveDisplacedBy = TestTie._slaveDisplacedBy
+
+    #: The penalty, per unit area.
+    PENALTY = 1.0e4
+
+    def setUp(self):
+        self.journal = Journal()
+        registered = mock.patch.dict(penaltyLawsAndTheTie, {BondedNormalLaw.name: BondedNormalLaw})
+        registered.start()
+        self.addCleanup(registered.stop)
+
+    def _bonded(self, **options):
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, -0.05)
+        options = {"contactType": BondedNormalLaw.name, "penalty": self.PENALTY} | options
+        return model, self._constraint(model, slaveSurface, masterSurface, **options)
+
+    def test_it_pairs_once_and_holds_the_points_along_the_normal_only(self):
+        model, bonded = self._bonded(searchDistance=0.1)
+        self.assertIsInstance(bonded.law, BondedNormalLaw)
+        self.assertTrue((bonded.stateOfPoints == ContactState.TIED).all())
+
+        # pulled apart beyond the search distance and slid along: still paired with the same master points
+        field = self._addDisplacementField(model)
+        pairing = bonded._assignedFacetIdx.copy()
+        for node in model.surfaces["slaveFace"][_YMAX][0].nodes:
+            field["U"][field._indicesOfNodesInArray[node]] = [0.4, -0.5, 0.0]
+        self.assertFalse(bonded.updateConnectivity(model))
+        np.testing.assert_array_equal(bonded._assignedFacetIdx, pairing)
+
+        area = _SIDE**2
+        normal = np.array([0.0, -1e-3, 0.0])
+        self._forces(bonded, self._slaveDisplacedBy(bonded, normal))
+        np.testing.assert_allclose(
+            bonded.getTractions(), np.tile(-self.PENALTY * normal, (bonded.nPoints, 1)), atol=1e-9
+        )
+        np.testing.assert_allclose(bonded.contactForceOnSlave, -self.PENALTY * area * normal, rtol=1e-9, atol=1e-9)
+        np.testing.assert_allclose(bonded.contactForceOnMaster, self.PENALTY * area * normal, rtol=1e-9, atol=1e-9)
+        self.assertAlmostEqual(bonded.penaltyEnergy, 0.5 * self.PENALTY * area * 1e-6, delta=1e-12)
+        self.assertEqual(bonded.numberOfPointsInContact, bonded.nPoints)
+
+        sliding = np.array([1e-3, 0.0, -2e-3])
+        np.testing.assert_allclose(self._forces(bonded, self._slaveDisplacedBy(bonded, sliding)), 0.0, atol=1e-9)
+        np.testing.assert_allclose(bonded.getTractions(), 0.0, atol=1e-9)
+
+    def test_its_tangent_and_bound_are_those_of_its_springs(self):
+        for contactPoints in ("quadraturePoints", "nodes"):
+            model, bonded = self._bonded(contactPoints=contactPoints)
+            U = 1e-3 * np.random.default_rng(11).standard_normal(bonded.nDof)
+            K, P = residualContributionAndTangent(bonded, U, np.zeros_like(U))[1], self._forces(bonded, U)
+            dP_dU = finiteDifferenceTangent(bonded, U, np.zeros_like(U), h=1e-8)
+            scale = np.abs(K).max()
+            np.testing.assert_allclose(K, dP_dU, atol=1e-6 * scale, err_msg=contactPoints)
+            np.testing.assert_allclose(K, K.T, atol=1e-12 * scale)
+            assertTheBoundIsTheOneOfTheTangent(bonded, U)
+
+            PExplicit = np.zeros(bonded.nDof)
+            bonded.computeKernelsExplicit(U, np.zeros_like(U), PExplicit, None)
+            np.testing.assert_array_equal(-PExplicit, P)
+
+
+if __name__ == "__main__":
+    unittest.main()
