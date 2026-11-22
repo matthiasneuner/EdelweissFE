@@ -375,9 +375,12 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
         constraints (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`).
 
         This default takes the tangent :meth:`computeKernels` gives, the stiffness of the constraint at the state given,
-        in the scratch :meth:`computeKernelsExplicit` uses. A constraint whose tangent is costly overrides it with the
-        bound of what its law supplies, and so does one whose explicit forces are not the ones :meth:`computeKernels`
-        gives the tangent of.
+        in the scratch :meth:`computeKernelsExplicit` uses: right for a constraint whose tangent is cheap (a spring
+        between two nodes). A constraint whose tangent is costly -- every one that evaluates its explicit forces without
+        it (:class:`~edelweissfe.constraints.base.forcesonlyexplicitevaluation.ForcesOnlyExplicitEvaluation`) -- overrides
+        it with the bound of the springs of its law, from the same springs as its force
+        (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`), and so does one
+        whose explicit forces are not the ones :meth:`computeKernels` gives the tangent of.
 
         Parameters
         ----------

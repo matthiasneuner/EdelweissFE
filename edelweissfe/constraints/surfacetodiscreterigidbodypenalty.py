@@ -37,6 +37,12 @@ from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
 )
 from edelweissfe.constraints.base.frozencontactsearch import FrozenContactSearch
 from edelweissfe.constraints.base.penaltylaw import penaltyLaw
+from edelweissfe.constraints.base.penaltysprings import (
+    PenaltySprings,
+    SpringGradientOnOwnNodes,
+    SpringGradientOnSharedNodes,
+    addBoundOfAbsoluteStiffnessOfSprings,
+)
 from edelweissfe.constraints.base.rigidbodycontactstiffness import (
     RigidBodyContactStiffnessView,
     rigidBodyContactLocalEntries,
@@ -491,6 +497,49 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not len(located):
             return
 
+        gaps, normals, leverArms, dPhysicalSpin_dTheta = self._locatedPointsAgainstTheRigidBody(U_np, dU)
+        self._gapCurrent[located] = gaps
+
+        springs = self._springsOfClosedPoints(gaps, normals)
+        closed, normalForces = springs.points, springs.forces
+        if not len(closed):
+            return
+
+        self._normalForceCurrent[located[closed]] = normalForces
+        self.totalNormalForce = float(normalForces.sum())
+
+        # The force on the nodes of a point is -f_n c n: the contact points distribute it.
+        self.slave.addForceResidual(P[: self.nSlaveDof], closed, normalForces, springs.directions)
+
+        # The force on the RP is -f_n dg/du_RP = f_n n, and the force conjugate to its rotation DOF is
+        # -f_n dg/dtheta = f_n S^T (r x n).
+        forceOnRigidBody = normalForces @ springs.directions
+        momentOnRigidBody = normalForces @ np.cross(leverArms[closed], springs.directions)
+        P[self.nSlaveDof : self.nSlaveDof + self.nDim] -= forceOnRigidBody
+        P[self.nSlaveDof + self.nDim :] -= dPhysicalSpin_dTheta.T @ momentOnRigidBody
+
+        if K is not None:
+            self._addTangent(K, closed, normalForces, springs.stiffness, normals, leverArms, dPhysicalSpin_dTheta)
+
+    def _locatedPointsAgainstTheRigidBody(
+        self, U_np: np.ndarray, dU: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Where the located contact points are against the rigid body: their gaps, the current normals of their
+        triangles, their lever arms about the RP, and :math:`S`, see the class docstring.
+
+        Parameters
+        ----------
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]
+            The gaps (nLocated), the normals and the lever arms (nLocated, nDim), and ``dPhysicalSpin_dTheta``.
+        """
+
         nSlaveDof, nDim = self.nSlaveDof, self.nDim
 
         # Where the located contact points are, as their kind of point says.
@@ -507,30 +556,74 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         normals = self._bodyNormalsOfLocated @ rotationMatrix.T
         leverArms = pointCoordinates - rpCurrentPosition
         gaps = np.einsum("pj,pj->p", normals, leverArms) - self._planeOffsetsOfLocated
-        self._gapCurrent[located] = gaps
+        return gaps, normals, leverArms, dPhysicalSpin_dTheta
+
+    def _springsOfClosedPoints(self, gaps: np.ndarray, normals: np.ndarray) -> PenaltySprings:
+        """The penalty springs of the contact: one along the current normal at every closed point, with the force and
+        the stiffness the law gives it for :math:`p\\, A_p`. The force (:meth:`computeKernels`) and the bound of the
+        stiffness (:meth:`computeBoundOfAbsoluteStiffnessTimes`) go through these springs.
+
+        Parameters
+        ----------
+        gaps
+            The gaps of the located points.
+        normals
+            The current normals of their triangles.
+
+        Returns
+        -------
+        PenaltySprings
+            The springs; none if no point is closed.
+        """
 
         closed = np.flatnonzero(self.law.isClosed(gaps))
+        forces, stiffness = self.law.normalForce(self.penalty * self._areasOfLocated[closed], gaps[closed])
+        return PenaltySprings(closed, normals[closed], forces, stiffness)
+
+    def computeBoundOfAbsoluteStiffnessTimes(
+        self,
+        U_np: np.ndarray,
+        dU: np.ndarray,
+        weights: np.ndarray,
+        bound: np.ndarray,
+        timeStep: TimeStep,
+    ):
+        """Add the row sums of the absolute value of the stiffness of the springs, weighted by column; see
+        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`.
+
+        The springs are those of the force (:meth:`_springsOfClosedPoints`), with the gradient of the gap (see the class
+        docstring): :math:`c \\otimes n` on the nodes the contact points share, :math:`-n` on the displacement of the
+        RP and :math:`-S^T (r \\times n)` on its rotation; the bound is the one of every penalty spring
+        (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`). Not bounded: the
+        second derivatives of the gap, scaled by the normal force (the normal rotates with the body), small against
+        the penalty, as for the geometric stiffness of a finite sliding contact.
+        """
+
+        located = self._locatedPoints
+        if not len(located):
+            return
+
+        gaps, normals, leverArms, dPhysicalSpin_dTheta = self._locatedPointsAgainstTheRigidBody(U_np, dU)
+        springs = self._springsOfClosedPoints(gaps, normals)
+        closed, n = springs.points, springs.directions
         if not len(closed):
             return
 
-        normalForces, dNormalForce_dGap = self.law.normalForce(
-            self.penalty * self._areasOfLocated[closed], gaps[closed]
-        )
-        self._normalForceCurrent[located[closed]] = normalForces
-        self.totalNormalForce = float(normalForces.sum())
-
-        # The force on the nodes of a point is -f_n c n: the contact points distribute it.
-        self.slave.addForceResidual(P[:nSlaveDof], closed, normalForces, normals[closed])
-
-        # The force on the RP is -f_n dg/du_RP = f_n n, and the force conjugate to its rotation DOF is
-        # -f_n dg/dtheta = f_n S^T (r x n).
-        forceOnRigidBody = normalForces @ normals[closed]
-        momentOnRigidBody = normalForces @ np.cross(leverArms[closed], normals[closed])
-        P[nSlaveDof : nSlaveDof + nDim] -= forceOnRigidBody
-        P[nSlaveDof + nDim :] -= dPhysicalSpin_dTheta.T @ momentOnRigidBody
-
-        if K is not None:
-            self._addTangent(K, closed, normalForces, dNormalForce_dGap, normals, leverArms, dPhysicalSpin_dTheta)
+        nSlaveDof, nDim = self.nSlaveDof, self.nDim
+        oneNodeEach = -np.ones((len(closed), 1))
+        dofsOfTheRp = nSlaveDof + np.arange(self.rpDofCount)
+        gradient = [
+            SpringGradientOnSharedNodes(
+                self.slave.interpolationMatrixOfLocatedPoints()[closed], n, np.arange(nSlaveDof).reshape((-1, nDim))
+            ),
+            SpringGradientOnOwnNodes(oneNodeEach, n, np.broadcast_to(dofsOfTheRp[:nDim], (len(closed), 1, nDim))),
+            SpringGradientOnOwnNodes(
+                oneNodeEach,
+                np.cross(leverArms[closed], n) @ dPhysicalSpin_dTheta,
+                np.broadcast_to(dofsOfTheRp[nDim:], (len(closed), 1, self.rpDofCount - nDim)),
+            ),
+        ]
+        addBoundOfAbsoluteStiffnessOfSprings(bound, weights, springs.stiffness, gradient)
 
     def _addTangent(
         self,

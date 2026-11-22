@@ -40,6 +40,7 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
     _YMAX,
     _YMIN,
     _hexa20Coordinates,
+    twoBlockModel,
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
@@ -100,42 +101,6 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
     def setUp(self):
         self.journal = Journal()
 
-    def _twoBlockModel(self, penetration: float, nodalWeights: str = "facetConsistent") -> tuple:
-        """Two hexa20 cubes meeting at y = 0, the lower one overlapping the upper by
-        ``penetration``, with the lower block's Ymax face as slave and the upper block's Ymin face
-        as master.
-
-        Returns
-        -------
-        tuple
-            ``(model, slaveSurface, masterSurface)``.
-        """
-
-        model = FEModel(3)
-        label = 1
-        elements = {}
-        with model.topology.changes():
-            for key, yOffset in (("upper", 0.0), ("lower", -_SIDE + penetration)):
-                nodes = []
-                for x in _hexa20Coordinates(yOffset):
-                    node = Node(label, x)
-                    model.nodes[label] = node
-                    nodes.append(node)
-                    label += 1
-                (elNumber,) = model.topology.reserveElementNumbers(1)
-                element = DisplacementElement("C3D20", elNumber)
-                element.setNodes(nodes)
-                model.createElement(element)
-                elements[key] = element
-
-            model.surfaces["masterFace"] = {_YMIN: ElementSet("m", [elements["upper"]])}
-            model.surfaces["slaveFace"] = {_YMAX: ElementSet("s", [elements["lower"]])}
-
-            masterSetName, _ = buildContactFacets(model, "masterFace", "mst", "midside", nodalWeights, self.journal)
-            slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "midside", nodalWeights, self.journal)
-
-        return model, model.elementSets[slaveSetName], model.elementSets[masterSetName]
-
     def _constraint(self, model, slaveSurface, masterSurface, **options) -> IntegratedContact:
         configuration = SurfaceToDeformableSurfacePenaltySchema(
             penalty=options.pop("penalty", 1.0e4),
@@ -177,7 +142,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             ("linear", "nodes"),
             ("quadratic", "nodes"),
         ):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(
                 model, slaveSurface, masterSurface, contactType=contactType, contactPoints=contactPoints
             )
@@ -202,7 +167,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         """The frozen-projection formulation must produce a symmetric operator; a weight
         substitution that broke the gradient/distribution transpose relation would show up here."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         K = self._assembledTangent(constraint, np.zeros(constraint.nDof))
         np.testing.assert_allclose(K, K.T, atol=1e-12 * max(np.abs(K).max(), 1.0))
@@ -210,7 +175,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
     def test_explicit_path_matches_the_implicit_forces(self):
         """``computeKernelsExplicit`` must deliver exactly the forces the implicit path does."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         U = np.zeros(constraint.nDof)
 
@@ -228,7 +193,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         nodes of the slave face carry a NEGATIVE (tensile) normal force, of exactly the consistent
         magnitude -p*A/12, while the midside nodes carry +p*A/3."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface, penalty=1.0e4)
         self._forces(constraint, np.zeros(constraint.nDof))
 
@@ -259,7 +224,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         out of the search radius would keep being reported as closed forever.
         """
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         field = self._addDisplacementField(model)
         constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=1.0)
         self._forces(constraint, np.zeros(constraint.nDof))
@@ -399,7 +364,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         without any second element being involved.
         """
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.01)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.01)
         field = self._addDisplacementField(model)
         constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=1.0)
         slaveNodes = [node for node in slaveSurface.extractNodeSet()]
@@ -460,7 +425,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
     def test_getGaps_returns_a_copy(self):
         """Mutating the returned array must not corrupt the state a later Uzawa update would read."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         self._forces(constraint, np.zeros(constraint.nDof))
 
@@ -472,7 +437,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
     def test_open_gap_carries_no_force(self):
         """Separated surfaces produce no contact force at all."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=-0.01)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=-0.01)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         forces = self._forces(constraint, np.zeros(constraint.nDof))
         np.testing.assert_array_equal(forces, 0.0)
@@ -480,7 +445,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
 
     def test_quadrature_point_count_is_honoured(self):
         for nQuadraturePoints in (1, 3, 6):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(model, slaveSurface, masterSurface, nQuadraturePoints=nQuadraturePoints)
             self.assertEqual(constraint.nPoints, len(slaveSurface) * nQuadraturePoints)
             self.assertEqual(len(constraint.getNormalPressures()), constraint.nPoints)
@@ -492,14 +457,14 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
 
         resultants = []
         for nQuadraturePoints in (1, 3, 6):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(model, slaveSurface, masterSurface, nQuadraturePoints=nQuadraturePoints)
             self._forces(constraint, np.zeros(constraint.nDof))
             resultants.append(constraint.totalNormalForce)
         np.testing.assert_allclose(resultants, resultants[0], rtol=1e-12)
 
     def test_finite_sliding_is_rejected(self):
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         with self.assertRaises(ValueError) as ctx:
             self._constraint(model, slaveSurface, masterSurface, sliding="finite")
         self.assertIn("only 'small' is implemented", str(ctx.exception))
@@ -507,7 +472,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
     def test_unstamped_facets_are_rejected(self):
         """A facet built by hand, without a parent face, cannot be integrated over."""
 
-        model, _, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, _, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         handMade = Tria3ContactFacet("Tria3ContactFacet", 9999)
         handMade.setNodes([Node(9000 + i, x) for i, x in enumerate(np.eye(3))])
         handMade.initializeElement()
@@ -517,7 +482,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         self.assertIn("carries no parent face", str(ctx.exception))
 
     def test_self_contact_is_rejected(self):
-        model, slaveSurface, _ = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, _ = twoBlockModel(self.journal, penetration=0.05)
         with self.assertRaises(ValueError) as ctx:
             self._constraint(model, slaveSurface, slaveSurface)
         self.assertIn("self-contact is not supported", str(ctx.exception))
@@ -533,14 +498,16 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         minimise is one this formulation removes outright.
         """
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05, nodalWeights="serendipityOptimal")
+        model, slaveSurface, masterSurface = twoBlockModel(
+            self.journal, penetration=0.05, nodalWeights="serendipityOptimal"
+        )
         with self.assertRaises(ValueError) as ctx:
             self._constraint(model, slaveSurface, masterSurface)
         self.assertIn("cannot honour", str(ctx.exception))
         self.assertIn("nodalWeights='facetConsistent'", str(ctx.exception))
 
     def test_invalid_penalty_and_type_are_rejected(self):
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         with self.assertRaises(ValueError) as ctx:
             self._constraint(model, slaveSurface, masterSurface, penalty=0.0)
         self.assertIn("penalty must be positive", str(ctx.exception))
@@ -555,7 +522,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
 
         resultants = {}
         for contactPoints in ("nodes", "quadraturePoints"):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(model, slaveSurface, masterSurface, contactPoints=contactPoints)
             self._forces(constraint, np.zeros(constraint.nDof))
             resultants[contactPoints] = constraint.totalNormalForce
@@ -570,7 +537,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         approaching: it is found inside, gets no force, and is reported -- the closest facet of a point inside a
         body is no indication of the way out. At the first update, an overlap as given is contact."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=-0.5)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=-0.5)
         field = self._addDisplacementField(model)
         constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=0.1)
         self.assertTrue((constraint.stateOfPoints == ContactState.FREE).all())
@@ -586,7 +553,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         """The frozen projection and the pairing states written to a checkpoint are adopted by a constraint on the
         same model."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         U = 1e-3 * np.random.default_rng(3).standard_normal(constraint.nDof)
         forces = self._forces(constraint, U)
@@ -605,7 +572,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         def at(time: float) -> TimeStep:
             return TimeStep(1, 0.0, 0.0, 0.0, time, time)
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlapRampTime=2.0)
         np.testing.assert_allclose(constraint._initialOverlap, -0.05, rtol=1e-12)
         U = np.zeros(constraint.nDof)
@@ -641,7 +608,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             return TimeStep(1, 0.0, 0.0, 0.0, time, time)
 
         for contactPoints in ("quadraturePoints", "nodes"):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(
                 model, slaveSurface, masterSurface, initialOverlapRampTime=2.0, contactPoints=contactPoints
             )
@@ -667,7 +634,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
 
         approach = np.array([0.0, 0.01, 0.0])
         for contactPoints in ("quadraturePoints", "nodes"):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             adjusted = self._constraint(
                 model, slaveSurface, masterSurface, initialOverlap="adjust", contactPoints=contactPoints
             )
@@ -679,7 +646,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 np.testing.assert_allclose(adjusted.getGaps(), 0.0, atol=1e-14)
                 self.assertLess(adjusted.penaltyEnergy, 1e-20)
 
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.0)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.0)
             touching = self._constraint(model, slaveSurface, masterSurface, contactPoints=contactPoints)
             self.assertEqual(touching.nDof, adjusted.nDof)
 
@@ -702,7 +669,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         """A point that leaves the master after an adjusted initial overlap and comes back meets the master where it
         touched it at the start: no force until it is back there, the force of its further approach beyond."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         field = self._addDisplacementField(model)
         constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
 
@@ -724,7 +691,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         """The offsets of an adjusted initial overlap are written to a checkpoint and restored, and they belong to the
         contact points: a new mesh of the master keeps them, regenerated contact points lose them (reported)."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
         U = self._slaveDisplacedBy(constraint, np.array([0.0, 0.01, 0.0]))
         forces = self._forces(constraint, U)
@@ -738,7 +705,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         np.testing.assert_array_equal(restored._initialOverlap, constraint._initialOverlap)
 
         for touched in ("master", "slave"):
-            model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+            model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
             constraint = self._constraint(model, slaveSurface, masterSurface, initialOverlap="adjust")
             facets = constraint._masterSurfaceSetName if touched == "master" else constraint.slave.setName
             surface = model.contactFacetRecipes[facets][0]
@@ -754,7 +721,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
                 self.assertAlmostEqual(constraint.totalNormalForce, -1.0e4 * _SIDE**2 * 0.05, delta=1e-9)
 
     def test_an_initial_overlap_is_pushed_apart_or_adjusted_and_nothing_else(self):
-        model, slaveSurface, masterSurface = self._twoBlockModel(0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, 0.05)
         for options in (
             {"initialOverlap": "close"},
             {"initialOverlap": "adjust", "initialOverlapRampTime": 1.0},
@@ -767,7 +734,7 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         np.testing.assert_array_equal(pushedApart._initialOverlap, 0.0)  # at once: nothing to record
 
     def test_refresh_ignores_changes_that_do_not_touch_the_surfaces(self):
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration=0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
         constraint = self._constraint(model, slaveSurface, masterSurface)
         self.assertFalse(constraint.refresh(model, ModelChange(kind=ModelChangeType.REFINEMENT)))
 
@@ -950,7 +917,6 @@ class TestTie(unittest.TestCase):
     """The tie (``type=tied``): the same constraint, its points paired once and held in every direction, at rest where
     they were paired."""
 
-    _twoBlockModel = TestIntegratedSurfaceContact._twoBlockModel
     _constraint = TestIntegratedSurfaceContact._constraint
     _forces = TestIntegratedSurfaceContact._forces
     _addDisplacementField = TestIntegratedSurfaceContact._addDisplacementField
@@ -965,7 +931,7 @@ class TestTie(unittest.TestCase):
         """The two hexa20 blocks, the lower one's top face tied to the upper one's bottom face, with a gap (negative
         ``penetration``) or an overlap between them."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(penetration)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration)
         options = {"contactType": "tied", "penalty": self.PENALTY} | options
         return model, self._constraint(model, slaveSurface, masterSurface, **options)
 
@@ -1060,7 +1026,7 @@ class TestTie(unittest.TestCase):
     def test_a_checkpoint_continues_the_tie(self):
         """A tie restored from a checkpoint rests where the checkpointed one did, not where it would pair itself."""
 
-        model, slaveSurface, masterSurface = self._twoBlockModel(-0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, -0.05)
         tie = self._constraint(model, slaveSurface, masterSurface, contactType="tied", penalty=self.PENALTY)
         U = 1e-3 * np.random.default_rng(3).standard_normal(tie.nDof)
         forces = self._forces(tie, U)
@@ -1129,7 +1095,7 @@ class TestTie(unittest.TestCase):
             assertTheBoundIsTheOneOfTheTangent(tie, U)
 
     def test_a_tie_takes_no_ramp_and_only_this_constraint_ties(self):
-        model, slaveSurface, masterSurface = self._twoBlockModel(0.05)
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, 0.05)
         with self.assertRaises(ValueError):
             self._constraint(model, slaveSurface, masterSurface, contactType="tied", initialOverlapRampTime=1.0)
         with self.assertRaises(ValueError):

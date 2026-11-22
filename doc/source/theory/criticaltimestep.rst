@@ -174,8 +174,17 @@ the next one: a point that closes *within* an increment adds its stiffness one i
 limit amplifies an oscillation by a bounded factor, and the time increment is never raised again within the step, so
 this is not an instability; the energy balance of ``NED`` (the kinetic energy may not exceed the energy at the start of
 the step plus the external work) remains the check. Not estimated either: the geometric stiffness of a contact with
-finite sliding (of the order of the normal force over the size of a facet, small against the penalty), and a penalty
-on a field integrated by forward Euler.
+finite sliding, or of a rigid body whose normals rotate with it (of the order of the normal force over the size of a
+facet or the lever arm, small against the penalty), the coupling of the normal and the tangential force of a sliding
+frictional contact (the friction coefficient times the normal stiffness; unsymmetric), and a penalty on a field
+integrated by forward Euler.
+
+**One formula for every penalty contact.** Each contact gives its stiffness as springs: a spring :math:`p` with the
+gradient :math:`\boldsymbol{w}_p` of its stretch and the stiffness :math:`k_p` of its law -- the normal spring of a
+closed point, a tie's spring along each axis, the tangential spring of a sticking frictional contact. The row sums are
+then :math:`b_a \mathrel{+}= \sum_p |k_p|\, |w_{p,a}|\, (|\boldsymbol{w}_p| \cdot \boldsymbol{w})`
+(:mod:`edelweissfe.constraints.base.penaltysprings`), and each contact takes the springs for its bound from the same
+code it takes them for its force, so that a change of the force cannot leave the bound behind.
 
 When an estimate is taken anew
 ------------------------------

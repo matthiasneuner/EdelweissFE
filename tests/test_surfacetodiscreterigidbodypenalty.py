@@ -40,6 +40,7 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
+from edelweissfe.constraints.base.constraintbase import ConstraintBase
 from edelweissfe.constraints.base.contactpointsatslavenodes import (
     ContactPointsAtSlaveNodes,
 )
@@ -205,6 +206,31 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
             np.testing.assert_allclose(
                 K, dP_dU, rtol=0, atol=1e-6 * scale, err_msg=f"type={contactType}, contactPoints={contactPoints}"
             )
+
+    def test_the_bound_is_the_one_of_the_springs_of_the_force(self):
+        """The bound of the stiffness for the critical time step of ``NED`` comes from the springs of the force, one
+        along the normal at every closed point. Just closed, the normal forces are negligible, and so are the second
+        derivatives of the gap they scale: at the nodes of the contact points, whose blocks are per point, the bound
+        is the row sum of the absolute tangent itself; at the RP, which all points share, it is above it (the absolute
+        value of the sum over the points is at most the sum of their absolute values)."""
+
+        for contactPoints in ("quadraturePoints", "nodes"):
+            model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=1e-9)
+            constraint = self._constraint(model, slaveSurface, rigidBody, contactPoints=contactPoints)
+            U = np.zeros(constraint.nDof)
+
+            weights = np.random.default_rng(3).uniform(0.5, 2.0, constraint.nDof)
+            bound, ofTheTangent = np.zeros(constraint.nDof), np.zeros(constraint.nDof)
+            constraint.computeBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, None)
+            ConstraintBase.computeBoundOfAbsoluteStiffnessTimes(
+                constraint, U, np.zeros_like(U), weights, ofTheTangent, None
+            )
+
+            self.assertTrue(np.all(constraint.getGaps() < 0.0), "every contact point must be closed")
+            slave = slice(0, constraint.nSlaveDof)
+            negligible = 1e-9 * ofTheTangent.max()
+            np.testing.assert_allclose(bound[slave], ofTheTangent[slave], atol=negligible, err_msg=contactPoints)
+            self.assertTrue(np.all(bound[constraint.nSlaveDof :] >= ofTheTangent[constraint.nSlaveDof :] - negligible))
 
     def test_forces_balance_and_corners_are_pulled(self):
         """The contact forces on the block and on the rigid body are in equilibrium, and the corner

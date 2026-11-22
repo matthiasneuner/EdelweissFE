@@ -42,6 +42,12 @@ from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
 )
 from edelweissfe.constraints.base.frozencontactsearch import FrozenContactSearch
 from edelweissfe.constraints.base.penaltylaw import penaltyLaw, penaltyLawsAndTheTie
+from edelweissfe.constraints.base.penaltysprings import (
+    PenaltySprings,
+    SpringGradientOnOwnNodes,
+    SpringGradientOnSharedNodes,
+    addBoundOfAbsoluteStiffnessOfSprings,
+)
 from edelweissfe.constraints.base.surfacecontactpenaltyschema import (
     SurfaceContactPenaltySchema,
     contactPointsOfTheSlaveSurface,
@@ -57,7 +63,6 @@ from edelweissfe.utils.facetcontactgeometry import (
     closestFacetCandidates,
     closestFacets,
     facetNormalAndMeasure,
-    rowDot,
 )
 from edelweissfe.utils.meshtools import currentNodeCoordinates
 from edelweissfe.utils.parentfacegeometry import parentFaceShapeFunctions
@@ -161,21 +166,6 @@ class ContactStiffnessView:
         for m in blockSizes:
             self.blocks.append(flat_array[offset : offset + m * m].reshape((m, m)))
             offset += m * m
-
-
-@dataclass(frozen=True)
-class PenaltySprings:
-    """Penalty springs at located contact points, one per point, each along a unit direction: the contact's spring
-    along the normal at a closed point, or a tie's spring along one axis."""
-
-    #: The located points with a spring (indices into the located points).
-    points: np.ndarray
-    #: The direction of each spring, (len(points), nDim).
-    directions: np.ndarray
-    #: The force of each spring along its direction, :math:`f`.
-    forces: np.ndarray
-    #: The stiffness of each spring, :math:`\\mathrm{d}f/\\mathrm{d}g`.
-    stiffness: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -1350,17 +1340,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         The springs are those of the force (:meth:`_springsOfLocatedPoints`): the contact's one along :math:`\\bar{n}`
         at every closed point, with its gap (less the initial overlap not counted) and its frozen direction (the
         facet normal or, at a crease of the master, the direction to the closest point); the tie's one along every axis
-        at every point. A spring :math:`p` has the stiffness :math:`k_p\\, w_p \\otimes w_p`, with
-        :math:`w_p = [c, -N^m] \\otimes \\bar{n}_p` and the stiffness :math:`k_p = \\mathrm{d}f/\\mathrm{d}g` its law
-        gives it (the one of the tangent). The absolute value of a sum is at most the sum of the absolute values, so
-
-        .. math::
-
-            b_a \\mathrel{+}= \\sum_p |k_p|\\, |w_{p,a}| \\, \\big(|w_p| \\cdot \\boldsymbol{w}\\big) :
-
-        one product of the absolute interpolation vectors with the weights per spring, and one distribution back, as
-        the force is distributed. The springs of a tie along different axes act on different components, so for a
-        tie this is the row sum itself.
+        at every point. A spring :math:`p` has the gradient :math:`w_p = [c, -N^m] \\otimes \\bar{n}_p` and the
+        stiffness :math:`k_p = \\mathrm{d}f/\\mathrm{d}g` its law gives it (the one of the tangent); the bound is the one
+        of every penalty spring
+        (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`), with the
+        contact points' interpolation over the slave nodes they share and the parent face nodes of each point's master
+        facet. The springs of a tie along different axes act on different components, so for a tie this is the row
+        sum itself.
         """
 
         located = self._locatedPoints
@@ -1373,30 +1359,20 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             return
 
         nSlaveDof = self._nSlaveDof
-        absoluteSlaveInterpolationOfLocated = abs(self.slave.interpolationMatrixOfLocatedPoints())
-        slaveWeights = weights[:nSlaveDof].reshape((-1, self.nDim))
-        masterWeightsOfLocated = weights[nSlaveDof:].reshape((len(located), self.nMasterParentNodes, self.nDim))
-        slaveBound = bound[:nSlaveDof].reshape((-1, self.nDim))
-        masterBoundOfLocated = bound[nSlaveDof:].reshape((len(located), self.nMasterParentNodes, self.nDim))
-
+        slaveInterpolationOfLocated = self.slave.interpolationMatrixOfLocatedPoints()
+        dofsOfSlaveNodes = np.arange(nSlaveDof).reshape((-1, self.nDim))
+        dofsOfMasterNodesOfLocated = nSlaveDof + np.arange(len(located) * self.nMasterParentNodes * self.nDim).reshape(
+            (len(located), self.nMasterParentNodes, self.nDim)
+        )
         for spring in springs:
             points = spring.points
-            absoluteDirections = np.abs(spring.directions)
-            absoluteSlaveInterpolation = absoluteSlaveInterpolationOfLocated[points]
-            absoluteMasterShapeFunctions = np.abs(self._masterShapeFunctionsOfLocated[points])
-
-            # |w_p| . weights, then k_p times it
-            weightedBySpring = rowDot(absoluteDirections, absoluteSlaveInterpolation @ slaveWeights) + np.einsum(
-                "ai,aij,aj->a", absoluteMasterShapeFunctions, masterWeightsOfLocated[points], absoluteDirections
-            )
-            stiffnessTimesWeighted = np.abs(spring.stiffness) * weightedBySpring
-
-            slaveBound[:] += absoluteSlaveInterpolation.T @ (stiffnessTimesWeighted[:, None] * absoluteDirections)
-            masterBoundOfLocated[points] += (
-                stiffnessTimesWeighted[:, None, None]
-                * absoluteMasterShapeFunctions[:, :, None]
-                * absoluteDirections[:, None, :]
-            )
+            gradient = [
+                SpringGradientOnSharedNodes(slaveInterpolationOfLocated[points], spring.directions, dofsOfSlaveNodes),
+                SpringGradientOnOwnNodes(
+                    -self._masterShapeFunctionsOfLocated[points], spring.directions, dofsOfMasterNodesOfLocated[points]
+                ),
+            ]
+            addBoundOfAbsoluteStiffnessOfSprings(bound, weights, spring.stiffness, gradient)
 
     @property
     def contactForceOnSlave(self) -> np.ndarray:

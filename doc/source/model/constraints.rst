@@ -620,6 +620,12 @@ The penalty contacts are assembled from two pieces of their own: the *contact po
 .. automodule:: edelweissfe.constraints.base.penaltylaw
     :members:
 
+The law gives each contact point its springs, and the bound of their stiffness for the
+critical time step of an explicit analysis: one formula for the bound, used by every penalty contact:
+
+.. automodule:: edelweissfe.constraints.base.penaltysprings
+    :members:
+
 Multi-point (DOF-elimination) constraints subclass from
 ``edelweissfe.constraints.base.multipointconstraintbase`` instead -- they contribute nothing to
 the load vector or system matrix; they only declare linear dependency records, which the solvers
