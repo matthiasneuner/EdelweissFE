@@ -184,8 +184,8 @@ The constraint is one contact for every kind of contact point (:ref:`contact-poi
 quadrature points of the slave facets (``contactPoints=quadraturePoints``, the default), the slave
 nodes, each standing for its tributary area (``contactPoints=nodes``), and, from EdelweissMeshfree,
 points on the faces of particles. Points that approach the master within ``searchDistance`` are
-paired with it; a point found inside without having been seen approaching gets no force and is
-reported. A point in contact slides from facet to facet, but not across a convex crease; in every update it walks
+paired with it; a point found inside without having been seen approaching gets no force, is
+reported, and counts as found inside until it is seen outside again. A point in contact slides from facet to facet, but not across a convex crease; in every update it walks
 over the master until its facet no longer changes, so that an update repeated at the same configuration, as a
 resumed run repeats one, pairs it the same (:ref:`contact-corners`). The master may have corners: at its creases -- a crest, a re-entrant root -- the gap is the
 distance to the crease, signed by its pseudonormal (:ref:`contact-corners`). An overlap at the start is either

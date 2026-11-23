@@ -865,8 +865,10 @@ it is, so that it slides from facet to facet, from one face of the master onto t
 re-entrant corner -- but never across a *convex crease* (below): the closest facet of a point that has
 entered near a convex corner of the master may be on its side, and of a point deep inside a thin master on
 its far side, and either would push the point out of the wrong side. A point that leaves the master body is
-released at once. A point that was out of reach at the previous update and is now inside has tunnelled
-through the search distance between two updates; it is *found inside*, gets no force, and is reported. The
+released at once, and is free if it is then beyond the search distance. A point that was out of reach at the
+previous update and is now inside has tunnelled through the search distance between two updates; it is *found
+inside*, gets no force, and is reported, and it counts as found inside until it is seen outside again, also while
+it is deeper inside than the search distance. The
 search distance must therefore exceed the distance a point travels towards the surface between two updates of
 the connectivity: every ``contact-update-frequency`` increments of ``NED`` (by default 100), every increment in a
 model with particles or in an implicit analysis. Sized from the velocity times one time increment, it is too small

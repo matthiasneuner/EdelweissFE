@@ -140,7 +140,8 @@ class ContactState(IntEnum):
     IN_CONTACT = 2
     #: The point lies inside the master body without having been seen outside of it before: it has tunnelled through
     #: the search distance between two updates of the connectivity. It gets no force (the closest facet is no
-    #: indication of the way out), and the constraint reports it.
+    #: indication of the way out), and the constraint reports it. It stays so until it is seen outside within the
+    #: search distance: deeper inside than the search distance, it is out of sight, not free.
     FOUND_INSIDE = 3
     #: The point is paired once, with a material point of the master surface, for good: it is tied to it (a law that
     #: pairs once, :attr:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.pairsOnce`: the tie).
@@ -287,9 +288,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     this side of the crease, and on from there, until its facet no longer changes -- so that an update repeated at
     the same configuration, as a resumed step repeats one, pairs it the same, however far it slid since the last
     update. A point that leaves the master body is released at once, also
-    beside a crest. A point that was out of reach at the previous update and is found inside the master body has
-    tunnelled through the search distance between two updates of the connectivity (:attr:`ContactState.FOUND_INSIDE`):
-    it gets no force and is reported. The search distance must therefore exceed the distance a point travels towards
+    beside a crest, and is free if it is then beyond the search distance. A point that was out of reach at the previous
+    update and is found inside the master body has tunnelled through the search distance between two updates of the
+    connectivity (:attr:`ContactState.FOUND_INSIDE`): it gets no force, is reported, and counts as found inside until
+    it is seen outside again, also while it is deeper inside than the search distance. The search distance must therefore exceed the distance a point travels towards
     the surface between two updates -- every ``contact-update-frequency`` increments of ``NED`` (by default 100), every
     increment in a model with particles or in an implicit analysis -- and the constraint warns when a point enters
     deeper than half of it.
@@ -613,7 +615,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     @property
     def numberOfPointsFoundInside(self) -> int:
         """The number of contact points found inside the master body without having been seen outside of it, which
-        get no force (:attr:`ContactState.FOUND_INSIDE`).
+        get no force (:attr:`ContactState.FOUND_INSIDE`); a point counts until it is seen outside again.
 
         Returns
         -------
@@ -717,9 +719,16 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             )
 
         state = np.full(self.nPoints, ContactState.FREE, dtype=np.int8)
-        state[reached & ~penetrating] = ContactState.APPROACHING
+        # (a point that was in contact is reached at any distance: once it has left the master body, beyond the search
+        # distance it is free)
+        withinTheSearchDistance = (
+            np.ones(self.nPoints, dtype=bool) if self.searchDistance is None else distance <= self.searchDistance
+        )
+        state[reached & ~penetrating & withinTheSearchDistance] = ContactState.APPROACHING
         state[penetrating & wasSeen] = ContactState.IN_CONTACT
         state[penetrating & ~wasSeen] = ContactState.FOUND_INSIDE
+        # a point found inside that no facet reaches any more has gone deeper, not out
+        state[~reached & (previousState == ContactState.FOUND_INSIDE)] = ContactState.FOUND_INSIDE
 
         self._reportEntriesAndPointsFoundInside(previousState, state, gap)
         self._stateOfPoint = state

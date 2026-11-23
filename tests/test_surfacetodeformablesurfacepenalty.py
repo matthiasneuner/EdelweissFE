@@ -237,13 +237,12 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
 
         self.assertTrue((constraint.getGaps() < 0.0).any(), "expected penetrating points to start")
 
-        # Pull the slave block away, beyond the search distance. A point in contact never leaves the search at once:
-        # the first update finds it outside (approaching), the second out of reach.
+        # Pull the slave block away, beyond the search distance: a point that has left the master body there is free
+        # in the update that sees it leave.
         for node in slaveSurface.extractNodeSet():
             field["U"][field._indicesOfNodesInArray[node]] = [0.0, -2.0, 0.0]
         constraint.updateConnectivity(model)
-        self.assertTrue((constraint.stateOfPoints == ContactState.APPROACHING).all())
-        constraint.updateConnectivity(model)
+        self.assertTrue((constraint.stateOfPoints == ContactState.FREE).all())
 
         self.assertTrue((constraint._assignedFacetIdx < 0).all(), "expected no assignments")
         self.assertFalse(constraint.withinReach)
@@ -552,6 +551,47 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
             field["U"][field._indicesOfNodesInArray[node]] = [0.0, 0.52, 0.0]
         constraint.updateConnectivity(model)
         self.assertEqual(constraint.numberOfPointsFoundInside, constraint.nPoints)
+        self.assertFalse(constraint.withinReach)
+        self.assertEqual(constraint.nDof, 0)
+
+    def test_a_point_found_inside_counts_until_it_is_seen_outside_also_deeper_than_the_search_distance(self):
+        """A point found inside that goes on, deeper than the search distance, is out of sight of every facet. It has
+        not left the master body: it still counts as found inside, so that a count of zero after a run means that no
+        point is inside unseen. Seen outside again within the search distance, it approaches."""
+
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=-0.5)
+        field = self._addDisplacementField(model)
+        constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=0.1)
+
+        def moveTheSlaveFaceUpBy(dy: float):
+            for node in slaveSurface.extractNodeSet():
+                field["U"][field._indicesOfNodesInArray[node]] = [0.0, dy, 0.0]
+            constraint.updateConnectivity(model)
+
+        # tunnelled 0.02 into the master body, then on to 0.25 (beyond the search distance), and back to 0.02
+        for dy in (0.52, 0.75, 0.52):
+            moveTheSlaveFaceUpBy(dy)
+            self.assertTrue((constraint.stateOfPoints == ContactState.FOUND_INSIDE).all(), f"dy={dy}")
+            self.assertEqual(constraint.numberOfPointsFoundInside, constraint.nPoints)
+            self.assertFalse(constraint.withinReach)
+
+        moveTheSlaveFaceUpBy(0.45)
+        self.assertTrue((constraint.stateOfPoints == ContactState.APPROACHING).all())
+        self.assertEqual(constraint.numberOfPointsFoundInside, 0)
+
+    def test_a_point_that_leaves_its_contact_beyond_the_search_distance_is_free_at_once(self):
+        """A point in contact is not lost to the search distance; one that has left the master body is. Beyond the
+        search distance it is free, and the constraint out of reach, in the update that sees it leave."""
+
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration=0.05)
+        field = self._addDisplacementField(model)
+        constraint = self._constraint(model, slaveSurface, masterSurface, searchDistance=0.1)
+        self.assertTrue((constraint.stateOfPoints == ContactState.IN_CONTACT).all())
+
+        for node in slaveSurface.extractNodeSet():
+            field["U"][field._indicesOfNodesInArray[node]] = [0.0, -0.3, 0.0]
+        constraint.updateConnectivity(model)
+        self.assertTrue((constraint.stateOfPoints == ContactState.FREE).all())
         self.assertFalse(constraint.withinReach)
         self.assertEqual(constraint.nDof, 0)
 
