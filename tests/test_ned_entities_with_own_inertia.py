@@ -39,13 +39,22 @@ same contract in a few lines of Python, and the tests check ``NED``'s path for i
 * the motion starts from the velocity projected from the momentum, and the leapfrog then is the central difference
   recursion of the oscillator, to round-off; its period is the analytic one, to second order in the increment,
 * the critical time step of the entities sets the increment of a step that asks for a larger one, and, since it sets
-  the increment, it is estimated in every increment.
+  the increment, it is estimated in every increment,
+* a field of the entities that gets neither an inertia nor a damping is refused, and so are a damping of the entities
+  that is negative or not finite, and an inertia that is not finite,
+* the rate of a first-order field of the entities (dashpots on springs) is published in every increment, also when the
+  velocity is projected from the momentum in every increment,
+* the step gives the entities zero Newmark parameters: their inertia is integrated at the nodes,
+* a multi-point constraint whose slave is a degree of freedom of the entities is refused.
 """
 
 import numpy as np
 import pytest
 
 from edelweissfe.config.configurator import loadConfiguration
+from edelweissfe.constraints.base.multipointconstraintbase import (
+    MultiPointConstraintBase,
+)
 from edelweissfe.elements.pointmass import PointMass
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.discretesystem import DiscreteSystem
@@ -68,14 +77,20 @@ VELOCITIES = (0.3, -0.1)
 OMEGA = np.sqrt(STIFFNESS / MASS)
 #: The critical time step of one mass on its spring, 2 / omega.
 CRITICAL_TIME_STEP = 2.0 / OMEGA
+#: The coefficient of the dashpots of :class:`ModelOfDashpotsOnSprings`, and where each starts. The forward Euler update
+#: of a dashpot on a spring has the critical time step 2 c / k.
+DAMPING = 20.0
+DISPLACEMENTS = (0.02, -0.05)
 
 
 class MassOnASpring(PointMass):
     """A point mass on a spring to the ground that carries its displacement and its velocity in itself, as a particle
     carries its state. As a point mass, it sits on one node and lumps its mass there."""
 
-    def __init__(self, number: int, node: Node, model: FEModel, velocity: float):
-        super().__init__(number, [node], model, MASS)
+    def __init__(self, number: int, node: Node, model: FEModel, velocity: float, mass: float, damping: float):
+        super().__init__(number, [node], model, mass)
+        #: The coefficient of a dashpot to the ground, lumped to the node as the mass is.
+        self.damping = damping
         self.displacement = np.zeros(model.domainSize)
         self.velocity = np.array([velocity, 0.0])
 
@@ -127,16 +142,23 @@ class SystemOfMassesOnSprings(DiscreteSystem):
 
     def assembleLumpedDampingOfEntitiesWithOwnInertia(self, forEachChunk):
         self.model.calls.append("damping")
-        return self._onTheNodes(lambda mass: np.zeros(mass.nDof))
+        return self._onTheNodes(lambda mass: np.full(mass.nDof, mass.damping))
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
         self.model.calls.append("estimate")
-        # each mass on its spring alone: omega^2 = k / m, from the mass the solver has just assembled
-        masses = self.entitiesWithOwnInertia
+
+        # each entity on its spring alone, from the mass and the damping the solver has just assembled: omega^2 = k / m
+        # for a mass; for a dashpot without a mass, (k / c)^2, so that 2 / omega is its critical time step 2 c / k
+        def squaredFrequencyOf(entity) -> float:
+            mass, damping = lumpedMass[entity][0], lumpedDamping[entity][0]
+            return STIFFNESS / mass if mass > 0.0 else (STIFFNESS / damping) ** 2
+
+        entities = self.entitiesWithOwnInertia
+        squaredFrequencies = np.array([squaredFrequencyOf(entity) for entity in entities])
         return CriticalTimeStepBoundOfEachDof(
-            min(2.0 * np.sqrt(lumpedMass[mass][0] / STIFFNESS) for mass in masses),
-            np.concatenate([self.locations[mass] for mass in masses]),
-            np.concatenate([STIFFNESS / np.asarray(lumpedMass[mass]) for mass in masses]),
+            2.0 / np.sqrt(squaredFrequencies.max()),
+            np.concatenate([self.locations[entity] for entity in entities]),
+            np.repeat(squaredFrequencies, [entity.nDof for entity in entities]),
         )
 
     def _onTheNodes(self, valueOf) -> DofVector:
@@ -149,20 +171,33 @@ class SystemOfMassesOnSprings(DiscreteSystem):
 
 class ModelOfMassesOnSprings(FEModel):
     """A model of masses on springs, one per node, that answers with :class:`SystemOfMassesOnSprings`, and records
-    what ``NED`` asks of it."""
+    what ``NED`` asks of it.
 
-    def __init__(self):
+    Parameters
+    ----------
+    mass
+        The mass of every point mass.
+    damping
+        The coefficient of the dashpot of every point mass to the ground; none by default.
+    """
+
+    def __init__(self, mass: float = MASS, damping: float = 0.0):
         super().__init__(2)
         self.calls = []
+        #: The Newmark parameters the solver gave last; those an implicit dynamic step would have left.
+        self.newmarkParametersOfEntities = (0.25, 0.5)
         for number, velocity in enumerate(VELOCITIES, start=1):
             node = Node(number, np.array([float(number), 0.0]))
             self.nodes[number] = node
-            self.elements[number] = MassOnASpring(number, node, self, velocity)
+            self.elements[number] = MassOnASpring(number, node, self, velocity, mass, damping)
         self.elementSets["all"] = ElementSet("all", list(self.elements.values()))
         self.nodeSets["all"] = NodeSet("all", list(self.nodes.values()))
 
     def buildDiscreteSystem(self) -> SystemOfMassesOnSprings:
         return SystemOfMassesOnSprings(self, super().buildDiscreteSystem().locations)
+
+    def setNewmarkParametersOfEntities(self, beta: float, gamma: float):
+        self.newmarkParametersOfEntities = (beta, gamma)
 
     def advanceToTime(self, time: float):
         self.calls.append("accept")
@@ -173,23 +208,52 @@ class ModelOfMassesOnSprings(FEModel):
         return super().updateConnectivity()
 
 
+class ModelOfDashpotsOnSprings(ModelOfMassesOnSprings):
+    """Dashpots on springs: without a mass, the displacement is a first-order field, :math:`c \\dot{x} + k x = 0`, which
+    ``NED`` integrates by forward Euler. Each dashpot starts displaced, and creeps back."""
+
+    def __init__(self):
+        super().__init__(mass=0.0, damping=DAMPING)
+        for dashpot, displacement in zip(self.elements.values(), DISPLACEMENTS):
+            dashpot.displacement[0] = displacement
+
+
+class TheSecondMassFollowsTheFirst(MultiPointConstraintBase):
+    """A multi-point constraint that makes the displacement of the node of the second mass a slave of that of the
+    first, :math:`u_2 = u_1`."""
+
+    def __init__(self, name: str, model: FEModel):
+        self.name = name
+        self._nodes = (model.nodes[1], model.nodes[2])
+
+    def getMultiPointConstraints(self, numbering) -> list[tuple[int, list[tuple[int, float]]]]:
+        master, slave = (numbering.idcsOfFieldVariablesInDofVector[node.fields["displacement"]] for node in self._nodes)
+        return [(slaveDof, [(masterDof, 1.0)]) for slaveDof, masterDof in zip(slave, master)]
+
+
 class _RecordingNED(NED):
-    """``NED``, recording the increment and the displacement of every mass after each increment it accepts."""
+    """``NED``, recording the increment and the displacement of every mass after each increment it accepts, and the
+    velocity the model holds at the nodes then (the entry ``V`` of the node field)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.history = []
+        self.publishedVelocities = []
 
     def acceptIncrement(self, step, model, timeStep):
         super().acceptIncrement(step, model, timeStep)
         self.history.append((timeStep.timeIncrement, [mass.displacement[0] for mass in model.elements.values()]))
+        self.publishedVelocities.append(np.array(model.nodeFields["displacement"]["V"])[:, 0])
 
 
-def _run(stepLength: float, **options) -> tuple[ModelOfMassesOnSprings, _RecordingNED]:
-    """Run one explicit step of the given length, which asks for the whole step as its increment."""
+def _run(
+    stepLength: float, model: ModelOfMassesOnSprings = None, **options
+) -> tuple[ModelOfMassesOnSprings, _RecordingNED]:
+    """Run one explicit step of the given length, which asks for the whole step as its increment, on the given model
+    (by default the masses on springs)."""
 
     journal = Journal(verbose=False)
-    model = ModelOfMassesOnSprings()
+    model = model or ModelOfMassesOnSprings()
     model.prepareYourself(journal)
     model.advanceToTime(0.0)
     model.calls.clear()
@@ -283,3 +347,82 @@ def test_the_period_is_the_one_of_the_oscillator_to_second_order_in_the_incremen
             times[crossing + 1] - times[crossing]
         )
         assert halfPeriod == pytest.approx(np.pi / OMEGA, rel=(OMEGA * courantNumber * CRITICAL_TIME_STEP) ** 2 / 10)
+
+
+def test_a_field_of_the_entities_without_inertia_and_damping_is_refused():
+    """Point masses without a mass (as particles without a density) give the displacement neither an inertia nor a
+    damping at any degree of freedom: there is nothing to integrate it with, and ``NED`` says so when it takes the
+    operators of the entities, instead of leaving the field where it is for the whole step."""
+
+    with pytest.raises(ValueError, match="displacement carries neither an inertia nor a damping"):
+        _run(10 * CRITICAL_TIME_STEP, model=ModelOfMassesOnSprings(mass=0.0))
+
+
+@pytest.mark.parametrize(
+    "mass, damping, refusal",
+    [
+        (MASS, -1.0, "lumped damping is not a valid dissipation"),
+        (MASS, np.nan, "lumped damping is not a valid dissipation"),
+        (np.nan, 0.0, "lumped inertia is not finite"),
+    ],
+)
+def test_an_invalid_damping_or_inertia_of_the_entities_is_refused(mass, damping, refusal):
+    """The damping of the entities is checked as that of the elements is: a negative one would amplify a second-order
+    field through the rate C/M, which no check of the divisor sees, and a coefficient that is not a number passes every
+    comparison and would reach every increment."""
+
+    with pytest.raises(ValueError, match=refusal):
+        _run(10 * CRITICAL_TIME_STEP, model=ModelOfMassesOnSprings(mass=mass, damping=damping))
+
+
+@pytest.mark.parametrize("projectVelocity", [False, True])
+def test_the_rate_of_a_first_order_field_of_the_entities_is_published_in_every_increment(projectVelocity):
+    """Dashpots on springs creep back by forward Euler, :math:`x_{n+1} = x_n (1 - k \\Delta t / c)`, and the velocity
+    the model holds after an increment is the rate it was taken with. ``project-velocity-every-increment`` projects the
+    velocity of the second-order fields from the momentum; a first-order field has no momentum, and keeps its rate."""
+
+    _, solver = _run(
+        5 * CRITICAL_TIME_STEP,
+        model=ModelOfDashpotsOnSprings(),
+        **{"project-velocity-every-increment": projectVelocity},
+    )
+
+    timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])
+    displacements = np.array([x for _, x in solver.history])
+    np.testing.assert_allclose(displacements[0], DISPLACEMENTS)
+    np.testing.assert_allclose(
+        displacements[1:],
+        displacements[:-1] * (1.0 - STIFFNESS * timeIncrements[1:, np.newaxis] / DAMPING),
+        rtol=1e-12,
+    )
+
+    rates = (displacements[1:] - displacements[:-1]) / timeIncrements[1:, np.newaxis]
+    assert np.all(rates != 0.0)
+    np.testing.assert_allclose(np.array(solver.publishedVelocities)[1:], rates, rtol=1e-12)
+
+
+def test_the_step_gives_the_entities_zero_newmark_parameters():
+    """An entity that can integrate its own inertia by the Newmark scheme keeps the parameters of the solver that gave
+    them last, e.g. of an implicit dynamic step. ``NED`` integrates the inertia at the nodes, and gives zero at the
+    start of its step: a tangent such an entity is asked for afterwards holds no inertia of a scheme that is not
+    running."""
+
+    model, _ = _run(CRITICAL_TIME_STEP)
+
+    assert model.newmarkParametersOfEntities == (0.0, 0.0)
+
+
+def test_a_multi_point_constraint_with_a_slave_among_the_degrees_of_freedom_of_the_entities_is_refused():
+    """A slave of a multi-point constraint has no equation of motion of its own: the inertia the entities lump to it
+    would be folded onto its masters, and the velocity and the kinetic energy published for it would be zero. ``NED``
+    refuses it when it builds the numbering, and names the constraint."""
+
+    model = ModelOfMassesOnSprings()
+    model.multiPointConstraints["follow"] = TheSecondMassFollowsTheFirst("follow", model)
+
+    with pytest.raises(
+        NotImplementedError,
+        match=r"multi-point constraint\(s\) 'follow' make 2 degree\(s\) of freedom of the entities that carry their own "
+        r"inertia",
+    ):
+        _run(10 * CRITICAL_TIME_STEP, model=model)

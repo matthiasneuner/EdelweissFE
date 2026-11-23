@@ -183,7 +183,13 @@ The kinetic energy of the balance, and the momentum of the diagnostics, are thos
 lumped mass, on the nodes of the entities as on those of the elements: the state the leapfrog integrates. The
 checkpoint holds the inertia and the damping of the entities with the net force, and a resumed step finds their
 connectivity again.
-Model modifiers that act after the start of the analysis are not supported in such a model.
+An entity that can integrate its own inertia by the Newmark scheme, as an implicit dynamic step asks of it, carries
+none here: at the start of every step, this solver gives the entities zero Newmark parameters
+(:meth:`~edelweissfe.models.femodel.FEModel.setNewmarkParametersOfEntities`), as every quasi-static solver does.
+Model modifiers that act after the start of the analysis are not supported in such a model, and neither is a
+multi-point constraint whose slave is a degree of freedom of the nodes of the entities: its inertia would be folded onto
+its masters, and the velocity and the kinetic energy published for it would be zero. ``NED`` refuses such a constraint
+when it builds the numbering.
 
 **Energy balance.** Every reporting increment prints the energy the model held at the start of the
 step, kinetic and internal (``E_0``), the external work accumulated at prescribed degrees of freedom
@@ -632,6 +638,10 @@ class NED(NonlinearSolverBase):
 
         self.validateModelCapabilities(model)
 
+        # The inertia of every entity is integrated at the nodes here. An entity that can integrate its own by the
+        # Newmark scheme carries none: a step of an implicit solver may have left it its parameters.
+        model.setNewmarkParametersOfEntities(0.0, 0.0)
+
         # The timing table's untimed residue is measured against this wall clock, so timers and
         # clock must start together, before any timed work of this step.
         performancetiming.reset()
@@ -1027,8 +1037,9 @@ class NED(NonlinearSolverBase):
 
         In the zero increment, the motion of the entities starts (:meth:`_startTheMotionOfEntitiesWithOwnInertia`);
         with ``project-velocity-every-increment``, the velocity of their nodes is projected from their momentum in every
-        increment. A node of theirs without a positive mass has no equation of motion, so it has no velocity: not even
-        the one it carried while it still had a mass, which the update would otherwise keep.
+        increment (:meth:`_projectTheVelocityOfEntitiesFromTheirMomentum`, the second-order fields only). A node of
+        theirs without a positive mass has no equation of motion, so it has no velocity: not even the one it carried
+        while it still had a mass, which the update would otherwise keep.
 
         Parameters
         ----------
@@ -1082,12 +1093,12 @@ class NED(NonlinearSolverBase):
             )
             self._enforceTheCriticalTimeStep(step, "The penalty constraints", 2)
 
-        ids = self.ids_inertiaOfEntities
         if timeStep.timeIncrement == 0.0:
             self._startTheMotionOfEntitiesWithOwnInertia(momentum, dirichlets)
         elif self.options["project-velocity-every-increment"]:
-            self._V[ids] = momentum[ids] * self._Minv[ids]
+            self._projectTheVelocityOfEntitiesFromTheirMomentum(momentum)
 
+        ids = self.ids_inertiaOfEntities
         self._V[ids[self._Minv[ids] == 0.0]] = 0.0
 
         if timeStep.timeIncrement > 0.0 and timeStep.number % self.options["output-frequency"] == 0:
@@ -1119,9 +1130,25 @@ class NED(NonlinearSolverBase):
 
         if "nodes" not in self.system.carriersOfTheMotion():
             self._netForce[ids] = evaluatedNetForce
-            self._V[ids] = momentum[ids] * self._Minv[ids]
+            self._projectTheVelocityOfEntitiesFromTheirMomentum(momentum)
 
         self._energyAtStepStart = self.energyOfTheModelsState()
+
+    def _projectTheVelocityOfEntitiesFromTheirMomentum(self, momentum: DofVector):
+        """Project the velocity of the nodes of the entities that carry their own inertia from the entities' lumped
+        momentum, :math:`\\boldsymbol{v} = \\boldsymbol{M}^{-1} \\boldsymbol{p}`, at the degrees of freedom of the
+        second-order fields. A first-order field has no momentum: its rate is the one of the forward Euler update,
+        :math:`\\boldsymbol{C}^{-1} \\boldsymbol{f}_\\mathrm{net}`, and is left as it is.
+
+        Parameters
+        ----------
+        momentum
+            The lumped momentum of the entities.
+        """
+
+        ids = self.ids_inertiaOfEntities
+        secondOrder = ids[self._secondOrderMask[ids] != 0.0]
+        self._V[secondOrder] = momentum[secondOrder] * self._Minv[secondOrder]
 
     def _takeLumpedOperatorsOfEntitiesWithOwnInertia(
         self, inertiaOfEntities: np.ndarray, dampingOfEntities: np.ndarray
@@ -1988,8 +2015,8 @@ class NED(NonlinearSolverBase):
         lumped operators and the indices of the fields by time derivative; see
         :meth:`~edelweissfe.solvers.base.nonlinearsolverbase.NonlinearSolverBase.forgetDiscreteSystem`. Everything
         :meth:`onNewNumbering` builds is gone, so that no array of the previous numbering is left to be mistaken for
-        one of the next. The net force and the mass of the entities that carry their own inertia, which a resumed step
-        finds from its checkpoint, are dropped as well: whoever needs them takes them before the build (see
+        one of the next. The net force and the mass and the damping of the entities that carry their own inertia, which
+        a resumed step finds from its checkpoint, are dropped as well: whoever needs them takes them before the build (see
         :meth:`prepareIncrement`). What is derived from the mesh, the critical time step and the classification of
         the fields by time derivative, is no array of the numbering: it is derived again when the mesh changed (see
         :meth:`onNewNumbering`)."""
@@ -2025,7 +2052,8 @@ class NED(NonlinearSolverBase):
         NotImplementedError
             If the discrete system holds entities this solver does not integrate: material points, cells or cell
             elements of a meshfree model; or entities that carry their own inertia together with model modifiers that
-            act after the start of the analysis.
+            act after the start of the analysis, or with a multi-point constraint whose slave is one of their degrees
+            of freedom (see :meth:`_refuseSlavesAmongTheDofsOfEntitiesWithOwnInertia`).
         """
 
         system = self.system
@@ -2050,6 +2078,7 @@ class NED(NonlinearSolverBase):
         self.ids_inertiaOfEntities = np.setdiff1d(
             self._dofIndicesOfFields(system.numbering.fields), system.dofsWithNodalInertia(system.numbering.fields)
         )
+        self._refuseSlavesAmongTheDofsOfEntitiesWithOwnInertia()
 
         self._assembleLumpedOperators()
 
@@ -2081,6 +2110,40 @@ class NED(NonlinearSolverBase):
                 self.identification,
                 1,
             )
+
+    def _refuseSlavesAmongTheDofsOfEntitiesWithOwnInertia(self):
+        """Refuse a multi-point constraint whose slave is a degree of freedom of the entities that carry their own
+        inertia (:attr:`ids_inertiaOfEntities`). Such a slave has no equation of motion of its own: the inertia the
+        entities lump to it would be folded onto its masters, and the velocity this solver publishes for it at every
+        accepted increment, and its kinetic energy, would be zero.
+
+        Raises
+        ------
+        NotImplementedError
+            If a multi-point constraint has a slave among the degrees of freedom of the entities; the message names
+            the constraint.
+        """
+
+        if self.mpcTransformation is None:
+            return
+
+        slaves = np.intersect1d(self.mpcTransformation.slaveDofIndices, self.ids_inertiaOfEntities, assume_unique=True)
+        if slaves.size == 0:
+            return
+
+        numbering = self.system.numbering
+        names = [
+            name
+            for name, constraint in self.system.model.multiPointConstraints.items()
+            if np.isin([slave for slave, _ in constraint.getMultiPointConstraints(numbering)], slaves).any()
+        ]
+        raise NotImplementedError(
+            "The multi-point constraint(s) {:} make {:} degree(s) of freedom of the entities that carry their own "
+            "inertia (the nodes of the particles of a meshfree model) their slaves, which {:} does not support: the "
+            "velocity and the kinetic energy it publishes for such a slave would be zero.".format(
+                ", ".join("'{:}'".format(name) for name in names), slaves.size, self.identification
+            )
+        )
 
     def onNewLocations(self):
         """Wrap the vectors of the increments with the new locations, their values kept: the increments continue from
@@ -2129,21 +2192,6 @@ class NED(NonlinearSolverBase):
             el.computeLumpedDamping(Ce)
             damping[locations[el]] += Ce
 
-        # Checked separately: at second-order DOFs the damping enters only as the rate C/M, which the
-        # inertia check below never sees, and a negative rate amplifies instead of damping.
-        if not np.all(np.isfinite(damping)) or np.any(damping < 0.0):
-            raise ValueError(
-                "The assembled lumped damping is not a valid dissipation: {:} of {:} entries are "
-                "negative and {:} are not finite (smallest: {:e}). A damping coefficient enters the "
-                "second-order update as the rate C/M, where a negative value amplifies instead of "
-                "damping, and a first-order field divides by it directly.".format(
-                    int(np.count_nonzero(np.asarray(damping) < 0.0)),
-                    damping.shape[0],
-                    int(np.count_nonzero(~np.isfinite(np.asarray(damping)))),
-                    np.nanmin(damping),
-                )
-            )
-
         self._inertiaOfTheElements = M
         self._dampingOfTheElements = damping
 
@@ -2186,7 +2234,8 @@ class NED(NonlinearSolverBase):
 
     def _deriveLumpedOperators(self):
         """Derive everything the explicit update divides by from the lumped inertia and damping of the elements and of
-        the entities that carry their own inertia: the classification of the fields by time derivative
+        the entities that carry their own inertia, once both are checked (a damping is finite and not negative, an
+        inertia finite; a negative divisor is refused below): the classification of the fields by time derivative
         (:meth:`_classifyFieldsOfTheMesh`), a property of the mesh derived for the first numbering of a step and for a
         new mesh (see :meth:`onNewNumbering`), with the
         entities' operators once they are known; the index sets of the fields; and, as arrays of the length of the
@@ -2203,6 +2252,30 @@ class NED(NonlinearSolverBase):
         if self._inertiaOfEntities is not None:
             M[ids] = self._inertiaOfEntities[ids]
             damping[ids] = self._dampingOfEntities[ids]
+
+        # The damping of the elements and of the entities, checked on its own: at second-order DOFs it enters only as
+        # the rate C/M, which the check of the divisor below never sees, and a negative rate amplifies instead of
+        # damping.
+        if not np.all(np.isfinite(damping)) or np.any(damping < 0.0):
+            raise ValueError(
+                "The assembled lumped damping is not a valid dissipation: {:} of {:} entries are "
+                "negative and {:} are not finite (smallest: {:e}). A damping coefficient enters the "
+                "second-order update as the rate C/M, where a negative value amplifies instead of "
+                "damping, and a first-order field divides by it directly.".format(
+                    int(np.count_nonzero(damping < 0.0)),
+                    damping.shape[0],
+                    int(np.count_nonzero(~np.isfinite(damping))),
+                    np.nanmin(damping),
+                )
+            )
+
+        # A lumped inertia that is not a number passes every comparison below, and would reach every increment.
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "The assembled lumped inertia is not finite at {:} of {:} degrees of freedom.".format(
+                    int(np.count_nonzero(~np.isfinite(M))), M.shape[0]
+                )
+            )
 
         if self._meshOfTheClassification != self.system.model.topology.version:
             self._classifyFieldsOfTheMesh(M, damping)
@@ -2428,7 +2501,9 @@ class NED(NonlinearSolverBase):
         (:attr:`ids_inertiaOfEntities`) wherever these give them a coefficient, an inertia or a damping: a node their
         kernel functions reach only where they vanish has neither, and no equation of motion. A field of the entities
         with a damping and no inertia, e.g. the nonlocal field of gradient-enhanced particles without a micro-inertia,
-        is therefore first order, as it is for the elements.
+        is therefore first order, as it is for the elements. A field of the entities that gets no coefficient at any
+        of its degrees of freedom, e.g. the displacement of particles without a density, is refused like a field of
+        elements that carries neither.
 
         Parameters
         ----------
@@ -2466,7 +2541,16 @@ class NED(NonlinearSolverBase):
             carriesInertia = np.asarray(inertia[indices]) != 0.0
             carriesDamping = np.asarray(damping[indices]) != 0.0
 
-            if carriesInertia.all():
+            if not carriesInertia.any() and not carriesDamping.any():
+                # Asked first: of a field that only the entities carry, no degree of freedom is left to decide then,
+                # and "all of none" would hold.
+                raise ValueError(
+                    "Field {:} carries neither an inertia nor a damping, so there is no time "
+                    "derivative for this solver to integrate it with. Its elements, and the entities that carry "
+                    "their own inertia, report both (computeLumpedInertia and computeLumpedDamping); "
+                    "a zero density or a zero volume gives a zero inertia.".format(fieldName)
+                )
+            elif carriesInertia.all():
                 secondOrderFields.append(fieldName)
             elif carriesInertia.any():
                 raise ValueError(
@@ -2480,20 +2564,13 @@ class NED(NonlinearSolverBase):
                 )
             elif carriesDamping.all():
                 firstOrderFields.append(fieldName)
-            elif carriesDamping.any():
+            else:
                 raise ValueError(
                     "Field {:} carries no inertia, so it is integrated by its damping alone -- but "
                     "a damping was assembled on only {:} of its {:} degrees of freedom, and the "
                     "rest have nothing to divide by.".format(
                         fieldName, int(np.count_nonzero(carriesDamping)), carriesDamping.size
                     )
-                )
-            else:
-                raise ValueError(
-                    "Field {:} carries neither an inertia nor a damping, so there is no time "
-                    "derivative for this solver to integrate it with. Its elements report both "
-                    "through computeLumpedInertia and computeLumpedDamping; an element with zero "
-                    "density or zero volume reports the first as zero.".format(fieldName)
                 )
 
         return firstOrderFields, secondOrderFields
