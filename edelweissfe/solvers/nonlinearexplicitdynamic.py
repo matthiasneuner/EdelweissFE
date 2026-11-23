@@ -80,23 +80,13 @@ that carry their own inertia (below) when the margin of their last estimate may 
 the degrees of freedom it couples: in every increment, the row sums of its stiffness scaled by the lumped mass are
 added to the parts' estimates there, from the stiffness its law gives it after the increment
 (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfThePenaltyConstraints`). It is enforced where it is
-below the largest increment the step allows, and a step that asks for smaller increments keeps them. By default, the
-increment is lowered only, never raised within a step.
+below the largest increment the step allows, and a step that asks for smaller increments keeps them.
 
-**Lowered only, or followed.** By default, the time increment is lowered only, never raised within a step: whenever a
-critical time step is estimated and falls below the increment in use, the increment becomes it, and it stays there for
-the rest of the step, even when the critical time step grows again. A brief stiff state -- a particle briefly
-compressed, a contact that closed and opened again -- thus sets the increment of the whole rest of the step. With
-``follow-critical-time-step``, the time increment follows the critical time step up as well as down: it becomes the
-critical time step, at most the step's ``maxInc``, each time a part is estimated -- the elements at the start of the
-step and after a change of the mesh, the entities that carry their own inertia (see below) whenever their estimate is
-taken anew, the penalty constraints in every increment. The increment is raised only at these points
-(:meth:`NED._enforceTheCriticalTimeStep`). A raised increment no longer keeps the margin of the states it was lowered
-for, so the penalty constraints are then bounded over the next increment, not only at its start: a contact point that
-could close within the next increment -- its gap at most what it approaches by in it, with its velocity and its
-acceleration, over the largest increment the step could take next -- enters the estimate before it closes
-(:meth:`NED._estimateThePenaltyConstraints`). Lowered only, a point that closes within an increment enters the estimate
-after it.
+**Lowered only, or followed.** By default, the time increment is lowered only, never raised within a step; with
+``follow-critical-time-step``, it follows the critical time step up as well as down, at the cost of the safety margin
+that lowering only keeps against a stiff state that returns, and the penalty constraints are then bounded over the next
+increment, not only at its start (:meth:`NED._estimateThePenaltyConstraints`). Both, and when to choose which, are
+explained under :ref:`ned-time-increment-lowered-or-followed`.
 
 **Three cadences, all in increments.** ``output-frequency`` is how often progress is logged and
 field outputs are finalized (a divisor, so it must be at least 1). ``topology-check-frequency`` is
@@ -184,7 +174,7 @@ entities' assembled system, which changes with their configuration: it is estima
 whenever the margin of its last estimate over the time increment in use may be used up -- by the fall of their lumped
 inertia since, which is followed in every increment, and by the assumed fall per increment from their stiffness
 (``critical-time-step-decrease-per-increment``) --, and lowers the time increment whenever it falls below it (or sets
-it, with ``follow-critical-time-step``, see "Lowered only, or followed" above). The first
+it, with ``follow-critical-time-step``, see :ref:`ned-time-increment-lowered-or-followed`). The first
 increment of a step must be the zero increment: in it, the entities take an increment of zero length, from which they
 evaluate the force, the inertia, the damping and the critical time step of the configuration the step starts from.
 Where the model holds the motion of their nodes
@@ -468,13 +458,9 @@ class NEDSchema:
     )
     followCriticalTimeStep: bool = schemaField(
         description=(
-            "Let the time increment follow the critical time step up as well as down: each time a part of the model is "
-            "estimated (the elements at the start of the step and after a change of the mesh, the entities that carry "
-            "their own inertia whenever their estimate is taken anew, the penalty constraints in every increment), the "
-            "time increment becomes courant-number times the critical time step of the model, at most the step's "
-            "maxInc; a contact point that could close within the next increment then enters the estimate of the "
-            "penalty constraints before it closes. Off by default: the time increment is lowered only, never raised "
-            "within a step, and a step that asks for smaller increments (startInc) keeps them."
+            "Let the time increment follow the critical time step up as well as down, at most the step's maxInc, each "
+            "time the critical time step is taken; off by default: lowered only, never raised within a step. See 'The "
+            "time increment: lowered only, or followed' in the documentation of NED."
         ),
         dtype=bool,
         default=False,
@@ -1425,17 +1411,11 @@ class NED(NonlinearSolverBase):
 
     def _enforceTheCriticalTimeStep(self, step, cause: str, journalLevel: int):
         """Set the time increment of the step from the critical time step of the model, the smallest of the elements',
-        the entities' and the one of the degrees of freedom the penalty constraints couple, scaled by the courant number.
-        Called each time one of them is estimated.
-
-        By default, the increment is lowered only, never raised within a step: the critical time step is enforced if it
-        is below the increment the step would take now (:meth:`_timeIncrementInUse`). A step that asks for smaller
-        increments keeps them, and a finite element model whose step asks for the whole step length, as explicit steps
-        usually do, takes the critical time step of its elements.
-
-        With ``follow-critical-time-step``, the increment becomes the critical time step, at most the step's
-        ``maxInc``, up as well as down: once a stiff state has passed, the increment comes back the next time a part is
-        estimated.
+        the entities' and the one of the degrees of freedom the penalty constraints couple, scaled by the courant number
+        (:meth:`_criticalTimeStepOfTheModel`). Called each time one of them is estimated. By default the increment is
+        lowered only, to the critical time step if it is below the increment the step would take now
+        (:meth:`_timeIncrementInUse`); with ``follow-critical-time-step`` it becomes the critical time step, at most the
+        step's ``maxInc``. See :ref:`ned-time-increment-lowered-or-followed`.
 
         Parameters
         ----------
@@ -1445,8 +1425,26 @@ class NED(NonlinearSolverBase):
             What changed the critical time step, for the journal.
         journalLevel
             The level of the journal message when an enforced increment changes.
+
+        Raises
+        ------
+        ValueError
+            If the critical time step of a part of the model is not a number.
         """
 
+        # Python's min() keeps its first argument when the comparison with NaN is false, so each part is checked;
+        # infinity is legal: a part that reports no bound.
+        parts = (
+            self._criticalTimeStepOfTheElements,
+            self._criticalTimeStepOfTheEntities,
+            self._criticalTimeStepOfThePenaltyConstraints,
+        )
+        notANumber = [part for part in parts if np.isnan(part.value)]
+        if notANumber:
+            raise ValueError(
+                "{:}: the critical time step is not a number ({:}): the stiffness or the mass of the model is not "
+                "finite.".format(cause, ", ".join("of {:} {:e}".format(part.part, part.value) for part in notANumber))
+            )
         self._criticalTimeStep = self._criticalTimeStepOfTheModel()
         timeStepper = step.timeStepper
         enforced = timeStepper.enforcedTimeIncrement

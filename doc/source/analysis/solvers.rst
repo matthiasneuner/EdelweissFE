@@ -475,20 +475,38 @@ adds its stiffness to their rows in every increment. With
 ``project-velocity-every-increment``, the velocity of the particles' nodes is projected from their momentum in every
 increment.
 
+.. _ned-time-increment-lowered-or-followed:
+
 The time increment: lowered only, or followed
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-By default, ``NED`` lowers the time increment whenever the critical time step falls below it, and never raises it within
-a step: a brief stiff state -- a particle that is briefly compressed, a contact that closed and opened again -- sets the
-increment for the rest of the step. With ``follow-critical-time-step``, the time increment follows the critical time
-step up as well as down: each time a part of the model is estimated, the increment becomes ``courant-number`` times the
-critical time step of the model, at most the step's ``maxInc``. The elements are estimated at the start of the step and
-after a change of the mesh, the particles whenever the margin of their last estimate may be used up, the penalty
-constraints in every increment: the increment is raised only at these points. A contact point that could close within
-the next increment -- whose gap is at most what it approaches by, with its velocity and its acceleration, over the
-largest increment the step could take -- then enters the estimate of the penalty constraints before it closes, not one increment late
-(:doc:`/theory/criticaltimestep`, "Points that could close"). The step's ``startInc`` is not kept; a step that wants
-smaller increments sets ``maxInc``.
+``NED`` takes the critical time step -- the smallest of the elements', the entities' that carry their own inertia (e.g.
+particles) and the one of the degrees of freedom the penalty constraints couple, scaled by ``courant-number`` -- each
+time one of them is estimated: the elements at the start of the step and after a change of the mesh, the entities
+whenever the margin of their last estimate may be used up, the penalty constraints in every increment. Only at these
+points is it known; in between, the time increment is trusted.
+
+**Lowered only (the default).** Whenever the critical time step is taken and falls below the time increment in use,
+the increment becomes the critical time step; it is never raised within a step. A step that asks for smaller increments
+(``startInc``, at most ``maxInc``) keeps them. A brief stiff state -- a particle that is briefly compressed, a contact
+that closed and opened again -- thus sets the increment for the rest of the step.
+
+**Followed** (``follow-critical-time-step``). Each time the critical time step is taken, the time increment becomes
+the critical time step, at most the step's ``maxInc``, up as well as down; the step's ``startInc`` is not kept, and a
+step that wants smaller increments sets ``maxInc``. Once a stiff state has passed, the increment comes back with the
+next critical time step taken. A contact point that could close within the next increment -- whose gap is at most what
+it approaches by, with its velocity and its acceleration, over the largest increment the step could take -- then enters
+the estimate of the penalty constraints before it closes, not one increment late (:doc:`/theory/criticaltimestep`,
+"Points that could close").
+
+**What following gives up.** Between two critical time steps taken, the increment is trusted: the courant number covers
+the gradual change of the model in between. Lowered only, the increment of a run that has met a stiff state once stays
+low, and is ready for the next time that state returns. The states this option is meant for are brief, but they tend to
+recur: a particle compressed again, a contact closing again. Followed, the increment is raised after the first one and
+meets the next with nothing but the courant margin until the next estimate sees it -- for the entities, once the margin
+of their last estimate may be used up. Use the option with a ``critical-time-step-decrease-per-increment`` large enough
+to estimate the entities as often as such a state may recur, or with a lower ``courant-number``; at a
+``courant-number`` close to 1, repeated raising and lowering can also pump energy into a mode near the stability limit.
 
 .. code-block:: edelweiss
 
