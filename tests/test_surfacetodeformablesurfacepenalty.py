@@ -45,7 +45,7 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
 from edelweissfe.constraints.base.contactpointsatslavenodes import (
     ContactPointsAtSlaveNodes,
 )
@@ -644,6 +644,40 @@ class TestIntegratedSurfaceContact(unittest.TestCase):
         for c in (constraint, restored):
             c.computeKernels(U, np.zeros_like(U), np.zeros(c.nDof), None, at(1.0))
         self.assertEqual(restored.totalNormalForce, constraint.totalNormalForce)
+
+    def test_over_the_next_increment_a_point_that_could_close_has_its_spring(self):
+        """The slave face lies 0.05 below the master face: open now, its bound is zero. Over a next increment in which
+        the slave moves up by 0.1, from its velocity or from its acceleration, every point closes within it, and the
+        bound over it is the one at its end, with the gradients of now (the same here); over one in which it moves up by
+        0.02, or down, no point closes (``NED``'s ``follow-critical-time-step``,
+        :meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`)."""
+
+        model, slaveSurface, masterSurface = twoBlockModel(self.journal, -0.05)
+        constraint = self._constraint(model, slaveSurface, masterSurface)
+        nSlaveDof = constraint._nSlaveDof
+        zero = np.zeros(constraint.nDof)
+        weights = np.random.default_rng(3).uniform(0.5, 2.0, constraint.nDof)
+        timeStep = TimeStep(1, 0.1, 0.1, 0.1, 0.1, 0.1)
+
+        def slaveMovedUpBy(motion: float) -> np.ndarray:
+            dU = np.zeros(constraint.nDof)
+            dU[:nSlaveDof] = np.tile((0.0, motion, 0.0), nSlaveDof // 3)
+            return dU
+
+        def boundOver(nextIncrement: NextIncrement | None, U: np.ndarray = zero) -> np.ndarray:
+            bound = np.zeros(constraint.nDof)
+            constraint.addBoundOfAbsoluteStiffnessTimes(U, zero, weights, bound, timeStep, nextIncrement)
+            return bound
+
+        self.assertFalse(boundOver(None).any())
+        closing = boundOver(NextIncrement(slaveMovedUpBy(0.1), zero, timeStep))
+        atTheEnd = boundOver(None, slaveMovedUpBy(0.1))
+        self.assertGreater(atTheEnd.max(), 0.0)
+        np.testing.assert_allclose(closing, atTheEnd, rtol=1e-12)
+        accelerating = boundOver(NextIncrement(zero, slaveMovedUpBy(0.1), timeStep))
+        np.testing.assert_allclose(accelerating, atTheEnd, rtol=1e-12)
+        self.assertFalse(boundOver(NextIncrement(slaveMovedUpBy(0.02), zero, timeStep)).any())
+        self.assertFalse(boundOver(NextIncrement(slaveMovedUpBy(-0.1), zero, timeStep)).any())
 
     def test_the_bound_of_the_stiffness_is_the_one_of_the_tangent_also_during_the_ramp(self):
         """For both kinds of contact points: at the start of the ramp of an initial overlap only the points that

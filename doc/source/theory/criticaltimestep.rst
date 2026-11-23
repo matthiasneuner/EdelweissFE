@@ -169,11 +169,40 @@ second fold, a stiff element at a slave would be missing at its master just wher
 What the bound gives away is the Gershgorin step: the row sum is the exact frequency for springs between equal masses
 and above it otherwise, and a normal oblique to the axes spreads the spring over the components of a node.
 
-**What is not estimated.** The stiffness the constraints add enters from the state they have after an increment, for
-the next one: a point that closes *within* an increment adds its stiffness one increment late. An increment above the
-limit amplifies an oscillation by a bounded factor, and the time increment is never raised again within the step, so
-this is not an instability; the energy balance of ``NED`` (the kinetic energy may not exceed the energy at the start of
-the step plus the external work) remains the check. Not estimated either: the geometric stiffness of a contact with
+**Points that could close.** By default, the stiffness the constraints add enters from the state they have after an
+increment, for the next one: a point that closes *within* an increment adds its stiffness one increment late. An
+increment above the limit amplifies an oscillation by a bounded factor, and the time increment is never raised again
+within the step, so this is not an instability; the energy balance of ``NED`` (the kinetic energy may not exceed the
+energy at the start of the step plus the external work) remains the check. With ``follow-critical-time-step``, the
+time increment is raised again as soon as the critical time step allows it -- when a contact has opened, for one --, and
+a point that closes one increment late would be met by the full raised increment. The constraints are then bounded
+over the next increment as well. The leapfrog takes an increment of length :math:`s` as
+
+.. math::
+
+   \Delta \boldsymbol{u}(s) = s\, \boldsymbol{v} + \tfrac{1}{2} s (\Delta t_\mathrm{last} + s)\, \boldsymbol{a} ,
+
+with the velocity :math:`\boldsymbol{v}` of the last increment, its length, and the acceleration :math:`\boldsymbol{a}`
+at its end; :math:`s` is at most :math:`\Delta t_\mathrm{max}`, the critical time step with the constraints as they are
+now, scaled by the courant number and at most ``maxInc``: the constraints bounded over the increment can only lower it.
+With the pairing and the normals held, as within an increment, a gap is affine in the displacements, and changes by
+:math:`s\, \dot{g}_v + \tfrac{1}{2} s (\Delta t_\mathrm{last} + s)\, \dot{g}_a`; each part, where it closes the gap,
+closes it most at :math:`\Delta t_\mathrm{max}`. So within the increment, whatever its length, the gap is at least
+
+.. math::
+
+   g + \min(0, \Delta g_v) + \min(0, \Delta g_a) ,
+
+with the changes :math:`\Delta g_v, \Delta g_a` of the gap by the two parts at :math:`\Delta t_\mathrm{max}`. Every
+contact gives its law this smallest gap, with the gradient of now
+(:meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`): a point that could close within the
+next increment has its spring in the estimate before it closes, and a law whose stiffness grows with the depth is
+stiffest there. Taking the velocity alone would not do: near the critical time step of the open state, the acceleration
+can turn a receding point around within one increment. The prediction is exact for the leapfrog without damping;
+damping only slows a point down. Raising and lowering the increment is not free: each change of the increment changes
+the energy the central difference holds in a mode by a fraction of the order of :math:`(\omega \Delta t)^2`, small for
+the motion that carries the energy, which lies far below the highest frequencies of a mesh, but not for a mode near the
+critical time step that carries much of it; the energy balance remains the check. Not estimated either: the geometric stiffness of a contact with
 finite sliding, or of a rigid body whose normals rotate with it (of the order of the normal force over the size of a
 facet or the lever arm, small against the penalty), the coupling of the normal and the tangential force of a sliding
 frictional contact (the friction coefficient times the normal stiffness; unsymmetric), and a penalty on a field

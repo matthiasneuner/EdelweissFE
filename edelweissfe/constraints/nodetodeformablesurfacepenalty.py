@@ -26,11 +26,11 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
 from edelweissfe.constraints.base.contactpointsatslavenodes import (
     tributaryAreasOfSlaveNodes,
 )
@@ -882,6 +882,57 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             self._normalForceCurrent[s] = f_n
             self.totalNormalForce += f_n
 
+    def _contactAtTheSmallestGapWithinTheNextIncrement(
+        self,
+        s: int,
+        contact: "_ContactOfSlave",
+        U_np: np.ndarray,
+        dU: np.ndarray,
+        pIdcs: list,
+        fIdcs: list,
+        nextIncrement: NextIncrement,
+        timeStep: TimeStep,
+    ) -> "_ContactOfSlave":
+        """The contact of a slave node at its smallest gap within the next increment
+        (:meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`), for the bound of the
+        stiffness over it: the normal force and the stiffness the law gives that gap, the gradient of now. A slave whose
+        projection leaves its facet within the increment (finite sliding) keeps its contact of now.
+
+        Parameters
+        ----------
+        s
+            The slave.
+        contact
+            Its contact now (:meth:`_contactOfSlave`).
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+        pIdcs
+            The degrees of freedom of the slave in the block.
+        fIdcs
+            Those of the nodes of its facet.
+        nextIncrement
+            The next increment.
+        timeStep
+            The time step now.
+
+        Returns
+        -------
+        _ContactOfSlave
+            The contact at the smallest gap.
+        """
+
+        def gapAt(U, dU, timeStep):
+            contactThere = self._contactOfSlave(s, U, pIdcs, fIdcs)
+            return np.inf if contactThere is None else contactThere.gap
+
+        gap = nextIncrement.smallestGaps(gapAt, U_np, dU, timeStep)
+        if not (gap < contact.gap and gap < 0.0 and np.isfinite(gap)):
+            return contact
+        normalForce, stiffness = self.law.normalForce(self.penalty * self.tributaryAreas[s], gap)
+        return replace(contact, gap=gap, normalForce=normalForce, stiffness=stiffness)
+
     def addBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
@@ -889,14 +940,17 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         weights: np.ndarray,
         bound: np.ndarray,
         timeStep: TimeStep,
+        nextIncrement: NextIncrement | None = None,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs of the contact, weighted by column;
         see :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
         Every slave node in contact (:meth:`_contactOfSlave`, as for the force) has a spring along the normal, with the
         gradient of its gap :math:`w = c \\otimes \\bar{n}` over the slave node and the nodes of its facet and the
-        stiffness of the law; with friction, a spring of the tangential penalty along every direction of the tangent
-        plane, :math:`c \\otimes t`, the stiffness of sticking. The bound is the one of every penalty spring
+        stiffness of the law; over the next increment, every slave node in contact within it, as it is where its
+        gap is the smallest (:meth:`_contactAtTheSmallestGapWithinTheNextIncrement`). With
+        friction, a spring of the tangential penalty along every direction of the tangent plane, :math:`c \\otimes t`,
+        the stiffness of sticking. The bound is the one of every penalty spring
         (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`). Not bounded: the
         geometric stiffness of finite sliding (the normal force times the second derivative of the gap), and the
         coupling of the normal and the tangential force while sliding (the friction coefficient times the normal
@@ -906,6 +960,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         coefficients, directions, stiffness, dofs = [], [], [], []
         for s, pIdcs, fIdcs in self._slavesWithAFacet():
             contact = self._contactOfSlave(s, U_np, pIdcs, fIdcs)
+            if contact is not None and nextIncrement is not None:
+                contact = self._contactAtTheSmallestGapWithinTheNextIncrement(
+                    s, contact, U_np, dU, pIdcs, fIdcs, nextIncrement, timeStep
+                )
             if contact is None or contact.normalForce is None:
                 continue
             dofsOfSlave = np.reshape(pIdcs + fIdcs, (-1, self.nDim))

@@ -32,7 +32,7 @@ from enum import IntEnum
 import numpy as np
 from scipy.spatial import cKDTree
 
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
 from edelweissfe.constraints.base.contactpoints import ContactPoints
 from edelweissfe.constraints.base.contactpointsonslavesurface import (
     checkFacetsCarryParentFaces,
@@ -1313,7 +1313,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return xS, xS - np.einsum("ai,aij->aj", self._masterShapeFunctionsOfLocated, xM)
 
     def _springsOfLocatedPoints(
-        self, relative: np.ndarray, timeStep: TimeStep | None
+        self, relative: np.ndarray, timeStep: TimeStep | None, smallestGaps: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray, list[PenaltySprings]]:
         """The penalty springs the law puts at the located points, from where they are relative to their master
         points.
@@ -1329,7 +1329,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         :math:`d_i`.
 
         The force (:meth:`_addForcesOfSprings`), the bound of the stiffness
-        (:meth:`addBoundOfAbsoluteStiffnessTimes`) and the outputs go through the same springs.
+        (:meth:`addBoundOfAbsoluteStiffnessTimes`) and the outputs go through the same springs. The bound over the next
+        increment gives the law the smallest gap of each point within it
+        (:meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`).
 
         Parameters
         ----------
@@ -1338,6 +1340,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             :meth:`_relativePositionsOfLocatedPoints`.
         timeStep
             The time step of the evaluation, for the ramp of an initial overlap.
+        smallestGaps
+            The smallest gaps of the located points within the next increment, for the bound over it, which the law
+            sees instead of those of ``relative``; None for the state now.
 
         Returns
         -------
@@ -1347,11 +1352,32 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """
 
         displacementsFromRest = relative - self._restingOffsetOfLocated
-        gaps = self._gapsOfLocatedPoints(displacementsFromRest, timeStep)
+        gaps = self._gapsOfLocatedPoints(displacementsFromRest, timeStep) if smallestGaps is None else smallestGaps
         springs = self.law.springs(
             self.penalty * self._areasOfLocated, gaps, self._normalsOfLocated, displacementsFromRest
         )
         return displacementsFromRest, gaps, springs
+
+    def _gapsOfLocatedPointsAt(self, U_np: np.ndarray, dU: np.ndarray, timeStep: TimeStep | None) -> np.ndarray:
+        """The gaps of the located points as the law sees them at a state (:meth:`_gapsOfLocatedPoints`).
+
+        Parameters
+        ----------
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+        timeStep
+            The time step of the state.
+
+        Returns
+        -------
+        numpy.ndarray
+            The gaps.
+        """
+
+        _, relative = self._relativePositionsOfLocatedPoints(U_np, dU)
+        return self._gapsOfLocatedPoints(relative - self._restingOffsetOfLocated, timeStep)
 
     def _gapsOfLocatedPoints(self, displacementsFromRest: np.ndarray, timeStep: TimeStep | None) -> np.ndarray:
         """The gaps of the located points as the law sees them: :math:`g = \\bar{n} \\cdot \\boldsymbol{d}`, less the
@@ -1419,11 +1445,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         weights: np.ndarray,
         bound: np.ndarray,
         timeStep: TimeStep,
+        nextIncrement: NextIncrement | None = None,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs, weighted by column; see
         :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
-        The springs are those of the force (:meth:`_springsOfLocatedPoints`). A spring :math:`p` has the gradient
+        The springs are those of the force (:meth:`_springsOfLocatedPoints`), over the next increment with the smallest
+        gap of each point within it: a point that could close within it has its spring. A spring :math:`p` has the gradient
         :math:`w_p = [c, -N^m] \\otimes \\bar{n}_p`, its direction :math:`\\bar{n}_p`, and the stiffness :math:`k_p =
         \\mathrm{d}f/\\mathrm{d}g` its law gives it (the one of the tangent); the bound is the one of every penalty
         spring (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`), with the
@@ -1436,8 +1464,11 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not len(located):
             return
 
+        smallestGaps = None
+        if nextIncrement is not None:
+            smallestGaps = nextIncrement.smallestGaps(self._gapsOfLocatedPointsAt, U_np, dU, timeStep)
         _, relative = self._relativePositionsOfLocatedPoints(U_np, dU)
-        _, _, springs = self._springsOfLocatedPoints(relative, timeStep)
+        _, _, springs = self._springsOfLocatedPoints(relative, timeStep, smallestGaps)
         if not springs:
             return
 

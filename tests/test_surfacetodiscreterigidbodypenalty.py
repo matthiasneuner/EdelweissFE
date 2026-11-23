@@ -40,7 +40,7 @@ from _hexa20cube import (  # noqa: E402  (tests/ is on sys.path)
 )
 
 import edelweissfe.utils.inputfileparser  # noqa: F401 bootstrap input language
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
 from edelweissfe.constraints.base.contactpointsatslavenodes import (
     ContactPointsAtSlaveNodes,
 )
@@ -231,6 +231,35 @@ class TestSurfaceToDiscreteRigidBodyContact(unittest.TestCase):
             negligible = 1e-9 * ofTheTangent.max()
             np.testing.assert_allclose(bound[slave], ofTheTangent[slave], atol=negligible, err_msg=contactPoints)
             self.assertTrue(np.all(bound[constraint.nSlaveDof :] >= ofTheTangent[constraint.nSlaveDof :] - negligible))
+
+    def test_over_the_next_increment_a_point_that_could_close_has_its_spring(self):
+        """The rigid support lies 0.05 below the cube: open now, the bound is zero. Over a next increment in which the
+        cube moves down by 0.1, from its velocity or from its acceleration, every point closes within it, and the bound
+        holds their springs; over one in which it moves down by 0.02, or up, no point closes (``NED``'s
+        ``follow-critical-time-step``, :meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`).
+        """
+
+        model, slaveSurface, rigidBody = self._blockOnRigidSupport(penetration=-0.05)
+        constraint = self._constraint(model, slaveSurface, rigidBody)
+        zero = np.zeros(constraint.nDof)
+        weights = np.random.default_rng(3).uniform(0.5, 2.0, constraint.nDof)
+
+        def slaveMovedDownBy(motion: float) -> np.ndarray:
+            dU = np.zeros(constraint.nDof)
+            dU[: constraint.nSlaveDof] = np.tile((0.0, -motion, 0.0), constraint.nSlaveDof // 3)
+            return dU
+
+        def boundOver(nextIncrement: NextIncrement | None) -> np.ndarray:
+            bound = np.zeros(constraint.nDof)
+            constraint.addBoundOfAbsoluteStiffnessTimes(zero, zero, weights, bound, None, nextIncrement)
+            return bound
+
+        self.assertFalse(boundOver(None).any())
+        for byTheVelocity, byTheAcceleration in ((slaveMovedDownBy(0.1), zero), (zero, slaveMovedDownBy(0.1))):
+            closing = boundOver(NextIncrement(byTheVelocity, byTheAcceleration, None))
+            self.assertGreater(closing[1 : constraint.nSlaveDof : 3].min(), 0.0)
+        self.assertFalse(boundOver(NextIncrement(slaveMovedDownBy(0.02), zero, None)).any())
+        self.assertFalse(boundOver(NextIncrement(slaveMovedDownBy(-0.1), zero, None)).any())
 
     def test_forces_balance_and_corners_are_pulled(self):
         """The contact forces on the block and on the rigid body are in equilibrium, and the corner

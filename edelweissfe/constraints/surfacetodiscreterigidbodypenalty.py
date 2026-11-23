@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from edelweissfe.constraints.base.constraintbase import ConstraintBase
+from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
 from edelweissfe.constraints.base.contactpoints import ContactPoints
 from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
     ForcesOnlyExplicitEvaluation,
@@ -587,13 +587,15 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         weights: np.ndarray,
         bound: np.ndarray,
         timeStep: TimeStep,
+        nextIncrement: NextIncrement | None = None,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs, weighted by column; see
         :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
-        The springs are those of the force (:meth:`_springsOfClosedPoints`), with the gradient of the gap (see the class
-        docstring): :math:`c \\otimes n` on the nodes the contact points share, :math:`-n` on the displacement of the
-        RP and :math:`-S^T (r \\times n)` on its rotation; the bound is the one of every penalty spring
+        The springs are those of the force (:meth:`_springsOfClosedPoints`), over the next increment at the smallest
+        gap of each point within it (:meth:`~edelweissfe.constraints.base.constraintbase.NextIncrement.smallestGaps`),
+        with the gradient of the gap now (see the class docstring): :math:`c \\otimes n` on the nodes the contact
+        points share, :math:`-n` on the displacement of the RP and :math:`-S^T (r \\times n)` on its rotation; the bound is the one of every penalty spring
         (:func:`~edelweissfe.constraints.base.penaltysprings.addBoundOfAbsoluteStiffnessOfSprings`). Not bounded: the
         second derivatives of the gap, scaled by the normal force (the normal rotates with the body), small against
         the penalty, as for the geometric stiffness of a finite sliding contact.
@@ -604,6 +606,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             return
 
         gaps, normals, leverArms, dPhysicalSpin_dTheta = self._locatedPointsAgainstTheRigidBody(U_np, dU)
+        if nextIncrement is not None:
+            gaps = nextIncrement.smallestGaps(
+                lambda U, dU, timeStep: self._locatedPointsAgainstTheRigidBody(U, dU)[0], U_np, dU, timeStep
+            )
         springs = self._springsOfClosedPoints(gaps, normals)
         if springs is None:
             return
