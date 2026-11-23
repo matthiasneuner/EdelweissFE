@@ -788,6 +788,8 @@ class NED(NonlinearSolverBase):
         if change == Change.MESH:
             self.reportTopologyChangeConservation(lumpedTotalsBefore, momentumBefore, kineticBefore, self._V, model)
 
+            # Only a model without entities that carry their own inertia gets here (live modifiers are refused with
+            # them, see onNewNumbering), so the entities' critical time step never enters it.
             self._enforceTheCriticalTimeStep(step, "Refinement", 1)
 
     def isOutputIncrement(self, timeStep: TimeStep) -> bool:
@@ -1415,7 +1417,9 @@ class NED(NonlinearSolverBase):
         (:meth:`_criticalTimeStepOfTheModel`). Called each time one of them is estimated. By default the increment is
         lowered only, to the critical time step if it is below the increment the step would take now
         (:meth:`_timeIncrementInUse`); with ``follow-critical-time-step`` it becomes the critical time step, at most the
-        step's ``maxInc``. See :ref:`ned-time-increment-lowered-or-followed`.
+        step's ``maxInc``. As long as no part has reported a bound (the critical time step is infinite, e.g. at the
+        start of a step of entities alone), the increment stays as it is, whether it follows or not. See
+        :ref:`ned-time-increment-lowered-or-followed`.
 
         Parameters
         ----------
@@ -1446,6 +1450,10 @@ class NED(NonlinearSolverBase):
                 "finite.".format(cause, ", ".join("of {:} {:e}".format(part.part, part.value) for part in notANumber))
             )
         self._criticalTimeStep = self._criticalTimeStepOfTheModel()
+        # No bound reported yet: nothing to follow. Lowered only, this changes nothing anyway (no increment is above an
+        # infinite one); followed, it keeps the step's own increment instead of jumping to maxInc.
+        if np.isinf(self._criticalTimeStep):
+            return
         timeStepper = step.timeStepper
         enforced = timeStepper.enforcedTimeIncrement
         if self.options["follow-critical-time-step"]:

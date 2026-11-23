@@ -42,7 +42,8 @@ same contract in a few lines of Python, and the tests check ``NED``'s path for i
   the increment, it is estimated in every increment,
 * after a brief stiff event, the increment comes back with ``follow-critical-time-step`` and stays low without it, and
   the increment that follows the critical time step is at most the step's ``maxInc``, whatever its ``startInc``,
-* a critical time step that is not a number is refused, whether the increment follows it or not,
+* a critical time step that is not a number is refused, whether the increment follows it or not, and without any
+  bound the step keeps its own increment, also when it follows the critical time step,
 * a field of the entities that gets neither an inertia nor a damping is refused, and so are a damping of the entities
   that is negative or not finite, and an inertia that is not finite,
 * the rate of a first-order field of the entities (dashpots on springs) is published in every increment, also when the
@@ -257,6 +258,20 @@ class ModelOfMassesOnSpringsWithoutABound(ModelOfMassesOnSprings):
         return SystemOfMassesOnSpringsWithoutABound(self, super().buildDiscreteSystem().locations)
 
 
+class SystemOfMassesOnSpringsReportingNoCriticalTimeStep(SystemOfMassesOnSprings):
+    """Masses on springs that report no critical time step (an infinite one), as entities whose stiffness gives none."""
+
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
+        return np.inf
+
+
+class ModelOfMassesOnSpringsReportingNoCriticalTimeStep(ModelOfMassesOnSprings):
+    """Masses on springs that report no critical time step."""
+
+    def buildDiscreteSystem(self) -> SystemOfMassesOnSpringsReportingNoCriticalTimeStep:
+        return SystemOfMassesOnSpringsReportingNoCriticalTimeStep(self, super().buildDiscreteSystem().locations)
+
+
 class TheSecondMassFollowsTheFirst(MultiPointConstraintBase):
     """A multi-point constraint that makes the displacement of the node of the second mass a slave of that of the
     first, :math:`u_2 = u_1`."""
@@ -396,21 +411,44 @@ def test_a_critical_time_step_that_is_not_a_number_is_refused(follow):
         )
 
 
-@pytest.mark.parametrize("follow, expectedTimeIncrement", [(False, 0.1), (True, 0.5)])
-def test_the_increment_that_follows_the_critical_time_step_is_at_most_the_steps_max_inc(follow, expectedTimeIncrement):
+@pytest.mark.parametrize(
+    "follow, maxInc, expectedTimeIncrement",
+    [(False, 0.05, 0.1), (True, 0.05, 0.5), (False, 1.0, 0.1), (True, 1.0, 0.8)],
+)
+def test_the_increment_that_follows_the_critical_time_step_is_at_most_the_steps_max_inc(
+    follow, maxInc, expectedTimeIncrement
+):
     """The step asks for a tenth of the critical time step to start with (``startInc``), and for at most half of it
-    (``maxInc``); the courant number is 0.8. Lowered only, the increment stays the step's own, the smaller;
-    following the critical time step, it is the critical time step, at most ``maxInc``."""
+    or ten times it (``maxInc``); the courant number is 0.8. Lowered only, the increment stays the step's own, the
+    smaller; following the critical time step, it is the courant number times the critical time step, at most
+    ``maxInc``: the small ``startInc`` is raised to it when ``maxInc`` allows it."""
 
     stepLength = 10 * CRITICAL_TIME_STEP
     _, solver = _run(
         stepLength,
-        stepOptions={"startInc": 0.01, "maxInc": 0.05},
+        stepOptions={"startInc": 0.01, "maxInc": maxInc},
         **{"courant-number": 0.8, "follow-critical-time-step": follow},
     )
 
     timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])[1:-1]
     np.testing.assert_allclose(timeIncrements, expectedTimeIncrement * CRITICAL_TIME_STEP, rtol=1e-12)
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_without_a_bound_the_step_keeps_its_own_increment(follow):
+    """Neither the masses nor anything else reports a critical time step: it stays infinite, there is nothing to
+    follow, and the step keeps its own increment (``startInc``), not its ``maxInc``."""
+
+    stepLength = 10 * CRITICAL_TIME_STEP
+    _, solver = _run(
+        stepLength,
+        model=ModelOfMassesOnSpringsReportingNoCriticalTimeStep(),
+        stepOptions={"startInc": 0.01, "maxInc": 0.05},
+        **{"follow-critical-time-step": follow},
+    )
+
+    timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])[1:-1]
+    np.testing.assert_allclose(timeIncrements, 0.1 * CRITICAL_TIME_STEP, rtol=1e-12)
 
 
 @pytest.mark.parametrize("courantNumber", [0.8, 0.05])
