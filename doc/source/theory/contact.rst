@@ -1198,7 +1198,7 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
    which is where a serendipity corner receives its tensile share. The tangent is assembled only when
    one is asked for; the explicit path overrides the hook so that no tangent container is ever
    allocated. The bound of the stiffness in an explicit analysis's critical time step
-   (``computeBoundOfAbsoluteStiffnessTimes``) goes through the same springs.
+   (``addBoundOfAbsoluteStiffnessTimes``) goes through the same springs.
 #. The springs are kept: every output (tractions, pressures, resultants, energy) is taken from them.
 
 Open points are skipped entirely rather than contributing a zero, and the whole evaluation is

@@ -34,7 +34,7 @@ constraint is :math:`\\boldsymbol{w}_p`, and its law gives it a force :math:`f_p
 \\boldsymbol{w}_p`, their stiffness :math:`\\sum_p k_p\\, \\boldsymbol{w}_p \\otimes \\boldsymbol{w}_p`.
 
 The explicit dynamic solver ``NED`` needs the row sums of the absolute value of that stiffness, weighted by column
-(:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`). The absolute
+(:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`). The absolute
 value of a sum is at most the sum of the absolute values, so
 
 .. math::

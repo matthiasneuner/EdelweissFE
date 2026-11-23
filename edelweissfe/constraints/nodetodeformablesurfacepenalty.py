@@ -743,7 +743,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     def _contactOfSlave(self, s: int, U_np: np.ndarray, pIdcs: list, fIdcs: list) -> "_ContactOfSlave | None":
         """The contact of a slave node with its facet: the gap, its gradient and Hessian, and the normal force and the
         stiffness the law (and the augmented-Lagrange multiplier) gives it. The force (:meth:`computeKernels`) and the
-        bound of the stiffness (:meth:`computeBoundOfAbsoluteStiffnessTimes`) are made from it.
+        bound of the stiffness (:meth:`addBoundOfAbsoluteStiffnessTimes`) are made from it.
 
         Parameters
         ----------
@@ -882,7 +882,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             self._normalForceCurrent[s] = f_n
             self.totalNormalForce += f_n
 
-    def computeBoundOfAbsoluteStiffnessTimes(
+    def addBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
         dU: np.ndarray,
@@ -891,7 +891,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         timeStep: TimeStep,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs of the contact, weighted by column;
-        see :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`.
+        see :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
         Every slave node in contact (:meth:`_contactOfSlave`, as for the force) has a spring along the normal, with the
         gradient of its gap :math:`w = c \\otimes \\bar{n}` over the slave node and the nodes of its facet and the

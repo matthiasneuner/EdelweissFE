@@ -1329,7 +1329,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         :math:`d_i`.
 
         The force (:meth:`_addForcesOfSprings`), the bound of the stiffness
-        (:meth:`computeBoundOfAbsoluteStiffnessTimes`) and the outputs go through the same springs.
+        (:meth:`addBoundOfAbsoluteStiffnessTimes`) and the outputs go through the same springs.
 
         Parameters
         ----------
@@ -1412,7 +1412,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                 w = np.concatenate(((c[:, None] * directions[i][None, :]).ravel(), wMaster[i]))
                 K.blocks[k] += stiffness[i] * np.outer(w, w)
 
-    def computeBoundOfAbsoluteStiffnessTimes(
+    def addBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
         dU: np.ndarray,
@@ -1421,7 +1421,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         timeStep: TimeStep,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs, weighted by column; see
-        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`.
+        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
         The springs are those of the force (:meth:`_springsOfLocatedPoints`). A spring :math:`p` has the gradient
         :math:`w_p = [c, -N^m] \\otimes \\bar{n}_p`, its direction :math:`\\bar{n}_p`, and the stiffness :math:`k_p =

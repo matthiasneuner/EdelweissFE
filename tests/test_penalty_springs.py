@@ -104,8 +104,8 @@ def _bounds(constraint, U: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     weights = np.random.default_rng(3).uniform(0.5, 2.0, constraint.nDof)
     bound, ofTheTangent = np.zeros(constraint.nDof), np.zeros(constraint.nDof)
-    constraint.computeBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, None)
-    ConstraintBase.computeBoundOfAbsoluteStiffnessTimes(constraint, U, np.zeros_like(U), weights, ofTheTangent, None)
+    constraint.addBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, None)
+    ConstraintBase.addBoundOfAbsoluteStiffnessTimes(constraint, U, np.zeros_like(U), weights, ofTheTangent, None)
     assert ofTheTangent.max() > 0.0
     return bound, ofTheTangent
 

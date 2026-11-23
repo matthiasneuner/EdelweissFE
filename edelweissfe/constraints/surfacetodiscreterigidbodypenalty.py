@@ -561,7 +561,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """The penalty springs of the contact law (:meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.springs`):
         one along the current normal at every closed point, with the force and the stiffness the law gives it for
         :math:`p\\, A_p`. The force (:meth:`computeKernels`) and the bound of the stiffness
-        (:meth:`computeBoundOfAbsoluteStiffnessTimes`) go through these springs. The constraint measures gaps only and
+        (:meth:`addBoundOfAbsoluteStiffnessTimes`) go through these springs. The constraint measures gaps only and
         takes contact laws only, whose springs are these, if any.
 
         Parameters
@@ -580,7 +580,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         springs = self.law.springs(self.penalty * self._areasOfLocated, gaps, normals)
         return springs[0] if springs else None
 
-    def computeBoundOfAbsoluteStiffnessTimes(
+    def addBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
         dU: np.ndarray,
@@ -589,7 +589,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         timeStep: TimeStep,
     ):
         """Add the row sums of the absolute value of the stiffness of the springs, weighted by column; see
-        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`.
+        :meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`.
 
         The springs are those of the force (:meth:`_springsOfClosedPoints`), with the gradient of the gap (see the class
         docstring): :math:`c \\otimes n` on the nodes the contact points share, :math:`-n` on the displacement of the

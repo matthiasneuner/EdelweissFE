@@ -1215,7 +1215,7 @@ class NED(NonlinearSolverBase):
         sides, :math:`r_i = \\sum_j |K^\\mathrm{c}_{ij}| / \\sqrt{M_i M_j}`: what the constraints add to the squared
         frequency of every degree of freedom they couple (see :doc:`/theory/criticaltimestep`). Every constraint of the
         discrete system bounds its own
-        (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`), at the
+        (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`), at the
         state it is evaluated in, with the column weights :math:`1/\\sqrt{M_j}`.
 
         The masses are those the increment divides by, on the degrees of freedom integrated by central differences; a
@@ -1256,7 +1256,7 @@ class NED(NonlinearSolverBase):
             for constraint in constraints:
                 _, indices, _ = self._explicitEvaluationPlanOf(constraint)
                 bound = np.zeros(constraint.nDof)
-                constraint.computeBoundOfAbsoluteStiffnessTimes(
+                constraint.addBoundOfAbsoluteStiffnessTimes(
                     U[constraint], dU[constraint], weights[indices], bound, timeStep
                 )
                 np.add.at(rowSums, indices, bound)

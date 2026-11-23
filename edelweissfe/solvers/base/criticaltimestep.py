@@ -497,7 +497,7 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
         r_i = \\frac{1}{\\sqrt{M_i}} \\sum_j |K^\\mathrm{c}_{ij}| \\frac{1}{\\sqrt{M_j}} ,
 
     with :math:`\\omega_i^2` the part's bound at the degree of freedom :math:`i` and :math:`\\boldsymbol{K}^\\mathrm{c}`
-    the stiffness of the constraints (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.computeBoundOfAbsoluteStiffnessTimes`).
+    the stiffness of the constraints (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`).
     A constraint does not take the minimum with the parts: it raises the frequencies of the degrees of freedom it couples,
     so it lowers the critical time step only where it acts, and only by what it adds there.
 

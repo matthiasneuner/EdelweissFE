@@ -87,7 +87,7 @@ from edelweissfe.utils.residualtangentcheck import (
 
 def assertTheBoundIsTheOneOfTheTangent(constraint, U: np.ndarray, timeStep: TimeStep | None = None):
     """The bound of the stiffness the critical time step of ``NED`` takes from the constraint,
-    :meth:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint.computeBoundOfAbsoluteStiffnessTimes`
+    :meth:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint.addBoundOfAbsoluteStiffnessTimes`
     (from the springs of the law), equals the row sums of the absolute value of its tangent (the default of
     :class:`~edelweissfe.constraints.base.constraintbase.ConstraintBase`), weighted by random columns: one spring per
     point, or springs along different axes, which act on different components, so the bound is the row sum itself.
@@ -95,8 +95,8 @@ def assertTheBoundIsTheOneOfTheTangent(constraint, U: np.ndarray, timeStep: Time
 
     weights = np.random.default_rng(3).uniform(0.5, 2.0, constraint.nDof)
     bound, boundOfTheTangent = np.zeros(constraint.nDof), np.zeros(constraint.nDof)
-    constraint.computeBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, timeStep)
-    ConstraintBase.computeBoundOfAbsoluteStiffnessTimes(
+    constraint.addBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, timeStep)
+    ConstraintBase.addBoundOfAbsoluteStiffnessTimes(
         constraint, U, np.zeros_like(U), weights, boundOfTheTangent, timeStep
     )
     assert boundOfTheTangent.max() > 0.0
@@ -1226,7 +1226,7 @@ class TestTie(unittest.TestCase):
             U = 1e-3 * np.random.default_rng(8).standard_normal(tie.nDof)
 
             bound = np.zeros(tie.nDof)
-            tie.computeBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, None)
+            tie.addBoundOfAbsoluteStiffnessTimes(U, np.zeros_like(U), weights, bound, None)
             estimate = 2.0 / np.sqrt(np.max(weights * bound))
 
             K = residualContributionAndTangent(tie, U, np.zeros_like(U))[1][:nSlave, :nSlave]

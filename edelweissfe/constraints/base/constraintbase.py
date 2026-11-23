@@ -51,7 +51,7 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
     #: :meth:`prepareExplicitEvaluation`).
     _discardedTangentScratch = None
     #: The local rows and columns of the entries of that scratch, for a constraint that lists them; None until
-    #: :meth:`computeBoundOfAbsoluteStiffnessTimes` first needs them in the discrete system.
+    #: :meth:`addBoundOfAbsoluteStiffnessTimes` first needs them in the discrete system.
     _localEntriesOfTheDiscardedTangent = None
 
     #: The state this constraint carries from one increment to the next, by attribute name and type;
@@ -306,7 +306,7 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
         :meth:`computeKernelsExplicit`.
 
         This default forgets the tangent that :meth:`computeKernelsExplicit` throws away (and
-        :meth:`computeBoundOfAbsoluteStiffnessTimes` bounds), so that the next evaluation sizes it, once, for the block
+        :meth:`addBoundOfAbsoluteStiffnessTimes` bounds), so that the next evaluation sizes it, once, for the block
         the constraint has now. The size is the number of entries of the block
         (:func:`~edelweissfe.numerics.systemmatrixcontributor.countEntriesOfBlock`), which for a constraint that lists
         its entries means building the list: once per discrete system, not in every increment. A constraint that
@@ -360,7 +360,7 @@ class ConstraintBase(OptionSchemaProvider, BaseNodeCouplingEntity, SystemMatrixC
         K = self.shapeBlock(scratch)
         self.computeKernels(U_np, dU, P, K, timeStep)
 
-    def computeBoundOfAbsoluteStiffnessTimes(
+    def addBoundOfAbsoluteStiffnessTimes(
         self,
         U_np: np.ndarray,
         dU: np.ndarray,

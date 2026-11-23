@@ -112,7 +112,7 @@ the bound of its part there -- for the elements the largest :math:`\lambda_e = (
    r_i = \frac{1}{\sqrt{M_i}} \sum_j |K^\mathrm{c}_{ij}| \frac{1}{\sqrt{M_j}}
 
 be the row sum of the absolute value of the constraints' stiffness, scaled by the lumped mass on both sides (every
-constraint gives it: ``computeBoundOfAbsoluteStiffnessTimes``). Then
+constraint gives it: ``addBoundOfAbsoluteStiffnessTimes``). Then
 
 .. math::
 
