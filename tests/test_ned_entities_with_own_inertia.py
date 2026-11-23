@@ -40,6 +40,8 @@ same contract in a few lines of Python, and the tests check ``NED``'s path for i
   recursion of the oscillator, to round-off; its period is the analytic one, to second order in the increment,
 * the critical time step of the entities sets the increment of a step that asks for a larger one, and, since it sets
   the increment, it is estimated in every increment,
+* after a brief stiff event, the increment comes back with ``follow-critical-time-step`` and stays low without it, and
+  the increment that follows the critical time step is at most the step's ``maxInc``, whatever its ``startInc``,
 * a field of the entities that gets neither an inertia nor a damping is refused, and so are a damping of the entities
   that is negative or not finite, and an inertia that is not finite,
 * the rate of a first-order field of the entities (dashpots on springs) is published in every increment, also when the
@@ -81,6 +83,10 @@ CRITICAL_TIME_STEP = 2.0 / OMEGA
 #: of a dashpot on a spring has the critical time step 2 c / k.
 DAMPING = 20.0
 DISPLACEMENTS = (0.02, -0.05)
+#: The brief stiff event of :class:`ModelOfMassesOnSpringsWithAStiffEvent`: when the springs are stiffer, and by how
+#: much. Its ends lie between the start times of the increments taken at the courant number 0.5.
+STIFF_EVENT_START, STIFF_EVENT_END = 10.3 * CRITICAL_TIME_STEP, 12.25 * CRITICAL_TIME_STEP
+STIFF_EVENT_FACTOR = 25.0
 
 
 class MassOnASpring(PointMass):
@@ -132,7 +138,8 @@ class SystemOfMassesOnSprings(DiscreteSystem):
         self.model.calls.append("force and momentum")
         # the residual contribution of the spring, the negative of the force it exerts on the node, with the sign of
         # every element and constraint of EdelweissFE
-        return self._onTheNodes(lambda mass: STIFFNESS * mass.displacement), self._onTheNodes(
+        stiffness = self.model.springStiffness()
+        return self._onTheNodes(lambda mass: stiffness * mass.displacement), self._onTheNodes(
             lambda mass: mass.mass * mass.velocity
         )
 
@@ -146,12 +153,13 @@ class SystemOfMassesOnSprings(DiscreteSystem):
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
         self.model.calls.append("estimate")
+        stiffness = self.model.springStiffness()
 
         # each entity on its spring alone, from the mass and the damping the solver has just assembled: omega^2 = k / m
         # for a mass; for a dashpot without a mass, (k / c)^2, so that 2 / omega is its critical time step 2 c / k
         def squaredFrequencyOf(entity) -> float:
             mass, damping = lumpedMass[entity][0], lumpedDamping[entity][0]
-            return STIFFNESS / mass if mass > 0.0 else (STIFFNESS / damping) ** 2
+            return stiffness / mass if mass > 0.0 else (stiffness / damping) ** 2
 
         entities = self.entitiesWithOwnInertia
         squaredFrequencies = np.array([squaredFrequencyOf(entity) for entity in entities])
@@ -196,6 +204,11 @@ class ModelOfMassesOnSprings(FEModel):
     def buildDiscreteSystem(self) -> SystemOfMassesOnSprings:
         return SystemOfMassesOnSprings(self, super().buildDiscreteSystem().locations)
 
+    def springStiffness(self) -> float:
+        """The stiffness of every spring now."""
+
+        return STIFFNESS
+
     def setNewmarkParametersOfEntities(self, beta: float, gamma: float):
         self.newmarkParametersOfEntities = (beta, gamma)
 
@@ -216,6 +229,16 @@ class ModelOfDashpotsOnSprings(ModelOfMassesOnSprings):
         super().__init__(mass=0.0, damping=DAMPING)
         for dashpot, displacement in zip(self.elements.values(), DISPLACEMENTS):
             dashpot.displacement[0] = displacement
+
+
+class ModelOfMassesOnSpringsWithAStiffEvent(ModelOfMassesOnSprings):
+    """Masses on springs that are stiffer for a while, from :data:`STIFF_EVENT_START` to :data:`STIFF_EVENT_END`, as a
+    particle that is briefly compressed: the bound of the entities' stable time increment falls by the square root of
+    :data:`STIFF_EVENT_FACTOR` meanwhile, and comes back after the event."""
+
+    def springStiffness(self) -> float:
+        stiffer = STIFF_EVENT_START <= self.time < STIFF_EVENT_END
+        return STIFFNESS * (STIFF_EVENT_FACTOR if stiffer else 1.0)
 
 
 class TheSecondMassFollowsTheFirst(MultiPointConstraintBase):
@@ -247,10 +270,10 @@ class _RecordingNED(NED):
 
 
 def _run(
-    stepLength: float, model: ModelOfMassesOnSprings = None, **options
+    stepLength: float, model: ModelOfMassesOnSprings = None, stepOptions: dict = None, **options
 ) -> tuple[ModelOfMassesOnSprings, _RecordingNED]:
-    """Run one explicit step of the given length, which asks for the whole step as its increment, on the given model
-    (by default the masses on springs)."""
+    """Run one explicit step of the given length, which asks for the whole step as its increment unless the options of
+    the step say otherwise, on the given model (by default the masses on springs), with the options of the solver."""
 
     journal = Journal(verbose=False)
     model = model or ModelOfMassesOnSprings()
@@ -273,6 +296,7 @@ def _run(
         StepActionCollection(),
         stepLength=stepLength,
         maxNumInc=100000,
+        **(stepOptions or {}),
     ).solve()
     fieldOutputController.finalizeJob()
 
@@ -306,6 +330,57 @@ def test_the_critical_time_step_of_the_entities_sets_the_increment_of_a_step_tha
     timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])
     assert timeIncrements[0] == 0.0
     np.testing.assert_allclose(timeIncrements[1:-1], courantNumber * CRITICAL_TIME_STEP, rtol=1e-14)
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_after_a_brief_stiff_event_the_increment_comes_back_only_if_it_follows_the_critical_time_step(follow):
+    """The springs are stiffer for a while, and the critical time step of the entities, estimated in every increment
+    here, falls by a factor of five meanwhile. The increment that starts in the event is the critical time step of the
+    stiff springs times the courant number. After the event, it is lowered only, and stays at the one of the event, by
+    default; with ``follow-critical-time-step``, it comes back to the one before the event with the first estimate
+    taken after it."""
+
+    courantNumber = 0.5
+    _, solver = _run(
+        30 * CRITICAL_TIME_STEP,
+        model=ModelOfMassesOnSpringsWithAStiffEvent(),
+        **{
+            "courant-number": courantNumber,
+            "critical-time-step-decrease-per-increment": 1.0,
+            "follow-critical-time-step": follow,
+        },
+    )
+
+    timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])[1:-1]  # without the zero
+    # increment, and the last one, which ends the step
+    startTimes = np.cumsum(timeIncrements) - timeIncrements
+    beforeTheEvent = startTimes < STIFF_EVENT_START
+    inTheEvent = (startTimes >= STIFF_EVENT_START) & (startTimes < STIFF_EVENT_END)
+    afterTheEvent = startTimes >= STIFF_EVENT_END
+    assert beforeTheEvent.any() and inTheEvent.any() and afterTheEvent.any()
+
+    soft = courantNumber * CRITICAL_TIME_STEP
+    stiff = soft / np.sqrt(STIFF_EVENT_FACTOR)
+    np.testing.assert_allclose(timeIncrements[beforeTheEvent], soft, rtol=1e-14)
+    np.testing.assert_allclose(timeIncrements[inTheEvent], stiff, rtol=1e-14)
+    np.testing.assert_allclose(timeIncrements[afterTheEvent], soft if follow else stiff, rtol=1e-14)
+
+
+@pytest.mark.parametrize("follow, expectedTimeIncrement", [(False, 0.1), (True, 0.5)])
+def test_the_increment_that_follows_the_critical_time_step_is_at_most_the_steps_max_inc(follow, expectedTimeIncrement):
+    """The step asks for a tenth of the critical time step to start with (``startInc``), and for at most half of it
+    (``maxInc``); the courant number is 0.8. Lowered only, the increment stays the step's own, the smaller;
+    following the critical time step, it is the critical time step, at most ``maxInc``."""
+
+    stepLength = 10 * CRITICAL_TIME_STEP
+    _, solver = _run(
+        stepLength,
+        stepOptions={"startInc": 0.01, "maxInc": 0.05},
+        **{"courant-number": 0.8, "follow-critical-time-step": follow},
+    )
+
+    timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])[1:-1]
+    np.testing.assert_allclose(timeIncrements, expectedTimeIncrement * CRITICAL_TIME_STEP, rtol=1e-12)
 
 
 @pytest.mark.parametrize("courantNumber", [0.8, 0.05])
