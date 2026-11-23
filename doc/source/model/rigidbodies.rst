@@ -83,35 +83,17 @@ winding makes the signed tetrahedra cancel correctly for non-convex bodies, so t
 (no volumetric mesh required). The inertia tensor is returned about the center of mass, in the
 global (non-rotated) axes of the input vertices.
 
-Surface query
--------------
+The rigid surface
+-----------------
 
-Contact needs, for an arbitrary array of world-frame query points, the signed distance to the rigid
-surface (negative inside) and the outward normal of the closest facet, evaluated for the body's
-current pose. This is provided by :class:`~edelweissfe.utils.discretesurfacequery.DiscreteSurfaceQuery`,
-which wraps VTK's ``vtkImplicitPolyDataDistance`` and a static cell locator built once on the
-*reference* mesh. Rather than re-transform the whole mesh each query, the query points are mapped
-into the body's local (reference) frame,
-
-.. math::
-    \mathbf{p}_{\text{local}} = \mathbf{X}_{RP}
-        + \mathbf{R}^{\top}\big(\mathbf{p} - (\mathbf{X}_{RP}+\mathbf{u}_{RP})\big) ,
-
-the distance/closest-facet lookup is done there, and the returned normals are rotated back to the
-world frame by :math:`\mathbf{R}`.
-
-.. note::
-    The implementation stores points as *row* vectors (shape ``(N, 3)``), for which
-    ``v.dot(M)`` computes :math:`\mathbf{M}^{\top}\mathbf{v}` per row. Consequently the inverse
-    map above is coded as ``localCoords.dot(rotation_matrix)`` (i.e. :math:`\mathbf{R}^{\top}`) and
-    the forward map of normals as ``normals.dot(rotation_matrix.T)`` (i.e. :math:`\mathbf{R}`) —
-    the opposite of what a naive read of the transpose suggests. This convention is documented in
-    the source and was verified numerically against a known rotated mesh; do not "fix" the transpose
-    without re-deriving it.
-
-Outward normals are established from the mesh topology (``compute_normals(..., auto_orient_normals=True)``)
-rather than trusting the source file's face winding, so the sign of the signed distance and the
-direction of the returned normals are reliable for any correctly closed input mesh.
+Contact with a discrete rigid body (``surfaceToDiscreteRigidBodyPenalty``) pairs its contact points with the triangles
+of the rigid surface, in the body frame, with their outward normals
+(:meth:`~edelweissfe.rigidbodies.discreterigidbody.DiscreteRigidBody.referenceTriangles`); the body's pose maps them
+into the current configuration. They come from :class:`~edelweissfe.utils.discretesurfacequery.DiscreteSurfaceQuery`,
+which extracts the outer surface of the mesh once. Outward normals are established from the mesh topology
+(``compute_normals(..., auto_orient_normals=True)``) rather than trusting the source file's face winding, so they are
+reliable for any correctly closed input mesh; a surface that is not closed, not made of triangles, or holds a triangle
+of zero area is refused.
 
 Creating a discrete rigid body
 ------------------------------
