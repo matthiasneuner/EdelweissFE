@@ -55,8 +55,11 @@ cost small against an increment. Two such bounds are used:
   nodes at which its own lumped mass vanishes. Every eigenvalue :math:`\lambda` of a matrix is bounded by its largest
   absolute row sum (Gershgorin), and more sharply by the Collatz-Wielandt bound of its absolute value with positive
   weights. EdelweissMeshfree applies it to the mass-scaled stiffness :math:`\boldsymbol{M}^{-1/2}\boldsymbol{K}
-  \boldsymbol{M}^{-1/2}` with weights per field, and Marmot bounds the row sums of every particle without assembling
-  its stiffness (EdelweissMeshfree, ``MPMDiscreteSystem.criticalTimeStepOfEntitiesWithOwnInertia``).
+  \boldsymbol{M}^{-1/2}` with weights per field -- or, with ``carry-critical-time-step-weights``, with weights carried
+  from estimate to estimate and refined by one step of the power iteration each time
+  (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`, "Carried weights")
+  --, and Marmot bounds the row sums of every particle without assembling its stiffness (EdelweissMeshfree,
+  ``MPMDiscreteSystem.criticalTimeStepOfEntitiesWithOwnInertia``).
 
 Both are bounds from above for :math:`\omega_\mathrm{max}`, so the time increment they give is safe; how far below the
 true limit it lies is the price of not computing the eigenvalue.
@@ -153,6 +156,9 @@ symmetric stiffness: the penalty springs are (a closed point with a frozen proje
 bounds their elastic stiffness. The tangent of gradient-enhanced particles is not symmetric;
 for them, the constraint's rows are added to the particles' rows inside their field matrix
 (EdelweissMeshfree, ``CriticalTimeStepBoundOfEachFieldBlock``), and the bound of the field matrix holds for any matrix.
+The rows :math:`r_i` add to the particles' rows as they are where the particles' weights are constant on the field of
+the constraint, so with carried weights the particles keep weights constant per field in every field a constraint acts
+on.
 Where a constraint couples particles and finite elements at once, the two arguments are combined; that the
 unsymmetric particles take part in the Rayleigh quotient of the elements is then an assumption.
 

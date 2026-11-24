@@ -108,7 +108,7 @@ class _Entities:
         self.K = K
         self.numbering = object()
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk):
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheBound=None):
         M = np.asarray(M)
         return CriticalTimeStepBoundOfEachDof(_gershgorinEstimate(self.K, M), np.arange(len(M)), _rowSums(self.K, M))
 
@@ -234,6 +234,42 @@ def test_a_decrease_of_one_estimates_in_every_increment():
     criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(1.0)
     criticalTimeStep.estimate(system, M, C, None, 0)
     assert criticalTimeStep.isDue(system, 1, M, C, 1e-3 * criticalTimeStep.value)
+
+
+class _EntitiesRecordingTheWeights(_Entities):
+    """:class:`_Entities` that record the weights every estimate is handed, and refine them by a stand-in step: every
+    weight grows by one per estimate."""
+
+    def __init__(self, K):
+        super().__init__(K)
+        self.numbering = SimpleNamespace(nDof=len(K))
+        self.handed = []
+
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheBound=None):
+        self.handed.append(np.array(weightsOfTheBound))
+        weightsOfTheBound += 1.0
+        return super().criticalTimeStepOfEntitiesWithOwnInertia(M, C, forEachChunk)
+
+
+def test_carried_weights_start_anew_with_a_new_numbering_and_with_every_step():
+    """With carried weights, every estimate is handed the weights the last one left, a vector of the numbering; the
+    first estimate on a new numbering, and the first one of a step, is handed zeros: the start."""
+
+    system, M = _entities()
+    system = _EntitiesRecordingTheWeights(system.K)
+    C = np.zeros_like(M)
+    criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA, carryWeights=True)
+
+    for increment in range(3):
+        criticalTimeStep.estimate(system, M, C, None, increment)
+    system.numbering = SimpleNamespace(nDof=len(M))
+    criticalTimeStep.estimate(system, M, C, None, 3)
+    criticalTimeStep.reset()
+    criticalTimeStep.estimate(system, M, C, None, 0)
+
+    assert [weights.shape for weights in system.handed] == [(len(M),)] * 5
+    assert [float(np.max(weights)) for weights in system.handed] == [0.0, 1.0, 2.0, 0.0, 0.0]
+    assert criticalTimeStep.value == _gershgorinEstimate(system.K, M)
 
 
 class _ElementWithItsEigenvalue:

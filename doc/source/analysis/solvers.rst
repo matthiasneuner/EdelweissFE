@@ -471,9 +471,12 @@ so a nonlocal field of gradient-enhanced particles is integrated by its own sche
 critical time step with the elements'; it is estimated in the zero increment, and anew whenever the margin of its last
 estimate over the time increment in use may be used up (option ``critical-time-step-decrease-per-increment``, see
 :doc:`/theory/criticaltimestep`). A penalty constraint on the particles -- a support, the contact with a projectile --
-adds its stiffness to their rows in every increment. With
-``project-velocity-every-increment``, the velocity of the particles' nodes is projected from their momentum in every
-increment.
+adds its stiffness to their rows in every increment. With ``carry-critical-time-step-weights``, every estimate starts
+from the weights the last one left and refines them by one step of the power iteration, which tightens it over a few
+estimates at no extra cost; an estimate below the one the weights started from starts them anew, so an increment that
+is lowered only never falls below the smallest estimate without them (see "Entities that carry their own inertia"
+above). With ``project-velocity-every-increment``, the velocity of the particles' nodes is projected from their momentum
+in every increment.
 
 .. _ned-time-increment-lowered-or-followed:
 

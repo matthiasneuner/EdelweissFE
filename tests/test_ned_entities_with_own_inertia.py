@@ -44,6 +44,9 @@ same contract in a few lines of Python, and the tests check ``NED``'s path for i
   the increment that follows the critical time step is at most the step's ``maxInc``, whatever its ``startInc``,
 * a critical time step that is not a number is refused, whether the increment follows it or not, and without any
   bound the step keeps its own increment, also when it follows the critical time step,
+* with ``carry-critical-time-step-weights``, the weights of the estimate are handed from one estimate to the next, zero
+  at the first estimate of a step; without it, the estimate gets none; carried weights that give an estimate below the
+  one they started from start anew, and the increment is not lowered by them,
 * a field of the entities that gets neither an inertia nor a damping is refused, and so are a damping of the entities
   that is negative or not finite, and an inertia that is not finite,
 * the rate of a first-order field of the entities (dashpots on springs) is published in every increment, also when the
@@ -153,8 +156,12 @@ class SystemOfMassesOnSprings(DiscreteSystem):
         self.model.calls.append("damping")
         return self._onTheNodes(lambda mass: np.full(mass.nDof, mass.damping))
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound=None):
         self.model.calls.append("estimate")
+        # the weights it was handed, and one step of a stand-in refinement: every weight grows by one per estimate
+        self.model.weightsOfTheBounds.append(None if weightsOfTheBound is None else np.array(weightsOfTheBound))
+        if weightsOfTheBound is not None:
+            weightsOfTheBound += 1.0
         stiffness = self.model.springStiffness()
 
         # each entity on its spring alone, from the mass and the damping the solver has just assembled: omega^2 = k / m
@@ -194,6 +201,8 @@ class ModelOfMassesOnSprings(FEModel):
     def __init__(self, mass: float = MASS, damping: float = 0.0):
         super().__init__(2)
         self.calls = []
+        #: The weights every estimate was handed (None without ``carry-critical-time-step-weights``).
+        self.weightsOfTheBounds = []
         #: The Newmark parameters the solver gave last; those an implicit dynamic step would have left.
         self.newmarkParametersOfEntities = (0.25, 0.5)
         for number, velocity in enumerate(VELOCITIES, start=1):
@@ -247,8 +256,10 @@ class SystemOfMassesOnSpringsWithoutABound(SystemOfMassesOnSprings):
     """Masses on springs whose critical time step is not a number, as from a stiffness or a mass that is not
     finite."""
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
-        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(lumpedMass, lumpedDamping, forEachChunk)
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound=None):
+        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(
+            lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound
+        )
         return CriticalTimeStepBoundOfEachDof(np.nan, bound.dofs, np.full_like(bound.squaredFrequencies, np.nan))
 
 
@@ -262,8 +273,10 @@ class ModelOfMassesOnSpringsWithoutABound(ModelOfMassesOnSprings):
 class SystemOfMassesOnSpringsReportingNoCriticalTimeStep(SystemOfMassesOnSprings):
     """Masses on springs that report no critical time step (an infinite one), as entities whose stiffness gives none."""
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
-        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(lumpedMass, lumpedDamping, forEachChunk)
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound=None):
+        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(
+            lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound
+        )
         return CriticalTimeStepBoundOfEachDof(np.inf, bound.dofs, np.zeros_like(bound.squaredFrequencies))
 
 
@@ -272,6 +285,26 @@ class ModelOfMassesOnSpringsReportingNoCriticalTimeStep(ModelOfMassesOnSprings):
 
     def buildDiscreteSystem(self) -> SystemOfMassesOnSpringsReportingNoCriticalTimeStep:
         return SystemOfMassesOnSpringsReportingNoCriticalTimeStep(self, super().buildDiscreteSystem().locations)
+
+
+class SystemWhoseCarriedWeightsFallBehind(SystemOfMassesOnSprings):
+    """The masses on springs with a stand-in of carried weights that fall behind the stiffness: the estimate the weights
+    start from (weights zero) is that of the springs, the next one (weights one) is larger, the one after it (weights
+    two) below the start."""
+
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound=None):
+        factor = {0.0: 1.0, 1.0: 1.5, 2.0: 0.5}[float(np.max(weightsOfTheBound))]
+        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(
+            lumpedMass, lumpedDamping, forEachChunk, weightsOfTheBound
+        )
+        return CriticalTimeStepBoundOfEachDof(factor * bound.value, bound.dofs, bound.squaredFrequencies / factor**2)
+
+
+class ModelWhoseCarriedWeightsFallBehind(ModelOfMassesOnSprings):
+    """The masses on springs, answering with :class:`SystemWhoseCarriedWeightsFallBehind`."""
+
+    def buildDiscreteSystem(self) -> SystemWhoseCarriedWeightsFallBehind:
+        return SystemWhoseCarriedWeightsFallBehind(self, super().buildDiscreteSystem().locations)
 
 
 class TheSecondMassFollowsTheFirst(MultiPointConstraintBase):
@@ -451,6 +484,47 @@ def test_without_a_bound_the_step_keeps_its_own_increment(follow):
 
     timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])[1:-1]
     np.testing.assert_allclose(timeIncrements, 0.1 * CRITICAL_TIME_STEP, rtol=1e-12)
+
+
+#: The options of a solver that estimates the entities in every increment.
+IN_EVERY_INCREMENT = {"critical-time-step-decrease-per-increment": 1.0}
+
+
+def test_without_carried_weights_the_estimate_gets_none():
+    model, _ = _run(10 * CRITICAL_TIME_STEP, **IN_EVERY_INCREMENT)
+
+    assert model.weightsOfTheBounds and all(weights is None for weights in model.weightsOfTheBounds)
+
+
+def test_carried_weights_are_handed_from_estimate_to_estimate_starting_at_zero():
+    """With ``carry-critical-time-step-weights``, every estimate gets the weights the last one left, a vector of the
+    numbering; the first estimate of the step gets zeros: no weights yet."""
+
+    model, _ = _run(10 * CRITICAL_TIME_STEP, **IN_EVERY_INCREMENT, **{"carry-critical-time-step-weights": True})
+
+    assert len(model.weightsOfTheBounds) > 2
+    for number, weights in enumerate(model.weightsOfTheBounds):
+        np.testing.assert_array_equal(weights, np.full(len(weights), float(number)))
+
+
+def test_carried_weights_that_give_an_estimate_below_their_start_start_anew():
+    """The third estimate of the weights (weights two) is below the estimate they started from: ``NED`` starts them anew
+    and estimates again from zero weights, so the weights handed cycle through zero, one, two, and the increment is
+    never lowered below the start's."""
+
+    courantNumber = 0.5
+    model, solver = _run(
+        10 * CRITICAL_TIME_STEP,
+        ModelWhoseCarriedWeightsFallBehind(),
+        **IN_EVERY_INCREMENT,
+        **{"carry-critical-time-step-weights": True, "courant-number": courantNumber},
+    )
+
+    handed = [float(np.max(weights)) for weights in model.weightsOfTheBounds]
+    assert len(handed) > 6
+    assert handed == [float(number % 3) for number in range(len(handed))]
+    timeIncrements = np.array([timeIncrement for timeIncrement, _ in solver.history])
+    np.testing.assert_allclose(timeIncrements[1:-1], courantNumber * CRITICAL_TIME_STEP, rtol=1e-14)
 
 
 @pytest.mark.parametrize("courantNumber", [0.8, 0.05])

@@ -309,13 +309,31 @@ class CriticalTimeStepOfEntitiesWithOwnInertia(CriticalTimeStepEstimate):
     every increment; where another part sets it, they are estimated only every so many increments, as many as their
     margin allows at the rate :math:`\\delta`.
 
+    **Carried weights** (option ``carry-critical-time-step-weights``). The estimate of the entities is a
+    Collatz-Wielandt bound with weights constant per field
+    (:meth:`~edelweissfe.models.discretesystem.DiscreteSystem.criticalTimeStepOfEntitiesWithOwnInertia`). With carried
+    weights, every estimate takes the weights the last one left and leaves the next ones, one step of the power
+    iteration towards the Perron vector, where the bound is exact. Any positive weights bound the largest eigenvalue
+    from above, but weights refined at another configuration can bound it less tightly than the weights constant per
+    field they started from when the stiffness changed faster than the weights followed, e.g. where entities reach
+    nodes whose weights the power iteration has made small. So an estimate with carried weights below the estimate the
+    weights started from starts them anew: the entities are estimated again from the weights constant per field, and
+    the larger of the two estimates is taken. Every estimate is thus at least the one the weights started from: with
+    the time increment lowered only, it never falls below the smallest estimate with weights constant per field of
+    the step; followed (``follow-critical-time-step``), it can fall below the estimate without carried weights of the
+    same configuration, down to the one the weights started from. The weights start anew -- constant per field -- also
+    with every numbering (the nodes they belong to may have changed) and every step (a material property may have
+    changed), and after a resume: they are not part of the checkpoint.
+
     Parameters
     ----------
     decreasePerIncrement
         :math:`\\delta`, in :math:`(0, 1]`; 1 estimates in every increment.
+    carryWeights
+        Whether the weights of the estimate are carried from one estimate to the next.
     """
 
-    def __init__(self, decreasePerIncrement: float):
+    def __init__(self, decreasePerIncrement: float, carryWeights: bool = False):
         if not 0.0 < decreasePerIncrement <= 1.0:
             raise ValueError(
                 "The decrease of the critical time step per increment must lie in (0, 1], not {:}.".format(
@@ -323,6 +341,7 @@ class CriticalTimeStepOfEntitiesWithOwnInertia(CriticalTimeStepEstimate):
                 )
             )
         self.decreasePerIncrement = decreasePerIncrement
+        self.carryWeights = carryWeights
         super().__init__("the entities that carry their own inertia")
 
     def reset(self):
@@ -335,9 +354,18 @@ class CriticalTimeStepOfEntitiesWithOwnInertia(CriticalTimeStepEstimate):
         self._increment = None
         self._inertia = None
         self._damping = None
+        #: With carried weights, the weights the last estimate left for the next one, a vector of its numbering, zero
+        #: where a degree of freedom has none yet; None without carried weights, and before the first estimate on a
+        #: numbering.
+        self._weightsOfTheBound = None
+        #: With carried weights, the critical time step of the estimate the weights started from, the first one after
+        #: they were set to zero, with weights constant per field.
+        self._valueTheWeightsStartedFrom = np.inf
 
     def estimate(self, system, lumpedInertia: DofVector, lumpedDamping: DofVector, forEachChunk, increment: int):
-        """Estimate the critical time step of the entities at their current configuration.
+        """Estimate the critical time step of the entities at their current configuration; with carried weights, from
+        the weights the last estimate left, started anew where it falls below the estimate they started from (see the
+        class documentation, "Carried weights").
 
         Parameters
         ----------
@@ -353,7 +381,24 @@ class CriticalTimeStepOfEntitiesWithOwnInertia(CriticalTimeStepEstimate):
             The number of the increment just accepted.
         """
 
-        self.bound = system.criticalTimeStepOfEntitiesWithOwnInertia(lumpedInertia, lumpedDamping, forEachChunk)
+        if self.carryWeights and self._numbering is not system.numbering:
+            self._weightsOfTheBound = np.zeros(system.numbering.nDof)
+        weights = self._weightsOfTheBound
+        startsTheWeights = weights is not None and not weights.any()
+
+        bound = system.criticalTimeStepOfEntitiesWithOwnInertia(lumpedInertia, lumpedDamping, forEachChunk, weights)
+        if bound is not None and weights is not None:
+            if startsTheWeights:
+                self._valueTheWeightsStartedFrom = bound.value
+            elif bound.value < self._valueTheWeightsStartedFrom:
+                weights[:] = 0.0
+                anew = system.criticalTimeStepOfEntitiesWithOwnInertia(
+                    lumpedInertia, lumpedDamping, forEachChunk, weights
+                )
+                self._valueTheWeightsStartedFrom = anew.value
+                if anew.value > bound.value:
+                    bound = anew
+        self.bound = bound
         self._take(None if self.bound is None else self.bound.value)
         self._numbering = system.numbering
         self._increment = increment

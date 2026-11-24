@@ -174,9 +174,15 @@ entities' assembled system, which changes with their configuration: it is estima
 whenever the margin of its last estimate over the time increment in use may be used up -- by the fall of their lumped
 inertia since, which is followed in every increment, and by the assumed fall per increment from their stiffness
 (``critical-time-step-decrease-per-increment``) --, and lowers the time increment whenever it falls below it (or sets
-it, with ``follow-critical-time-step``, see :ref:`ned-time-increment-lowered-or-followed`). The first
-increment of a step must be the zero increment: in it, the entities take an increment of zero length, from which they
-evaluate the force, the inertia, the damping and the critical time step of the configuration the step starts from.
+it, with ``follow-critical-time-step``, see :ref:`ned-time-increment-lowered-or-followed`). The estimate is a
+Collatz-Wielandt bound of the largest eigenvalue of the absolute value of the entities' mass-scaled stiffness, from
+weights constant per field; with ``carry-critical-time-step-weights``, ``NED`` keeps the weights an estimate leaves and
+hands them to the next, so that every estimate takes one more step of the power iteration towards the Perron vector,
+where the bound is exact. An estimate below the one the weights started from starts them anew, and the larger of the
+two is taken; the weights start anew also with every numbering and every step, and after a resume
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`, "Carried weights"). The
+first increment of a step must be the zero increment: in it, the entities take an increment of zero length, from which
+they evaluate the force, the inertia, the damping and the critical time step of the configuration the step starts from.
 Where the model holds the motion of their nodes
 (:meth:`~edelweissfe.models.discretesystem.DiscreteSystem.carriersOfTheMotion`) -- after a step of this solver, or of
 ``NID`` integrating the inertia at the nodes --, the step continues it as at the nodes of elements, from their velocity
@@ -466,6 +472,19 @@ class NEDSchema:
         default=False,
         optionName="follow-critical-time-step",
     )
+    carryCriticalTimeStepWeights: bool = schemaField(
+        description=(
+            "Carry the weights of the estimate of the critical time step of the entities that carry their own inertia "
+            "(the particles of a meshfree model) from one estimate to the next, and refine them by one "
+            "Collatz-Wielandt step each time: the estimate tightens towards the spectral radius it bounds over a few "
+            "estimates, in the pass the estimate takes anyway. An estimate below the one the weights started from "
+            "(with weights constant per field) starts them anew, and so do every numbering and every step, and a "
+            "resume."
+        ),
+        dtype=bool,
+        default=False,
+        optionName="carry-critical-time-step-weights",
+    )
 
 
 class NED(NonlinearSolverBase):
@@ -499,6 +518,7 @@ class NED(NonlinearSolverBase):
         "project-velocity-every-increment": False,
         "critical-time-step-decrease-per-increment": 0.1,
         "follow-critical-time-step": False,
+        "carry-critical-time-step-weights": False,
         # Lists, so _updateOptions appends the comma-separated items. Empty means "assert nothing".
         "expect-second-order-fields": [],
         "expect-first-order-fields": [],
@@ -567,7 +587,7 @@ class NED(NonlinearSolverBase):
         #: may be used up, the penalty constraints in every increment.
         self._criticalTimeStepOfTheElements = CriticalTimeStepOfTheElements()
         self._criticalTimeStepOfTheEntities = CriticalTimeStepOfEntitiesWithOwnInertia(
-            self.options["critical-time-step-decrease-per-increment"]
+            self.options["critical-time-step-decrease-per-increment"], self.options["carry-critical-time-step-weights"]
         )
         self._criticalTimeStepOfThePenaltyConstraints = CriticalTimeStepOfThePenaltyConstraints()
         #: The internal (strain) energy the elements publish at the end of the last increment, for the energy balance.

@@ -530,6 +530,7 @@ class DiscreteSystem:
         lumpedMass: DofVector,
         lumpedDamping: DofVector,
         forEachChunk: Callable[[list, Callable], None],
+        weightsOfTheBound: np.ndarray | None = None,
     ) -> "CriticalTimeStepBound | None":
         """An estimate of the critical time step of the explicit scheme for the entities that carry their own inertia
         (:attr:`entitiesWithOwnInertia`) at their current configuration, a lower bound of it. A property of their
@@ -538,6 +539,16 @@ class DiscreteSystem:
         anew (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`). It is
         given in the form the penalty constraints that couple the entities' degrees of freedom add to
         (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepBound`).
+
+        A bound of the largest eigenvalue of a nonnegative matrix :math:`\\boldsymbol{A}` -- here the absolute value of
+        the mass-scaled stiffness -- is the Collatz-Wielandt bound :math:`\\rho(\\boldsymbol{A}) \\le \\max_i
+        (\\boldsymbol{A}\\boldsymbol{w})_i / w_i`, which holds for every positive weight vector :math:`\\boldsymbol{w}`
+        and is exact for the Perron vector. ``NED`` may carry the weights from one estimate to the next
+        (``carry-critical-time-step-weights``): each estimate then takes the weights the last one left, and leaves
+        :math:`\\boldsymbol{A}\\boldsymbol{w}` for the next, one step of the power iteration per estimate. Weights of
+        zero start the iteration anew, from the estimate's own start weights. Whatever its weights, the estimate takes
+        the row sums of the penalty constraints as they are
+        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepBound.criticalTimeStep`).
 
         A finite element model has no such entity: None.
 
@@ -550,6 +561,10 @@ class DiscreteSystem:
             Their lumped damping, likewise (:meth:`assembleLumpedDampingOfEntitiesWithOwnInertia`).
         forEachChunk
             The solver's loop over chunks of independent entities, see :meth:`updateMaterialPoints`.
+        weightsOfTheBound
+            The weights the last estimate left, a vector of the numbering, zero where a degree of freedom has none yet;
+            replaced in place by the weights for the next estimate. None for the estimate with its own start weights
+            alone.
 
         Returns
         -------
