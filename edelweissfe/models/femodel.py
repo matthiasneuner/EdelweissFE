@@ -424,6 +424,37 @@ class FEModel:
         self._prepareElements(journal)
         self.topology.recordSetupFingerprint()
 
+    def thicknessOf(self, element) -> float:
+        """The thickness of a plane model at one of its elements: the thickness of the plane section the element
+        belongs to (``*section, type=plane, thickness=...``), by which the element multiplies what it integrates over
+        its area. What else integrates over the area of the slice -- e.g. the contact points, see
+        :func:`~edelweissfe.constraints.base.contactpoints.thicknessesOfFacets` -- takes it from here, so that the
+        forces balance at the nodes.
+
+        Parameters
+        ----------
+        element
+            The element.
+
+        Returns
+        -------
+        float
+            The thickness.
+
+        Raises
+        ------
+        ValueError
+            If no section with a thickness holds the element.
+        """
+
+        for section in self.sections.values():
+            if section.thickness is not None and any(element in elementSet for elementSet in section.elSets):
+                return section.thickness
+        raise ValueError(
+            f"Element {element.elNumber} is in no section with a thickness (type=plane); a plane model is a slice of "
+            "the thickness of its sections."
+        )
+
     def activeConstraints(self) -> list:
         """The constraints that take part in the discrete system: all constraints, in their order, that are active,
         i.e. switched on and within reach (see

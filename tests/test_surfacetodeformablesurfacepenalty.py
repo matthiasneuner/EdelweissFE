@@ -75,6 +75,8 @@ from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.models.modelchangeobserver import ModelChangeType
 from edelweissfe.numerics.systemmatrixcontributor import countEntriesOfBlock
 from edelweissfe.points.node import Node
+from edelweissfe.sections.plane import PlaneSectionSchema
+from edelweissfe.sections.plane import Section as PlaneSection
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.timesteppers.timestep import TimeStep
@@ -877,6 +879,14 @@ class TestContactAtCornersOfTheMaster(unittest.TestCase):
                 model, "masterFaces", "mst", "corner", "facetConsistent", self.journal
             )
             slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "corner", "facetConsistent", self.journal)
+        # a plane model is a slice of the thickness of its sections, which the contact points stand for
+        model.sections["unitThickness"] = PlaneSection(
+            "unitThickness",
+            model,
+            {},
+            [ElementSet("all", list(elements.values()))],
+            configuration=PlaneSectionSchema(thickness=1.0),
+        )
 
         for node in model.nodes.values():
             node.fields["displacement"] = 2

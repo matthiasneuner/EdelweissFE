@@ -36,6 +36,7 @@ from scipy.sparse import csr_matrix, identity
 from edelweissfe.constraints.base.contactpoints import (
     ContactPoints,
     areasOfContactPoints,
+    thicknessesOfFacets,
 )
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
@@ -43,14 +44,19 @@ from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.utils.meshtools import currentNodeCoordinates
 
 
-def tributaryAreasOfSlaveNodes(slaveFacets: list) -> tuple[list, np.ndarray]:
-    """The unique nodes of slave contact facets and the area each stands for: the sum of its area shares over its
-    incident facets (``nodalAreaShares``, set by the surface element generator), in the reference configuration.
+def tributaryAreasOfSlaveNodes(slaveFacets: list, model: FEModel) -> tuple[list, np.ndarray]:
+    """The unique nodes of slave contact facets and the area each stands for, in the reference configuration, as the
+    model integrates (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`): the sum of its shares of
+    the measures of its incident facets (``nodalAreaShares``, set by the surface element generator), each facet with
+    the thickness of its section in a plane model -- a node between facets of different thicknesses stands for its
+    share of the area of each --, over the ring at the node's radius in an axisymmetric model.
 
     Parameters
     ----------
     slaveFacets
         The slave contact facet elements.
+    model
+        The model, with the sections of the elements the facets bound.
 
     Returns
     -------
@@ -60,11 +66,24 @@ def tributaryAreasOfSlaveNodes(slaveFacets: list) -> tuple[list, np.ndarray]:
         order is unaffected.
     """
 
-    tributaryAreaOfSlaveNode = {}
-    for slaveFacet in slaveFacets:
+    measureOfNode = {}
+    thicknessTimesMeasureOfNode = {}
+    for slaveFacet, thickness in zip(slaveFacets, thicknessesOfFacets(slaveFacets, model)):
         for node, share in zip(slaveFacet.nodes, slaveFacet.nodalAreaShares):
-            tributaryAreaOfSlaveNode[node] = tributaryAreaOfSlaveNode.get(node, 0.0) + share
-    return list(tributaryAreaOfSlaveNode.keys()), np.array(list(tributaryAreaOfSlaveNode.values()))
+            measureOfNode[node] = measureOfNode.get(node, 0.0) + share
+            thicknessTimesMeasureOfNode[node] = thicknessTimesMeasureOfNode.get(node, 0.0) + thickness * share
+
+    nodes = list(measureOfNode)
+    measures = np.array(list(measureOfNode.values()), dtype=float)
+    # the share-weighted thickness of a node, so that its area is the sum of its shares of the areas of its facets
+    thicknesses = np.divide(
+        np.array(list(thicknessTimesMeasureOfNode.values()), dtype=float),
+        measures,
+        out=np.ones_like(measures),
+        where=measures > 0,
+    )
+    coordinates = np.array([node.coordinates for node in nodes]).reshape(len(nodes), model.domainSize)
+    return nodes, areasOfContactPoints(measures, coordinates, thicknesses, model.axisymmetric)
 
 
 class ContactPointsAtSlaveNodes(ContactPoints):
@@ -72,10 +91,11 @@ class ContactPointsAtSlaveNodes(ContactPoints):
 
     A node is its own contact point: its interpolation vector is :math:`c = [1]`, it sits at
     :math:`\\boldsymbol{X} + \\boldsymbol{U}` (its origin :math:`\\boldsymbol{X}`, its total displacement
-    :math:`\\boldsymbol{U}`), and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`), in an
-    axisymmetric model for the ring it sweeps, :math:`2 \\pi r` times its tributary length at its radius
-    (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`). A located node takes itself into the
-    block of the constraint, once.
+    :math:`\\boldsymbol{U}`), and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`): times the
+    thickness in a plane model, in an axisymmetric model for the ring it sweeps, :math:`2 \\pi r` times its tributary
+    length at its radius (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`), measured when a
+    constraint takes the points (:meth:`measureTheAreasAsIn`). A located node takes itself into the block of the
+    constraint, once.
 
     Parameters
     ----------
@@ -83,20 +103,30 @@ class ContactPointsAtSlaveNodes(ContactPoints):
         The element set of contact facet elements forming the slave surface.
     constraintName
         The name of the owning constraint, for error messages.
-    axisymmetric
-        True if the slave surface lies in the section r-z of an axisymmetric model, see
-        :attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`.
     """
 
-    def __init__(self, slaveSurface: ElementSet, constraintName: str, axisymmetric: bool = False):
+    def __init__(self, slaveSurface: ElementSet, constraintName: str):
         self.setName = slaveSurface.name
         self._constraintName = constraintName
-        self.axisymmetric = axisymmetric
-        self.slaveNodes, tributaryAreas = tributaryAreasOfSlaveNodes(list(slaveSurface))
+        self._facets = list(slaveSurface)
+        self.slaveNodes = list(dict.fromkeys(node for facet in self._facets for node in facet.nodes))
         self.nPoints = len(self.slaveNodes)
         self._referenceCoordinates = np.array([node.coordinates for node in self.slaveNodes])
-        self.areas = areasOfContactPoints(tributaryAreas, self._referenceCoordinates, axisymmetric)
         self.locatePoints(np.zeros(0, dtype=int))
+
+    def measureTheAreasAsIn(self, model: FEModel, constraintName: str):
+        """Measure the tributary areas of the slave nodes as the model integrates (:func:`tributaryAreasOfSlaveNodes`).
+
+        Parameters
+        ----------
+        model
+            The model of the constraint.
+        constraintName
+            The name of the constraint.
+        """
+
+        _, self.areas = tributaryAreasOfSlaveNodes(self._facets, model)
+        self.axisymmetric = model.axisymmetric
 
     @property
     def surfaceNodes(self) -> list:
@@ -300,4 +330,4 @@ class ContactPointsAtSlaveNodes(ContactPoints):
             The new contact points.
         """
 
-        return ContactPointsAtSlaveNodes(model.elementSets[self.setName], self._constraintName, model.axisymmetric)
+        return ContactPointsAtSlaveNodes(model.elementSets[self.setName], self._constraintName)

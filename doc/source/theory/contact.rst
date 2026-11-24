@@ -841,8 +841,10 @@ are in use:
       - :math:`\boldsymbol{x}_q^n + G(\boldsymbol{x}_q) \cdot \Delta\boldsymbol{U}`
       - its share of the face, at the start of the contact
 
-In an axisymmetric model, each :math:`A_p` is the area of the ring the point sweeps about the axis
-(:ref:`contact-axisymmetric`).
+In 2D, :math:`w_q J_q` and the tributary area are lengths of the section. In a plane model, a slice of the thickness
+:math:`t` of its sections, each :math:`A_p` is that length times the thickness of the section of the element whose face
+the point lies on, as the plane elements integrate times the thickness (:ref:`contact-plane`); in an axisymmetric
+model, it is the area of the ring the point sweeps about the axis (:ref:`contact-axisymmetric`).
 
 So one constraint, :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`, serves all of them;
 what a kind of point contributes is its
@@ -880,6 +882,28 @@ the connectivity: every ``contact-update-frequency`` increments of ``NED`` (by d
 model with particles or in an implicit analysis. Sized from the velocity times one time increment, it is too small
 by that frequency. The constraint warns when a point enters deeper than half of it. At the first update, the bodies are as
 the model gives them: a point that overlaps then is in contact (:ref:`contact-initial-overlap`).
+
+.. _contact-plane:
+
+Plane models: every point stands for the thickness of its section
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A plane model is a slice of the body, of the thickness :math:`t` its plane sections give
+(``*section, type=plane, thickness=...``); the plane elements integrate their internal forces, masses and loads over
+their areas times that thickness. A contact point on a line of the section stands for the length :math:`L_p` of its
+share of the line times the thickness,
+
+.. math::
+    A_p = t_p \, L_p ,
+
+with :math:`t_p` the thickness of the section of the element whose face the point lies on
+(:meth:`~edelweissfe.models.femodel.FEModel.thicknessOf`): the springs and the elements then act on the same slice, and
+the pressure on a point is its force per that area, the true pressure. A slice twice as thick transmits twice the
+force at the same pressure. A node between faces of different thicknesses -- elements of two sections meeting on the
+slave surface -- stands for its share of the area of each face, :math:`A_s = \sum_f t_f a_{s,f}` with its length
+shares :math:`a_{s,f}`. The constraint has the contact points measure their areas from the sections of its model
+(:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.measureTheAreasAsIn`), when it takes them and when
+it regenerates them after a refinement; an element of the slave surface without a plane section is refused.
 
 .. _contact-axisymmetric:
 
@@ -929,9 +953,11 @@ the next increment, and is then in the bound with its spring, is told by its gap
 **One rule for every kind of point.** The areas are measured by
 :func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`, which every kind of contact point uses: the
 quadrature points and the nodes of finite element faces here, the points on the edges of particles in
-EdelweissMeshfree. The contact points carry whether they are axisymmetric
-(:attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`), and the constraint refuses points
-that do not measure their areas as the model integrates. A point on the axis stands for no area and carries no force;
+EdelweissMeshfree. The constraint has the points of finite element faces measure their areas as its model integrates
+(:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.measureTheAreasAsIn`); points that measure their
+areas when they are made carry whether they are axisymmetric
+(:attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`), and the constraint refuses them if
+they do not measure their areas as the model integrates. A point on the axis stands for no area and carries no force;
 a point at a negative radius is refused. A restart rebuilds the areas from the model, as they are geometry, and adopts
 the frozen projection from the checkpoint, as in a plane model.
 

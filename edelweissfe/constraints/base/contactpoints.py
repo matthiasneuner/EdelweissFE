@@ -57,8 +57,16 @@ from the origins*.
 
 Every contact point stands for an area :math:`A_p`, its share of the slave surface: the penalty per unit area times it
 is the stiffness of its spring. In a 3D model it is the area of the point's share of the surface, its weight times the
-Jacobian of its face (the tributary area of a node); in a plane model the length of its share of the boundary of the
-section, per unit thickness. In an **axisymmetric model**, the section r-z of a body of revolution about the axis
+Jacobian of its face (the tributary area of a node). A **plane model** is a slice of the body of the thickness
+:math:`t` of its sections, by which the plane elements multiply what they integrate over their areas; a point of the
+boundary of the slice stands for the length :math:`L_p` of its share of the boundary times that thickness,
+
+.. math::
+    A_p = t_p \\, L_p ,
+
+with the thickness of the section of the element whose face the point lies on
+(:meth:`~edelweissfe.models.femodel.FEModel.thicknessOf`, :func:`thicknessesOfFacets`). A node between faces of
+different thicknesses stands for its share of the area of each. In an **axisymmetric model**, the section r-z of a body of revolution about the axis
 :math:`r = 0`, a point of the boundary of the section stands for the ring it sweeps about the axis, and its share of the
 surface is the area of that ring, the length :math:`L_p` of its share of the boundary times the circumference at its
 radius (Pappus' theorem):
@@ -70,7 +78,9 @@ So the forces of the springs are those on the full rings, as the axisymmetric el
 and their masses over the full rings, and the two balance at the nodes; the pressure on a point is its force per the
 area of its ring, the true pressure. The axial forces of the points add up to the total axial force; the radial forces
 of a ring cancel about the axis, so a sum of radial components is no resultant. Every kind of contact point takes its
-area from :func:`areasOfContactPoints`, so that the points of finite elements and of particles share the rule.
+area from :func:`areasOfContactPoints`, so that the points of finite elements and of particles share the rule. The
+areas follow from the model, which the points meet in the constraint that takes them
+(:meth:`ContactPoints.measureTheAreasAsIn`).
 
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
 the master, the gap, the law -- is written once for all of them, for a deformable master surface
@@ -87,10 +97,12 @@ from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
 
 
-def areasOfContactPoints(measures: np.ndarray, coordinates: np.ndarray, axisymmetric: bool) -> np.ndarray:
+def areasOfContactPoints(
+    measures: np.ndarray, coordinates: np.ndarray, thicknesses: np.ndarray, axisymmetric: bool
+) -> np.ndarray:
     """The areas contact points stand for, from their measures and where they are (see the module documentation): the
-    measures themselves in a 3D or a plane model, the areas of the rings they sweep about the axis in an axisymmetric
-    model, :math:`2 \\pi r` times their measures.
+    measures themselves in a 3D model, the measures times the thicknesses in a plane model, the areas of the rings they
+    sweep about the axis in an axisymmetric model, :math:`2 \\pi r` times their measures.
 
     Parameters
     ----------
@@ -100,6 +112,9 @@ def areasOfContactPoints(measures: np.ndarray, coordinates: np.ndarray, axisymme
     coordinates
         Where the points are, (nPoints, nDim), in the configuration the measures are taken in; in an axisymmetric model
         the first coordinate is the radius.
+    thicknesses
+        The thickness of the model at each point: that of its section in a plane model, 1 in a 3D model, see
+        :func:`thicknessesOfFacets`. Not used in an axisymmetric model, which integrates over the rings.
     axisymmetric
         True if the points lie in the section r-z of an axisymmetric model.
 
@@ -116,7 +131,7 @@ def areasOfContactPoints(measures: np.ndarray, coordinates: np.ndarray, axisymme
     """
 
     if not axisymmetric:
-        return np.asarray(measures, dtype=float)
+        return np.asarray(measures, dtype=float) * thicknesses
 
     radii = coordinates[:, 0]
     if len(radii) and radii.min() < 0.0:
@@ -125,6 +140,29 @@ def areasOfContactPoints(measures: np.ndarray, coordinates: np.ndarray, axisymme
             "body of revolution is meshed in r >= 0."
         )
     return 2.0 * np.pi * radii * measures
+
+
+def thicknessesOfFacets(facets: list, model: FEModel) -> np.ndarray:
+    """The thickness of the model at contact facets, for :func:`areasOfContactPoints`: in a plane model that of the
+    section of the element each facet bounds (:meth:`~edelweissfe.models.femodel.FEModel.thicknessOf`), 1 in a 3D or an
+    axisymmetric model, which measure no thickness.
+
+    Parameters
+    ----------
+    facets
+        The contact facet elements, stamped with the elements whose faces they tile.
+    model
+        The model.
+
+    Returns
+    -------
+    numpy.ndarray
+        The thickness of each facet.
+    """
+
+    if model.domainSize != 2 or model.axisymmetric:
+        return np.ones(len(facets))
+    return np.array([model.thicknessOf(facet.parentElement) for facet in facets], dtype=float)
 
 
 class ContactPoints(ABC):
@@ -145,17 +183,18 @@ class ContactPoints(ABC):
     nPoints : int
         The number of contact points.
     areas : numpy.ndarray
-        The area each contact point stands for, in the reference configuration, from :func:`areasOfContactPoints`; the
-        penalty modulus per unit area times this area is the stiffness of the point's spring.
+        The area each contact point stands for, in the reference configuration, from :func:`areasOfContactPoints`, as
+        the model integrates (:meth:`measureTheAreasAsIn`); the penalty modulus per unit area times this area is the
+        stiffness of the point's spring.
     """
 
     nPoints: int
     areas: np.ndarray
 
     #: True if the points lie in the section r-z of an axisymmetric model, where each stands for a ring about the axis
-    #: and its area is the area of the ring (:func:`areasOfContactPoints`). It must agree with the model's
-    #: :attr:`~edelweissfe.models.femodel.FEModel.axisymmetric`, which a constraint checks
-    #: (:meth:`checkTheAreasAreMeasuredAsIn`).
+    #: and its area is the area of the ring (:func:`areasOfContactPoints`). It agrees with the model's
+    #: :attr:`~edelweissfe.models.femodel.FEModel.axisymmetric` once the areas are measured as the model integrates
+    #: (:meth:`measureTheAreasAsIn`).
     axisymmetric: bool = False
 
     #: Whether the points can be located only once the model has connected the entities they belong to, at an update
@@ -353,9 +392,14 @@ class ContactPoints(ABC):
 
         return np.divide(-normalForces, self.areas, out=np.zeros_like(normalForces), where=self.areas > 0)
 
-    def checkTheAreasAreMeasuredAsIn(self, model: FEModel, constraintName: str):
-        """Check that the points measure their areas as the model integrates: over the rings about the axis in an
-        axisymmetric model, as they are in the model's own space otherwise (:attr:`axisymmetric`).
+    def measureTheAreasAsIn(self, model: FEModel, constraintName: str):
+        """Measure the areas the points stand for as the model integrates (:attr:`areas`, :func:`areasOfContactPoints`):
+        times the thickness of the sections in a plane model, over the rings about the axis in an axisymmetric model.
+        A constraint calls it on the points it takes, before it uses their areas.
+
+        Points that measure their areas when they are made -- the points of the faces of particles -- keep them, and
+        only check that they were made for a model of this kind (:attr:`axisymmetric`); the points of finite element
+        faces measure them here, from the sections of the model.
 
         Parameters
         ----------
@@ -367,7 +411,7 @@ class ContactPoints(ABC):
         Raises
         ------
         ValueError
-            If they do not.
+            If points that keep their areas were made for a model of another kind.
         """
 
         if self.axisymmetric != model.axisymmetric:

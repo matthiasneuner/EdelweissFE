@@ -45,9 +45,6 @@ from test_surfacetodeformablesurfacepenalty import (  # noqa: E402  (tests/ is o
 
 from edelweissfe.config.configurator import loadConfiguration
 from edelweissfe.constraints.base.contactpoints import areasOfContactPoints
-from edelweissfe.constraints.base.contactpointsonslavesurface import (
-    ContactPointsOnSlaveSurface,
-)
 from edelweissfe.constraints.base.surfacecontactpenaltyschema import (
     contactPointsOfTheSlaveSurface,
 )
@@ -70,6 +67,8 @@ from edelweissfe.helpers.inputfilehelpers import fillFEModelFromInputFile
 from edelweissfe.journal.journal import Journal
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.points.node import Node
+from edelweissfe.sections.plane import PlaneSectionSchema
+from edelweissfe.sections.plane import Section as PlaneSection
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.solvers.nonlinearexplicitdynamic import NED
 from edelweissfe.steps.adaptivestepforexplicitsimulations import (
@@ -132,14 +131,17 @@ def _quad8Ring(model: FEModel, origin: tuple, size: tuple, divisions: tuple) -> 
     return grid
 
 
-def _twoRings(interface: str, axisymmetric: bool = True) -> tuple:
+def _twoRings(interface: str, axisymmetric: bool = True, thickness: float = 7.0) -> tuple:
     """Two rings that overlap by :data:`DELTA` across an ``"annulus"`` (z = 0, RI <= r <= RO; the lower ring is the
-    slave) or a ``"cylinder"`` (r = R, 0 <= z <= H; the inner ring is the slave), with different meshes on either side.
+    slave) or a ``"cylinder"`` (r = R, 0 <= z <= H; the inner ring is the slave), with different meshes on either side,
+    in a plane section of the given thickness, which an axisymmetric model does not use. In a plane model they are two
+    blocks of that thickness.
 
     Returns
     -------
     tuple
-        The model, the slave facets, the master facets, and the area of the ring of the slave surface.
+        The model, the slave facets, the master facets, and the area of the ring of the slave surface (in a plane
+        model, the length of the slave line times the thickness).
     """
 
     journal = Journal(verbose=False)
@@ -150,13 +152,20 @@ def _twoRings(interface: str, axisymmetric: bool = True) -> tuple:
             master = _quad8Ring(model, (RI, 0.0), (RO - RI, H), (3, 2))
             model.surfaces["slaveFace"] = {_TOP: ElementSet("s", list(slave[:, -1]))}
             model.surfaces["masterFace"] = {_BOTTOM: ElementSet("m", list(master[:, 0]))}
-            ringArea = np.pi * (RO**2 - RI**2) if axisymmetric else RO - RI
+            ringArea = np.pi * (RO**2 - RI**2) if axisymmetric else (RO - RI) * thickness
         else:
             slave = _quad8Ring(model, (RI, 0.0), (R + DELTA - RI, H), (2, 2))
             master = _quad8Ring(model, (R, 0.0), (RO - R, H), (2, 3))
             model.surfaces["slaveFace"] = {_RIGHT: ElementSet("s", list(slave[-1, :]))}
             model.surfaces["masterFace"] = {_LEFT: ElementSet("m", list(master[0, :]))}
-            ringArea = 2 * np.pi * (R + DELTA) * H if axisymmetric else H
+            ringArea = 2 * np.pi * (R + DELTA) * H if axisymmetric else H * thickness
+        model.sections["rings"] = PlaneSection(
+            "rings",
+            model,
+            {},
+            [ElementSet("rings", list(slave.ravel()) + list(master.ravel()))],
+            configuration=PlaneSectionSchema(thickness=thickness),
+        )
         slaveSetName, _ = buildContactFacets(model, "slaveFace", "slv", "corner", "facetConsistent", journal)
         masterSetName, _ = buildContactFacets(model, "masterFace", "mst", "corner", "facetConsistent", journal)
     return model, slaveSetName, masterSetName, ringArea
@@ -200,12 +209,17 @@ def test_the_area_of_a_point_of_an_axisymmetric_model_is_the_area_of_its_ring():
     measures = np.array([0.5, 0.25, 0.0])
     coordinates = np.array([[2.0, 7.0], [0.5, -1.0], [0.0, 3.0]])
 
-    np.testing.assert_array_equal(areasOfContactPoints(measures, coordinates, axisymmetric=False), measures)
+    thicknesses = np.array([2.0, 3.0, 4.0])
+
+    np.testing.assert_array_equal(
+        areasOfContactPoints(measures, coordinates, thicknesses, axisymmetric=False), measures * thicknesses
+    )
     np.testing.assert_allclose(
-        areasOfContactPoints(measures, coordinates, axisymmetric=True), 2 * np.pi * np.array([1.0, 0.125, 0.0])
+        areasOfContactPoints(measures, coordinates, thicknesses, axisymmetric=True),
+        2 * np.pi * np.array([1.0, 0.125, 0.0]),
     )
     with pytest.raises(ValueError, match="negative|< 0"):
-        areasOfContactPoints(measures, -coordinates, axisymmetric=True)
+        areasOfContactPoints(measures, -coordinates, thicknesses, axisymmetric=True)
 
 
 @pytest.mark.parametrize("interface", ["annulus", "cylinder"])
@@ -216,7 +230,8 @@ def test_the_areas_of_the_points_add_up_to_the_area_of_the_ring_of_the_slave_sur
 ):
     """Every rule integrates the radius, which is linear along a straight facet, exactly: the areas of the points add up
     to the area of the ring of the slave surface, :math:`\\pi (r_o^2 - r_i^2)` of an annulus, :math:`2 \\pi R H` of a
-    cylinder -- and in a plane model to the length of the slave line, as before."""
+    cylinder, whatever the thickness of the section -- and in a plane model to the length of the slave line times the
+    thickness."""
 
     model, slaveSetName, masterSetName, ringArea = _twoRings(interface, axisymmetric)
     constraint = _constraint(model, slaveSetName, masterSetName, **contactPoints)
@@ -276,24 +291,6 @@ def test_a_tie_holds_the_ring_with_the_force_of_a_uniform_traction_on_it(interfa
     np.testing.assert_allclose(constraint.getTractions(), np.tile(-PENALTY * d, (constraint.nPoints, 1)), rtol=1e-10)
     np.testing.assert_allclose(constraint.contactForceOnSlave, -PENALTY * d * ringArea, rtol=1e-10)
     assertTheBoundIsTheOneOfTheTangent(constraint, U)
-
-
-def test_contact_points_that_do_not_measure_their_areas_as_the_model_integrates_are_refused():
-    model, slaveSetName, masterSetName, _ = _twoRings("annulus")
-    configuration = SurfaceToDeformableSurfacePenaltySchema(
-        slaveSurface=slaveSetName, masterSurface=masterSetName, penalty=PENALTY
-    )
-    lengthsOnly = ContactPointsOnSlaveSurface(model.elementSets[slaveSetName], 3, "theContact", axisymmetric=False)
-
-    with pytest.raises(ValueError, match="axisymmetric"):
-        SurfaceToDeformableSurfacePenalty(
-            "theContact",
-            model,
-            lengthsOnly,
-            model.elementSets[masterSetName],
-            Journal(verbose=False),
-            configuration=configuration,
-        )
 
 
 def test_the_node_based_contact_refuses_an_axisymmetric_model():
