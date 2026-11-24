@@ -846,7 +846,10 @@ what a kind of point contributes is its
 :class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`. A finite element carries its total
 displacement from the reference configuration, a particle the increment since the last update of the
 connectivity (it is updated-Lagrangian), so each kind of point measures its position from where it is
-known. A particle moves a point attached to it with :math:`G`, the interpolation vector of an attached
+known: its *origin* :math:`\boldsymbol{x}^0_p`, where it is when the solution of the block is zero
+(:math:`N^s(\xi_q) \cdot \boldsymbol{X}^s`, :math:`\boldsymbol{X}`, :math:`\boldsymbol{x}_q^n` in the table), and
+its displacement from there, :math:`\boldsymbol{c} \cdot \boldsymbol{u}`. The constraint measures every relative
+position from the origins (:ref:`contact-origins`). A particle moves a point attached to it with :math:`G`, the interpolation vector of an attached
 point, which is affine in the point; distributing the force with the same :math:`G` makes the penalty
 spring conservative. The slave nodes against the parent faces of the master differ from
 :mod:`~edelweissfe.constraints.nodetodeformablesurfacepenalty` with ``sliding=small`` in the master side
@@ -874,6 +877,43 @@ the connectivity: every ``contact-update-frequency`` increments of ``NED`` (by d
 model with particles or in an implicit analysis. Sized from the velocity times one time increment, it is too small
 by that frequency. The constraint warns when a point enters deeper than half of it. At the first update, the bodies are as
 the model gives them: a point that overlaps then is in contact (:ref:`contact-initial-overlap`).
+
+.. _contact-origins:
+
+Measured from the origins, not from the coordinates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The gap of a closed contact and the stretch of a tie are tiny differences of two large positions: across the
+interface, the point and its master point are as far apart as the spring is stretched, :math:`t/k` for a
+traction :math:`t`, while their coordinates are as large as the model. Taking the difference of the
+coordinates loses the stretch to their round-off, :math:`\varepsilon |\boldsymbol{x}|` for the machine
+epsilon :math:`\varepsilon`, and the penalty turns it into a force of :math:`k A_p \varepsilon
+|\boldsymbol{x}|` per point. Worse than its size is its shape: the force jumps from one bit of the coordinates
+to the next, a staircase in the displacements. A Newton iteration on such a residual stalls: its corrections
+shrink to round-off, but its residual keeps scattering over the height of a step, and whether it falls below
+the tolerance in time is a draw that every change of the rounding -- another order of summation, another number
+of threads -- makes anew. A stiff tie under a small load sits exactly there.
+
+So the displacement from rest of a point (:ref:`contact-tie`; for a contact, whose points rest on their master
+points, :math:`\boldsymbol{r}_0 = \boldsymbol{0}` and the gap is its normal part) is split where the large
+numbers are:
+
+.. math::
+    \boldsymbol{d} = \boldsymbol{x}_p - N^m \cdot \boldsymbol{x}^m - \boldsymbol{r}_0
+    = \underbrace{\left( \boldsymbol{x}^0_p - N^m \cdot \boldsymbol{X}^m \right) - \boldsymbol{r}_0}_{\text{the
+    same in every evaluation}}
+    + \left( \boldsymbol{c} \cdot \boldsymbol{u} - N^m \cdot \boldsymbol{U}^m \right) .
+
+The relative position of the origins of the points and the reference configuration of the master is taken once,
+when the points are located, and the first part is the same to the last bit in every evaluation until they are
+located anew: its round-off is a constant, a shift of the state at rest by a fraction of a bit of the
+coordinates, which stalls nothing. The second part is a difference of displacements, rounded relative to the
+displacements. The force is a smooth function of the solution, and a Newton iteration converges to the round-off
+of the forces themselves. What a pairing records from where a point is -- the resting offset
+:math:`\boldsymbol{r}_0` of a tie, an initial overlap (:ref:`contact-initial-overlap`) -- is measured the same way,
+at the solution the model holds, so that a point paired at rest is at rest exactly: the first part is then zero.
+Nothing of it is checkpointed beyond what was before: the relative position of the origins follows from the
+origins whenever the points are located, also after a resume.
 
 .. _contact-corners:
 
@@ -1178,6 +1218,8 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
    **not** part of this: an assigned point that happens to be open still owns its block, which is
    then left at zero, so the sparsity pattern is stable across the Newton loop and only a genuine
    reassignment forces a rebuild.
+#. With the location, each assigned point's relative position at the zero solution of the block is taken
+   from its origin and the reference configuration of its master parent face (:ref:`contact-origins`).
 #. A point that loses its master facet has its stored gap reset to zero rather than left stale --
    it backs the public ``getGaps()``, whose callers cannot mask unassigned entries because they do
    not know the assignment.
@@ -1185,9 +1227,11 @@ is shared with the rigid-body variant (:ref:`integrated-contact-rigid-body`).
 **Every evaluation**, in ``computeKernels`` (implicit) or ``computeKernelsExplicit``:
 
 #. Where each assigned point is relative to its master point, :math:`\boldsymbol{x}_p - N^m \cdot
-   \boldsymbol{x}^m`, from the frozen data (``_relativePositionsOfLocatedPoints``), less its resting offset:
-   its displacement from rest. Its component along :math:`\bar{\boldsymbol{n}}` is the gap of the expression
-   above (less the part of an initial overlap not fed in yet).
+   \boldsymbol{x}^m`, less its resting offset: its displacement from rest, from the frozen data -- the
+   displacement from rest at the zero solution of the block, plus the difference of the displacements of the
+   point and of its master point (``_displacementsFromRestOfLocatedPoints``, :ref:`contact-origins`). Its
+   component along :math:`\bar{\boldsymbol{n}}` is the gap of the expression above (less the part of an initial
+   overlap not fed in yet).
 #. The law turns this into penalty **springs** (``_springsOfLocatedPoints``, :ref:`contact-law`): for a
    contact, one along :math:`\bar{\boldsymbol{n}}` at every closed point (:math:`g < 0`), its normal force
    the penalty law applied to :math:`g`, scaled by that point's integration weight -- so ``penalty`` is a

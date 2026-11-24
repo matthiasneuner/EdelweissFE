@@ -1136,6 +1136,38 @@ class TestTie(unittest.TestCase):
                 np.testing.assert_allclose(forces, 0.0, atol=1e-12 * self.PENALTY, err_msg=f"{penetration}")
                 self.assertAlmostEqual(tie.penaltyEnergy, 0.0, delta=1e-20)
 
+    def test_a_tie_far_from_the_origin_follows_a_displacement_below_the_round_off_of_its_coordinates(self):
+        """The displacement from rest is measured from the origins of the points, not as a difference of their
+        coordinates (see the class documentation of the constraint, *Measured from the origins*). A tie a thousand
+        lengths from the origin of the coordinates, whose coordinates are rounded to about 1e-13, is exactly at rest
+        where it was paired, and its force follows a displacement of a fraction of that round-off linearly: it is a
+        smooth function of the displacements, not a staircase of the bits of the coordinates, on which a Newton
+        iteration would stall."""
+
+        origin = np.array([1e3, -1e3, 1e3])
+        roundOffOfTheCoordinates = np.spacing(np.abs(origin).max())
+        area = _SIDE**2
+        for contactPoints in ("quadraturePoints", "nodes"):
+            for penetration in (-0.05, 0.0):
+                model, slaveSurface, masterSurface = twoBlockModel(self.journal, penetration, origin=origin)
+                tie = self._constraint(
+                    model,
+                    slaveSurface,
+                    masterSurface,
+                    contactType="tied",
+                    penalty=self.PENALTY,
+                    contactPoints=contactPoints,
+                )
+                case = f"{contactPoints}, {penetration}"
+                np.testing.assert_array_equal(self._forces(tie, np.zeros(tie.nDof)), 0.0, err_msg=case)
+
+                for fraction in (1e-3, 1e-2, 1e-1):
+                    d = fraction * roundOffOfTheCoordinates * np.array([1.0, -2.0, 0.5])
+                    self._forces(tie, self._slaveDisplacedBy(tie, d))
+                    np.testing.assert_allclose(
+                        tie.contactForceOnSlave, -self.PENALTY * area * d, rtol=1e-12, err_msg=case
+                    )
+
     def test_a_tie_transmits_tension_compression_and_shear(self):
         """Displaced from rest by ``d``, every point is pulled back with the traction ``-k d``, in every direction:
         apart, together, and along the faces; the forces on the two sides cancel."""

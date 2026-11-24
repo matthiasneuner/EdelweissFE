@@ -46,6 +46,15 @@ work over a closed cycle. Finite elements carry their total displacement from th
 the increment from the configuration of the last update (they are updated-Lagrangian), so the position is measured
 from where each kind of point is known.
 
+A point's position is therefore told in two parts: its *origin* :math:`\\boldsymbol{x}^0`, where it is when the
+solution of the constraint's block is zero (the reference configuration of a finite element, the configuration of the
+last update of a particle), and its *displacement* :math:`c \\cdot \\boldsymbol{u}` from there, with the solution
+:math:`\\boldsymbol{u}` of the block (the total displacement of a finite element, the increment of a particle). A
+constraint that measures a small distance between two points -- the stretch of a stiff penalty spring -- takes the
+difference of the origins once and the difference of the displacements in every evaluation, rather than the difference
+of the coordinates: see :class:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint`, *Measured
+from the origins*.
+
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
 the master, the gap, the law -- is written once for all of them, for a deformable master surface
 (:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`) and for a discrete rigid body
@@ -67,8 +76,9 @@ class ContactPoints(ABC):
     In every update of the connectivity, the constraint asks for the current coordinates of all points
     (:meth:`currentPointCoordinates`), pairs those within reach with the master surface, and then *locates* the paired
     ones (:meth:`locatePoints`): they name the nodes they act on, which become the slave part of the constraint's
-    block. Within the increment the constraint evaluates the located points only: where they are
-    (:meth:`coordinatesOfLocatedPoints`), the residual contribution of the forces on them
+    block. Within the increment the constraint evaluates the located points only: where they are, from their origins
+    (:meth:`originsOfLocatedPoints`) and their displacements (:meth:`displacementsOfLocatedPoints`), the residual
+    contribution of the forces on them
     (:meth:`addForceResidual`) and, for the tangent, their interpolation vectors
     (:meth:`interpolationOfLocatedPoint`), all at once for the bound of the stiffness
     (:meth:`interpolationMatrixOfLocatedPoints`).
@@ -124,8 +134,39 @@ class ContactPoints(ABC):
         """
 
     @abstractmethod
+    def originsOfLocatedPoints(self) -> np.ndarray:
+        """The origins of the located points: where they are when the solution of the slave part of the constraint's
+        block is zero -- in the reference configuration for the points of finite elements, which carry their total
+        displacement, in the configuration of the last update for the points of particles, which carry the increment.
+        Constant from one location to the next.
+
+        Returns
+        -------
+        numpy.ndarray
+            The coordinates, of shape (nLocated, nDim).
+        """
+
+    @abstractmethod
+    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """The displacements of the located points from their origins (:meth:`originsOfLocatedPoints`):
+        :math:`C \\boldsymbol{u}`, the interpolation vectors of the points times the solution of the slave part of the
+        block -- the total displacement or the increment, whichever the kind of point carries.
+
+        Parameters
+        ----------
+        U
+            The solution of the slave part of the constraint's block.
+        dU
+            The increment of the slave part of the constraint's block.
+
+        Returns
+        -------
+        numpy.ndarray
+            The displacements, of shape (nLocated, nDim).
+        """
+
     def coordinatesOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """The current coordinates of the located points.
+        """The current coordinates of the located points: their origins plus their displacements.
 
         Parameters
         ----------
@@ -139,6 +180,8 @@ class ContactPoints(ABC):
         numpy.ndarray
             The coordinates, of shape (nLocated, nDim).
         """
+
+        return self.originsOfLocatedPoints() + self.displacementsOfLocatedPoints(U, dU)
 
     @abstractmethod
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):

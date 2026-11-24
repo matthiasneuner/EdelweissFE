@@ -102,7 +102,8 @@ class ContactPointsOnSlaveSurface(ContactPoints):
     The contact points are numbered by slave facet and, within a facet, by quadrature point. The faces of the slave
     surface must be of one type (one number of parent face nodes), so that the located points are evaluated as one
     array. A located point takes the nodes of its parent face into the block of the constraint, its own copy of them:
-    its interpolation vector is :math:`N^s(\\xi_q)` over them, and it moves with their total displacement.
+    its interpolation vector is :math:`N^s(\\xi_q)` over them, and it moves with their total displacement, from its
+    origin in the reference configuration, :math:`N^s(\\xi_q) \\cdot X^s`.
 
     Parameters
     ----------
@@ -309,8 +310,9 @@ class ContactPointsOnSlaveSurface(ContactPoints):
 
     def locatePoints(self, points: np.ndarray) -> list:
         """Locate the given points: each takes the nodes of its parent face into the block, a copy of its own, and its
-        shape functions and the reference coordinates of these nodes are gathered into arrays, once per update of the
-        connectivity, so that an evaluation is a fixed handful of array operations rather than a loop over the points.
+        shape functions and its origin, :math:`N^s(\\xi_q) \\cdot X^s` in the reference configuration, are gathered
+        into arrays, once per update of the connectivity, so that an evaluation is a fixed handful of array operations
+        rather than a loop over the points.
 
         Parameters
         ----------
@@ -327,20 +329,14 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         self._shapeFunctionsOfLocated = np.array(
             [self.shapeFunctions[f][q] for f, q in zip(facets, self.pointQuadraturePoint[points])]
         ).reshape((len(points), self.nParentNodes))
-        self._referenceCoordinatesOfLocated = np.array([self.parentReferenceCoordinates[f] for f in facets]).reshape(
+        referenceCoordinatesOfLocated = np.array([self.parentReferenceCoordinates[f] for f in facets]).reshape(
             (len(points), self.nParentNodes, self.nDim)
         )
+        self._originsOfLocated = np.einsum("ai,aij->aj", self._shapeFunctionsOfLocated, referenceCoordinatesOfLocated)
         return [node for f in facets for node in self.parentNodes[f]]
 
-    def coordinatesOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """:math:`x_q = N^s(\\xi_q) \\cdot (X^s + U^s)`, on the *curved* parent face, from the total displacement.
-
-        Parameters
-        ----------
-        U
-            The solution of the slave part of the block.
-        dU
-            The increment; unused, the total displacement places the points.
+    def originsOfLocatedPoints(self) -> np.ndarray:
+        """:math:`N^s(\\xi_q) \\cdot X^s`, the points in the reference configuration, on the *curved* parent face.
 
         Returns
         -------
@@ -348,8 +344,29 @@ class ContactPointsOnSlaveSurface(ContactPoints):
             The coordinates, of shape (nLocated, nDim).
         """
 
-        coordinates = self._referenceCoordinatesOfLocated + U.reshape(self._referenceCoordinatesOfLocated.shape)
-        return np.einsum("ai,aij->aj", self._shapeFunctionsOfLocated, coordinates)
+        return self._originsOfLocated
+
+    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """:math:`N^s(\\xi_q) \\cdot U^s`, from the total displacement of the parent face nodes.
+
+        Parameters
+        ----------
+        U
+            The solution of the slave part of the block.
+        dU
+            The increment; unused, the total displacement moves the points.
+
+        Returns
+        -------
+        numpy.ndarray
+            The displacements, of shape (nLocated, nDim).
+        """
+
+        return np.einsum(
+            "ai,aij->aj",
+            self._shapeFunctionsOfLocated,
+            U.reshape((len(self._shapeFunctionsOfLocated), self.nParentNodes, self.nDim)),
+        )
 
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
         """Add :math:`f\\, N^s \\otimes n` to the parent face nodes of each given point; see

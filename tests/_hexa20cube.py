@@ -79,10 +79,12 @@ def _hexa20Coordinates(yOffset: float) -> list:
     return corners + [0.5 * (corners[a] + corners[b]) for a, b in _HEXA20_EDGES]
 
 
-def twoBlockModel(journal, penetration: float, nodalWeights: str = "facetConsistent") -> tuple:
+def twoBlockModel(
+    journal, penetration: float, nodalWeights: str = "facetConsistent", origin: np.ndarray | None = None
+) -> tuple:
     """Two hexa20 cubes meeting at y = 0, the lower one overlapping the upper by
     ``penetration``, with the lower block's Ymax face as slave and the upper block's Ymin face
-    as master.
+    as master; both moved by ``origin``, if given.
 
     Parameters
     ----------
@@ -92,6 +94,8 @@ def twoBlockModel(journal, penetration: float, nodalWeights: str = "facetConsist
         How far the lower block overlaps the upper one.
     nodalWeights
         The nodal weights of the contact facets.
+    origin
+        Where the corner of the two cubes at the origin is moved, e.g. far from the origin of the coordinates.
 
     Returns
     -------
@@ -106,7 +110,7 @@ def twoBlockModel(journal, penetration: float, nodalWeights: str = "facetConsist
         for key, yOffset in (("upper", 0.0), ("lower", -_SIDE + penetration)):
             nodes = []
             for x in _hexa20Coordinates(yOffset):
-                node = Node(label, x)
+                node = Node(label, x if origin is None else x + origin)
                 model.nodes[label] = node
                 nodes.append(node)
                 label += 1

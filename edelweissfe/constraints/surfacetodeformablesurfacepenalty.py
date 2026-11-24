@@ -64,7 +64,7 @@ from edelweissfe.utils.facetcontactgeometry import (
     closestFacets,
     facetNormalAndMeasure,
 )
-from edelweissfe.utils.meshtools import currentNodeCoordinates
+from edelweissfe.utils.meshtools import currentNodeCoordinates, currentNodeDisplacements
 from edelweissfe.utils.parentfacegeometry import parentFaceShapeFunctions
 from edelweissfe.utils.schema import buildSchemaFromOptions, schemaField
 
@@ -261,6 +261,40 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     operator. The flat facets serve only as the search and parametrization scaffold; the contact
     geometry itself is the curved parent surface. For straight-edged faces the two points coincide
     identically, so nothing is lost in the common case.
+
+    Measured from the origins
+    -------------------------
+    The vector :math:`\\boldsymbol{x}_p - N^m \\cdot x^m` is a difference of two nearly equal positions: across a
+    closed contact or a tie, the two points are as far apart as a spring is stretched, :math:`t / k` for a traction
+    :math:`t`, while their coordinates are as large as the model. Subtracting the coordinates would lose the stretch
+    to their round-off, :math:`\\varepsilon |\\boldsymbol{x}|` for the machine epsilon :math:`\\varepsilon`, and the
+    penalty turns that into a force of :math:`k A_p \\varepsilon |\\boldsymbol{x}|` per point: the force would
+    jump from one bit of the coordinates to the next, a staircase in the displacements, and a Newton iteration would
+    stall on that staircase instead of converging -- however small its corrections, its residual would scatter over
+    the height of a step, with any change of the rounding (another order of summation) drawing it anew.
+
+    The constraint therefore measures every point from its *origin*
+    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.originsOfLocatedPoints`), where it is when the
+    solution of the block is zero -- the reference configuration of a finite element, the configuration of the last
+    update of a particle --, and the master from its reference configuration. The displacement from rest is then
+
+    .. math::
+        \\boldsymbol{d} = \\boldsymbol{x}_p - N^m \\cdot x^m - \\boldsymbol{r}_0
+        = \\underbrace{\\left( \\boldsymbol{x}^0_p - N^m \\cdot X^m \\right) - \\boldsymbol{r}_0}_{\\text{the same in
+        every evaluation}}
+        + \\left( c \\cdot \\boldsymbol{u} - N^m \\cdot U^m \\right) ,
+
+    with :math:`c \\cdot \\boldsymbol{u}` the displacement of the point from its origin
+    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.displacementsOfLocatedPoints`: the total
+    displacement of a finite element, the increment of a particle), :math:`U^m` the total displacement of the master
+    nodes, and :math:`\\boldsymbol{r}_0` the resting offset (zero unless the law pairs once, see *The tie*). The
+    relative position of the origins is taken once, when the points are located, and the first part is the same, to the
+    last bit, in every evaluation until they are located anew: its round-off is a constant, which shifts the state at
+    rest by a fraction of a bit of the coordinates and stalls nothing. The second part is a difference of
+    displacements, rounded relative to the displacements, not to the coordinates. The force is then a smooth function
+    of the solution, and a Newton iteration converges to the round-off of the forces themselves. What a pairing records
+    from where a point is -- the resting offset of a tie, an initial overlap -- is measured the same way, at the
+    solution the model holds, so that a point paired at rest is at rest exactly: its first part is then zero.
 
     The gap at the corners of the master
     ------------------------------------
@@ -739,12 +773,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         newAssignment = np.where(paired, closestFacet, -1)
         pairedFacet = newAssignment[paired]
         self._freezeProjections(paired, pairedFacet, weights[paired], direction[paired])
+        hasChanged = self._assignMasterFacets(newAssignment)
 
         offsetsTheInitialOverlap = self.adjustsTheInitialOverlap or self.initialOverlapRampTime > 0.0
         if firstSearch and self._initialOverlapTime is None and offsetsTheInitialOverlap:
-            self._recordTheInitialOverlap(model, coordinatesOfPoint[paired], pairedFacet, paired)
+            self._recordTheInitialOverlap(model)
 
-        return self._assignMasterFacets(newAssignment)
+        return hasChanged
 
     def _closestFacetsOnThisSideOfTheConvexCreases(
         self,
@@ -818,26 +853,28 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         )
         return facets, weights
 
-    def _recordTheInitialOverlap(
-        self, model: FEModel, coordinatesOfPoints: np.ndarray, facets: np.ndarray, paired: np.ndarray
-    ):
+    def _recordTheInitialOverlap(self, model: FEModel):
         """Record the overlap of the paired points at the first contact search as the offsets of their gaps (see the
-        class documentation, *The first update*), and report the deepest.
+        class documentation, *The first update*), and report the deepest. The paired points are located; their gaps
+        are measured as an evaluation measures them (:meth:`_displacementsFromRestOfLocatedPoints`), at the solution
+        the model holds (:meth:`_solutionOfTheBlockInTheModel`), so that an adjusted overlap leaves a point at rest
+        exactly.
 
         Parameters
         ----------
         model
-            The model, whose node field ``displacement`` places the master surface.
-        coordinatesOfPoints
-            The current coordinates of the paired points.
-        facets
-            The master facet of each paired point.
-        paired
-            Which points are paired, a mask over all points.
+            The model, whose node field ``displacement`` places both sides.
         """
 
         self._initialOverlapTime = model.time
-        self._initialOverlap[paired] = np.minimum(self._parentFaceGaps(model, coordinatesOfPoints, facets, paired), 0.0)
+        located = self._locatedPoints
+        gaps = np.einsum(
+            "aj,aj->a",
+            self._normalsOfLocated,
+            self._displacementsFromRestOfLocatedPoints(*self._solutionOfTheBlockInTheModel(model)),
+        )
+        self._initialOverlap[located] = np.minimum(gaps, 0.0)
+        self._initialOverlapOfLocated = self._initialOverlap[located]
 
         overlapping = np.count_nonzero(self._initialOverlap)
         if overlapping:
@@ -936,8 +973,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._freezeProjections(tied, closestFacet[tied], weights[tied], direction)
         self._stateOfPoint = np.where(tied, ContactState.TIED, ContactState.FREE).astype(np.int8)
         self._searchedBefore = True
+        hasChanged = self._assignMasterFacets(np.where(tied, closestFacet, -1))
 
-        offset = self._relativePositionsToParentFaces(model, coordinatesOfPoint[tied], closestFacet[tied], tied)
+        # Where each point is now relative to its master point, from the origins as an evaluation measures it: a point
+        # paired at rest is then at rest exactly.
+        offset = self._relativePositionsAtZeroSolutionOfLocated + self._relativeDisplacementsOfLocatedPoints(
+            *self._solutionOfTheBlockInTheModel(model)
+        )
         if self._displacementsFromRestHandedOn is not None:
             # Each new point is displaced from rest as the point of before closest to it was: the master side was
             # retiled under the same points, or the slave side made new points next to the old ones.
@@ -946,6 +988,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             offset -= displacements[closestBefore]
             self._displacementsFromRestHandedOn = None
         self._restingOffset[tied] = offset
+        self._restingOffsetOfLocated = self._restingOffset[self._locatedPoints]
 
         nTied = int(np.count_nonzero(tied))
         largestGap = float(np.linalg.norm(offset, axis=1).max()) if nTied else 0.0
@@ -962,7 +1005,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                 level=1,
             )
 
-        return self._assignMasterFacets(np.where(tied, closestFacet, -1))
+        return hasChanged
 
     def _reportEntriesAndPointsFoundInside(self, previousState: np.ndarray, state: np.ndarray, gap: np.ndarray):
         """Report in the journal the points newly found inside the master body, and a point that enters contact
@@ -1005,67 +1048,6 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                     self.identification,
                     level=1,
                 )
-
-    def _parentFaceGaps(
-        self, model: FEModel, coordinatesOfPoints: np.ndarray, facets: np.ndarray, points: np.ndarray
-    ) -> np.ndarray:
-        """The gaps of paired points as an evaluation measures them, to the point of the master's parent face, in the
-        configuration of the model: their relative positions (:meth:`_relativePositionsToParentFaces`) along their
-        frozen directions.
-
-        Parameters
-        ----------
-        model
-            The model, whose node field ``displacement`` places the master surface.
-        coordinatesOfPoints
-            The current coordinates of the points.
-        facets
-            The master facet of each point.
-        points
-            The indices of the points, whose frozen projection is used.
-
-        Returns
-        -------
-        numpy.ndarray
-            The gaps.
-        """
-
-        return np.einsum(
-            "pd,pd->p",
-            self._frozenNormals[points],
-            self._relativePositionsToParentFaces(model, coordinatesOfPoints, facets, points),
-        )
-
-    def _relativePositionsToParentFaces(
-        self, model: FEModel, coordinatesOfPoints: np.ndarray, facets: np.ndarray, points: np.ndarray
-    ) -> np.ndarray:
-        """Where paired points are relative to their points of the master's parent face, in the configuration of the
-        model.
-
-        Parameters
-        ----------
-        model
-            The model, whose node field ``displacement`` places the master surface.
-        coordinatesOfPoints
-            The current coordinates of the points.
-        facets
-            The master facet of each point.
-        points
-            The indices of the points, whose frozen projection is used.
-
-        Returns
-        -------
-        numpy.ndarray
-            The vectors from the master points to the points, (nPoints, nDim).
-        """
-
-        parentNodes = [node for f in facets for node in self.facetElements[f].parentFaceNodes]
-        reference = self._masterParentRefCoords[facets]
-        parentCoordinates = currentNodeCoordinates(parentNodes, model, reference.reshape((-1, self.nDim))).reshape(
-            reference.shape
-        )
-        masterPoints = np.einsum("pa,pad->pd", self._frozenMasterShapeFunctions[points], parentCoordinates)
-        return coordinatesOfPoints - masterPoints
 
     def _uncountedFractionOfInitialOverlapAt(self, timeStep: TimeStep | None) -> float:
         """The fraction of the initial overlap the gap does not count at the time of ``timeStep``. Adjusted: one, for
@@ -1123,9 +1105,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
     def _locatePairedPoints(self):
         """Locate the paired points in the block: the nodes their contact points act on (the slave part), then, point
-        after point, the parent face nodes of their master facets (the master part). Their frozen projections are
-        gathered into arrays, once per update of the connectivity, so that an evaluation is a fixed handful of array
-        operations rather than a loop over the points.
+        after point, the parent face nodes of their master facets (the master part). Their frozen projections, and
+        where they are relative to their master points at the zero solution of the block (see the class documentation,
+        *Measured from the origins*), are gathered into arrays, once per update of the connectivity, so that an
+        evaluation is a fixed handful of array operations rather than a loop over the points.
         """
 
         located = np.flatnonzero(self._assignedFacetIdx >= 0)
@@ -1142,8 +1125,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._normalsOfLocated = self._frozenNormals[located]
         self._initialOverlapOfLocated = self._initialOverlap[located]
         self._restingOffsetOfLocated = self._restingOffset[located]
-        self._masterRefOfLocated = self._masterParentRefCoords[facets].reshape(
+        # Where the points are relative to their master points when the solution of the block is zero: from the
+        # origins of the points and the reference configuration of the master, once per location.
+        masterReferenceCoordinatesOfLocated = self._masterParentRefCoords[facets].reshape(
             (len(located), self.nMasterParentNodes, self.nDim)
+        )
+        self._relativePositionsAtZeroSolutionOfLocated = self.slave.originsOfLocatedPoints() - np.einsum(
+            "ai,aij->aj", self._masterShapeFunctionsOfLocated, masterReferenceCoordinatesOfLocated
         )
         self._areasOfLocated = self.slave.areas[located]
         self._blockSizes = None
@@ -1267,8 +1255,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         """Add the residual contribution of the penalty springs at the located points, and the tangent unless ``K``
         is None.
 
-        All located points are evaluated at once: where they are relative to their master points
-        (:meth:`_relativePositionsOfLocatedPoints`), the springs the law puts there (:meth:`_springsOfLocatedPoints`:
+        All located points are evaluated at once: their displacements from rest, from the origins
+        (:meth:`_displacementsFromRestOfLocatedPoints`), the springs the law puts there (:meth:`_springsOfLocatedPoints`:
         the contact's one along :math:`\\bar{n}`, the tie's one along every axis), and the forces of the springs on the
         nodes (:meth:`_addForcesOfSprings`). The springs are kept for the outputs.
         """
@@ -1278,8 +1266,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not len(located):
             return
 
-        positions, relative = self._relativePositionsOfLocatedPoints(U_np, dU)
-        displacementsFromRest, gaps, springs = self._springsOfLocatedPoints(relative, timeStep)
+        nSlaveDof = self._nSlaveDof
+        positions = self.slave.coordinatesOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
+        displacementsFromRest = self._displacementsFromRestOfLocatedPoints(U_np, dU)
+        gaps, springs = self._springsOfLocatedPoints(displacementsFromRest, timeStep)
         for spring in springs:
             self._addForcesOfSprings(P, K, spring)
 
@@ -1288,10 +1278,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._gapCurrent[located] = gaps
         self._positionCurrent, self._displacementFromRest = positions, displacementsFromRest
 
-    def _relativePositionsOfLocatedPoints(self, U_np: np.ndarray, dU: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Where the located points are, and where relative to their master points: the contact points say where they
-        are, the master points ride the *curved* parent surfaces (see the class docstring on why the master point must
-        not be taken on the flat facet instead).
+    def _displacementsFromRestOfLocatedPoints(self, U_np: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """The displacements of the located points from rest, :math:`\\boldsymbol{d} = \\boldsymbol{x}_p - N^m \\cdot
+        x^m - \\boldsymbol{r}_0`, told from the origins (see the class documentation, *Measured from the origins*): the
+        displacement from rest at the zero solution of the block, the same in every evaluation until the points are
+        located anew, plus the difference of the displacements of the points and of their master points
+        (:meth:`_relativeDisplacementsOfLocatedPoints`).
 
         Parameters
         ----------
@@ -1302,21 +1294,65 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         Returns
         -------
-        tuple[numpy.ndarray, numpy.ndarray]
-            The current coordinates of the located points, and the vectors from their master points to them, each
-            (nLocated, nDim).
+        numpy.ndarray
+            The displacements from rest, (nLocated, nDim).
+        """
+
+        displacementsFromRestAtZeroSolution = (
+            self._relativePositionsAtZeroSolutionOfLocated - self._restingOffsetOfLocated
+        )
+        return displacementsFromRestAtZeroSolution + self._relativeDisplacementsOfLocatedPoints(U_np, dU)
+
+    def _relativeDisplacementsOfLocatedPoints(self, U_np: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """How far the located points have moved relative to their master points since the zero solution of the block:
+        :math:`c \\cdot \\boldsymbol{u} - N^m \\cdot U^m`, the displacements of the points from their origins less
+        those of their master points, which ride the *curved* parent surfaces (see the class docstring on why the master
+        point must not be taken on the flat facet instead).
+
+        Parameters
+        ----------
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+
+        Returns
+        -------
+        numpy.ndarray
+            The relative displacements, (nLocated, nDim).
         """
 
         nSlaveDof = self._nSlaveDof
-        xS = self.slave.coordinatesOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
-        xM = self._masterRefOfLocated + U_np[nSlaveDof:].reshape(self._masterRefOfLocated.shape)
-        return xS, xS - np.einsum("ai,aij->aj", self._masterShapeFunctionsOfLocated, xM)
+        displacementsOfPoints = self.slave.displacementsOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
+        displacementsOfMasterPoints = np.einsum(
+            "ai,aij->aj",
+            self._masterShapeFunctionsOfLocated,
+            U_np[nSlaveDof:].reshape((len(self._locatedPoints), self.nMasterParentNodes, self.nDim)),
+        )
+        return displacementsOfPoints - displacementsOfMasterPoints
+
+    def _solutionOfTheBlockInTheModel(self, model: FEModel) -> tuple[np.ndarray, np.ndarray]:
+        """The solution of the block at the state of the model, as at an update of the connectivity, where the points
+        are paired: taken from the model's displacement field, without an increment.
+
+        Parameters
+        ----------
+        model
+            The model, whose node field ``displacement`` places both sides.
+
+        Returns
+        -------
+        tuple[numpy.ndarray, numpy.ndarray]
+            The solution and the (zero) increment of the block.
+        """
+
+        U = currentNodeDisplacements(self._nodes, model, self.nDim).ravel()
+        return U, np.zeros_like(U)
 
     def _springsOfLocatedPoints(
-        self, relative: np.ndarray, timeStep: TimeStep | None, smallestGaps: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray, list[PenaltySprings]]:
-        """The penalty springs the law puts at the located points, from where they are relative to their master
-        points.
+        self, displacementsFromRest: np.ndarray, timeStep: TimeStep | None, smallestGaps: np.ndarray | None = None
+    ) -> tuple[np.ndarray, list[PenaltySprings]]:
+        """The penalty springs the law puts at the located points, from their displacements from rest.
 
         What the constraint gives the law is the same for every law: the penalty times the area of each point, its
         frozen normal :math:`\\bar{n}`, its displacement from rest :math:`\\boldsymbol{d} = \\boldsymbol{x} -
@@ -1335,28 +1371,25 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
         Parameters
         ----------
-        relative
-            Where the located points are relative to their master points, see
-            :meth:`_relativePositionsOfLocatedPoints`.
+        displacementsFromRest
+            The displacements of the located points from rest, see :meth:`_displacementsFromRestOfLocatedPoints`.
         timeStep
             The time step of the evaluation, for the ramp of an initial overlap.
         smallestGaps
             The smallest gaps of the located points within the next increment, for the bound over it, which the law
-            sees instead of those of ``relative``; None for the state now.
+            sees instead of those of ``displacementsFromRest``; None for the state now.
 
         Returns
         -------
         tuple
-            The displacements from rest (nLocated, nDim) and the gaps the law sees (nLocated) of the located points,
-            and the springs.
+            The gaps the law sees (nLocated) of the located points, and the springs.
         """
 
-        displacementsFromRest = relative - self._restingOffsetOfLocated
         gaps = self._gapsOfLocatedPoints(displacementsFromRest, timeStep) if smallestGaps is None else smallestGaps
         springs = self.law.springs(
             self.penalty * self._areasOfLocated, gaps, self._normalsOfLocated, displacementsFromRest
         )
-        return displacementsFromRest, gaps, springs
+        return gaps, springs
 
     def _gapsOfLocatedPointsAt(self, U_np: np.ndarray, dU: np.ndarray, timeStep: TimeStep | None) -> np.ndarray:
         """The gaps of the located points as the law sees them at a state (:meth:`_gapsOfLocatedPoints`).
@@ -1376,8 +1409,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             The gaps.
         """
 
-        _, relative = self._relativePositionsOfLocatedPoints(U_np, dU)
-        return self._gapsOfLocatedPoints(relative - self._restingOffsetOfLocated, timeStep)
+        return self._gapsOfLocatedPoints(self._displacementsFromRestOfLocatedPoints(U_np, dU), timeStep)
 
     def _gapsOfLocatedPoints(self, displacementsFromRest: np.ndarray, timeStep: TimeStep | None) -> np.ndarray:
         """The gaps of the located points as the law sees them: :math:`g = \\bar{n} \\cdot \\boldsymbol{d}`, less the
@@ -1467,8 +1499,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         smallestGaps = None
         if nextIncrement is not None:
             smallestGaps = nextIncrement.smallestGaps(self._gapsOfLocatedPointsAt, U_np, dU, timeStep)
-        _, relative = self._relativePositionsOfLocatedPoints(U_np, dU)
-        _, _, springs = self._springsOfLocatedPoints(relative, timeStep, smallestGaps)
+        _, springs = self._springsOfLocatedPoints(
+            self._displacementsFromRestOfLocatedPoints(U_np, dU), timeStep, smallestGaps
+        )
         if not springs:
             return
 

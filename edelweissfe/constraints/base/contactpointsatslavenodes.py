@@ -68,7 +68,8 @@ class ContactPointsAtSlaveNodes(ContactPoints):
     """The nodes of a slave surface, used as contact points.
 
     A node is its own contact point: its interpolation vector is :math:`c = [1]`, it sits at
-    :math:`\\boldsymbol{X} + \\boldsymbol{U}`, and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`).
+    :math:`\\boldsymbol{X} + \\boldsymbol{U}` (its origin :math:`\\boldsymbol{X}`, its total displacement
+    :math:`\\boldsymbol{U}`), and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`).
     A located node takes itself into the block of the constraint, once.
 
     Parameters
@@ -154,8 +155,19 @@ class ContactPointsAtSlaveNodes(ContactPoints):
         self._referenceCoordinatesOfLocated = self._referenceCoordinates[points]
         return [self.slaveNodes[p] for p in points]
 
-    def coordinatesOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """:math:`X + U`, from the total displacement.
+    def originsOfLocatedPoints(self) -> np.ndarray:
+        """:math:`\\boldsymbol{X}`, the reference coordinates of the located nodes.
+
+        Returns
+        -------
+        numpy.ndarray
+            The coordinates, of shape (nLocated, nDim).
+        """
+
+        return self._referenceCoordinatesOfLocated
+
+    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """:math:`\\boldsymbol{U}`, the total displacement of the located nodes.
 
         Parameters
         ----------
@@ -167,10 +179,10 @@ class ContactPointsAtSlaveNodes(ContactPoints):
         Returns
         -------
         numpy.ndarray
-            The coordinates, of shape (nLocated, nDim).
+            The displacements, of shape (nLocated, nDim).
         """
 
-        return self._referenceCoordinatesOfLocated + U.reshape(self._referenceCoordinatesOfLocated.shape)
+        return U.reshape(self._referenceCoordinatesOfLocated.shape)
 
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
         """Add :math:`f\\, n` at each given node; see :meth:`ContactPoints.addForceResidual`.
