@@ -1304,17 +1304,19 @@ class NED(NonlinearSolverBase):
     def _rowSumsOfThePenaltyConstraints(
         self, U: DofVector, dU: DofVector, timeStep: TimeStep | None, nextIncrement: NextIncrement | None
     ) -> np.ndarray | None:
-        """The row sums of the absolute value of the penalty constraints' stiffness, scaled by the lumped mass on both
-        sides, :math:`r_i = \\sum_j |K^\\mathrm{c}_{ij}| / \\sqrt{M_i M_j}`: what the constraints add to the squared
-        frequency of every degree of freedom they couple (see :doc:`/theory/criticaltimestep`). Every constraint of the
-        discrete system bounds its own
+        """The row sums of the absolute value of the penalty constraints' stiffness, scaled by the lumped coefficient
+        the increment divides by on both sides, :math:`r_i = \\sum_j |K^\\mathrm{c}_{ij}| / \\sqrt{M_i M_j}`: what the
+        constraints add to the squared frequency of every degree of freedom integrated by central differences, and to
+        the rate of every one integrated by forward Euler, where :math:`M` is the lumped damping (see
+        :doc:`/theory/criticaltimestep`). Every constraint of the discrete system bounds its own
         (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`), at the
         state it is evaluated in, and over the next increment if it is given, with the column weights
-        :math:`1/\\sqrt{M_j}`.
+        :math:`1/\\sqrt{M_j}`. A penalty couples one field with itself (the displacement, a tied nonlocal field), so a row
+        holds the columns of its own order only.
 
-        The masses are those the increment divides by, on the degrees of freedom integrated by central differences; a
-        degree of freedom without one, or with a prescribed motion, has no equation of motion and neither oscillates
-        nor lets a spring oscillate it: its weight and its row are zero. A multi-point-constraint slave moves with its
+        The coefficients are those the increment divides by: the inertia on the degrees of freedom integrated by central
+        differences, the damping on those integrated by forward Euler; a degree of freedom with a prescribed motion has
+        no equation of motion and neither oscillates nor lets a spring oscillate it: its weight and its row are zero. A multi-point-constraint slave moves with its
         masters: its weight is the sum of theirs, by the absolute value of its coefficients, and its row is folded onto
         them likewise.
 
@@ -1340,7 +1342,7 @@ class NED(NonlinearSolverBase):
         if not constraints:
             return None
 
-        scaling = np.sqrt(self._Minv) * self._secondOrderMask
+        scaling = np.sqrt(self._Minv)
         for dirichlet in self._stepActions["dirichlet"].values():
             scaling[dirichlet.constrainedDofIndices] = 0.0
 
@@ -1408,12 +1410,14 @@ class NED(NonlinearSolverBase):
             return
         penaltyConstraints = self._criticalTimeStepOfThePenaltyConstraints
         parts = (self._criticalTimeStepOfTheElements, self._criticalTimeStepOfTheEntities)
-        penaltyConstraints.estimate(self.system, rowSums, *parts, self.mpcTransformation)
+        penaltyConstraints.estimate(self.system, rowSums, *parts, self._secondOrderMask, self.mpcTransformation)
         if self.options["follow-critical-time-step"]:
             rowSumsOverTheNextIncrement = self._rowSumsOfThePenaltyConstraints(
                 U, dU, timeStep, self._theLargestNextIncrement(step, timeStep)
             )
-            penaltyConstraints.estimate(self.system, rowSumsOverTheNextIncrement, *parts, self.mpcTransformation)
+            penaltyConstraints.estimate(
+                self.system, rowSumsOverTheNextIncrement, *parts, self._secondOrderMask, self.mpcTransformation
+            )
 
     def _criticalTimeStepOfTheModel(self) -> float:
         """The critical time step of the model as last estimated, the smallest of the elements', the entities' and the
