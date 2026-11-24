@@ -199,7 +199,10 @@ and compression, by penalty springs; a gap or an overlap at the pairing is part 
 joins independently meshed bodies -- particles to the finite elements of a far field, or two meshes of
 finite elements -- in implicit and explicit analyses, and keeps its state when either side is refined.
 Unlike the ``tie`` constraint below, it is a penalty, works for every kind of contact point, and does not
-close a gap.
+close a gap. ``tiedFields`` ties scalar fields besides the displacement, e.g. the nonlocal field of gradient-enhanced
+elements and particles (``tiedFields=displacement; nonlocal damage``), with a penalty per unit area
+``nonlocalPenaltyFactor * nonlocalRadius^2 / h``, ``h`` the size of the master face (:ref:`a nonlocal field across the tie <contact-tie-fields>`), so
+that the field and its flux cross the tie instead of ending at it.
 
 Scope: frictionless normal penalty contact, or a tie, under ``sliding=small``, on both the implicit and the
 explicit solver path. Coulomb friction and augmented Lagrange are **not** implemented here (the

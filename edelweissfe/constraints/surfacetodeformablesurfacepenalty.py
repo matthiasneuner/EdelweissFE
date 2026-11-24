@@ -32,8 +32,9 @@ from enum import IntEnum
 import numpy as np
 from scipy.spatial import cKDTree
 
+from edelweissfe.config.phenomena import phenomena
 from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
-from edelweissfe.constraints.base.contactpoints import ContactPoints
+from edelweissfe.constraints.base.contactpoints import ContactPoints, dofsOfNodes
 from edelweissfe.constraints.base.contactpointsonslavesurface import (
     checkFacetsCarryParentFaces,
 )
@@ -65,7 +66,10 @@ from edelweissfe.utils.facetcontactgeometry import (
     facetNormalAndMeasure,
 )
 from edelweissfe.utils.meshtools import currentNodeCoordinates, currentNodeDisplacements
-from edelweissfe.utils.parentfacegeometry import parentFaceShapeFunctions
+from edelweissfe.utils.parentfacegeometry import (
+    parentFaceShapeFunctions,
+    sizesOfParentFaces,
+)
 from edelweissfe.utils.schema import buildSchemaFromOptions, schemaField
 
 """
@@ -152,14 +156,16 @@ class ContactStiffnessView:
     """Provides structured 2-D sub-views for the sparse stiffness matrix slice of :class:`Constraint`.
 
     Each located contact point couples the nodes its interpolation vector acts on to the nodes of its assigned master
-    facet's parent face, and to nothing else -- so the contribution is one dense square block per located point, over
-    that point's own ``[slave nodes, master parent face nodes]``, zero while the point has no spring.
+    facet's parent face, and to nothing else, and each field only with itself -- so the contribution is one dense
+    square block per tied field and located point, over that point's own ``[slave nodes, master parent face nodes]``,
+    zero while the point has no spring: the blocks of the displacement first, then those of every tied scalar field
+    (:class:`TiedFieldInTheBlock`).
 
     Attributes
     ----------
     blocks : list[numpy.ndarray]
-        One view per located contact point, of shape ``(m, m)`` with
-        ``m = (nSlaveNodesOfThePoint + nMasterParentNodes) * nDim``.
+        One view per tied field and located contact point, of shape ``(m, m)`` with
+        ``m = (nSlaveNodesOfThePoint + nMasterParentNodes) * nComponents``.
     """
 
     def __init__(self, flat_array: np.ndarray, blockSizes: list[int]):
@@ -170,7 +176,7 @@ class ContactStiffnessView:
         flat_array
             This constraint's slice of the global VIJ value array.
         blockSizes
-            The DOF count ``m`` of each located contact point's block, in assembly order.
+            The DOF count ``m`` of each block, in assembly order.
         """
 
         self.blocks = []
@@ -178,6 +184,24 @@ class ContactStiffnessView:
         for m in blockSizes:
             self.blocks.append(flat_array[offset : offset + m * m].reshape((m, m)))
             offset += m * m
+
+
+@dataclass(frozen=True)
+class TiedFieldInTheBlock:
+    """Where a field the constraint acts on sits in its block: the displacement, and every tied scalar field after it
+    (see :class:`Constraint`, *Tied scalar fields*). Each field holds all nodes of the block -- the slave nodes, then
+    the parent face nodes of the master facets, point after point --, node by node, with its components per node; and
+    each located point has one dense block of the tangent per field."""
+
+    #: The number of components of the field per node: :math:`n_\\mathrm{dim}` for the displacement, one for a scalar
+    #: field.
+    nComponents: int
+    #: Its degrees of freedom at the slave nodes.
+    slave: slice
+    #: Its degrees of freedom at the parent face nodes of the master facets.
+    master: slice
+    #: The index of the dense block of the tangent of the first located point, in this field.
+    firstBlock: int
 
 
 @dataclass(frozen=True)
@@ -220,6 +244,26 @@ class SurfaceToDeformableSurfacePenaltySchema(SurfaceContactPenaltySchema):
         dtype=str,
         default="linear",
         optionName="type",
+    )
+    tiedFields: str = schemaField(
+        description="With type=tied: the fields the tie ties, separated by ';': the displacement, and scalar fields "
+        "such as the nonlocal field of gradient-enhanced elements and particles ('displacement; nonlocal damage'), "
+        "whose values on both sides are held equal by a penalty per unit area of nonlocalPenaltyFactor * "
+        "nonlocalRadius^2 / h, h the size of the master face.",
+        dtype=str,
+        default="displacement",
+    )
+    nonlocalRadius: float | None = schemaField(
+        description="With a tied scalar field: the nonlocal radius l of the materials on both sides of the tie, whose "
+        "square is the coefficient of the gradient term of the nonlocal balance (N - l^2 lap N = L).",
+        dtype=float,
+        default=None,
+    )
+    nonlocalPenaltyFactor: float = schemaField(
+        description="With a tied scalar field: the factor beta of its penalty per unit area, beta * l^2 / h. The jump "
+        "of the field across the tie is then 1/beta of the change of the field over one master face.",
+        dtype=float,
+        default=10.0,
     )
 
 
@@ -285,7 +329,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         + \\left( c \\cdot \\boldsymbol{u} - N^m \\cdot U^m \\right) ,
 
     with :math:`c \\cdot \\boldsymbol{u}` the displacement of the point from its origin
-    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.displacementsOfLocatedPoints`: the total
+    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.changesFromTheOriginsOfLocatedPoints`: the total
     displacement of a finite element, the increment of a particle), :math:`U^m` the total displacement of the master
     nodes, and :math:`\\boldsymbol{r}_0` the resting offset (zero unless the law pairs once, see *The tie*). The
     relative position of the origins is taken once, when the points are located, and the first part is the same, to the
@@ -396,6 +440,60 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     On a **change of the mesh** of either side (a refinement), the points are tied anew at the next update, and each
     new point takes the displacement from rest of the tied point of before closest to it, at the last evaluation: if
     only the master side was retiled, every point keeps its own, and the forces of the tie stay as they were.
+
+    Tied scalar fields
+    ------------------
+    A tie of gradient-enhanced bodies -- particles to finite elements, both with a nonlocal field :math:`\\bar{N}` --
+    that held the displacement alone would let the nonlocal fields meet with zero flux: each side would see a free
+    boundary of its nonlocal balance :math:`\\eta \\dot{\\bar{N}} + \\bar{N} - l^2 \\nabla^2 \\bar{N} = L`, and the
+    damage would end at the tie in a sharp edge instead of spreading across it. ``tiedFields`` names the scalar fields
+    the tie holds equal across the interface besides the displacement (e.g. ``displacement; nonlocal damage``). At
+    every tied point, the *jump* of the field
+
+    .. math::
+        [\\bar{N}] = \\bar{N}^0_p + c \\cdot \\bar{\\boldsymbol{n}} - N^m \\cdot \\bar{\\boldsymbol{n}}^m
+
+    -- the value of the slave side at the point, from its origin
+    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.valuesOfAFieldAtTheOriginsOfLocatedPoints`:
+    zero for finite elements, whose nodes carry the total, the particle's own value for a particle, whose nodes carry
+    the increment), less the value of the master at its material point -- is held at zero by one more spring of the
+    law, along the one component of the field: its force :math:`\\kappa A_p [\\bar{N}]` on the slave, distributed
+    with :math:`c`, and its opposite on the master, distributed with :math:`N^m`, the stiffness :math:`\\kappa A_p\\,
+    [c, -N^m] \\otimes [c, -N^m]`. That is the penalty form of the continuity of the field; the flux
+    :math:`l^2 \\nabla\\bar{N} \\cdot \\boldsymbol{n}` crosses the tie as the force of the springs per unit area,
+    :math:`\\kappa [\\bar{N}]`. A field has no state at rest: the jump at the pairing is not kept, it is closed.
+
+    The field is interpolated exactly as the displacement: with the interpolation vector :math:`c` of the slave point,
+    and on the master with the parent face shape functions :math:`N^m` -- which is right for the elements whose nonlocal
+    field lives on all their nodes with the shape functions of the displacement (``GC3D20``, ``GC3D20R``, ``GCAX8R``,
+    ...); a master face whose nodes do not all carry the field cannot be located (its node has no such field). Both
+    sides reproduce a linear field exactly, the quadratic faces of the elements as well as the particles' interpolation,
+    so a linear field crosses the tie without a jump and without a force.
+
+    **The penalty.** The weak form of the nonlocal balance holds the term :math:`l^2 \\nabla\\bar{N} \\cdot
+    \\nabla\\delta\\bar{N}`; its stiffness per unit area of a face of size :math:`h` is of the order :math:`l^2/h`, and
+    so is the penalty per unit area that holds the field across the tie:
+
+    .. math::
+        \\kappa = \\beta \\, \\frac{l^2}{h} ,
+
+    with the nonlocal radius :math:`l` (``nonlocalRadius``), the size :math:`h` of the master face the point is tied to
+    (:func:`~edelweissfe.utils.parentfacegeometry.sizesOfParentFaces`), and the factor :math:`\\beta`
+    (``nonlocalPenaltyFactor``, by default 10). A flux :math:`q` then opens the jump :math:`q/\\kappa = (h/\\beta)\\,
+    \\nabla\\bar{N} \\cdot \\boldsymbol{n}`: :math:`1/\\beta` of the change of the field over one master face. The
+    areas :math:`A_p` are those of the displacement, with the ring weight :math:`2 \\pi r` of an axisymmetric model and
+    the thickness of a plane one.
+
+    **The critical time step.** A first-order nonlocal field (with a nonlocal viscosity :math:`\\eta`, no
+    micro-inertia) is integrated by forward Euler, stable for :math:`\\Delta t \\le 2/\\lambda_\\mathrm{max}
+    (\\boldsymbol{C}^{-1}\\boldsymbol{K})`; the springs of the field add their rows, scaled with the lumped damping
+    :math:`1/\\sqrt{C}` on both sides, to the bound of the field's own block, as the displacement springs add theirs,
+    scaled with :math:`1/\\sqrt{M}`, to the displacement's (see :doc:`/theory/criticaltimestep`). The springs of a
+    tied field are part of the bound of the stiffness (:meth:`addBoundOfAbsoluteStiffnessTimes`).
+
+    **Energy.** The springs of a tied scalar field store no mechanical energy (their "energy" :math:`\\tfrac{1}{2}
+    \\kappa A_p [\\bar{N}]^2` is not one); :attr:`penaltyEnergy` and the forces and tractions the tie reports are those
+    of the displacement springs alone.
 
     ``sliding=finite`` is rejected rather than approximated. It would require the exact gap gradient
     and Hessian of a point against a *curved* quadratic surface, whose closest-point projection is
@@ -518,6 +616,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._initialOverlapTime = None
 
         contactPoints.measureTheAreasAsIn(model, name)
+
+        #: The scalar fields the tie holds equal across the interface besides the displacement (see the class
+        #: documentation, *Tied scalar fields*), in the order of their parts of the block.
+        self.tiedScalarFields = self._tiedScalarFieldsOf(configuration)
+        self.nonlocalRadius = configuration.nonlocalRadius
+        self.nonlocalPenaltyFactor = configuration.nonlocalPenaltyFactor
+
         self.slave = contactPoints
         self._buildMaster(masterSurface)
         self._resetContactPoints()
@@ -543,6 +648,52 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             journal,
             configuration=configuration,
         )
+
+    def _tiedScalarFieldsOf(self, configuration: SurfaceToDeformableSurfacePenaltySchema) -> list[str]:
+        """The scalar fields ``tiedFields`` names besides the displacement, checked: the displacement is among the
+        fields, the others are scalar fields (:data:`~edelweissfe.config.phenomena.phenomena`), only a law that pairs
+        once ties them, and their penalty has a positive nonlocal radius and factor.
+
+        Parameters
+        ----------
+        configuration
+            The options of the constraint.
+
+        Returns
+        -------
+        list[str]
+            The scalar fields, in the order given.
+        """
+
+        fields = [field.strip() for field in configuration.tiedFields.split(";") if field.strip()]
+        if "displacement" not in fields or len(set(fields)) != len(fields):
+            raise ValueError(
+                f"Constraint '{self.name}': tiedFields '{configuration.tiedFields}' must name the displacement, and "
+                "every field once."
+            )
+        scalarFields = [field for field in fields if field != "displacement"]
+        notScalar = [field for field in scalarFields if phenomena.get(field) != "scalar"]
+        if notScalar:
+            raise ValueError(
+                f"Constraint '{self.name}': a tie ties the displacement and scalar fields; {notScalar} are not scalar "
+                "fields."
+            )
+        if scalarFields and not self.law.pairsOnce:
+            raise ValueError(
+                f"Constraint '{self.name}': only a tie (type=tied) ties fields besides the displacement; type="
+                f"{self.law.name} touches."
+            )
+        if scalarFields and not (
+            configuration.nonlocalRadius is not None
+            and configuration.nonlocalRadius > 0.0
+            and configuration.nonlocalPenaltyFactor > 0.0
+        ):
+            raise ValueError(
+                f"Constraint '{self.name}': a tied scalar field needs a positive nonlocalRadius and "
+                "nonlocalPenaltyFactor, which give its penalty per unit area, nonlocalPenaltyFactor * nonlocalRadius^2 "
+                "/ h."
+            )
+        return scalarFields
 
     def _buildMaster(self, masterSurface: ElementSet):
         """Build (or rebuild) everything cached about the master surface: its facets and their parent faces, the
@@ -589,6 +740,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             [[node.coordinates for node in facet.parentFaceNodes] for facet in self.facetElements]
         )
         self.nMasterParentNodes = self._masterParentRefCoords.shape[1] if self.facetElements else 0
+        # The size h of each master face, in the penalty of a tied scalar field (see the class documentation, *Tied
+        # scalar fields*).
+        self._sizesOfMasterFaces = (
+            sizesOfParentFaces(self._masterParentFaceType, self._masterParentRefCoords)
+            if self.facetElements
+            else np.zeros(0)
+        )
 
     def _resetContactPoints(self):
         """Size the per-point state for the current contact points, which start without a pairing."""
@@ -629,15 +787,15 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
     @property
     def nodes(self) -> list:
-        return self._nodes
+        return self._nodes * (1 + len(self.tiedScalarFields))
 
     @property
     def fields(self) -> list:
-        return [["displacement"]] * len(self._nodes)
+        return [[field] for field in ["displacement"] + self.tiedScalarFields for _ in range(len(self._nodes))]
 
     @property
     def nDof(self) -> int:
-        return self.nDim * len(self._nodes)
+        return (self.nDim + len(self.tiedScalarFields)) * len(self._nodes)
 
     @property
     def nPoints(self) -> int:
@@ -1135,7 +1293,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         facets = self._assignedFacetIdx[located]
         masterNodes = [node for f in facets for node in self.facetElements[f].parentFaceNodes]
         self._nodes = slaveNodes + masterNodes
+        self._nSlaveNodes = len(slaveNodes)
         self._nSlaveDof = self.nDim * len(slaveNodes)
+        self._fieldsInTheBlock = self._tiedFieldsInTheBlock()
 
         self._masterShapeFunctionsOfLocated = self._frozenMasterShapeFunctions[located]
         self._normalsOfLocated = self._frozenNormals[located]
@@ -1150,9 +1310,47 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             "ai,aij->aj", self._masterShapeFunctionsOfLocated, masterReferenceCoordinatesOfLocated
         )
         self._areasOfLocated = self.slave.areas[located]
+        # A tied scalar field: its penalty per unit area beta l^2 / h times the area of each point, and its values at
+        # the origins of the points (see the class documentation, *Tied scalar fields*), which change only when the
+        # points are located anew -- particles, at the configuration of an update.
+        self._scalarPenaltyTimesAreaOfLocated = (
+            self.nonlocalPenaltyFactor
+            * self.nonlocalRadius**2
+            / self._sizesOfMasterFaces[facets]
+            * self._areasOfLocated
+            if self.tiedScalarFields
+            else np.zeros(0)
+        )
+        self._valuesAtTheOriginsOfLocated = [
+            self.slave.valuesOfAFieldAtTheOriginsOfLocatedPoints(field) for field in self.tiedScalarFields
+        ]
         self._blockSizes = None
         # The springs of the last evaluation, at these located points: what the outputs report.
         self._springs = []
+
+    def _tiedFieldsInTheBlock(self) -> list[TiedFieldInTheBlock]:
+        """Where the displacement and each tied scalar field sit in the block, for the nodes as located now.
+
+        Returns
+        -------
+        list[TiedFieldInTheBlock]
+            The displacement first, then the tied scalar fields in their order.
+        """
+
+        nNodes, nLocated = len(self._nodes), len(self._locatedPoints)
+        fieldsInTheBlock, start = [], 0
+        for index, nComponents in enumerate([self.nDim] + [1] * len(self.tiedScalarFields)):
+            endOfTheSlave = start + nComponents * self._nSlaveNodes
+            fieldsInTheBlock.append(
+                TiedFieldInTheBlock(
+                    nComponents,
+                    slice(start, endOfTheSlave),
+                    slice(endOfTheSlave, start + nComponents * nNodes),
+                    index * nLocated,
+                )
+            )
+            start += nComponents * nNodes
+        return fieldsInTheBlock
 
     def _searchLayout(self) -> dict[str, np.ndarray]:
         return self.slave.searchLayout() | {
@@ -1240,19 +1438,24 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         return self._blockSizes
 
     def _dofsOfLocatedPoints(self) -> list[np.ndarray]:
-        """Per located point, its degrees of freedom in the block: those of its slave nodes, then those of the parent
-        face nodes of its master facet."""
+        """Per tied field and located point, in the order of the dense blocks of the tangent, the point's degrees of
+        freedom of the field in the block: those of its slave nodes, then those of the parent face nodes of its master
+        facet."""
 
-        nMasterDof = self.nMasterParentNodes * self.nDim
-        return [
-            np.concatenate(
-                (
-                    self.slave.interpolationOfLocatedPoint(k)[0],
-                    self._nSlaveDof + k * nMasterDof + np.arange(nMasterDof),
+        nodesOfLocated = [self.slave.interpolationOfLocatedPoint(k)[0] for k in range(len(self._locatedPoints))]
+        dofs = []
+        for field in self._fieldsInTheBlock:
+            nMasterDof = self.nMasterParentNodes * field.nComponents
+            dofs += [
+                np.concatenate(
+                    (
+                        field.slave.start + dofsOfNodes(nodes, field.nComponents),
+                        field.master.start + k * nMasterDof + np.arange(nMasterDof),
+                    )
                 )
-            )
-            for k in range(len(self._locatedPoints))
-        ]
+                for k, nodes in enumerate(nodesOfLocated)
+            ]
+        return dofs
 
     def localEntriesOfBlock(self) -> tuple[np.ndarray, np.ndarray]:
         """One dense block per located contact point, row by row, over its slave and master DOFs."""
@@ -1283,12 +1486,15 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if not len(located):
             return
 
-        nSlaveDof = self._nSlaveDof
-        positions = self.slave.coordinatesOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
+        displacement = self._fieldsInTheBlock[0]
+        positions = self.slave.coordinatesOfLocatedPoints(U_np[displacement.slave], dU[displacement.slave])
         displacementsFromRest = self._displacementsFromRestOfLocatedPoints(U_np, dU)
         gaps, springs = self._springsOfLocatedPoints(displacementsFromRest, timeStep)
         for spring in springs:
-            self._addForcesOfSprings(P, K, spring)
+            self._addForcesOfSprings(P, K, spring, displacement)
+        for index, field in enumerate(self._fieldsInTheBlock[1:]):
+            for spring in self._springsOfATiedScalarField(index, U_np, dU):
+                self._addForcesOfSprings(P, K, spring, field)
 
         # What the outputs report, and what a change of the mesh hands on to a law that pairs once.
         self._springs = springs
@@ -1339,14 +1545,72 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             The relative displacements, (nLocated, nDim).
         """
 
-        nSlaveDof = self._nSlaveDof
-        displacementsOfPoints = self.slave.displacementsOfLocatedPoints(U_np[:nSlaveDof], dU[:nSlaveDof])
+        displacement = self._fieldsInTheBlock[0]
+        displacementsOfPoints = self.slave.changesFromTheOriginsOfLocatedPoints(
+            U_np[displacement.slave], dU[displacement.slave], self.nDim
+        )
         displacementsOfMasterPoints = np.einsum(
             "ai,aij->aj",
             self._masterShapeFunctionsOfLocated,
-            U_np[nSlaveDof:].reshape((len(self._locatedPoints), self.nMasterParentNodes, self.nDim)),
+            U_np[displacement.master].reshape((len(self._locatedPoints), self.nMasterParentNodes, self.nDim)),
         )
         return displacementsOfPoints - displacementsOfMasterPoints
+
+    def _jumpsOfATiedScalarFieldAtLocatedPoints(self, index: int, U_np: np.ndarray, dU: np.ndarray) -> np.ndarray:
+        """The jump of a tied scalar field at the located points, :math:`[\\bar{N}] = \\bar{N}^0_p + c \\cdot
+        \\bar{\\boldsymbol{n}} - N^m \\cdot \\bar{\\boldsymbol{n}}^m`: the value of the slave side at the point, from its
+        origin, less the value of the master at its material point, which carries the total (see the class
+        documentation, *Tied scalar fields*).
+
+        Parameters
+        ----------
+        index
+            The index of the field in :attr:`tiedScalarFields`.
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+
+        Returns
+        -------
+        numpy.ndarray
+            The jumps, (nLocated).
+        """
+
+        field = self._fieldsInTheBlock[1 + index]
+        valuesOfPoints = (
+            self._valuesAtTheOriginsOfLocated[index]
+            + self.slave.changesFromTheOriginsOfLocatedPoints(U_np[field.slave], dU[field.slave], 1)[:, 0]
+        )
+        valuesOfMasterPoints = np.einsum(
+            "ai,ai->a",
+            self._masterShapeFunctionsOfLocated,
+            U_np[field.master].reshape((len(self._locatedPoints), self.nMasterParentNodes)),
+        )
+        return valuesOfPoints - valuesOfMasterPoints
+
+    def _springsOfATiedScalarField(self, index: int, U_np: np.ndarray, dU: np.ndarray) -> list[PenaltySprings]:
+        """The springs of the law that hold a tied scalar field across the tie: one at every located point, along the
+        one component of the field, stretched by the jump of the field
+        (:meth:`_jumpsOfATiedScalarFieldAtLocatedPoints`), of the stiffness :math:`\\kappa A_p`.
+
+        Parameters
+        ----------
+        index
+            The index of the field in :attr:`tiedScalarFields`.
+        U_np
+            The solution of the constraint's block.
+        dU
+            The increment of the constraint's block.
+
+        Returns
+        -------
+        list[PenaltySprings]
+            The springs.
+        """
+
+        jumps = self._jumpsOfATiedScalarFieldAtLocatedPoints(index, U_np, dU)
+        return self.law.springs(self._scalarPenaltyTimesAreaOfLocated, None, None, jumps[:, None])
 
     def _solutionOfTheBlockInTheModel(self, model: FEModel) -> tuple[np.ndarray, np.ndarray]:
         """The solution of the block at the state of the model, as at an update of the connectivity, where the points
@@ -1453,9 +1717,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             gaps = gaps - uncountedFraction * self._initialOverlapOfLocated
         return gaps
 
-    def _addForcesOfSprings(self, P: np.ndarray, K: ContactStiffnessView | None, springs: PenaltySprings):
+    def _addForcesOfSprings(
+        self, P: np.ndarray, K: ContactStiffnessView | None, springs: PenaltySprings, field: TiedFieldInTheBlock
+    ):
         """Add the residual contribution of penalty springs at located points, each along a unit direction
-        :math:`\\bar{n}` (the normal of a contact, an axis of a tie), and their tangent unless ``K`` is None.
+        :math:`\\bar{n}` of the components of a field (the normal of a contact, an axis of a tie, the one component of a
+        tied scalar field), and their tangent unless ``K`` is None.
 
         The residual contribution is the negative of the force on the nodes, :math:`f\\, w` with
         :math:`w = [c, -N^m] \\otimes \\bar{n}`: the contact points distribute their part with their interpolation
@@ -1469,23 +1736,24 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         K
             The tangent of the constraint, one dense block per located point; augmented. None on the explicit path.
         springs
-            The springs, see :meth:`_springsOfLocatedPoints`.
+            The springs, see :meth:`_springsOfLocatedPoints` and :meth:`_springsOfATiedScalarField`.
+        field
+            The field the springs act on, where it sits in the block.
         """
 
         points, directions, forces, stiffness = springs.points, springs.directions, springs.forces, springs.stiffness
-        nSlaveDof = self._nSlaveDof
-        self.slave.addForceResidual(P[:nSlaveDof], points, forces, directions)
+        self.slave.addForceResidual(P[field.slave], points, forces, directions)
         wMaster = ((-self._masterShapeFunctionsOfLocated[points])[:, :, None] * directions[:, None, :]).reshape(
             (len(points), -1)
         )
-        P[nSlaveDof:].reshape((len(self._locatedPoints), -1))[points] += forces[:, None] * wMaster
+        P[field.master].reshape((len(self._locatedPoints), -1))[points] += forces[:, None] * wMaster
 
         if K is not None:
-            # The tangent is only requested by the implicit path: one dense block per located point.
+            # The tangent is only requested by the implicit path: one dense block per located point and field.
             for i, k in enumerate(points):
                 c = self.slave.interpolationOfLocatedPoint(k)[1]
                 w = np.concatenate(((c[:, None] * directions[i][None, :]).ravel(), wMaster[i]))
-                K.blocks[k] += stiffness[i] * np.outer(w, w)
+                K.blocks[field.firstBlock + k] += stiffness[i] * np.outer(w, w)
 
     def addBoundOfAbsoluteStiffnessTimes(
         self,
@@ -1519,24 +1787,35 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         _, springs = self._springsOfLocatedPoints(
             self._displacementsFromRestOfLocatedPoints(U_np, dU), timeStep, smallestGaps
         )
-        if not springs:
+        springsOfTheFields = [(springs, self._fieldsInTheBlock[0])] + [
+            (self._springsOfATiedScalarField(index, U_np, dU), field)
+            for index, field in enumerate(self._fieldsInTheBlock[1:])
+        ]
+
+        if not any(springsOfTheField for springsOfTheField, _ in springsOfTheFields):
             return
 
-        nSlaveDof = self._nSlaveDof
         slaveInterpolationOfLocated = self.slave.interpolationMatrixOfLocatedPoints()
-        dofsOfSlaveNodes = np.arange(nSlaveDof).reshape((-1, self.nDim))
-        dofsOfMasterNodesOfLocated = nSlaveDof + np.arange(len(located) * self.nMasterParentNodes * self.nDim).reshape(
-            (len(located), self.nMasterParentNodes, self.nDim)
-        )
-        for spring in springs:
-            points = spring.points
-            gradient = [
-                SpringGradientOnSharedNodes(slaveInterpolationOfLocated[points], spring.directions, dofsOfSlaveNodes),
-                SpringGradientOnOwnNodes(
-                    -self._masterShapeFunctionsOfLocated[points], spring.directions, dofsOfMasterNodesOfLocated[points]
-                ),
-            ]
-            addBoundOfAbsoluteStiffnessOfSprings(bound, weights, spring.stiffness, gradient)
+        for springsOfTheField, field in springsOfTheFields:
+            if not springsOfTheField:
+                continue
+            dofsOfSlaveNodes = np.arange(field.slave.start, field.slave.stop).reshape((-1, field.nComponents))
+            dofsOfMasterNodesOfLocated = np.arange(field.master.start, field.master.stop).reshape(
+                (len(located), self.nMasterParentNodes, field.nComponents)
+            )
+            for spring in springsOfTheField:
+                points = spring.points
+                gradient = [
+                    SpringGradientOnSharedNodes(
+                        slaveInterpolationOfLocated[points], spring.directions, dofsOfSlaveNodes
+                    ),
+                    SpringGradientOnOwnNodes(
+                        -self._masterShapeFunctionsOfLocated[points],
+                        spring.directions,
+                        dofsOfMasterNodesOfLocated[points],
+                    ),
+                ]
+                addBoundOfAbsoluteStiffnessOfSprings(bound, weights, spring.stiffness, gradient)
 
     def _sumOverTheSprings(self, termOfSprings) -> np.ndarray:
         """The sum of a vector over the springs of the last evaluation; zero without a spring.

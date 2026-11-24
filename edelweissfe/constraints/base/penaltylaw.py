@@ -235,6 +235,11 @@ class TiedPenaltyLaw(PenaltyLaw):
     from rest with the stiffness :math:`k A`, whichever way it moves.
 
     It is a contact that never opens and never slides, the stick of a friction law that never slips.
+
+    A tie of a scalar field (the nonlocal field of gradient-enhanced bodies) takes the same springs, with the jump of
+    the field across the tie as the one component of the displacement from rest: one spring at every point, of the
+    stiffness :math:`\\kappa A`, that holds the two sides at the same value (see
+    :class:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint`, *Tied scalar fields*).
     """
 
     name = "tied"

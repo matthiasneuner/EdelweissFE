@@ -343,7 +343,7 @@ def test_the_penalty_springs_added_where_they_act_bound_the_exact_eigenvalue(sti
         ofTheElements.estimate(system, {element: None for element in elements})
         ofTheEntities = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
         ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
-        ofTheConstraints.estimate(system, s * (np.abs(Kc) @ s), ofTheElements, ofTheEntities)
+        ofTheConstraints.estimate(system, s * (np.abs(Kc) @ s), ofTheElements, ofTheEntities, np.ones(nDof))
 
         estimate = min(ofTheElements.value, ofTheConstraints.value)
         assert estimate <= exact * (1 + 1e-12)
@@ -366,12 +366,36 @@ def test_a_constraint_at_degrees_of_freedom_of_slow_elements_does_not_lower_the_
 
     rowSums = np.array([0.0, 0.0, 10.0, 10.0])
     ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
-    ofTheConstraints.estimate(system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA))
+    ofTheConstraints.estimate(
+        system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA), np.ones(4)
+    )
     assert ofTheConstraints.value == ofTheElements.value == stiff.criticalTimeStep
 
     rowSums[1] = 10.0
-    ofTheConstraints.estimate(system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA))
+    ofTheConstraints.estimate(
+        system, rowSums, ofTheElements, CriticalTimeStepOfEntitiesWithOwnInertia(DELTA), np.ones(4)
+    )
     assert ofTheConstraints.value == pytest.approx(2 / np.sqrt((2 / stiff.criticalTimeStep) ** 2 + 10.0), rel=1e-14)
+
+
+def test_the_elements_take_the_rows_of_the_fields_integrated_by_central_differences_alone():
+    """A penalty on a field integrated by forward Euler (a tied first-order nonlocal field) has its row scaled by the
+    damping, a rate, not a squared frequency: the elements bound their central-difference fields alone (Marmot's
+    elements leave a first-order field unbounded), so their estimate does not take that row; the same row at a
+    central-difference degree of freedom lowers it."""
+
+    stiff = _ElementWithItsEigenvalue(np.array([0, 1]), np.array([[100.0, -100.0], [-100.0, 100.0]]), np.ones(2))
+    system = _systemOf([stiff], 2)
+    ofTheElements = CriticalTimeStepOfTheElements()
+    ofTheElements.estimate(system, {stiff: None})
+    rowSums = np.array([0.0, 1e6])
+
+    ofTheConstraints = CriticalTimeStepOfThePenaltyConstraints()
+    entities = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
+    ofTheConstraints.estimate(system, rowSums, ofTheElements, entities, np.array([1.0, 0.0]))
+    assert ofTheConstraints.value == stiff.criticalTimeStep
+    ofTheConstraints.estimate(system, rowSums, ofTheElements, entities, np.ones(2))
+    assert ofTheConstraints.value == pytest.approx(2 / np.sqrt((2 / stiff.criticalTimeStep) ** 2 + 1e6), rel=1e-14)
 
 
 def test_the_entities_with_the_penalty_constraints_are_estimated_anew_when_their_combined_margin_may_be_used_up():
@@ -429,6 +453,7 @@ def _penaltyEstimateWithMultiPointConstraints(elements, M, Kc, transformation) -
         _rowSumsWithMultiPointConstraints(Kc, M, transformation),
         ofTheElements,
         CriticalTimeStepOfEntitiesWithOwnInertia(DELTA),
+        np.ones(len(M)),
         transformation,
     )
     return min(ofTheElements.value, ofTheConstraints.value)

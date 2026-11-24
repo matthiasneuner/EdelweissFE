@@ -212,7 +212,15 @@ critical time step that carries much of it; the energy balance remains the check
 finite sliding, or of a rigid body whose normals rotate with it (of the order of the normal force over the size of a
 facet or the lever arm, small against the penalty), the coupling of the normal and the tangential force of a sliding
 frictional contact (the friction coefficient times the normal stiffness; unsymmetric), and a penalty on a field
-integrated by forward Euler.
+integrated by forward Euler at the degrees of freedom of finite elements, whose estimate holds no rate of such a field
+to add to.
+
+**A penalty on a field integrated by forward Euler** (the tie of a first-order nonlocal field,
+:ref:`a nonlocal field across the tie <contact-tie-fields>`). Its row sums are scaled by the lumped damping, :math:`r_i = \sum_j |K^\mathrm{c}_{ij}| /
+\sqrt{C_i C_j}`, which bounds the rate :math:`\lambda(\boldsymbol{C}^{-1}\boldsymbol{K})` as the mass-scaled rows
+bound :math:`\omega^2`: added to the rate of a part, :math:`\Delta t \le 2/\max_i(\lambda_i + r_i)`. The particles
+bound their first-order fields in their own block and take the rows there; the finite elements bound the fields
+integrated by central differences alone, and take the rows of those.
 
 **One formula for every penalty contact.** Each contact gives its stiffness as springs: a spring :math:`p` with the
 gradient :math:`\boldsymbol{w}_p` of its stretch and the stiffness :math:`k_p` of its law -- the normal spring of a

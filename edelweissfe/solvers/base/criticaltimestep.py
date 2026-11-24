@@ -546,6 +546,13 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
     A constraint does not take the minimum with the parts: it raises the frequencies of the degrees of freedom it couples,
     so it lowers the critical time step only where it acts, and only by what it adds there.
 
+    On a field integrated by forward Euler (a first-order nonlocal field, with a damping and no inertia), :math:`M` is
+    the lumped damping and :math:`r_i` adds to the rate the part bounds, :math:`\\Delta t \\le 2/\\max_i(\\lambda_i +
+    r_i)` -- a tie of a nonlocal field (:class:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint`,
+    *Tied scalar fields*). The finite elements bound the fields integrated by central differences alone (Marmot's
+    elements leave a first-order nonlocal field unbounded), so their bound takes the rows of those fields; the entities
+    that carry their own inertia bound the fields of either order, each in its own block, and take every row.
+
     **Policy: in every increment.** The stiffness of a constraint follows the state of the contact -- which of its
     points are closed, and how deep --, which changes from increment to increment, and bounding it costs about as much
     as evaluating its force. It is estimated from the stiffness the constraints have after the increment, for the next
@@ -561,6 +568,7 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
         rowSumsOfThePenaltyConstraints: np.ndarray,
         elements: CriticalTimeStepOfTheElements,
         entities: CriticalTimeStepOfEntitiesWithOwnInertia,
+        integratedByCentralDifferences: np.ndarray,
         mpcTransformation=None,
     ):
         """Estimate the critical time step of the degrees of freedom the penalty constraints couple, with the last
@@ -577,6 +585,9 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
             The estimate of the finite elements.
         entities
             The estimate of the entities that carry their own inertia.
+        integratedByCentralDifferences
+            One where a degree of freedom of the numbering is integrated by central differences, zero where by forward
+            Euler or not at all: the rows the elements' bound takes.
         mpcTransformation
             The condensation of the multi-point constraints of the discrete system; None if it has none
             (:meth:`CriticalTimeStepOfTheElements.bound`).
@@ -584,7 +595,9 @@ class CriticalTimeStepOfThePenaltyConstraints(CriticalTimeStepEstimate):
 
         self._take(
             min(
-                elements.bound(system, mpcTransformation).criticalTimeStep(rowSumsOfThePenaltyConstraints),
+                elements.bound(system, mpcTransformation).criticalTimeStep(
+                    rowSumsOfThePenaltyConstraints * integratedByCentralDifferences
+                ),
                 entities.withThePenaltyConstraints(rowSumsOfThePenaltyConstraints),
             )
         )

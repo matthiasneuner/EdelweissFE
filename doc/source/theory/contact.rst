@@ -1196,6 +1196,63 @@ a kink of the master's shape functions, and the traction varies by that quadratu
 Fine slave faces against coarse master faces -- particles against a far field -- confine it to the edges of
 the master faces.
 
+.. _contact-tie-fields:
+
+**A nonlocal field across the tie.** Gradient-enhanced bodies carry a nonlocal field :math:`\bar{N}` besides the
+displacement, balanced by :math:`\eta \dot{\bar{N}} + \bar{N} - l^2 \nabla^2 \bar{N} = L` (with a micro-inertia,
+:math:`m \ddot{\bar{N}}` besides). A tie of the displacement alone leaves each side with a free boundary of that
+balance, :math:`l^2 \nabla\bar{N} \cdot \boldsymbol{n} = 0`: no flux crosses, the damage of the particles ends at
+the tie in a sharp edge, and a crack that reaches the tie cannot grow across it. ``tiedFields`` names the scalar
+fields the tie holds equal across the interface besides the displacement (``tiedFields=displacement; nonlocal
+damage``). It is the same tie once more, one spring per point along the one component of the field, stretched by the
+*jump* of the field between the point and its master point,
+
+.. math::
+    [\bar{N}] = \bar{N}^0_p + \boldsymbol{c} \cdot \bar{\boldsymbol{n}} - N^m \cdot \bar{\boldsymbol{n}}^m ,
+    \qquad f = \kappa A_p\, [\bar{N}] , \qquad
+    \boldsymbol{K} = \kappa A_p \, [\boldsymbol{c}, -N^m] \otimes [\boldsymbol{c}, -N^m] ,
+
+with the value of the field at the origin of the point :math:`\bar{N}^0_p` -- zero for finite elements, whose nodes
+carry the total, the value at the last update for a particle, whose nodes carry the increment; the particle knows it
+from the value and the gradient at its center -- and the nodal values :math:`\bar{\boldsymbol{n}}` of either side.
+The force is the penalty form of the continuity of the field: the flux :math:`l^2 \nabla\bar{N} \cdot
+\boldsymbol{n}` crosses the tie as :math:`\kappa [\bar{N}]` per unit area. The field is interpolated as the
+displacement: with the interpolation vector :math:`\boldsymbol{c}` of the point, and with the parent face shape
+functions :math:`N^m` of the master. This is right for the gradient-enhanced elements of Marmot used at a tie
+(``GC3D20``, ``GC3D20R``, ``GCAX8R``, ...), whose nonlocal field lives on all their nodes with the shape functions of
+the displacement; a master face whose nodes do not all carry the field cannot be located. Both sides reproduce a
+linear field exactly, so a linear field crosses the tie with no jump and no force, and a uniform jump is distributed
+as the consistent nodal flux of a uniform flux on both faces (``tests/test_tie_scalar_fields.py``). A field has no
+state at rest: a jump at the pairing is closed, not kept.
+
+The weak form of the nonlocal balance holds :math:`l^2 \nabla\bar{N} \cdot \nabla \delta\bar{N}`, whose
+stiffness per unit area of a face of the size :math:`h` is of the order :math:`l^2/h`. The penalty per unit area is
+scaled alike,
+
+.. math::
+    \kappa = \beta \, \frac{l^2}{h} ,
+
+with the nonlocal radius :math:`l` of the materials (``nonlocalRadius``), the size :math:`h` of the master face the
+point is tied to (the length of a line face, the square root of the area of a quadrilateral, from its corners), and
+the factor :math:`\beta` (``nonlocalPenaltyFactor``, by default 10). A flux then opens the jump :math:`(h/\beta)\,
+\nabla\bar{N} \cdot \boldsymbol{n}`, a tenth of the change of the field over one master face by default; a larger
+:math:`\beta` closes it further and stiffens the rows of the field in the critical time step. The areas
+:math:`A_p` are those of the displacement springs, with the ring weight of an axisymmetric model or the thickness of a
+plane one.
+
+In an explicit analysis the springs of the field enter the critical time step like the displacement springs
+(:doc:`/theory/criticaltimestep`, "Penalty constraints"): their row sums, scaled by the lumped coefficient of the
+field on both sides, add to the bound of the field's degrees of freedom. A nonlocal field with a micro-inertia is
+integrated by central differences, and the rows add to the squared frequencies, at the elements and at the particles.
+A first-order field (a nonlocal viscosity, no micro-inertia) is integrated by forward Euler; its rows, scaled by the
+damping, add to the rates of the particles' field block, while the elements' estimate holds no rate of a first-order
+field (Marmot's elements do not bound it) for them to add to. The tie of a nonlocal field of finite elements is
+therefore in the critical time step on the elements' side only with a micro-inertia (the S6 models of the screw
+anchor give it :math:`\eta^2/4`, critically damped). Under ``carry-critical-time-step-weights`` the weights of a
+field a constraint acts on stay constant per field, so a tied nonlocal field keeps them, as the displacement does.
+The springs of the field store no mechanical energy: the energy, the forces and the tractions the tie reports are
+those of its displacement springs.
+
 **A new mesh.** When either side is refined, the constraint is rebuilt, and the points are tied anew at the
 next update in the configuration of the model -- each displaced from rest as the tied point of before
 closest to it was at the last evaluation. If only the master was refined, every point keeps its own
