@@ -69,11 +69,14 @@ class FEModel:
     ----------
     dimension
         The dimension of the model.
+    axisymmetric
+        True if the model is the section of a body of revolution (``*job, domain=axisymmetric``), see
+        :attr:`axisymmetric`.
     """
 
     identification = "FEModel"
 
-    def __init__(self, dimension: int):
+    def __init__(self, dimension: int, axisymmetric: bool = False):
         self.time = 0.0  #: Current time of the model.
         self.nodes = {}  #: Nodes in the model.
         self.elements = {}  #: Elements in the model.
@@ -94,6 +97,15 @@ class FEModel:
         self.rigidBodies = {}  #: RigidBodies in the model.
         self.elementProperties = []  #: Element properties.
         self.domainSize = dimension  #: Spatial dimension of the model
+        if axisymmetric and dimension != 2:
+            raise ValueError(f"An axisymmetric model is two-dimensional, the section r-z; got dimension {dimension}.")
+        #: True if the model is the section r-z of a body of revolution about the axis r = 0: the first coordinate
+        #: is the radius r, the second the axial coordinate z, and every point of the section stands for the ring it
+        #: sweeps about the axis. What the model integrates is then integrated over the rings, with the circumference
+        #: :math:`2 \pi r` -- the axisymmetric elements their volumes, the contact points their areas (see
+        #: :func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`) --, so that the forces and the
+        #: masses at the nodes are those of the full rings. Set by ``*job, domain=axisymmetric``.
+        self.axisymmetric = axisymmetric
         self.fieldOutputController = None  #: Set once by the driver; lets in-model entities (e.g. AMR markers) look up a named *fieldOutput by value, not just by declaration.
         #: How the mesh may change during a run; see :class:`~edelweissfe.models.topologypipeline.TopologyPipeline`.
         self.topology = TopologyPipeline(self)
@@ -833,7 +845,9 @@ def printPrettyModelSummary(model: FEModel, journal: Journal):
             )
 
     journal.message(
-        "Finite element model with spatial dimension {:} has".format(model.domainSize),
+        "Finite element model with spatial dimension {:}{:} has".format(
+            model.domainSize, " (axisymmetric)" if model.axisymmetric else ""
+        ),
         identification,
         0,
     )
