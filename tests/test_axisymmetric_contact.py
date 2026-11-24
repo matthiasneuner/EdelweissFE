@@ -77,7 +77,10 @@ from edelweissfe.steps.adaptivestepforexplicitsimulations import (
 from edelweissfe.steps.stepmanager import StepActionCollection
 from edelweissfe.utils.fieldoutput import FieldOutputController
 from edelweissfe.utils.inputfileparser import parseInputFile
-from edelweissfe.utils.residualtangentcheck import residualContributionAndTangent
+from edelweissfe.utils.residualtangentcheck import (
+    finiteDifferenceTangent,
+    residualContributionAndTangent,
+)
 
 #: The rings span the radii RI to RO and the height H; the slave ring overlaps the master by DELTA.
 RI, RO, H, DELTA = 1.0, 2.0, 1.0, 1e-3
@@ -290,6 +293,53 @@ def test_a_tie_holds_the_ring_with_the_force_of_a_uniform_traction_on_it(interfa
 
     np.testing.assert_allclose(constraint.getTractions(), np.tile(-PENALTY * d, (constraint.nPoints, 1)), rtol=1e-10)
     np.testing.assert_allclose(constraint.contactForceOnSlave, -PENALTY * d * ringArea, rtol=1e-10)
+    assertTheBoundIsTheOneOfTheTangent(constraint, U)
+
+
+@pytest.mark.parametrize("interface", ["annulus", "cylinder"])
+def test_a_tied_nonlocal_field_crosses_the_ring_as_a_linear_field_and_a_uniform_flux(interface):
+    """The tie of the nonlocal field on the rings (``tiedFields``): a field linear along the interface (in r across an
+    annulus, in z across a cylinder) crosses with no jump and no force, a uniform jump :math:`j` of the slave side gives
+    the force :math:`\\kappa j` on the area of the ring, :math:`\\kappa = \\beta l^2 / h` with the size of the master
+    faces, equal and opposite on the master; the tangent is the derivative of the residual contribution and the bound of
+    the stiffness that of the tangent."""
+
+    radius, factor = 0.8, 10.0
+    model, slaveSetName, masterSetName, ringArea = _twoRings(interface)
+    constraint = _constraint(
+        model,
+        slaveSetName,
+        masterSetName,
+        contactType="tied",
+        tiedFields="displacement; nonlocal damage",
+        nonlocalRadius=radius,
+        nonlocalPenaltyFactor=factor,
+    )
+    nNodes = len(constraint._nodes)
+    field = slice(2 * nNodes, 3 * nNodes)
+    slaveNodes = constraint.slave.finiteElementNodes()
+    onTheSlave = np.array([node in slaveNodes for node in constraint._nodes])
+    X = np.array([node.coordinates for node in constraint._nodes])
+
+    U = np.zeros(constraint.nDof)
+    U[field] = 0.3 + 0.7 * X[:, 0 if interface == "annulus" else 1]
+    P = np.zeros(constraint.nDof)
+    constraint.computeKernels(U, np.zeros_like(U), P, None, None)
+    np.testing.assert_allclose(P[field], 0.0, atol=1e-12 * factor * radius**2)
+
+    jump = 2e-3
+    U[:] = 0.0
+    U[field][onTheSlave] = jump
+    P[:] = 0.0
+    constraint.computeKernels(U, np.zeros_like(U), P, None, None)
+    h = (RO - RI) / 3 if interface == "annulus" else H / 3
+    flux = factor * radius**2 / h * jump * ringArea
+    np.testing.assert_allclose(P[field][onTheSlave].sum(), flux, rtol=1e-10)
+    np.testing.assert_allclose(P[field][~onTheSlave].sum(), -flux, rtol=1e-10)
+
+    U = 1e-3 * np.random.default_rng(2).standard_normal(constraint.nDof)
+    _, K = residualContributionAndTangent(constraint, U, np.zeros_like(U))
+    np.testing.assert_allclose(K, finiteDifferenceTangent(constraint, U, np.zeros_like(U)), atol=1e-6 * np.abs(K).max())
     assertTheBoundIsTheOneOfTheTangent(constraint, U)
 
 
