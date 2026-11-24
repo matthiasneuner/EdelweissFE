@@ -248,7 +248,8 @@ class SystemOfMassesOnSpringsWithoutABound(SystemOfMassesOnSprings):
     finite."""
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
-        return np.nan
+        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(lumpedMass, lumpedDamping, forEachChunk)
+        return CriticalTimeStepBoundOfEachDof(np.nan, bound.dofs, np.full_like(bound.squaredFrequencies, np.nan))
 
 
 class ModelOfMassesOnSpringsWithoutABound(ModelOfMassesOnSprings):
@@ -262,7 +263,8 @@ class SystemOfMassesOnSpringsReportingNoCriticalTimeStep(SystemOfMassesOnSprings
     """Masses on springs that report no critical time step (an infinite one), as entities whose stiffness gives none."""
 
     def criticalTimeStepOfEntitiesWithOwnInertia(self, lumpedMass, lumpedDamping, forEachChunk):
-        return np.inf
+        bound = super().criticalTimeStepOfEntitiesWithOwnInertia(lumpedMass, lumpedDamping, forEachChunk)
+        return CriticalTimeStepBoundOfEachDof(np.inf, bound.dofs, np.zeros_like(bound.squaredFrequencies))
 
 
 class ModelOfMassesOnSpringsReportingNoCriticalTimeStep(ModelOfMassesOnSprings):
