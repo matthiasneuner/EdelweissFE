@@ -166,23 +166,26 @@ class ContactPointsAtSlaveNodes(ContactPoints):
 
         return self._referenceCoordinatesOfLocated
 
-    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """:math:`\\boldsymbol{U}`, the total displacement of the located nodes.
+    def changesFromTheOriginsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray, nComponents: int) -> np.ndarray:
+        """The total of the field at the located nodes; see
+        :meth:`ContactPoints.changesFromTheOriginsOfLocatedPoints`.
 
         Parameters
         ----------
         U
-            The solution of the slave part of the block.
+            The field's solution of the slave part of the block.
         dU
             The increment; unused.
+        nComponents
+            The number of components of the field per node.
 
         Returns
         -------
         numpy.ndarray
-            The displacements, of shape (nLocated, nDim).
+            The changes, of shape (nLocated, number of components of the field).
         """
 
-        return U.reshape(self._referenceCoordinatesOfLocated.shape)
+        return U.reshape((len(self._referenceCoordinatesOfLocated), nComponents))
 
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
         """Add :math:`f\\, n` at each given node; see :meth:`ContactPoints.addForceResidual`.
@@ -199,10 +202,10 @@ class ContactPointsAtSlaveNodes(ContactPoints):
             The unit directions of their springs.
         """
 
-        P.reshape(self._referenceCoordinatesOfLocated.shape)[points] += forces[:, None] * directions
+        P.reshape((-1, directions.shape[1]))[points] += forces[:, None] * directions
 
     def interpolationOfLocatedPoint(self, k: int) -> tuple[np.ndarray, np.ndarray]:
-        """The degrees of freedom of a located node, and :math:`c = [1]`.
+        """The position of a located node in the slave part of the block, and :math:`c = [1]`.
 
         Parameters
         ----------
@@ -212,11 +215,10 @@ class ContactPointsAtSlaveNodes(ContactPoints):
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
-            The degrees of freedom and the interpolation vector.
+            The position of the node and the interpolation vector.
         """
 
-        nDim = self._referenceCoordinates.shape[1]
-        return np.arange(k * nDim, (k + 1) * nDim), np.ones(1)
+        return np.array([k]), np.ones(1)
 
     def interpolationMatrixOfLocatedPoints(self) -> csr_matrix:
         """The identity: every located node is its own point; see

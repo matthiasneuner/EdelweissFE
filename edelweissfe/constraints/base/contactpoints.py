@@ -55,6 +55,15 @@ difference of the origins once and the difference of the displacements in every 
 of the coordinates: see :class:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint`, *Measured
 from the origins*.
 
+A scalar field the points carry besides the displacement -- the nonlocal field of a gradient-enhanced model, which a
+tie can tie as well -- is told in the same two parts: its value at the origin, :math:`\\bar{N}^0`, and its change
+:math:`c \\cdot \\bar{\\boldsymbol{n}}` from there, with the field's solution :math:`\\bar{\\boldsymbol{n}}` of the
+block. The nodes of finite elements carry the total of the field, so its value at their origins is zero; a particle
+knows its fields at the configuration of its last update, and its nodes carry the increment from there. The points move
+the field with the same interpolation vector as the displacement: the methods that interpolate and distribute
+(:meth:`ContactPoints.changesFromTheOriginsOfLocatedPoints`, :meth:`ContactPoints.addForceResidual`) take a field of any
+number of components per node, the displacement's :math:`n_\\mathrm{dim}` or the one of a scalar field.
+
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
 the master, the gap, the law -- is written once for all of them, for a deformable master surface
 (:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`) and for a discrete rigid body
@@ -70,6 +79,27 @@ from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
 
 
+def dofsOfNodes(nodes: np.ndarray, nComponents: int) -> np.ndarray:
+    """The degrees of freedom of nodes in a part of a block that holds a field node by node: the components of each
+    node in a row.
+
+    Parameters
+    ----------
+    nodes
+        The positions of the nodes in the part of the block.
+    nComponents
+        The number of components of the field per node: :math:`n_\\mathrm{dim}` for the displacement, one for a scalar
+        field.
+
+    Returns
+    -------
+    numpy.ndarray
+        The degrees of freedom, node by node.
+    """
+
+    return (np.asarray(nodes)[:, None] * nComponents + np.arange(nComponents)).ravel()
+
+
 class ContactPoints(ABC):
     """The contact points of the slave side of a contact constraint.
 
@@ -77,11 +107,12 @@ class ContactPoints(ABC):
     (:meth:`currentPointCoordinates`), pairs those within reach with the master surface, and then *locates* the paired
     ones (:meth:`locatePoints`): they name the nodes they act on, which become the slave part of the constraint's
     block. Within the increment the constraint evaluates the located points only: where they are, from their origins
-    (:meth:`originsOfLocatedPoints`) and their displacements (:meth:`displacementsOfLocatedPoints`), the residual
-    contribution of the forces on them
+    (:meth:`originsOfLocatedPoints`) and their displacements (:meth:`changesFromTheOriginsOfLocatedPoints`), the
+    residual contribution of the forces on them
     (:meth:`addForceResidual`) and, for the tangent, their interpolation vectors
     (:meth:`interpolationOfLocatedPoint`), all at once for the bound of the stiffness
-    (:meth:`interpolationMatrixOfLocatedPoints`).
+    (:meth:`interpolationMatrixOfLocatedPoints`). A tied scalar field is evaluated alike, from its values at the
+    origins (:meth:`valuesOfAFieldAtTheOriginsOfLocatedPoints`).
 
     Attributes
     ----------
@@ -147,23 +178,45 @@ class ContactPoints(ABC):
         """
 
     @abstractmethod
-    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """The displacements of the located points from their origins (:meth:`originsOfLocatedPoints`):
-        :math:`C \\boldsymbol{u}`, the interpolation vectors of the points times the solution of the slave part of the
-        block -- the total displacement or the increment, whichever the kind of point carries.
+    def changesFromTheOriginsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray, nComponents: int) -> np.ndarray:
+        """The change of a field at the located points from their origins (:meth:`originsOfLocatedPoints`):
+        :math:`C \\boldsymbol{u}`, the interpolation vectors of the points times the field's solution of the slave part
+        of the block -- the total or the increment, whichever the kind of point carries. For the displacement, the
+        displacements of the points from their origins.
 
         Parameters
         ----------
         U
-            The solution of the slave part of the constraint's block.
+            The field's solution of the slave part of the constraint's block, node by node.
         dU
-            The increment of the slave part of the constraint's block.
+            Its increment, likewise.
+        nComponents
+            The number of components of the field per node: :math:`n_\\mathrm{dim}` for the displacement, one for a
+            scalar field.
 
         Returns
         -------
         numpy.ndarray
-            The displacements, of shape (nLocated, nDim).
+            The changes, of shape (nLocated, number of components of the field).
         """
+
+    def valuesOfAFieldAtTheOriginsOfLocatedPoints(self, field: str) -> np.ndarray:
+        """The values of a scalar field at the origins of the located points, where the field's solution of the slave
+        part of the block is zero (see the module documentation). Zero by default: the nodes of finite elements carry
+        the total of the field.
+
+        Parameters
+        ----------
+        field
+            The name of the field.
+
+        Returns
+        -------
+        numpy.ndarray
+            The values, of shape (nLocated,).
+        """
+
+        return np.zeros(self.interpolationMatrixOfLocatedPoints().shape[0])
 
     def coordinatesOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
         """The current coordinates of the located points: their origins plus their displacements.
@@ -171,9 +224,9 @@ class ContactPoints(ABC):
         Parameters
         ----------
         U
-            The solution of the slave part of the constraint's block.
+            The displacement solution of the slave part of the constraint's block.
         dU
-            The increment of the slave part of the constraint's block.
+            Its increment.
 
         Returns
         -------
@@ -181,24 +234,27 @@ class ContactPoints(ABC):
             The coordinates, of shape (nLocated, nDim).
         """
 
-        return self.originsOfLocatedPoints() + self.displacementsOfLocatedPoints(U, dU)
+        origins = self.originsOfLocatedPoints()
+        return origins + self.changesFromTheOriginsOfLocatedPoints(U, dU, origins.shape[1])
 
     @abstractmethod
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
         """Add the residual contribution of the forces of penalty springs at located points, :math:`f\\, c \\otimes n`
         per point: the negative of the force :math:`-f\\, n` on the point, distributed with its interpolation vector.
-        A spring acts along a unit direction :math:`n`: the normal of a contact, an axis of a tie.
+        A spring acts along a unit direction :math:`n` of the components of a field: the normal of a contact, an axis
+        of a tie, the one component of a tied scalar field.
 
         Parameters
         ----------
         P
-            The slave part of the constraint's residual contribution; augmented.
+            The part of the constraint's residual contribution of the field the springs act on, at the slave nodes,
+            node by node; augmented.
         points
             The located points that carry a force (indices into the located points).
         forces
             The forces :math:`f` of their springs, the normal forces of a contact (negative in contact).
         directions
-            The unit directions of their springs, of shape (len(points), nDim).
+            The unit directions of their springs, of shape (len(points), number of components of the field).
         """
 
     @abstractmethod
@@ -213,8 +269,8 @@ class ContactPoints(ABC):
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
-            Its degrees of freedom in the slave part of the block, node by node, and its interpolation vector :math:`c`
-            over these nodes.
+            The positions of its nodes in the slave part of the block (:func:`dofsOfNodes` gives their degrees of
+            freedom for a field), and its interpolation vector :math:`c` over these nodes.
         """
 
     @abstractmethod

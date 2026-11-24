@@ -346,26 +346,29 @@ class ContactPointsOnSlaveSurface(ContactPoints):
 
         return self._originsOfLocated
 
-    def displacementsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray) -> np.ndarray:
-        """:math:`N^s(\\xi_q) \\cdot U^s`, from the total displacement of the parent face nodes.
+    def changesFromTheOriginsOfLocatedPoints(self, U: np.ndarray, dU: np.ndarray, nComponents: int) -> np.ndarray:
+        """:math:`N^s(\\xi_q) \\cdot U^s`, from the total of the field at the parent face nodes; see
+        :meth:`ContactPoints.changesFromTheOriginsOfLocatedPoints`.
 
         Parameters
         ----------
         U
-            The solution of the slave part of the block.
+            The field's solution of the slave part of the block.
         dU
-            The increment; unused, the total displacement moves the points.
+            The increment; unused, the nodes carry the total.
+        nComponents
+            The number of components of the field per node.
 
         Returns
         -------
         numpy.ndarray
-            The displacements, of shape (nLocated, nDim).
+            The changes, of shape (nLocated, number of components of the field).
         """
 
         return np.einsum(
             "ai,aij->aj",
             self._shapeFunctionsOfLocated,
-            U.reshape((len(self._shapeFunctionsOfLocated), self.nParentNodes, self.nDim)),
+            U.reshape((len(self._shapeFunctionsOfLocated), self.nParentNodes, nComponents)),
         )
 
     def addForceResidual(self, P: np.ndarray, points: np.ndarray, forces: np.ndarray, directions: np.ndarray):
@@ -386,10 +389,11 @@ class ContactPointsOnSlaveSurface(ContactPoints):
 
         Ns = self._shapeFunctionsOfLocated[points]
         w = (Ns[:, :, None] * directions[:, None, :]).reshape((len(points), -1))
-        P.reshape((-1, self.nParentNodes * self.nDim))[points] += forces[:, None] * w
+        P.reshape((-1, self.nParentNodes * directions.shape[1]))[points] += forces[:, None] * w
 
     def interpolationOfLocatedPoint(self, k: int) -> tuple[np.ndarray, np.ndarray]:
-        """The degrees of freedom of the parent face nodes of a located point, and its shape functions there.
+        """The positions of the parent face nodes of a located point in the slave part of the block, its own copy of
+        them, and its shape functions there.
 
         Parameters
         ----------
@@ -399,11 +403,10 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         Returns
         -------
         tuple[numpy.ndarray, numpy.ndarray]
-            The degrees of freedom and the interpolation vector.
+            The positions of the nodes and the interpolation vector.
         """
 
-        nDof = self.nParentNodes * self.nDim
-        return np.arange(k * nDof, (k + 1) * nDof), self._shapeFunctionsOfLocated[k]
+        return np.arange(k * self.nParentNodes, (k + 1) * self.nParentNodes), self._shapeFunctionsOfLocated[k]
 
     def interpolationMatrixOfLocatedPoints(self) -> csr_matrix:
         """The shape functions :math:`N^s(\\xi_q)` of the located points, each over its own copy of the nodes of its

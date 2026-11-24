@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from edelweissfe.constraints.base.constraintbase import ConstraintBase, NextIncrement
-from edelweissfe.constraints.base.contactpoints import ContactPoints
+from edelweissfe.constraints.base.contactpoints import ContactPoints, dofsOfNodes
 from edelweissfe.constraints.base.forcesonlyexplicitevaluation import (
     ForcesOnlyExplicitEvaluation,
 )
@@ -362,7 +362,9 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._bodyNormalsOfLocated = self._frozenBodyNormals[located]
         self._planeOffsetsOfLocated = self._frozenPlaneOffsets[located]
         self._areasOfLocated = self.slave.areas[located]
-        self._slaveDofsOfLocated = [self.slave.interpolationOfLocatedPoint(k)[0] for k in range(len(located))]
+        self._slaveDofsOfLocated = [
+            dofsOfNodes(self.slave.interpolationOfLocatedPoint(k)[0], self.nDim) for k in range(len(located))
+        ]
 
         # A point that lost its triangle has no gap and no force: reset them, so that getGaps() and the pressures do
         # not keep their last values.

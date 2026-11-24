@@ -201,3 +201,29 @@ def facetQuadratureRule(nFacetNodes: int, nPoints: int) -> tuple[np.ndarray, np.
             f"Available: {sorted(rules.keys())}."
         )
     return rules[nPoints]
+
+
+def sizesOfParentFaces(faceType: str, nodeCoordinates: np.ndarray) -> np.ndarray:
+    """The size :math:`h` of parent faces, from their corner nodes: the length of a line face, the square root of the
+    area of a quadrilateral face (half the cross product of its diagonals). A curved face is measured by its chords.
+
+    Parameters
+    ----------
+    faceType
+        One of the keys of :data:`PARENT_FACE_PARAMETRIC_COORDS`.
+    nodeCoordinates
+        The coordinates of the nodes of each face, in the canonical order (corners first), of shape
+        ``(nFaces, nNodes, nDim)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        The sizes, of shape ``(nFaces,)``.
+    """
+
+    x = np.asarray(nodeCoordinates)
+    if faceType in ("line2", "line3"):
+        return np.linalg.norm(x[:, 1] - x[:, 0], axis=-1)
+    if faceType in ("quad4", "quad8"):
+        return np.sqrt(0.5 * np.linalg.norm(np.cross(x[:, 2] - x[:, 0], x[:, 3] - x[:, 1]), axis=-1))
+    raise ValueError(f"sizesOfParentFaces: unsupported parent face type '{faceType}'.")
