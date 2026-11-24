@@ -38,7 +38,10 @@ distributed with the *parent* face's shape functions.
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from edelweissfe.constraints.base.contactpoints import ContactPoints
+from edelweissfe.constraints.base.contactpoints import (
+    ContactPoints,
+    areasOfContactPoints,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.sets.elementset import ElementSet
@@ -97,7 +100,9 @@ class ContactPointsOnSlaveSurface(ContactPoints):
     (with :math:`\\Xi` the facet vertices' own parametric coordinates in the parent face, stamped by
     the surface element generator), and carries the constant weight
     :math:`J_q = A_{\\text{facet}}^{\\text{ref}} w_q`. Its position follows the *curved* parent
-    surface, :math:`x_q = N^s(\\xi_q) \\cdot x^s`.
+    surface, :math:`x_q = N^s(\\xi_q) \\cdot x^s`. The area it stands for is :math:`J_q`, in an axisymmetric
+    model the area :math:`2 \\pi r_q J_q` of its ring, at the radius of its origin
+    (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`).
 
     The contact points are numbered by slave facet and, within a facet, by quadrature point. The faces of the slave
     surface must be of one type (one number of parent face nodes), so that the located points are evaluated as one
@@ -113,6 +118,9 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         The number of quadrature points per slave facet.
     constraintName
         The name of the owning constraint, for error messages.
+    axisymmetric
+        True if the slave surface lies in the section r-z of an axisymmetric model, see
+        :attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`.
 
     Attributes
     ----------
@@ -128,7 +136,7 @@ class ContactPointsOnSlaveSurface(ContactPoints):
     integrationWeights : list[numpy.ndarray]
         Per slave facet, the integration weight of each of its quadrature points in the reference
         configuration (consistent with the small-deformation setting, as the node-based
-        constraint's tributary areas are).
+        constraint's tributary areas are), in the model's own space: a length in 2D.
     pointFacet : numpy.ndarray
         The slave facet index of each contact point.
     pointQuadraturePoint : numpy.ndarray
@@ -136,11 +144,15 @@ class ContactPointsOnSlaveSurface(ContactPoints):
     nPoints : int
         The number of contact points.
     areas : numpy.ndarray
-        The integration weight of each contact point, see :attr:`integrationWeights`.
+        The area each contact point stands for: its integration weight (:attr:`integrationWeights`), in an
+        axisymmetric model times the circumference :math:`2 \\pi r` at its origin.
     """
 
-    def __init__(self, slaveSurface: ElementSet, nQuadraturePoints: int, constraintName: str):
+    def __init__(
+        self, slaveSurface: ElementSet, nQuadraturePoints: int, constraintName: str, axisymmetric: bool = False
+    ):
         self.setName = slaveSurface.name
+        self.axisymmetric = axisymmetric
         self._constraintName = constraintName
         self.nQuadraturePoints = nQuadraturePoints
         self.facets = list(slaveSurface)
@@ -169,8 +181,6 @@ class ContactPointsOnSlaveSurface(ContactPoints):
 
         self._surfaceNodes = list(dict.fromkeys(node for facet in self.facets for node in facet.nodes))
 
-        self.areas = np.concatenate(self.integrationWeights) if self.nPoints else np.zeros(0)
-
         nodeCounts = {len(nodes) for nodes in self.parentNodes}
         if len(nodeCounts) > 1:
             raise ValueError(
@@ -181,6 +191,15 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         self.nDim = self.parentReferenceCoordinates[0].shape[1] if self.facets else 0
         self.nParentNodes = nodeCounts.pop() if nodeCounts else 0
         self.locatePoints(np.zeros(0, dtype=int))
+
+        originsOfPoints = (
+            np.concatenate([N @ X for N, X in zip(self.shapeFunctions, self.parentReferenceCoordinates)])
+            if self.nPoints
+            else np.zeros((0, self.nDim))
+        )
+        self.areas = areasOfContactPoints(
+            np.concatenate(self.integrationWeights) if self.nPoints else np.zeros(0), originsOfPoints, axisymmetric
+        )
 
     @property
     def surfaceNodes(self) -> list:
@@ -305,7 +324,7 @@ class ContactPointsOnSlaveSurface(ContactPoints):
         """
 
         return ContactPointsOnSlaveSurface(
-            model.elementSets[self.setName], self.nQuadraturePoints, self._constraintName
+            model.elementSets[self.setName], self.nQuadraturePoints, self._constraintName, model.axisymmetric
         )
 
     def locatePoints(self, points: np.ndarray) -> list:

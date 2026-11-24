@@ -410,6 +410,19 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     the point at which that becomes a real problem, because quadrature points, unlike nodes, have no
     identity that survives a retiling. A tie hands its displacements from rest on, from point to closest point.
 
+    Axisymmetric models
+    -------------------
+    In an axisymmetric model, the section r-z of a body of revolution
+    (:attr:`~edelweissfe.models.femodel.FEModel.axisymmetric`), every contact point stands for the ring it sweeps about
+    the axis, and its area is the area of the ring, :math:`A_p = 2 \\pi r_p L_p` with the length :math:`L_p` of its
+    share of the surface line (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`). The forces
+    of the springs, their tangent, the bound of their stiffness for the critical time step, the pressures and the energy
+    are then those of the full rings, as the axisymmetric elements integrate their forces and masses over the full
+    rings; the geometry -- the search, the pairing, the gap, the could-close rule of the bound -- is the plane one. The
+    contact points must measure their areas as the model integrates; the constraint checks it
+    (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.checkTheAreasAreMeasuredAsIn`). See the
+    :ref:`contact theory <contact-axisymmetric>`.
+
     Parameters
     ----------
     name
@@ -502,6 +515,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         # without an offset (an overlap pushed apart at once).
         self._initialOverlapTime = None
 
+        contactPoints.checkTheAreasAreMeasuredAsIn(model, name)
         self.slave = contactPoints
         self._buildMaster(masterSurface)
         self._resetContactPoints()

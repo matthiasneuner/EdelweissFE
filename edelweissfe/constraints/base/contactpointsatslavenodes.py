@@ -33,7 +33,10 @@ area.
 import numpy as np
 from scipy.sparse import csr_matrix, identity
 
-from edelweissfe.constraints.base.contactpoints import ContactPoints
+from edelweissfe.constraints.base.contactpoints import (
+    ContactPoints,
+    areasOfContactPoints,
+)
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
 from edelweissfe.sets.elementset import ElementSet
@@ -69,8 +72,10 @@ class ContactPointsAtSlaveNodes(ContactPoints):
 
     A node is its own contact point: its interpolation vector is :math:`c = [1]`, it sits at
     :math:`\\boldsymbol{X} + \\boldsymbol{U}` (its origin :math:`\\boldsymbol{X}`, its total displacement
-    :math:`\\boldsymbol{U}`), and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`).
-    A located node takes itself into the block of the constraint, once.
+    :math:`\\boldsymbol{U}`), and it stands for its tributary area (:func:`tributaryAreasOfSlaveNodes`), in an
+    axisymmetric model for the ring it sweeps, :math:`2 \\pi r` times its tributary length at its radius
+    (:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`). A located node takes itself into the
+    block of the constraint, once.
 
     Parameters
     ----------
@@ -78,14 +83,19 @@ class ContactPointsAtSlaveNodes(ContactPoints):
         The element set of contact facet elements forming the slave surface.
     constraintName
         The name of the owning constraint, for error messages.
+    axisymmetric
+        True if the slave surface lies in the section r-z of an axisymmetric model, see
+        :attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`.
     """
 
-    def __init__(self, slaveSurface: ElementSet, constraintName: str):
+    def __init__(self, slaveSurface: ElementSet, constraintName: str, axisymmetric: bool = False):
         self.setName = slaveSurface.name
         self._constraintName = constraintName
-        self.slaveNodes, self.areas = tributaryAreasOfSlaveNodes(list(slaveSurface))
+        self.axisymmetric = axisymmetric
+        self.slaveNodes, tributaryAreas = tributaryAreasOfSlaveNodes(list(slaveSurface))
         self.nPoints = len(self.slaveNodes)
         self._referenceCoordinates = np.array([node.coordinates for node in self.slaveNodes])
+        self.areas = areasOfContactPoints(tributaryAreas, self._referenceCoordinates, axisymmetric)
         self.locatePoints(np.zeros(0, dtype=int))
 
     @property
@@ -290,4 +300,4 @@ class ContactPointsAtSlaveNodes(ContactPoints):
             The new contact points.
         """
 
-        return ContactPointsAtSlaveNodes(model.elementSets[self.setName], self._constraintName)
+        return ContactPointsAtSlaveNodes(model.elementSets[self.setName], self._constraintName, model.axisymmetric)

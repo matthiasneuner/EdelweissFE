@@ -379,6 +379,13 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
     ):
         super().__init__(name, model)
 
+        if model.axisymmetric:
+            raise NotImplementedError(
+                f"Constraint '{name}': nodeToDeformableSurfacePenalty does not weigh its nodes by the rings of an "
+                "axisymmetric model; use surfaceToDeformableSurfacePenalty (contactPoints=nodes for node-based "
+                "contact), whose contact points stand for the areas of their rings."
+            )
+
         self.name = name
         self.journal = journal
         self._lastSeenTopologyVersion = model.topology.version

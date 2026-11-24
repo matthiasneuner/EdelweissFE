@@ -112,10 +112,12 @@ class SurfaceContactPenaltySchema:
 
 #: The kinds of contact points an input file can choose, by the value of the ``contactPoints`` option.
 _contactPointsFromInput = {
-    "quadraturepoints": lambda configuration, slaveSurface, name: ContactPointsOnSlaveSurface(
-        slaveSurface, configuration.nQuadraturePoints, name
+    "quadraturepoints": lambda configuration, slaveSurface, name, axisymmetric: ContactPointsOnSlaveSurface(
+        slaveSurface, configuration.nQuadraturePoints, name, axisymmetric
     ),
-    "nodes": lambda configuration, slaveSurface, name: ContactPointsAtSlaveNodes(slaveSurface, name),
+    "nodes": lambda configuration, slaveSurface, name, axisymmetric: ContactPointsAtSlaveNodes(
+        slaveSurface, name, axisymmetric
+    ),
 }
 
 
@@ -123,15 +125,16 @@ def contactPointsOfTheSlaveSurface(
     configuration: SurfaceContactPenaltySchema, model: FEModel, constraintName: str
 ) -> ContactPoints:
     """The contact points an input file chooses on the slave surface of a contact constraint: its quadrature points or
-    its nodes (option ``contactPoints``). The points of the faces of particles are given to a constraint by
-    EdelweissMeshfree, not chosen in an input file.
+    its nodes (option ``contactPoints``), with their areas measured as the model integrates (over the rings of an
+    axisymmetric model). The points of the faces of particles are given to a constraint by EdelweissMeshfree, not
+    chosen in an input file.
 
     Parameters
     ----------
     configuration
         The options of the constraint.
     model
-        The model, holding the slave surface's element set.
+        The model, holding the slave surface's element set; whether it is axisymmetric.
     constraintName
         The name of the constraint, for error messages.
 
@@ -147,4 +150,6 @@ def contactPointsOfTheSlaveSurface(
             f"Constraint '{constraintName}': contactPoints '{configuration.contactPoints}' is not supported. Use "
             "'quadraturePoints' or 'nodes'."
         )
-    return contactPointsOfSurface(configuration, model.elementSets[configuration.slaveSurface], constraintName)
+    return contactPointsOfSurface(
+        configuration, model.elementSets[configuration.slaveSurface], constraintName, model.axisymmetric
+    )

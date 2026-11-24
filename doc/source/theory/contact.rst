@@ -841,6 +841,9 @@ are in use:
       - :math:`\boldsymbol{x}_q^n + G(\boldsymbol{x}_q) \cdot \Delta\boldsymbol{U}`
       - its share of the face, at the start of the contact
 
+In an axisymmetric model, each :math:`A_p` is the area of the ring the point sweeps about the axis
+(:ref:`contact-axisymmetric`).
+
 So one constraint, :mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`, serves all of them;
 what a kind of point contributes is its
 :class:`~edelweissfe.constraints.base.contactpoints.ContactPoints`. A finite element carries its total
@@ -877,6 +880,66 @@ the connectivity: every ``contact-update-frequency`` increments of ``NED`` (by d
 model with particles or in an implicit analysis. Sized from the velocity times one time increment, it is too small
 by that frequency. The constraint warns when a point enters deeper than half of it. At the first update, the bodies are as
 the model gives them: a point that overlaps then is in contact (:ref:`contact-initial-overlap`).
+
+.. _contact-axisymmetric:
+
+Axisymmetric models: every point stands for a ring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An axisymmetric model (``*job, domain=axisymmetric``) is the section r-z of a body of revolution about the axis
+:math:`r = 0`: the first coordinate is the radius :math:`r`, the second the axial coordinate :math:`z`, and every point
+of the section stands for the ring it sweeps about the axis
+(:attr:`~edelweissfe.models.femodel.FEModel.axisymmetric`). The contact surfaces are lines of the section: the faces
+of the axisymmetric elements (``CX8UL``, ``CX8RUL``, ``CAX``, ``GCAX``), tiled into ``Line2ContactFacet`` by the
+surface element generator like the faces of any 2D element, and, from EdelweissMeshfree, the edges of particles. The
+contact points lie on these lines.
+
+The geometry of the contact does not change. A point of the section has no hoop motion; the normal of a line of the
+section is the normal of the surface of revolution it sweeps; the gap of a point is the gap of its whole ring. The
+search, the pairing, the frozen projection, the gap and the springs are those of a plane model. What changes is the
+area a point stands for. It is the area of its ring, the length :math:`L_p` of its share of the line times the
+circumference at its radius (Pappus' theorem for a surface of revolution):
+
+.. math::
+    A_p = 2 \pi r_p \, L_p .
+
+For a quadrature point, :math:`L_p = w_q J_q` and :math:`r_p` is the radius of its origin; for a node, :math:`L_p` is
+its tributary length and :math:`r_p` its radius. On a straight facet the radius is linear along the facet, and the
+quadrature rules -- the rule of the nodes, the trapezoidal rule, as well -- integrate a linear function exactly, so the
+areas of the points of a facet add up to the area of the facet's ring, :math:`2 \pi \bar{r} L` with its mid radius
+:math:`\bar{r}`.
+
+**Why full rings.** The axisymmetric elements integrate their internal forces and their masses over the full ring,
+with :math:`\mathrm{d}V = 2 \pi r \, \mathrm{d}A`, not per radian: their nodal forces and masses are those of
+the rings of the nodes. The springs of the contact, at the stiffness ``penalty`` times the area of the ring, give the
+forces on the same rings, and the two balance at the nodes. A uniform pressure :math:`p` across an annulus
+:math:`r_i \le r \le r_o` then transmits the axial force :math:`\pi (r_o^2 - r_i^2) \, p`, across a cylinder of
+radius :math:`R` and height :math:`H` the radial ring force :math:`2 \pi R H p`. What a point reports is of its ring
+as well: its pressure and traction (``getNormalPressures``, ``getTractions``) are its force per the area of its ring,
+the true pressure, and the energy of its spring is the energy of the ring. The axial components of the forces add up to
+the total axial force; the radial forces of a ring cancel about the axis, so the radial component of a sum of forces
+(``contactForceOnSlave``) is no resultant on the body.
+
+**The critical time step.** The bound of the stiffness of the springs (:ref:`contact-explicit-dynamics`) adds the row
+sums :math:`\sum_j |K^\mathrm{c}_{ij}| / \sqrt{M_i M_j}` to the frequencies of the nodes. The stiffness of the springs
+and the lumped masses of the axisymmetric elements are both those of the full rings, so the row sums are the ones of
+any sector of the body, as if both were taken per radian: the bound is consistent. Whether a point could close within
+the next increment, and is then in the bound with its spring, is told by its gap, which the ring does not touch.
+
+**One rule for every kind of point.** The areas are measured by
+:func:`~edelweissfe.constraints.base.contactpoints.areasOfContactPoints`, which every kind of contact point uses: the
+quadrature points and the nodes of finite element faces here, the points on the edges of particles in
+EdelweissMeshfree. The contact points carry whether they are axisymmetric
+(:attr:`~edelweissfe.constraints.base.contactpoints.ContactPoints.axisymmetric`), and the constraint refuses points
+that do not measure their areas as the model integrates. A point on the axis stands for no area and carries no force;
+a point at a negative radius is refused. A restart rebuilds the areas from the model, as they are geometry, and adopts
+the frozen projection from the checkpoint, as in a plane model.
+
+Axisymmetric models are served by ``surfaceToDeformableSurfacePenalty``, for contact and for the tie, with either kind
+of contact point. The node-based ``nodeToDeformableSurfacePenalty`` refuses them (its tributary areas are not
+measured over the rings: use ``surfaceToDeformableSurfacePenalty`` with ``contactPoints=nodes``),
+``surfaceToDiscreteRigidBodyPenalty`` is for 3D models only, and the tie by elimination (``type=tie``) has no areas and
+is the same as in a plane model.
 
 .. _contact-origins:
 

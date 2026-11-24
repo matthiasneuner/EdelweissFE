@@ -55,6 +55,23 @@ difference of the origins once and the difference of the displacements in every 
 of the coordinates: see :class:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty.Constraint`, *Measured
 from the origins*.
 
+Every contact point stands for an area :math:`A_p`, its share of the slave surface: the penalty per unit area times it
+is the stiffness of its spring. In a 3D model it is the area of the point's share of the surface, its weight times the
+Jacobian of its face (the tributary area of a node); in a plane model the length of its share of the boundary of the
+section, per unit thickness. In an **axisymmetric model**, the section r-z of a body of revolution about the axis
+:math:`r = 0`, a point of the boundary of the section stands for the ring it sweeps about the axis, and its share of the
+surface is the area of that ring, the length :math:`L_p` of its share of the boundary times the circumference at its
+radius (Pappus' theorem):
+
+.. math::
+    A_p = 2 \\pi r_p \\, L_p .
+
+So the forces of the springs are those on the full rings, as the axisymmetric elements integrate their internal forces
+and their masses over the full rings, and the two balance at the nodes; the pressure on a point is its force per the
+area of its ring, the true pressure. The axial forces of the points add up to the total axial force; the radial forces
+of a ring cancel about the axis, so a sum of radial components is no resultant. Every kind of contact point takes its
+area from :func:`areasOfContactPoints`, so that the points of finite elements and of particles share the rule.
+
 :class:`ContactPoints` is what a constraint needs from its contact points. The constraint itself -- the pairing with
 the master, the gap, the law -- is written once for all of them, for a deformable master surface
 (:mod:`~edelweissfe.constraints.surfacetodeformablesurfacepenalty`) and for a discrete rigid body
@@ -68,6 +85,46 @@ from scipy.sparse import csr_matrix
 
 from edelweissfe.models.femodel import FEModel
 from edelweissfe.models.modelchange import ModelChange
+
+
+def areasOfContactPoints(measures: np.ndarray, coordinates: np.ndarray, axisymmetric: bool) -> np.ndarray:
+    """The areas contact points stand for, from their measures and where they are (see the module documentation): the
+    measures themselves in a 3D or a plane model, the areas of the rings they sweep about the axis in an axisymmetric
+    model, :math:`2 \\pi r` times their measures.
+
+    Parameters
+    ----------
+    measures
+        The measure of each point in the model's own space: its share of the area of the surface in 3D, of the length
+        of the boundary of the section in 2D, e.g. its quadrature weight times the Jacobian of its face.
+    coordinates
+        Where the points are, (nPoints, nDim), in the configuration the measures are taken in; in an axisymmetric model
+        the first coordinate is the radius.
+    axisymmetric
+        True if the points lie in the section r-z of an axisymmetric model.
+
+    Returns
+    -------
+    numpy.ndarray
+        The areas.
+
+    Raises
+    ------
+    ValueError
+        If a point of an axisymmetric model lies at a negative radius: the section of a body of revolution is meshed in
+        :math:`r \\geq 0`.
+    """
+
+    if not axisymmetric:
+        return np.asarray(measures, dtype=float)
+
+    radii = coordinates[:, 0]
+    if len(radii) and radii.min() < 0.0:
+        raise ValueError(
+            f"A contact point of an axisymmetric model lies at the radius {radii.min():.3e} < 0; the section r-z of a "
+            "body of revolution is meshed in r >= 0."
+        )
+    return 2.0 * np.pi * radii * measures
 
 
 class ContactPoints(ABC):
@@ -88,12 +145,18 @@ class ContactPoints(ABC):
     nPoints : int
         The number of contact points.
     areas : numpy.ndarray
-        The area each contact point stands for, in the reference configuration; the penalty modulus per unit area times
-        this area is the stiffness of the point's spring.
+        The area each contact point stands for, in the reference configuration, from :func:`areasOfContactPoints`; the
+        penalty modulus per unit area times this area is the stiffness of the point's spring.
     """
 
     nPoints: int
     areas: np.ndarray
+
+    #: True if the points lie in the section r-z of an axisymmetric model, where each stands for a ring about the axis
+    #: and its area is the area of the ring (:func:`areasOfContactPoints`). It must agree with the model's
+    #: :attr:`~edelweissfe.models.femodel.FEModel.axisymmetric`, which a constraint checks
+    #: (:meth:`checkTheAreasAreMeasuredAsIn`).
+    axisymmetric: bool = False
 
     #: Whether the points can be located only once the model has connected the entities they belong to, at an update
     #: of the connectivity: the points of particles, whose kernel functions follow from where the particles are. A
@@ -289,6 +352,30 @@ class ContactPoints(ABC):
         """
 
         return np.divide(-normalForces, self.areas, out=np.zeros_like(normalForces), where=self.areas > 0)
+
+    def checkTheAreasAreMeasuredAsIn(self, model: FEModel, constraintName: str):
+        """Check that the points measure their areas as the model integrates: over the rings about the axis in an
+        axisymmetric model, as they are in the model's own space otherwise (:attr:`axisymmetric`).
+
+        Parameters
+        ----------
+        model
+            The model of the constraint.
+        constraintName
+            The name of the constraint, for the error message.
+
+        Raises
+        ------
+        ValueError
+            If they do not.
+        """
+
+        if self.axisymmetric != model.axisymmetric:
+            kind = "an axisymmetric" if model.axisymmetric else "a non-axisymmetric"
+            raise ValueError(
+                f"Constraint '{constraintName}': the contact points were made with axisymmetric={self.axisymmetric} "
+                f"for {kind} model; their areas must be measured as the model integrates."
+            )
 
     def describe(self) -> str:
         """What the contact points are, for the journal.
