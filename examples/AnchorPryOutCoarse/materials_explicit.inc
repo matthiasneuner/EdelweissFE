@@ -8,7 +8,7 @@
 **  1. DENSITIES ARE REQUIRED. The solver builds a lumped mass from getDensity() on every element.
 **
 **  2. MASS SCALING x100. Every density is 100x its physical value (concrete 3e-7 instead of 3e-9).
-**     The stable increment goes with 1/sqrt(rho), so this buys a factor of 10 and is what makes the
+**     The critical time step goes with sqrt(rho), so this buys a factor of 10 and is what makes the
 **     run reach the same 1.5 mm of plate displacement as the implicit variant in a comparable time.
 **     The cost is that inertial forces at a given loading rate are 100x larger, which works AGAINST
 **     quasi-staticity. That is not a matter of opinion: plot_damage_comparison.py integrates the
@@ -24,11 +24,11 @@
 ** 22 properties here, not 20: idx 19 is the density, idx 20 the nonlocal viscosity eta and idx 21
 ** the micro-inertia m_k -- the HYPERBOLIC nonlocal field of the production hef70 explicit runs:
 ** eta = 3e-4 s and m_k = eta^2/4 = 2.25e-8 s^2. With m_k > 0 the nonlocal damage field is integrated
-** by central difference instead of forward Euler, so its stable increment falls off with h instead
+** by central difference instead of forward Euler, so its critical time step falls off with h instead
 ** of h^2 (#134). Neither value depends on the mesh:
 **  - m_k = eta^2/4 is the critically damped pairing of the homogeneous mode; Marmot rejects
 **    m_k > eta^2/4. It depends on eta alone, and a larger m_k only raises the nonlocal limit.
-**  - The mesh enters only through the nonlocal stable increment, ~ sqrt(m_k) * h / l, which does not
+**  - The mesh enters only through the nonlocal critical time step, ~ sqrt(m_k) * h / l, which does not
 **    bind here: the steel governs dt.
 **  - eta is a relaxation TIME: the nonlocal field lags the local one by ~eta, 1.25 % of this deck's
 **    0.024 s ramp (0.03 % in production, stepLength = 1 s).

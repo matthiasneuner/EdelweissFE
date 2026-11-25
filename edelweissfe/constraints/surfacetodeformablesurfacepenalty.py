@@ -342,16 +342,17 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
 
     The gap at the corners of the master
     ------------------------------------
-    The gap is frozen as the first-order expansion of the *signed distance* of the point to the master surface at the
-    update (:meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.signedDistances`): :math:`\\bar{n}` is the
-    direction in which that distance grows. Where the closest point lies inside a facet, or on a seam of a smooth
-    surface, that is the facet's normal. Where it lies on a *crease* -- an edge or a vertex where the facets meet at
-    more than the angle of
+    The gap is frozen as the first-order expansion of the gap of the point to the master surface at the update
+    (:meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.gapsAndGradients`): :math:`\\bar{n}` is its
+    gradient with respect to the point. Where the closest point lies inside a facet, or on a seam of a smooth surface,
+    that is the facet's normal, and the gap the distance along it. Where it lies on a *crease* -- an edge or a vertex
+    where the facets meet at more than the angle of
     :data:`~edelweissfe.utils.facetcontactgeometry.cosOfSmoothNormalChangeLimit`, such as the crest and the root of a
-    thread -- it is the line from the closest point to the contact point, and whether the point is inside or outside
-    is told by the angle-weighted pseudonormal of the crease, which is right at convex and re-entrant corners alike.
-    So a point beside a crest is outside, with the distance to the crest as its gap, and a point inside a root is
-    pushed out the shortest way. On the boundary of a master surface that ends, the plane of its last facet goes on.
+    thread or the tip of a cone -- the gap is the signed distance, its gradient the line from the closest point to the
+    contact point, and whether the point is inside or outside is told by the angle-weighted pseudonormal of the crease,
+    which is right at convex and re-entrant corners alike. So a point beside a crest is outside, with the distance to
+    the crest as its gap, and a point inside a root is pushed out the shortest way. On the boundary of a master surface
+    that ends, the plane of its last facet goes on, and a crease that ends there goes on along its last edge.
 
     The pairing
     -----------
@@ -885,11 +886,11 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if self.searchDistance is not None:
             reached &= wasInContact | (distance <= self.searchDistance)
 
-        # The signed distance to the closest facet tells inside from outside, also at the edges and the vertices of a
-        # master that is not convex.
+        # The gap to the closest facet tells inside from outside, also at the edges and the vertices of a master that
+        # is not convex.
         gap = np.zeros(self.nPoints)
-        direction = np.zeros((self.nPoints, self.nDim))
-        gap[reached], direction[reached] = self._masterFacets.signedDistances(
+        dGap_dPoint = np.zeros((self.nPoints, self.nDim))
+        gap[reached], dGap_dPoint[reached] = self._masterFacets.gapsAndGradients(
             coordinatesOfPoint[reached],
             closestFacet[reached],
             weights[reached],
@@ -917,7 +918,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
                 coordinatesOfFacet,
                 normalOfFacet,
             )
-            gap[mustStay], direction[mustStay] = self._masterFacets.signedDistances(
+            gap[mustStay], dGap_dPoint[mustStay] = self._masterFacets.gapsAndGradients(
                 coordinatesOfPoint[mustStay],
                 closestFacet[mustStay],
                 weights[mustStay],
@@ -946,7 +947,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         paired = (state == ContactState.APPROACHING) | (state == ContactState.IN_CONTACT)
         newAssignment = np.where(paired, closestFacet, -1)
         pairedFacet = newAssignment[paired]
-        self._freezeProjections(paired, pairedFacet, weights[paired], direction[paired])
+        self._freezeProjections(paired, pairedFacet, weights[paired], dGap_dPoint[paired])
         hasChanged = self._assignMasterFacets(newAssignment)
 
         offsetsTheInitialOverlap = self.adjustsTheInitialOverlap or self.initialOverlapRampTime > 0.0
@@ -1084,12 +1085,12 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         normalOfFacet, _ = facetNormalAndMeasure(coordinatesOfFacet)
         return coordinatesOfFacet, normalOfFacet, self._masterFacets.features(coordinatesOfFacet, normalOfFacet)
 
-    def _freezeProjections(self, paired: np.ndarray, facets: np.ndarray, weights: np.ndarray, directions: np.ndarray):
+    def _freezeProjections(self, paired: np.ndarray, facets: np.ndarray, weights: np.ndarray, dGap_dPoint: np.ndarray):
         """Freeze the projections of the paired points, and clear those of the others.
 
         The clamped barycentric weights locate the closest point in the flat facet; that location is mapped into the
         parent face's parametric space, and the parent face's shape functions are evaluated there. Frozen with them is
-        the direction in which the gap grows.
+        the gradient of the gap with respect to the point, :math:`\\bar{n}`.
 
         Parameters
         ----------
@@ -1099,8 +1100,8 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
             The facet of each paired point.
         weights
             The barycentric weights of the closest point of each paired point in its facet.
-        directions
-            The direction in which the gap of each paired point grows.
+        dGap_dPoint
+            The gradient of the gap of each paired point with respect to the point, a unit vector.
         """
 
         parametric = np.einsum("pa,pad->pd", weights, self._vertexParametricCoordsOfFacet[facets])
@@ -1108,7 +1109,7 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         self._frozenNormals[:] = 0.0
         if len(facets):
             self._frozenMasterShapeFunctions[paired] = parentFaceShapeFunctions(self._masterParentFaceType, parametric)
-            self._frozenNormals[paired] = directions
+            self._frozenNormals[paired] = dGap_dPoint
 
     def _pairOnce(self, model: FEModel) -> bool:
         """Pair every contact point within ``searchDistance`` of the master surface (every point, without a search
@@ -1141,10 +1142,10 @@ class Constraint(FrozenContactSearch, ForcesOnlyExplicitEvaluation, ConstraintBa
         if self.searchDistance is not None:
             tied &= distance <= self.searchDistance
 
-        _, direction = self._masterFacets.signedDistances(
+        _, dGap_dPoint = self._masterFacets.gapsAndGradients(
             coordinatesOfPoint[tied], closestFacet[tied], weights[tied], coordinatesOfFacet, normalOfFacet, features
         )
-        self._freezeProjections(tied, closestFacet[tied], weights[tied], direction)
+        self._freezeProjections(tied, closestFacet[tied], weights[tied], dGap_dPoint)
         self._stateOfPoint = np.where(tied, ContactState.TIED, ContactState.FREE).astype(np.int8)
         self._searchedBefore = True
         hasChanged = self._assignMasterFacets(np.where(tied, closestFacet, -1))

@@ -6,7 +6,7 @@
 ** Every contact point stands for the ring it sweeps about the axis, 2 pi r times its length, so the springs of the tie,
 ** the lumped masses and the internal forces of the elements are all those of the full rings; the critical time step
 ** of the degrees of freedom the tie couples adds the row sums of the springs, scaled by the ring-weighted masses.
-** tests/test_axisymmetric_contact.py checks that bound against the exact critical time step of a small model.
+** tests/test_axisymmetric_contact.py checks that estimate against the exact critical time step of a small model.
 *material, name=CompressibleNeoHooke, id=neoHooke
 **K,                  G,      density
 333.3333333333333,    500.0,  1.0

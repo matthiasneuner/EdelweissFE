@@ -4,8 +4,8 @@ Theory: the critical time step of an explicit analysis
 An explicit analysis (``NED``, :doc:`/analysis/solvers`) solves no system of equations: it divides the net force by a
 lumped mass and steps on. The price is that it is stable only below a time increment, the *critical time step*. This
 page explains where that limit comes from, why EdelweissFE estimates it instead of computing it, how the estimates of
-the parts of a model are combined, what penalty constraints add to them, and when each estimate is taken anew. The code is
-:mod:`~edelweissfe.solvers.base.criticaltimestep`.
+the parts of a model are combined, what penalty constraints add to them, what the estimates do not see, and when each
+estimate is taken anew. The code is :mod:`~edelweissfe.solvers.base.criticaltimestep`.
 
 Where the limit comes from
 --------------------------
@@ -48,9 +48,11 @@ cost small against an increment. Two such bounds are used:
   frequency of its elements, each taken alone with its own lumped mass:
   :math:`\omega_\mathrm{max}^2 \le \max_e \lambda_\mathrm{max}(\boldsymbol{M}_e^{-1}\boldsymbol{K}_e)` (the Rayleigh
   quotient of the mesh is a weighted mean of the elements' quotients). An element's eigenvalue problem is small, and
-  Marmot solves it with the element's own strain operator and the largest wave speed of its material, which holds for
-  every element order and distortion -- where the classic "element length over wave speed" is exact only for a linear
-  bar.
+  Marmot bounds it with the element's own strain operator and the largest wave speed of its material, which holds for
+  every element order and distortion of the geometry it is taken on -- where the classic "element length over wave
+  speed" is exact only for a linear bar. A finite-strain element of Marmot takes its reference geometry, with the
+  wave speed at its current deformation: for a strongly deformed element, that no longer bounds its eigenvalue, and
+  the elements' policy rests on an assumption (see "When an estimate is taken anew").
 * **Row sums.** The particles of a meshfree model (RKPM) have no such inequality: the stiffness of a particle couples
   nodes at which its own lumped mass vanishes. Every eigenvalue :math:`\lambda` of a matrix is bounded by its largest
   absolute row sum (Gershgorin), and more sharply by the Collatz-Wielandt bound of its absolute value with positive
@@ -64,21 +66,32 @@ cost small against an increment. Two such bounds are used:
 Both are bounds from above for :math:`\omega_\mathrm{max}`, so the time increment they give is safe; how far below the
 true limit it lies is the price of not computing the eigenvalue.
 
+**Words.** A *bound* is on the side of the eigenvalue: an upper bound of :math:`\omega_\mathrm{max}^2`, as the
+element eigenvalue inequality, Gershgorin's or Collatz-Wielandt's give it. An *estimate* is on the side of time: a
+part's lower bound of its critical time step, made from such a bound
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepEstimate`). The *time increment* is what a step
+takes, at most ``courant-number`` times the critical time step. The code, its options and its journal use these words
+in this sense only.
+
 How the parts combine
 ---------------------
 
 A model may hold finite elements and particles. Their degrees of freedom are disjoint -- ``NED`` refuses a node that
 both would carry -- so the matrix :math:`\boldsymbol{M}^{-1}\boldsymbol{K}` of the model is block diagonal in the two
 parts, its eigenvalues are those of the parts, and the critical time step of the model is the **smallest** of the
-parts':
+parts' (as far as the parts' own stiffness goes; what penalty constraints add is explained below):
 
 .. math::
 
    \Delta t = \text{courant-number} \times \min\left(\Delta t_\mathrm{crit}^\mathrm{elements},\,
    \Delta t_\mathrm{crit}^\mathrm{particles}\right) .
 
-``courant-number`` is the one safety factor: the fraction of the estimated limit the analysis runs at. With penalty
-constraints, the critical time step of the degrees of freedom they couple joins the minimum (below).
+``courant-number`` is the one safety factor: the fraction of the estimated limit the analysis runs at. A part gives
+its estimate as an object (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepEstimate`), whose value
+is the part's critical time step, and which, in a derived class, also holds what it was made from: what is added to a
+part's stiffness can be added to its estimate there
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepEstimateOfTheDofs`). With penalty constraints, the
+critical time step of the degrees of freedom they couple joins the minimum (below).
 
 The particles' estimate has one factor of its own, below one, which is not a safety factor but part of what it
 estimates: their stabilization (NSNI) acts on the increment, so their explicit scheme is not exactly the central
@@ -155,7 +168,8 @@ lies above their exact critical time step (EdelweissFE#323). The argument is the
 symmetric stiffness: the penalty springs are (a closed point with a frozen projection), and the elements' estimate
 bounds their elastic stiffness. The tangent of gradient-enhanced particles is not symmetric;
 for them, the constraint's rows are added to the particles' rows inside their field matrix
-(EdelweissMeshfree, ``CriticalTimeStepBoundOfEachFieldBlock``), and the bound of the field matrix holds for any matrix.
+(EdelweissMeshfree, ``CriticalTimeStepEstimateFromTheFieldMatrix``), and the bound of the field matrix holds for any
+matrix.
 The rows :math:`r_i` add to the particles' rows as they are where the particles' weights are constant on the field of
 the constraint, so with carried weights the particles keep weights constant per field in every field a constraint acts
 on.
@@ -189,8 +203,9 @@ over the next increment as well. The leapfrog takes an increment of length :math
    \Delta \boldsymbol{u}(s) = s\, \boldsymbol{v} + \tfrac{1}{2} s (\Delta t_\mathrm{last} + s)\, \boldsymbol{a} ,
 
 with the velocity :math:`\boldsymbol{v}` of the last increment, its length, and the acceleration :math:`\boldsymbol{a}`
-at its end; :math:`s` is at most :math:`\Delta t_\mathrm{max}`, the critical time step with the constraints as they are
-now, scaled by the courant number and at most ``maxInc``: the constraints bounded over the increment can only lower it.
+at its end; :math:`s` is at most :math:`\Delta t_\mathrm{max}`, the largest time increment the critical time step with
+the constraints as they are now allows -- ``courant-number`` times it --, at most ``maxInc``: the constraints bounded
+over the increment can only lower it.
 With the pairing and the normals held, as within an increment, a gap is affine in the displacements, and changes by
 :math:`s\, \dot{g}_v + \tfrac{1}{2} s (\Delta t_\mathrm{last} + s)\, \dot{g}_a`; each part, where it closes the gap,
 closes it most at :math:`\Delta t_\mathrm{max}`. So within the increment, whatever its length, the gap is at least
@@ -208,18 +223,13 @@ can turn a receding point around within one increment. The prediction is exact f
 damping only slows a point down. Raising and lowering the increment is not free: each change of the increment changes
 the energy the central difference holds in a mode by a fraction of the order of :math:`(\omega \Delta t)^2`, small for
 the motion that carries the energy, which lies far below the highest frequencies of a mesh, but not for a mode near the
-critical time step that carries much of it; the energy balance remains the check. Not estimated either: the geometric stiffness of a contact with
-finite sliding, or of a rigid body whose normals rotate with it (of the order of the normal force over the size of a
-facet or the lever arm, small against the penalty), the coupling of the normal and the tangential force of a sliding
-frictional contact (the friction coefficient times the normal stiffness; unsymmetric), and a penalty on a field
-integrated by forward Euler at the degrees of freedom of finite elements, whose estimate holds no rate of such a field
-to add to.
+critical time step that carries much of it; the energy balance remains the check.
 
 **A penalty on a field integrated by forward Euler** (the tie of a first-order nonlocal field,
 :ref:`a nonlocal field across the tie <contact-tie-fields>`). Its row sums are scaled by the lumped damping, :math:`r_i = \sum_j |K^\mathrm{c}_{ij}| /
 \sqrt{C_i C_j}`, which bounds the rate :math:`\lambda(\boldsymbol{C}^{-1}\boldsymbol{K})` as the mass-scaled rows
 bound :math:`\omega^2`: added to the rate of a part, :math:`\Delta t \le 2/\max_i(\lambda_i + r_i)`. The particles
-bound their first-order fields in their own block and take the rows there; the finite elements bound the fields
+estimate their first-order fields in their own block and take the rows there; the finite elements estimate the fields
 integrated by central differences alone, and take the rows of those.
 
 **One formula for every penalty contact.** Each contact gives its stiffness as springs: a spring :math:`p` with the
@@ -229,6 +239,29 @@ then :math:`b_a \mathrel{+}= \sum_p |k_p|\, |w_{p,a}|\, (|\boldsymbol{w}_p| \cdo
 (:mod:`edelweissfe.constraints.base.penaltysprings`), and each contact takes the springs for its bound from the same
 code it takes them for its force, so that a change of the force cannot leave the bound behind.
 
+What the estimate does not see
+------------------------------
+
+The parts' estimates cover the stiffness of the parts themselves, and the penalty constraints add theirs where they act
+(above), within a part and between the parts. Not seen are:
+
+* **A point that closes within an increment.** By default, it enters the estimate one increment late; with
+  ``follow-critical-time-step``, before it closes (see "Points that could close").
+* **The geometric stiffness of contact.** That of a contact with finite sliding, or of a rigid body whose normals rotate
+  with it (of the order of the normal force over the size of a facet or the lever arm, small against the penalty), and
+  the coupling of the normal and the tangential force of a sliding frictional contact (the friction coefficient times
+  the normal stiffness; unsymmetric).
+* **A penalty on a field integrated by forward Euler at the degrees of freedom of finite elements**, whose estimate
+  holds no rate of such a field to add to.
+* **The tangent of a rate-dependent material.** The stiffness the particles are estimated with is that of a zero
+  increment over a unit time; for a material with a viscosity, e.g. Duvaut-Lions, it is relaxed over that time, softer than the
+  response within an explicit increment, and the estimate may be too large.
+* **The particles' stabilization.** The factor of the particles' NSNI above was measured, on blocks of particles, not
+  derived; a particle arrangement far from those may need a smaller one.
+
+How to check: halve ``courant-number`` and compare the results, and watch the energy balance of ``NED``: kinetic energy
+that appears from nowhere is the sign of a time increment above the true limit.
+
 When an estimate is taken anew
 ------------------------------
 
@@ -236,16 +269,23 @@ The true critical time step changes as the analysis runs: elements are refined, 
 stiffen and soften. Estimating in every increment would always be right, but an estimate of all particles costs a
 noticeable part of an increment. So each part comes with a *policy*, decided by what its estimate depends on.
 
-**The finite elements: once per mesh**
-(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfTheElements`). Their estimate uses the elastic
-wave speed of the material, not its state. A softening material only raises the true limit, so the estimate stays safe
-until the mesh changes; it is taken anew after a refinement and at the start of every step.
+**The finite elements: once per mesh, and at the start of every step**
+(:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfTheElements`). Their estimate depends on the
+mesh, on the lumped mass, and on the wave speed of the material at the state of the estimate. An estimate of all
+elements costs a full element pass, so the policy *assumes* that within a step neither the geometry nor the wave speed
+of an element changes enough to use up the margin the courant number leaves. A softening material only raises the
+true limit; the assumption fails where elements are compressed far at finite strain, which shrinks their geometry, or
+where their material stiffens with the deformation: a hyperelastic solid in compression, a compacting material. There,
+take a lower ``courant-number``, or shorter steps, since every step estimates anew. The elements are estimated anew
+after a refinement, and at the start of every step, since a material property may have changed with the step
+(``changeMaterialProperty``).
 
 **The particles: when the margin may be used up**
 (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`). Their estimate depends
 on their state: on their lumped masses, which change as they move over the nodes of the kernel functions, and on their
 stiffness, which changes with the material and with the deformation of the particles. After an estimate :math:`v`,
-``NED`` keeps in every increment a lower bound of what the estimate can be now, :math:`n` increments later:
+``NED`` keeps in every increment the critical time step at worst, :math:`L`: a lower bound of the particles' critical
+time step now, :math:`n` increments later,
 
 .. math::
 
@@ -253,12 +293,15 @@ stiffness, which changes with the material and with the deformation of the parti
 
 and takes a new estimate when :math:`\text{courant-number} \times L` falls below the time increment in use.
 
-* :math:`\alpha` is the largest relative fall of a lumped mass since the estimate, :math:`\beta` the same for the
-  damping of a forward-Euler field. This factor is **exact**. The estimate scales the stiffness with
-  :math:`\boldsymbol{M}^{-1/2}` on both sides; if every mass is at least :math:`\alpha` times what it was, every scaled
-  row sum, and with them the bound of :math:`\omega_\mathrm{max}^2`, is at most :math:`1/\alpha` times larger (the
-  largest eigenvalue of a nonnegative matrix grows with its entries), so the estimate is at least :math:`\sqrt{\alpha}`
-  times what it was. The masses cost nothing to watch: ``NED`` assembles them in every
+* :math:`\alpha = \min_i M_i / M_i^0 \le 1` is the smallest ratio of a lumped mass now to the same mass at the
+  estimate (1 if none fell), :math:`\beta \le 1` the same for the damping of a forward-Euler field. This factor is
+  **exact**. The estimate scales the stiffness with :math:`\boldsymbol{M}^{-1/2}` on both sides; if every mass is at
+  least :math:`\alpha` times what it was, every scaled row sum, and with them the bound of
+  :math:`\omega_\mathrm{max}^2`, is at most :math:`1/\alpha` times larger (the largest eigenvalue of a nonnegative
+  matrix grows with its entries), so the estimate is at least :math:`\sqrt{\alpha}` times what it was. The damping
+  enters linearly instead: the forward Euler limit :math:`2/\lambda_\mathrm{max}(\boldsymbol{C}^{-1}\boldsymbol{K})`
+  is linear in :math:`\boldsymbol{C}`, while the central differences' :math:`2/\omega_\mathrm{max}` goes with the
+  square root of :math:`\boldsymbol{M}`. The masses cost nothing to watch: ``NED`` assembles them in every
   increment anyway. A node that gets a mass for the first time (a particle reaches a kernel function's node, whose mass
   grows from zero) is a new row whose scaling has no bound: then the particles are estimated anew at once.
 * :math:`\delta`, the option ``critical-time-step-decrease-per-increment``, is the largest relative fall per increment
@@ -266,7 +309,7 @@ and takes a new estimate when :math:`\text{courant-number} \times L` falls below
   abruptly from one increment to the next. What makes it reasonable is what an increment is: a fraction of the time a
   wave needs to cross a particle, so in one increment the configuration moves by a fraction of a particle, and the
   stiffness, which follows the configuration, changes by a fraction of itself. Its default was measured: in the
-  impact of a steel projectile on a concrete slab of gradient-enhanced particles (GM7 and GCDP), the fall of the
+  impact of a steel projectile on a concrete slab of gradient-enhanced particles, the fall of the
   particles' estimate not explained by their masses stayed below half the default in every single increment, and far
   below it over several increments. There, the fall came from particles at the rim of the crater that are stretched
   far: the nonlocal field of a gradient-enhanced particle is balanced with gradients in the reference configuration,
@@ -274,10 +317,11 @@ and takes a new estimate when :math:`\text{courant-number} \times L` falls below
   only an estimate sees, not the masses. A larger :math:`\delta` is more cautious and estimates more often; 1 estimates
   in every increment.
 
-Where penalty constraints couple the particles, the same lower bound is kept for the particles' rows with the
-constraints added: the particles' stiffness may have grown by :math:`1/f^2`, :math:`f = \min(1, \sqrt{\alpha},
-\beta)(1 - \delta)^n`, the constraints' rows are those of now. The particles are estimated anew also when that bound
-falls below the time increment in use -- the margin a contact at the particles' nodes leaves is smaller than their own.
+Where penalty constraints couple the particles, the same critical time step at worst is kept for the particles' rows
+with the constraints added: the particles' stiffness may have grown by :math:`1/f^2`, :math:`f = \min(1,
+\sqrt{\alpha}, \beta)(1 - \delta)^n`, the constraints' rows are those of now. The particles are estimated anew also
+when ``courant-number`` times that one falls below the time increment in use -- the margin a contact at the particles'
+nodes leaves is smaller than their own.
 
 What the policy does in practice follows from the margin. Where the particles set the time increment, the increment in
 use *is* courant-number times their last estimate, the margin is used up after one increment, and they are estimated in

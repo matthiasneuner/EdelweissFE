@@ -26,7 +26,8 @@
 #  the top level directory of EdelweissFE.
 #  ---------------------------------------------------------------------
 """The policies of the critical time step (:mod:`edelweissfe.solvers.base.criticaltimestep`): when the estimate of a
-part is taken anew, and that the lower bound the policy of the entities keeps between two estimates is one."""
+part is taken anew, and that the critical time step at worst, which the policy of the entities keeps between two
+estimates, is never above the critical time step."""
 
 from types import SimpleNamespace
 
@@ -35,7 +36,7 @@ import pytest
 
 from edelweissfe.numerics.mpctransformation import MultiPointConstraintTransformation
 from edelweissfe.solvers.base.criticaltimestep import (
-    CriticalTimeStepBoundOfEachDof,
+    CriticalTimeStepEstimateFromTheBoundOfEachDof,
     CriticalTimeStepOfEntitiesWithOwnInertia,
     CriticalTimeStepOfTheElements,
     CriticalTimeStepOfThePenaltyConstraints,
@@ -108,9 +109,11 @@ class _Entities:
         self.K = K
         self.numbering = object()
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheBound=None):
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheEstimate=None):
         M = np.asarray(M)
-        return CriticalTimeStepBoundOfEachDof(_gershgorinEstimate(self.K, M), np.arange(len(M)), _rowSums(self.K, M))
+        return CriticalTimeStepEstimateFromTheBoundOfEachDof(
+            _gershgorinEstimate(self.K, M), np.arange(len(M)), _rowSums(self.K, M)
+        )
 
 
 def _entities(nDof=6, seed=0):
@@ -150,12 +153,12 @@ def test_with_the_masses_held_the_entities_are_estimated_anew_when_the_assumed_d
 
     due = [n for n in range(1, 20) if criticalTimeStep.isDue(system, 10 + n, M, C, inUse)]
     assert due[0] == trusted + 1
-    assert criticalTimeStep.lowerBound(10 + trusted, M, C) == pytest.approx(
+    assert criticalTimeStep.criticalTimeStepAtWorst(10 + trusted, M, C) == pytest.approx(
         criticalTimeStep.value * (1 - DELTA) ** trusted
     )
 
 
-def test_a_fall_of_the_masses_lowers_the_bound_by_its_square_root_and_makes_the_estimate_due():
+def test_a_fall_of_the_masses_lowers_the_critical_time_step_at_worst_by_its_square_root_and_makes_the_estimate_due():
     system, M = _entities()
     C = np.zeros_like(M)
     criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
@@ -164,17 +167,21 @@ def test_a_fall_of_the_masses_lowers_the_bound_by_its_square_root_and_makes_the_
 
     fallen = M.copy()
     fallen[3] *= 0.5
-    assert criticalTimeStep.lowerBound(0, fallen, C) == pytest.approx(criticalTimeStep.value * np.sqrt(0.5))
+    assert criticalTimeStep.criticalTimeStepAtWorst(0, fallen, C) == pytest.approx(
+        criticalTimeStep.value * np.sqrt(0.5)
+    )
     assert not criticalTimeStep.isDue(system, 0, M, C, inUse)
     assert criticalTimeStep.isDue(system, 0, fallen, C, inUse)
 
     risen = 2.0 * M
-    assert criticalTimeStep.lowerBound(0, risen, C) == criticalTimeStep.value, "a heavier node earns no credit"
+    assert (
+        criticalTimeStep.criticalTimeStepAtWorst(0, risen, C) == criticalTimeStep.value
+    ), "a heavier node earns no credit"
 
 
-def test_the_lower_bound_of_the_masses_is_one(seed=1):
-    """With the stiffness held, the estimate after any fall of the masses is never below the lower bound the policy
-    keeps from the estimate before: the factor of the masses is exact, no assumption."""
+def test_after_any_change_of_the_masses_the_new_estimate_is_at_least_the_critical_time_step_at_worst(seed=1):
+    """With the stiffness held, the estimate after any fall of the masses is never below the critical time step at
+    worst that the policy keeps from the estimate before: the factor of the masses is exact, no assumption."""
 
     system, M = _entities(nDof=12, seed=seed)
     C = np.zeros_like(M)
@@ -183,7 +190,8 @@ def test_the_lower_bound_of_the_masses_is_one(seed=1):
         criticalTimeStep = CriticalTimeStepOfEntitiesWithOwnInertia(DELTA)
         criticalTimeStep.estimate(system, M, C, None, 0)
         changed = M * rng.uniform(0.2, 1.5, M.size)
-        assert criticalTimeStep.lowerBound(0, changed, C) <= _gershgorinEstimate(system.K, changed) * (1 + 1e-12)
+        atWorst = criticalTimeStep.criticalTimeStepAtWorst(0, changed, C)
+        assert atWorst <= _gershgorinEstimate(system.K, changed) * (1 + 1e-12)
 
 
 def test_a_node_that_gains_a_mass_makes_the_estimate_due_one_that_loses_it_does_not():
@@ -213,7 +221,7 @@ def test_the_damping_of_a_forward_euler_field_enters_linearly():
 
     fallen = C.copy()
     fallen[1] = 0.25
-    assert criticalTimeStep.lowerBound(0, M, fallen) == pytest.approx(0.25 * criticalTimeStep.value)
+    assert criticalTimeStep.criticalTimeStepAtWorst(0, M, fallen) == pytest.approx(0.25 * criticalTimeStep.value)
 
     gained = C.copy()
     gained[5] = 1.0
@@ -245,9 +253,9 @@ class _EntitiesRecordingTheWeights(_Entities):
         self.numbering = SimpleNamespace(nDof=len(K))
         self.handed = []
 
-    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheBound=None):
-        self.handed.append(np.array(weightsOfTheBound))
-        weightsOfTheBound += 1.0
+    def criticalTimeStepOfEntitiesWithOwnInertia(self, M, C, forEachChunk, weightsOfTheEstimate=None):
+        self.handed.append(np.array(weightsOfTheEstimate))
+        weightsOfTheEstimate += 1.0
         return super().criticalTimeStepOfEntitiesWithOwnInertia(M, C, forEachChunk)
 
 
@@ -349,7 +357,7 @@ def test_the_penalty_springs_added_where_they_act_bound_the_exact_eigenvalue(sti
         assert estimate <= exact * (1 + 1e-12)
         elementsOnly += ofTheElements.value <= exact * (1 + 1e-12)
         limiting += ofTheConstraints.value < ofTheElements.value
-    assert elementsOnly < 300, "the springs raise the frequencies: the elements alone are not always a bound"
+    assert elementsOnly < 300, "the springs raise the frequencies: the elements' estimate alone does not always hold"
     assert limiting > 0
 
 
@@ -380,8 +388,8 @@ def test_a_constraint_at_degrees_of_freedom_of_slow_elements_does_not_lower_the_
 
 def test_the_elements_take_the_rows_of_the_fields_integrated_by_central_differences_alone():
     """A penalty on a field integrated by forward Euler (a tied first-order nonlocal field) has its row scaled by the
-    damping, a rate, not a squared frequency: the elements bound their central-difference fields alone (Marmot's
-    elements leave a first-order field unbounded), so their estimate does not take that row; the same row at a
+    damping, a rate, not a squared frequency: the elements estimate their central-difference fields alone (Marmot's
+    elements give no estimate for a first-order field), so their estimate does not take that row; the same row at a
     central-difference degree of freedom lowers it."""
 
     stiff = _ElementWithItsEigenvalue(np.array([0, 1]), np.array([[100.0, -100.0], [-100.0, 100.0]]), np.ones(2))

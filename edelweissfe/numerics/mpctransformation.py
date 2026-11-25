@@ -503,8 +503,8 @@ class MultiPointConstraintTransformation:
         :math:`v_m \\leftarrow \\max(v_m, \\max_{s:\\, N_{sm} \\ne 0} v_s)`; every other entry stays as it is.
 
         The explicit dynamic solver folds the elements' bounds of the squared frequencies with it
-        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfTheElements.bound`): an element at a slave
-        acts on the masters of the slave, through :math:`T^T K T`.
+        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfTheElements.estimateFromTheBoundOfEachDof`):
+        an element at a slave acts on the masters of the slave, through :math:`T^T K T`.
 
         Parameters
         ----------

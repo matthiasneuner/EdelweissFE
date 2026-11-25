@@ -58,6 +58,7 @@ from edelweissfe.points.node import Node
 from edelweissfe.sets.elementset import ElementSet
 from edelweissfe.sets.nodeset import NodeSet
 from edelweissfe.solvers.base.criticaltimestep import (
+    CriticalTimeStepEstimate,
     CriticalTimeStepOfThePenaltyConstraints,
 )
 from edelweissfe.solvers.nonlinearexplicitdynamic import NED
@@ -187,7 +188,7 @@ def test_for_unequal_masses_the_estimate_is_a_lower_bound_within_the_bound_of_th
 def test_a_step_that_asks_for_more_than_the_springs_allow_is_unstable_without_the_estimate_and_stable_with_it(
     monkeypatch,
 ):
-    """The step asks for twice the critical time step of the springs. The finite elements (point masses) bound nothing,
+    """The step asks for twice the critical time step of the springs. The finite elements (point masses) have no stiffness,
     so without the estimate of the penalty constraints -- as before it existed -- the step takes that increment, and
     the oscillation grows by orders of magnitude within a few periods. With it, the increment is the courant number
     times the critical time step, and the first mass stays within the amplitude its energy allows against its spring
@@ -198,10 +199,14 @@ def test_a_step_that_asks_for_more_than_the_springs_allow_is_unstable_without_th
     exact = exactCriticalTimeStep(masses, ground, tie)
     amplitude = VELOCITY * np.sqrt(masses[0] / ground)
 
-    stable = run(massesOnSprings(masses, ground, tie), 40 * exact, 2 * exact)
-    assert max(abs(x) for _, x in stable.history) < 2 * amplitude
+    withTheEstimate = run(massesOnSprings(masses, ground, tie), 40 * exact, 2 * exact)
+    assert max(abs(x) for _, x in withTheEstimate.history) < 2 * amplitude
 
-    monkeypatch.setattr(CriticalTimeStepOfThePenaltyConstraints, "estimate", lambda self, *args: self._take(np.inf))
-    unstable = run(massesOnSprings(masses, ground, tie), 40 * exact, 2 * exact)
-    assert all(timeIncrement in (0.0, 2 * exact) for timeIncrement, _ in unstable.history[:-1])
-    assert max(abs(x) for _, x in unstable.history) > 1e3 * amplitude
+    monkeypatch.setattr(
+        CriticalTimeStepOfThePenaltyConstraints,
+        "estimate",
+        lambda self, *args: self._take(CriticalTimeStepEstimate(np.inf)),
+    )
+    withoutTheEstimate = run(massesOnSprings(masses, ground, tie), 40 * exact, 2 * exact)
+    assert all(timeIncrement in (0.0, 2 * exact) for timeIncrement, _ in withoutTheEstimate.history[:-1])
+    assert max(abs(x) for _, x in withoutTheEstimate.history) > 1e3 * amplitude

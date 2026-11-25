@@ -31,8 +31,8 @@ The first tests need no element formulation: two rings of quadratic elements ove
 and the areas of the contact points and the forces of their springs are checked against the areas of the rings and the
 force of a uniform pressure on them. The tests with Marmot's axisymmetric elements (CX8RUL) solve: tied rings transmit a
 homogeneous state as the merged mesh does, a contact patch transmits a pressure whose force the reactions of the
-elements balance, the critical time step of an explicit analysis with a tie bounds the exact one, and a resumed
-explicit contact is bitwise the uninterrupted one.
+elements balance, the critical time step of an explicit analysis with a tie is estimated below the exact one, and a
+resumed explicit contact is bitwise the uninterrupted one.
 """
 
 from pathlib import Path
@@ -645,7 +645,7 @@ def _exactCriticalTimeStep(model: FEModel) -> float:
 
 
 @pytest.mark.parametrize("penalty", [1e3, 1e6], ids=["the elements bind", "the tie binds"])
-def test_the_critical_time_step_of_an_axisymmetric_tie_bounds_the_exact_one(
+def test_the_critical_time_step_of_an_axisymmetric_tie_is_estimated_below_the_exact_one(
     marmotAxisymmetricElements, tmp_path, penalty
 ):
     """``NED`` on two rings tied by a penalty: the critical time step it estimates -- the elements', and the one of the
@@ -675,7 +675,7 @@ def test_the_critical_time_step_of_an_axisymmetric_tie_bounds_the_exact_one(
     ).solve()
     fieldOutputController.finalizeJob()
 
-    estimate = solver._criticalTimeStepOfTheModel() / solver.options["courant-number"]
+    estimate = solver._criticalTimeStepOfTheModel()
     exact = _exactCriticalTimeStep(model)
 
     assert estimate <= exact * (1 + 1e-12)

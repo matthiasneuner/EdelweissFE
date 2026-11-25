@@ -1012,21 +1012,26 @@ Corners of the master: creases, the signed distance and the pseudonormal
 A thread is all corners: the crest of a tooth is a convex edge, its root, where the flank meets the
 core, a re-entrant one. What the frozen gap freezes there decides whether the contact is right.
 
-**The gap is the signed distance, expanded to first order.** At the update, the point's distance to the
-master surface is :math:`d = |\boldsymbol{x}_p - \boldsymbol{x}_c|`, with :math:`\boldsymbol{x}_c` the
-closest point of the closest facet, and its sign says inside or outside. The frozen gap
-:math:`g = \bar{\boldsymbol{n}} \cdot (\boldsymbol{x}_p - N^m \cdot \boldsymbol{x}^m)` is that signed
-distance expanded to first order about the update, so :math:`\bar{\boldsymbol{n}}` is the direction in which
-the distance grows -- the gradient of the distance:
+**The gap, expanded to first order.** At the update, the point's distance to the master surface is
+:math:`d = |\boldsymbol{x}_p - \boldsymbol{x}_c|`, with :math:`\boldsymbol{x}_c` the closest point of the
+closest facet, and its sign says inside or outside. The gap is the signed distance :math:`\pm d` where
+:math:`\boldsymbol{x}_c` lies on a crease, and the distance along the facet normal elsewhere: the two agree
+inside a facet, and differ only by the small turn of the normal at a seam of a smooth surface. The frozen gap
+:math:`g = \bar{\boldsymbol{n}} \cdot (\boldsymbol{x}_p - N^m \cdot \boldsymbol{x}^m)` is that gap
+expanded to first order about the update, so :math:`\bar{\boldsymbol{n}}` is its gradient with respect to the
+point (:meth:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface.gapsAndGradients`):
 
 - where :math:`\boldsymbol{x}_c` lies inside its facet, the facet's normal;
 - where it lies on a **crease** -- an edge (or, in 2D, a vertex) where two facets meet with normals more
-  than 30 degrees apart, or a vertex on such an edge -- the line from the closest point to the point,
-  :math:`\bar{\boldsymbol{n}} = \pm(\boldsymbol{x}_p - \boldsymbol{x}_c)/d`, and :math:`g = \pm d`;
+  than 30 degrees apart, a vertex on such an edge, or a vertex where one of its facets turns away from the
+  vertex's pseudonormal by more than half that angle, as at the tip of a finely faceted cone -- the line from
+  the closest point to the point, :math:`\bar{\boldsymbol{n}} = \pm(\boldsymbol{x}_p - \boldsymbol{x}_c)/d`,
+  and :math:`g = \pm d`;
 - where it lies on a seam of a *smooth* surface (the facets of a curved face meet at small angles), or on
-  the boundary of a master surface that ends, the facet's normal again: the corners of a smooth tiling are
-  artefacts, and beyond its boundary a surface does not say what lies, so the plane of its last facet goes
-  on.
+  the boundary of a master surface that ends, the facet's normal again, and the distance along it: the corners
+  of a smooth tiling are artefacts, and beyond its boundary a surface does not say what lies, so the plane of its
+  last facet goes on. A crease that ends on the boundary goes on along its last edge: the vertex where it ends
+  is a crease, with the pseudonormal of that edge.
 
 Measured along a facet normal, a point *beside* a crest -- beyond the edge of the crest's flat, below its
 plane, but outside the tooth -- has a negative gap and is pushed into the concrete by a crest that is not
@@ -1038,9 +1043,9 @@ outside: next to an acute crest, a point outside lies behind the plane of the fl
 to it. The pseudonormal of the closest feature does (Bærentzen and Aanæs, *Signed distance computation
 using the angle weighted pseudonormal*, IEEE TVCG 11, 2005): the sum of the normals of the facets that
 meet at an edge, or at a vertex, each weighted with the facet's angle there. For the closest feature of a
-closed surface, :math:`\boldsymbol{x}_p - \boldsymbol{x}_c` points along it outside the body and against it
-inside, at convex and re-entrant features alike. The search finds the globally closest facet, so the sign
-is exact for a closed master; for a master surface that ends, exact away from its boundary.
+closed surface, :math:`\boldsymbol{x}_p - \boldsymbol{x}_c` has a positive component along it outside the
+body, a negative one inside, at convex and re-entrant features alike. The search finds the globally closest
+facet, so the sign is exact for a closed master; for a master surface that ends, exact away from its boundary.
 
 **Convex creases in the pairing.** A point in contact keeps away from the facets across a *convex*
 crease from the facet it was paired with: their normals differ by more than 30 degrees, and they lie
@@ -1066,7 +1071,8 @@ closest facet, and an update repeated at the same configuration changes nothing.
 
 The geometry is :class:`~edelweissfe.utils.facetcontactgeometry.FacetedSurface`; the tests
 ``tests/test_facet_pseudonormals.py`` (inside and outside of a closed tooth with an acute crest and two
-roots, in 2D and 3D) and the class ``TestContactAtCornersOfTheMaster`` of
+roots, in 2D and 3D, of the tip of a finely faceted cone, and beyond the ends of an open tooth) and the class
+``TestContactAtCornersOfTheMaster`` of
 ``tests/test_surfacetodeformablesurfacepenalty.py`` (a point sliding around a root stays in contact with the
 signed distance as its gap; a point sliding off a crest is released; a point that slid around a curved master in
 one update pairs as a search from scratch, and pairs the same after a checkpoint and a repeated update) show it.
