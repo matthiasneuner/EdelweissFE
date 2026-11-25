@@ -268,8 +268,10 @@ increment -- now, and moved on by either part or by both
 value of each entry. That is a bound only where each spring that can switch acts on degrees of freedom of its own: each
 spring is closed deepest in a state of its own, and two springs that share a degree of freedom -- the slave points on
 one master facet, every spring of a rigid body at its reference point -- and close in different states are never in
-one tangent together, so the entry misses their sum. The contacts of EdelweissFE are of that kind, and bounded from
-their tangent; a constraint that needs the bound over the next increment there gives its springs. Taking the velocity
+one tangent together, so the entry misses their sum. A constraint that needs the bound over the next increment there
+gives its springs, as the contact with a deformable master surface does (``surfaceToDeformableSurfacePenalty``); the
+node-to-surface contact and the contacts with a discrete rigid body are of that kind, and bounded from their tangent.
+Taking the velocity
 alone would not do: near the critical time step of the open state, the acceleration can turn a receding point around
 within one increment. The prediction is exact for the leapfrog without damping; damping only slows a point down.
 Raising and lowering the increment is not free: each change of the increment changes the energy the central difference
@@ -280,7 +282,8 @@ carries much of it; the energy balance remains the check.
 **From the tangent, or from the springs.** By default, a constraint is bounded from the tangent it gives at the state
 (:meth:`~edelweissfe.constraints.base.constraintbase.ConstraintBase.addBoundOfAbsoluteStiffnessTimes`), formed for
 this before every increment. A constraint whose tangent is costly, or that has none -- a contact evaluated without a
-tangent in an explicit analysis --, gives its stiffness as springs instead: a spring :math:`p` with the vector
+tangent in an explicit analysis, such as ``surfaceToDeformableSurfacePenalty`` --, gives its stiffness as springs
+instead: a spring :math:`p` with the vector
 :math:`\boldsymbol{a}_p` with which it acts and the stiffness :math:`k_p` of its law -- the normal spring of a closed
 point, a support's spring along the axis it holds. The row sums are then, with the weights :math:`\boldsymbol{w}` of
 the columns, :math:`b_i \mathrel{+}= \sum_p |k_p|\, |a_{p,i}|\, (|\boldsymbol{a}_p| \cdot \boldsymbol{w})`
@@ -298,8 +301,8 @@ The parts' estimates cover the stiffness of the parts themselves, and the penalt
   ``follow-critical-time-step``, before it closes, for a constraint that bounds its springs, and for one bounded from
   its tangent whose springs that can switch act on degrees of freedom of their own (see "Points that could close").
 * **With follow-critical-time-step, a constraint bounded from its tangent whose springs share degrees of freedom** --
-  every contact of EdelweissFE: over the next increment, it is seen only as far as one state closes its springs
-  together.
+  the node-to-surface contact and the contacts with a discrete rigid body: over the next increment, it is seen only as
+  far as one state closes its springs together.
 * **The geometric stiffness of contact.** That of a contact with finite sliding, or of a rigid body whose normals rotate
   with it (of the order of the normal force over the size of a facet or the lever arm, small against the penalty), and
   the coupling of the normal and the tangential force of a sliding frictional contact (the friction coefficient times

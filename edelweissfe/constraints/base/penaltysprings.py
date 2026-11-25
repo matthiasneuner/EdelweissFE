@@ -46,21 +46,46 @@ value of a sum is at most the sum of the absolute values, so, with the weights :
 one product of the absolute gradients with the weights per spring, and one distribution back, as the force is
 distributed. :func:`addBoundOfAbsoluteStiffnessOfSprings` is that formula, written once for every penalty constraint
 of EdelweissFE and EdelweissMeshfree that bounds its springs instead of its tangent. A constraint takes its springs for
-the bound from the same code it takes them for its force, so that the force and the bound cannot drift apart.
+the bound from the same code it takes them for its force, so that the force and the bound cannot drift apart. A
+contact law gives its springs at the paired contact points as :class:`PenaltySprings`
+(:mod:`~edelweissfe.constraints.base.penaltylaw`).
 
 The gradient of a spring moves nodes along the direction of the spring, :math:`a_{p,(n,j)} = c_{pn}\\, d_{pj}`: the
 coefficient :math:`c_{pn}` with which the spring moves node :math:`n` (an interpolation vector, or the negative shape
 functions of a master face) times the component :math:`j` of its direction. It comes in parts, of two kinds:
 
 * :class:`SpringGradientOnSharedNodes`: the springs share their nodes, and the coefficients are a matrix over them --
-  the interpolation vectors of the points of a particle;
+  the interpolation matrix of contact points
+  (:meth:`~edelweissfe.constraints.base.contactpoints.ContactPoints.interpolationMatrixOfLocatedPoints`), the
+  interpolation vectors of the points of a particle;
 * :class:`SpringGradientOnOwnNodes`: every spring has nodes of its own in the block -- the parent face nodes of the
   master facet of a contact point, a slave node and its facet, the reference point of a rigid body.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from edelweissfe.utils.facetcontactgeometry import rowDot
+
+
+@dataclass(frozen=True)
+class PenaltySprings:
+    """Penalty springs at located contact points, at most one per point, each along a unit direction: the spring of a
+    contact along the normal at a closed point. A law makes them
+    (:meth:`~edelweissfe.constraints.base.penaltylaw.PenaltyLaw.springs`); the constraint takes from them its force,
+    its tangent, the bound of its stiffness and its outputs."""
+
+    #: The located points with a spring (indices into the located points).
+    points: np.ndarray
+    #: The direction of each spring, (len(points), nDim).
+    directions: np.ndarray
+    #: The force of each spring along its direction, :math:`f`.
+    forces: np.ndarray
+    #: The stiffness of each spring, :math:`k = \mathrm{d}f/\mathrm{d}g`.
+    stiffness: np.ndarray
+    #: The energy stored in each spring, :math:`\Pi` with :math:`\mathrm{d}\Pi/\mathrm{d}g = f`.
+    energies: np.ndarray
 
 
 class SpringGradientOnSharedNodes:

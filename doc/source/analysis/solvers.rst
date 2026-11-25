@@ -502,13 +502,13 @@ step that wants smaller increments sets ``maxInc``. Once a stiff state has passe
 next critical time step taken. A contact point that could close within the next increment -- whose gap is at most what
 it approaches by, with its velocity and its acceleration, over the largest increment the step could take -- then enters
 the estimate of the penalty constraints before it closes, not one increment late, where the constraint bounds its
-springs, or is bounded from its tangent and each spring that can switch acts on degrees of freedom of its own. Where
-springs share degrees of freedom -- the master facets of a contact, the reference point of a rigid body, as in every
-contact of EdelweissFE, which are bounded from their tangent --, a point is seen over the next increment only as far
-as one state of the constraint closes its springs together (:doc:`/theory/criticaltimestep`, "Points that could
-close"). As long as no estimate is known -- no element reports one, the entities have not been
-estimated yet or report none, and no penalty constraint couples a degree of freedom -- there is nothing to follow, and
-the step keeps its own increment.
+springs (as the contact with a deformable master surface does), or is bounded from its tangent and each spring that can
+switch acts on degrees of freedom of its own. Where springs share degrees of freedom and the constraint is bounded from
+its tangent -- the master facets of the node-to-surface contact, the reference point of a rigid body --, a point is seen
+over the next increment only as far as one state of the constraint closes its springs together
+(:doc:`/theory/criticaltimestep`, "Points that could close"). As long as no estimate is known -- no element reports one,
+the entities have not been estimated yet or report none, and no penalty constraint couples a degree of freedom -- there
+is nothing to follow, and the step keeps its own increment.
 
 **What following gives up.** Between two critical time steps taken, the increment is trusted: the courant number covers
 the gradual change of the model in between. Lowered only, the increment of a run that has met a stiff state once stays
