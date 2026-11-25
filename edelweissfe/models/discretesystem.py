@@ -44,7 +44,9 @@ from edelweissfe.timesteppers.timestep import TimeStep
 if TYPE_CHECKING:
     from edelweissfe.fields.nodefield import NodeField
     from edelweissfe.models.femodel import FEModel
-    from edelweissfe.solvers.base.criticaltimestep import CriticalTimeStepBound
+    from edelweissfe.solvers.base.criticaltimestep import (
+        CriticalTimeStepEstimateOfTheDofs,
+    )
 
 
 class DiscreteSystem:
@@ -530,15 +532,15 @@ class DiscreteSystem:
         lumpedMass: DofVector,
         lumpedDamping: DofVector,
         forEachChunk: Callable[[list, Callable], None],
-        weightsOfTheBound: np.ndarray | None = None,
-    ) -> "CriticalTimeStepBound | None":
+        weightsOfTheEstimate: np.ndarray | None = None,
+    ) -> "CriticalTimeStepEstimateOfTheDofs | None":
         """An estimate of the critical time step of the explicit scheme for the entities that carry their own inertia
         (:attr:`entitiesWithOwnInertia`) at their current configuration, a lower bound of it. A property of their
         assembled system, not of one entity: an entity's stiffness may couple nodes at which its own lumped mass
         vanishes. ``NED`` takes the smaller of it and the elements' critical time step, and decides when it is estimated
         anew (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepOfEntitiesWithOwnInertia`). It is
         given in the form the penalty constraints that couple the entities' degrees of freedom add to
-        (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepBound`).
+        (:class:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepEstimateOfTheDofs`).
 
         A bound of the largest eigenvalue of a nonnegative matrix :math:`\\boldsymbol{A}` -- here the absolute value of
         the mass-scaled stiffness -- is the Collatz-Wielandt bound :math:`\\rho(\\boldsymbol{A}) \\le \\max_i
@@ -548,7 +550,7 @@ class DiscreteSystem:
         :math:`\\boldsymbol{A}\\boldsymbol{w}` for the next, one step of the power iteration per estimate. Weights of
         zero start the iteration anew, from the estimate's own start weights. Whatever its weights, the estimate takes
         the row sums of the penalty constraints as they are
-        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepBound.criticalTimeStep`).
+        (:meth:`~edelweissfe.solvers.base.criticaltimestep.CriticalTimeStepEstimateOfTheDofs.criticalTimeStep`).
 
         A finite element model has no such entity: None.
 
@@ -561,16 +563,16 @@ class DiscreteSystem:
             Their lumped damping, likewise (:meth:`assembleLumpedDampingOfEntitiesWithOwnInertia`).
         forEachChunk
             The solver's loop over chunks of independent entities, see :meth:`updateMaterialPoints`.
-        weightsOfTheBound
+        weightsOfTheEstimate
             The weights the last estimate left, a vector of the numbering, zero where a degree of freedom has none yet;
             replaced in place by the weights for the next estimate. None for the estimate with its own start weights
             alone.
 
         Returns
         -------
-        CriticalTimeStepBound | None
-            The estimate, its critical time step, unscaled by a courant number, its ``value``; None if the model has no
-            such entity.
+        CriticalTimeStepEstimateOfTheDofs | None
+            The estimate; its ``value`` is the critical time step, not scaled by a courant number. None if the model has
+            no such entity.
         """
 
         return None
